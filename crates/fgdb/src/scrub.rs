@@ -2,10 +2,11 @@
 
 use asupersync::fs::Vfs;
 use fgdb_chronicle::CommitError;
+use fgdb_strata::catalog::{CatalogVersion, SchemaTransition, SchemaTransitionVersion};
 use fgdb_strata::vertex::VertexPatchVersion;
 use fgdb_strata::{DeltaBlockVersion, store::StoreError};
 use fgdb_types::{CommitCx, ObjectId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Database;
 use fgdb_chronicle::scrub::LostReason;
@@ -90,6 +91,7 @@ enum MetadataKind {
     Root,
     Segment,
     IndexSegment,
+    Catalog,
 }
 
 fn record_verification(
@@ -307,7 +309,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// Lost objects are reported individually and are never overwritten.
     /// Also re-read the admitted generation's manifest, partition root, V4
     /// segments, FGSB blocks, hosted FGSP properties, FGVP vertex patches and
-    /// attached FGRN adjacency runs.
+    /// attached FGRN adjacency runs, the selected name catalog and the schema
+    /// transitions/catalogs referenced by the complete retained capsule history.
     /// Packed objects use freshly admitted location tables and uncached
     /// payload reads, so a prior successful sweep cannot hide later damage.
     /// The complete inventory comes from admission metadata retained before
@@ -355,6 +358,9 @@ impl<V: Vfs + Clone> Database<V> {
             (self.snapshot.manifest.0, MetadataKind::Manifest),
             (self.snapshot.root.0, MetadataKind::Root),
         ]);
+        if let Some(reference) = self.snapshot.schema.reference {
+            metadata.insert(reference.root.0, MetadataKind::Catalog);
+        }
         metadata.extend(segments.map(|(id, level)| {
             let kind = match level {
                 fgdb_strata::root_segment::SegmentLevel::Leaf => MetadataKind::Segment,
@@ -397,6 +403,66 @@ impl<V: Vfs + Clone> Database<V> {
                 error => std::io::Error::other(error),
             })
         })?;
+        // Catalog generations are immutable transaction dependencies, not
+        // reconstructible graph blocks. Verify every retained transition and
+        // both of its catalog roots so a healthy sweep also promises that full
+        // Chronicle recovery can resolve the schema history. Lost capsules
+        // already fence the handle; never infer their hidden dependencies.
+        let mut transitions = BTreeSet::new();
+        if summary.lost.is_empty() {
+            for entry in self.coordinator.chain().entries() {
+                if entry.marker.commit_seq > self.snapshot.frontier.0 {
+                    break;
+                }
+                checkpoint(cx)?;
+                let batch = crate::read_delta_batch(
+                    cx,
+                    &self.coordinator,
+                    &self.keys,
+                    entry,
+                    &mut self.crypto_verification_events,
+                )
+                .await
+                .map_err(|error| CommitError::Io(std::io::Error::other(error)))?;
+                for coordinate in batch.coordinate_entries() {
+                    if (coordinate.graph, coordinate.branch) != (crate::GRAPH, crate::BRANCH) {
+                        continue;
+                    }
+                    for row in &coordinate.rows {
+                        if let fgdb_delta_types::DeltaRow::Schema { transition_oid, .. } = row {
+                            transitions.insert(*transition_oid);
+                        }
+                    }
+                }
+            }
+        }
+        for object_id in transitions {
+            checkpoint(cx)?;
+            let result = store
+                .scrub_schema_transition_bytes(
+                    cx,
+                    SchemaTransitionVersion(object_id),
+                    &repaired_pack_members,
+                )
+                .await
+                .and_then(|(bytes, repaired)| {
+                    let transition = SchemaTransition::decode(&bytes)
+                        .map_err(StoreError::MalformedCatalog)?;
+                    metadata.insert(transition.after.root.0, MetadataKind::Catalog);
+                    if let Some(before) = transition.before {
+                        metadata.insert(before.root.0, MetadataKind::Catalog);
+                    }
+                    Ok((bytes, repaired))
+                });
+            summary.metadata_objects += 1;
+            record_verification(
+                object_id,
+                result,
+                &mut summary.metadata_clean,
+                &mut summary.metadata_repaired,
+                &mut summary.metadata_lost,
+            )?;
+        }
         let mut objects: BTreeMap<_, _> = self
             .published_root
             .blocks
@@ -459,7 +525,7 @@ impl<V: Vfs + Clone> Database<V> {
                 &mut summary.block_lost,
             )?;
         }
-        summary.metadata_objects = metadata.len();
+        summary.metadata_objects += metadata.len();
         for (object_id, kind) in metadata {
             checkpoint(cx)?;
             let result = match kind {
@@ -481,6 +547,11 @@ impl<V: Vfs + Clone> Database<V> {
                 MetadataKind::IndexSegment => {
                     store
                         .scrub_root_index_segment_bytes(cx, object_id, &repaired_pack_members)
+                        .await
+                }
+                MetadataKind::Catalog => {
+                    store
+                        .scrub_catalog_bytes(cx, CatalogVersion(object_id), &repaired_pack_members)
                         .await
                 }
             };

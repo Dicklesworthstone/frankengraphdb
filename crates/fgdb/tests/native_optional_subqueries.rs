@@ -303,6 +303,107 @@ fn optional_subqueries_keep_staged_history_and_reopened_versions() {
 }
 
 #[test]
+fn wildcard_optional_call_uses_the_same_pinned_staged_and_masked_sources() {
+    let ((), report) = run_async_under_lab(0x0f71_7206, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = seed(&mut db, &commit, false).await;
+        let params = arguments();
+        let text = "MATCH (a:Owner) OPTIONAL CALL (*) { \
+                    MATCH (a)-[r:R]->(b) \
+                    WHERE EXISTS { MATCH (b)-[:S]->(c) WHERE c.p >= $floor } \
+                    RETURN b,r } RETURN a,b,r ORDER BY a,b,r";
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+        let pinned = db.read_session().unwrap();
+        assert_eq!(
+            rows(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            BEFORE
+        );
+
+        let issuer = Authority::new(
+            AuthKey::from_seed(0x0f71_7206),
+            NS,
+            "graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            BRANCH,
+            1_000,
+            QueryLimits {
+                max_nodes: 10_000,
+                max_work: 1_000_000,
+                max_rows: 1_000,
+            },
+        );
+        grant.labels = Scope::only([OWNER, VISIBLE]);
+        grant.relations = Scope::only([R, S]);
+        grant.properties = Scope::only([P]);
+        let token = issuer.issue_at(&grant, 100).unwrap();
+        assert_eq!(
+            rows(
+                prepared
+                    .execute_authorized(
+                        &db,
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        &params,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap()
+            ),
+            MASKED,
+            "wildcard names cannot expand the capability's visible graph"
+        );
+
+        let mut transaction = db.begin(&txcx).unwrap();
+        let mut changes = WriteBatch::new(S);
+        changes.delete_edge(EId(201));
+        changes.delete_edge(EId(202));
+        changes.add_edge(EId(206), VId(11), VId(20), vec![]);
+        changes.add_edge(EId(207), VId(11), VId(20), vec![]);
+        transaction.write(&mut db, changes).unwrap();
+        assert_eq!(
+            rows(
+                prepared
+                    .execute_in_transaction(&transaction, &db, &cx, &params, policy())
+                    .unwrap()
+            ),
+            STAGED
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        transaction.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            rows(
+                prepared
+                    .execute_in_view(&pinned, &cx, &params, policy())
+                    .unwrap()
+            ),
+            BEFORE
+        );
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows(prepared.execute(&reopened, &cx, &params, policy()).unwrap()),
+            STAGED
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn optional_subqueries_mask_inner_topology_before_existence_count_and_collection() {
     let ((), report) = run_async_under_lab(0x0f71_7202, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

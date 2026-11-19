@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 77
+registry_epoch = 78
 
 [[kind]]
 object_kind = 0x0001
@@ -3447,6 +3447,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/root_authority_trust_body/"
 
 [[kind]]
+object_kind = 0x042d
+name = "SchemaTransition"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 160
+golden_corpus = "crates/fgdb-strata/src/catalog.rs"
+
+[[kind]]
 object_kind = 0x042e
 name = "SealedPreBootstrapDispatchJournalImport"
 status = "reserved"
@@ -5414,7 +5423,7 @@ name = "PartitionManifest"
 status = "active"
 construction_order = 35
 role_predicate = "true"
-max_size_bytes = 134217728
+max_size_bytes = 152043530
 golden_corpus = "corpus/logical/partition_manifest/"
 
 [[kind]]
@@ -5497,3 +5506,12 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 268435456
 golden_corpus = "crates/fgdb-strata/src/tiered/sealed/durable/tests.rs"
+
+[[kind]]
+object_kind = 0x058e
+name = "SchemaCatalog"
+status = "active"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "crates/fgdb-strata/src/catalog.rs"

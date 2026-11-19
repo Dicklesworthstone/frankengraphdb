@@ -1262,6 +1262,174 @@ fn empty_results_errors_and_width_violations_publish_no_rows() {
 }
 
 #[test]
+fn optional_call_procedures_preserve_outer_occurrences_and_null_extend_only_exports() {
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    for text in [
+        "OPTIONAL CALL t.empty() YIELD v RETURN v",
+        "OPTIONAL CALL t.empty() YIELD v",
+    ] {
+        assert_eq!(
+            call(&prepare(text, &GqlParameters::new())).unwrap(),
+            vec![GraphValueRow::from_owned_values(vec![null.clone()])],
+            "{text}"
+        );
+    }
+    let query = prepare(
+        "UNWIND [1,2,2,null] AS x OPTIONAL CALL t.lookup(x) YIELD value AS y \
+         RETURN x,y ORDER BY x,y",
+        &GqlParameters::new(),
+    );
+    let mut invocations = Vec::new();
+    let result = query
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| {
+                assert_eq!(call.outputs(), ["value"]);
+                invocations.push(arguments[0].clone());
+                if arguments[0] == int(1) {
+                    rows(vec![vec![int(10)], vec![int(10)]])
+                } else {
+                    rows(Vec::new())
+                }
+            },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap();
+    assert_eq!(invocations, [int(1), int(2), int(2), null.clone()]);
+    assert_eq!(
+        result.value,
+        [
+            vec![int(1), int(10)],
+            vec![int(1), int(10)],
+            vec![int(2), null.clone()],
+            vec![int(2), null.clone()],
+            vec![null.clone(), null],
+        ]
+        .map(GraphValueRow::from_owned_values)
+    );
+    assert_eq!(result.rows.result_rows, 5);
+    assert!(
+        call(&prepare(
+            "UNWIND [] AS x OPTIONAL CALL t.echo(x) YIELD y RETURN x,y",
+            &GqlParameters::new()
+        ))
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
+fn optional_call_yield_where_filters_before_null_extension_and_with_filters_after() {
+    let null_row = vec![GraphValueRow::from_owned_values(vec![
+        int(7),
+        GraphValue::Scalar(CanonicalScalar::Null),
+    ])];
+    // The WHERE attached to YIELD belongs inside the optional call. Both an
+    // empty host and a nonempty host with no qualifying row preserve x.
+    for invocation in ["t.empty()", "t.echo(2)"] {
+        let text = format!(
+            "WITH 7 AS x OPTIONAL CALL {invocation} YIELD y \
+             WHERE y > x RETURN x,y"
+        );
+        assert_eq!(
+            call(&prepare(&text, &GqlParameters::new())).unwrap(),
+            null_row
+        );
+        let text = format!(
+            "WITH 7 AS x OPTIONAL CALL {invocation} YIELD y \
+             WITH x,y WHERE y > x RETURN x,y"
+        );
+        assert!(
+            call(&prepare(&text, &GqlParameters::new()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        call(&prepare(
+            "WITH 7 AS x OPTIONAL CALL t.echo(9) YIELD y WHERE y > x RETURN x,y",
+            &GqlParameters::new()
+        ))
+        .unwrap(),
+        vec![GraphValueRow::from_owned_values(vec![int(7), int(9)])]
+    );
+    // A graph-expression filter is compiled through the same nested Apply
+    // owner. Its empty witness must not erase the optional caller row.
+    assert_eq!(
+        call(&prepare(
+            "WITH 7 AS x OPTIONAL CALL t.echo(9) YIELD y \
+             WHERE EXISTS { WITH x,y WHERE y > x RETURN y } RETURN x,y",
+            &GqlParameters::new()
+        ))
+        .unwrap(),
+        vec![GraphValueRow::from_owned_values(vec![int(7), int(9)])]
+    );
+    assert_eq!(
+        call(&prepare(
+            "WITH 7 AS x OPTIONAL CALL t.echo(2) YIELD y \
+             WHERE EXISTS { WITH x,y WHERE y > x RETURN y } RETURN x,y",
+            &GqlParameters::new()
+        ))
+        .unwrap(),
+        null_row
+    );
+}
+
+#[test]
+fn optional_call_procedures_preserve_host_errors_schema_refusals_and_identity() {
+    let params = GqlParameters::new();
+    for text in [
+        "OPTIONAL CALL t.nope() YIELD v RETURN v",
+        "OPTIONAL CALL t.nope() YIELD v RETURN v LIMIT 0",
+        "WITH 1 AS x OPTIONAL CALL t.nope(x) YIELD v WHERE false RETURN x,v",
+    ] {
+        assert!(
+            matches!(
+                call(&prepare(text, &params)),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                    "unknown procedure"
+                )))
+            ),
+            "{text}"
+        );
+    }
+    assert!(matches!(
+        call(&prepare(
+            "OPTIONAL CALL t.echo(1,2) YIELD v RETURN v",
+            &params
+        )),
+        Err(GqlQueryError::Source(
+            GraphSetExecutionError::InputSchema { .. }
+        ))
+    ));
+    let query = prepare("OPTIONAL CALL t.empty() YIELD v RETURN v", &params);
+    assert!(matches!(
+        query.execute_governed(wide(), no_graph, || Ok::<_, usize>(())),
+        Err(GqlQueryError::Source(
+            GraphSetExecutionError::ProcedureUnavailable { .. }
+        ))
+    ));
+    assert_ne!(
+        query.canonical_bytes(),
+        prepare("CALL t.empty() YIELD v RETURN v", &params).canonical_bytes()
+    );
+    for text in [
+        "OPTIONAL CALL t.echo(1/0) YIELD v RETURN v LIMIT 0",
+        "OPTIONAL CALL t.echo(1) YIELD v WHERE 1/0=0 RETURN v LIMIT 0",
+    ] {
+        assert!(
+            matches!(
+                call(&prepare(text, &params)),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                    if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn a_host_without_procedures_refuses_instead_of_inventing_rows() {
     let query = prepare(
         "CALL t.scores() YIELD score RETURN score",

@@ -80,6 +80,47 @@ impl Fixture {
         )
     }
 }
+
+#[test]
+fn cooperative_join_preserves_nested_positions_and_charges_after_rejected_prefixes() {
+    use core::task::{Context, Poll, Waker};
+    let fixture = Fixture::from_edges((0..260).map(|id| (id, id, id + 1)));
+    let pattern = PreparedGraphText::prepare(
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r,s,a,b,c SKIP 200 LIMIT 5",
+        |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            _ => None,
+        },
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let plan = EdgeScanPlan::compile(pattern.plan()).unwrap();
+    let policy = GqlQueryPolicy::new(10_000, 1000, 1_000_000, 1_000_000);
+    let mut synchronous =
+        EdgeScanCursor::new(fixture.clone(), plan.clone(), policy, || Ok::<(), &str>(()));
+    let expected = synchronous.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let mut cooperative = EdgeScanCursor::new(fixture, plan, policy, || Ok::<(), &str>(()));
+    let mut context = Context::from_waker(Waker::noop());
+    let mut actual = Vec::new();
+    let mut pending = 0;
+    loop {
+        match cooperative.poll_next(&mut context) {
+            Poll::Pending => pending += 1,
+            Poll::Ready(Some(row)) => actual.push(row.unwrap()),
+            Poll::Ready(None) => break,
+        }
+    }
+    assert!(pending >= 3);
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 5);
+    for (offset, row) in actual.iter().enumerate() {
+        assert_eq!(row.values()[0], GraphValue::Edge(EId(200 + offset as u128)));
+        assert_eq!(row.values()[1], GraphValue::Edge(EId(201 + offset as u128)));
+    }
+    assert_eq!(cooperative.row_stats(), synchronous.row_stats());
+    assert_eq!(cooperative.evaluator_stats(), synchronous.evaluator_stats());
+}
 impl EdgeScanSource for Fixture {
     type Error = &'static str;
     fn snapshot_seq(&self) -> CommitSeq {

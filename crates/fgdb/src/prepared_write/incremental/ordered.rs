@@ -75,7 +75,7 @@ impl<V: Vfs + Clone> Database<V> {
             || prior_coordinates.iter().any(|coordinate| {
                 coordinate.graph != crate::GRAPH
                     || coordinate.branch != crate::BRANCH
-                    || coordinate.schema_epoch != crate::SchemaEpoch(0)
+                    || coordinate.schema_epoch != self.snapshot.schema.catalog.epoch()
                     || coordinate.schema_transition.is_some()
             })
             || suffix
@@ -223,7 +223,7 @@ impl<V: Vfs + Clone> Database<V> {
                         graph: crate::GRAPH,
                         branch: crate::BRANCH,
                         relation,
-                        schema_epoch: crate::SchemaEpoch(0),
+                        schema_epoch: self.snapshot.schema.catalog.epoch(),
                         schema_transition: None,
                         rows: Vec::new(),
                     },

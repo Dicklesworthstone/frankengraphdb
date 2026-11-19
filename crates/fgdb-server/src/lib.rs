@@ -3,9 +3,10 @@
 //! The server composes the embedded engine behind `fgdb-protocol`'s FGP
 //! connection machine over asupersync TCP or TLS 1.3. It reimplements none of the
 //! engine: every statement runs through the same capability-authorized
-//! sessions an embedded host would use, constructed fresh per statement from
-//! the connection's Warden capability, so signature, scope, expiry, signed
-//! budgets and issuer retirement are rechecked for every statement and
+//! sessions an embedded host would use. Autocommit creates a fresh session;
+//! explicit transactions retain their original native owner and cumulative
+//! Warden allowance. Signature, scope, expiry, signed budgets and issuer
+//! retirement remain checked at every statement and completion, and
 //! security applies before expansion (FG-INV-20), never as a result filter.
 //!
 //! FGP also rechecks the selected issuer's cooperative retirement fence and
@@ -33,6 +34,13 @@
 //!   vertex and relationship `MERGE` steps, and support `ON CREATE`/`ON MATCH`
 //!   actions plus terminal `SET`, `REMOVE`, and `DELETE`. Creating MERGE
 //!   chains hold admitted effects for one ordered preparation and commit.
+//! - Connection-scoped explicit FGP writes through `BEGIN_TRANSACTION`,
+//!   `EXECUTE_TRANSACTION`, `COMMIT_TRANSACTION` and `ROLLBACK_TRANSACTION`.
+//!   Statements share one authorized native workspace, see staged effects and
+//!   deliver distinct provisional `TRANSACTION_RESULT_CHUNK/END` frames.
+//!   Only COMMIT publishes. Failed statements, rejected delivery (including a
+//!   late cancellation), disconnect, drain and recovery discard the prefix.
+//!   The retained owner holds no database lock between messages.
 //! - Results as the session-owned, ephemeral `SNAPSHOT_RESULT_CHUNK` /
 //!   `SNAPSHOT_RESULT_END` class on a server-minted child stream, under
 //!   per-stream byte-and-row flow credit replenished by `WINDOW_UPDATE`.
@@ -62,7 +70,7 @@
 //! Not served, and refused with a typed error rather than approximated: the
 //! durable `PublishedResultStream` class with `RESULT_ACK`/`RESULT_RELEASE`,
 //! prepared writes with RETURN, durable transaction ownership/reattachment,
-//! FGP explicit write transactions, durable or capability-masked subscriptions, and HTTP/2,
+//! durable or capability-masked subscriptions, and HTTP/2,
 //! gRPC and WebSocket adapters.
 //! Results are ephemeral. Autocommit results follow native completion, while
 //! explicit transaction rows are provisional until `COMMIT`. Disconnect can
@@ -222,7 +230,13 @@ pub struct DatabaseConfig {
     pub issuer_key: AuthKey,
     /// Bumping the policy epoch invalidates every token issued under the old one.
     pub policy_epoch: u64,
+    /// Optional operator declarations layered over the selected durable names.
+    /// Exact durable redeclarations are allowed; conflicting names or ids refuse
+    /// startup. Extra declarations remain process-local and are not persisted.
     pub symbols: Symbols,
+    /// Optional publication pin for configuration bound through a prior
+    /// metadata-only open. Startup refuses if that publication has changed.
+    pub catalog_frontier: Option<fgdb_types::CommitSeq>,
     /// The native mutation coordinate (the CLI's `--write-relation`).
     pub write_relation: RelationId,
     pub query_policy: GqlQueryPolicy,
@@ -234,7 +248,8 @@ pub struct DatabaseConfig {
     /// they are bounded process configuration, not a durable schema catalog.
     pub beacon_indexes: Vec<BeaconIndexConfig>,
     pub write_policy: GraphWriteProgramPolicy,
-    /// Host ceiling on expanded statements per write program.
+    /// Host ceiling on expanded statements per write program and on sequential
+    /// statements in an explicit read-only transaction.
     pub max_statements: usize,
     /// Subscription registrations this database admits over the server's
     /// lifetime: a registration lives as long as the open database.
@@ -268,6 +283,7 @@ impl DatabaseConfig {
             issuer_key,
             policy_epoch: 1,
             symbols: Symbols::new(),
+            catalog_frontier: None,
             write_relation: RelationId(1),
             query_policy,
             read_cache_limits: fgdb::ReadCacheLimits::default(),
@@ -333,6 +349,12 @@ pub enum ServerError {
     DuplicateDatabase(String),
     InvalidDatabaseName,
     Open(fgdb::OpenError),
+    Catalog(fgdb::ReadError),
+    Symbols(SymbolConflict),
+    CatalogChanged {
+        expected: fgdb_types::CommitSeq,
+        actual: fgdb_types::CommitSeq,
+    },
     ReadCache(Box<asupersync::error::Error>),
     BeaconConfig {
         name: String,
@@ -356,6 +378,13 @@ impl core::fmt::Display for ServerError {
                 f.write_str("a database name must be 1..=128 bytes of [A-Za-z0-9_.-]")
             }
             Self::Open(error) => write!(f, "cannot open database: {error}"),
+            Self::Catalog(error) => write!(f, "cannot read database symbol catalog: {error}"),
+            Self::Symbols(error) => write!(f, "cannot configure database symbols: {error}"),
+            Self::CatalogChanged { expected, actual } => write!(
+                f,
+                "database publication changed from {} to {} while binding its symbol catalog; retry startup",
+                expected.0, actual.0,
+            ),
             Self::ReadCache(error) => write!(f, "cannot configure read-cache retention: {error}"),
             Self::BeaconConfig { name, reason } => {
                 write!(f, "invalid Beacon index {name:?}: {reason}")
@@ -447,6 +476,7 @@ pub(crate) struct Served {
     /// Direct transport binders use it before handing off immutable operands.
     pub(crate) statement_clock: fgdb::StatementClock,
     pub(crate) authority: Authority,
+    /// Startup names for surfaces which retain this immutable generation.
     pub(crate) symbols: Symbols,
     pub(crate) write_relation: RelationId,
     pub(crate) query_policy: GqlQueryPolicy,
@@ -549,6 +579,16 @@ impl Server {
         let mut db = Database::open(&contexts.commit(), path, config.keys)
             .await
             .map_err(ServerError::Open)?;
+        if let Some(expected) = config.catalog_frontier {
+            let actual = db.frontier().map_err(ServerError::Catalog)?;
+            if expected != actual {
+                return Err(ServerError::CatalogChanged { expected, actual });
+            }
+        }
+        let symbols = config
+            .symbols
+            .with_catalog(db.symbol_catalog().map_err(ServerError::Catalog)?)
+            .map_err(ServerError::Symbols)?;
         let statement_clock = fgdb::StatementClock::new(|_| {
             let elapsed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -585,7 +625,7 @@ impl Server {
                 db,
                 statement_clock,
                 authority,
-                symbols: config.symbols,
+                symbols,
                 write_relation: config.write_relation,
                 query_policy: config.query_policy,
                 write_policy: config.write_policy,

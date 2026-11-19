@@ -2,12 +2,15 @@
 //! A frame and at most one row awaiting byte credit are the adapter's only row
 //! buffers. Native aggregates retain their governed group/support state and
 //! consume the input cooperatively on first demand, then move completed groups
-//! through this same delivery path without rescanning the source graph. The
-//! metadata chunk announces the child before any input is demanded, so its
-//! cancellation can be serviced during accumulation.
+//! through this same delivery path without rescanning the source graph. Row
+//! scans also yield during hidden/rejected input and projected suffix work.
+//! The metadata chunk announces the child before any input is demanded, so
+//! controls can be serviced while either source is still finding its next row.
 
 use super::*;
-use crate::execute::{PreparedRead, read_prepared_session, read_session};
+use crate::execute::PreparedRead;
+#[cfg(test)]
+use crate::execute::{read_prepared_session, read_session};
 use fgdb_types::PurposeContexts;
 
 pub(super) enum SourceStatement<'a> {
@@ -17,7 +20,7 @@ pub(super) enum SourceStatement<'a> {
 
 pub(super) struct Chunks {
     columns: Option<Vec<String>>,
-    pending: Option<(Vec<WireValue>, usize)>,
+    pending: Option<(Vec<WireValue>, usize, usize)>,
     ended: bool,
 }
 
@@ -57,7 +60,8 @@ impl Chunks {
             return Ok(None);
         }
         let mut rows = Vec::new();
-        while rows.len() < row_room {
+        let mut nodes = 0;
+        while rows.len() < row_room.min(MAX_ROWS_PER_CHUNK) {
             if self.pending.is_none() {
                 // The row's column count alone requires four bytes. A header
                 // or column-only grant must not drive graph candidates.
@@ -68,13 +72,14 @@ impl Chunks {
                 let empty = row.is_none();
                 self.accept(row, ended || empty, frame_budget)?;
             }
-            let Some((_, length)) = &self.pending else {
+            let Some((_, length, row_nodes)) = &self.pending else {
                 break;
             };
-            if size.saturating_add(*length) > byte_room {
+            if size.saturating_add(*length) > byte_room || *row_nodes > MAX_VALUE_NODES - nodes {
                 break;
             }
             size += *length;
+            nodes += *row_nodes;
             rows.push(self.pending.take().expect("measured pending row").0);
         }
         if rows.is_empty() && self.columns.is_none() {
@@ -105,11 +110,12 @@ impl Chunks {
         ended: bool,
         frame_budget: usize,
     ) -> Result<(), Refusal> {
-        // row_len validates/encodes recursively. Measure once, never again
-        // for a ping or insufficient credit grant.
+        // row_cost validates/encodes recursively. Cache both costs once:
+        // individually valid rows can exceed a complete body's node limit
+        // even when their combined bytes fit the negotiated frame.
         self.pending = match row {
             Some(row) => {
-                let length = ResultChunk::row_len(&row).map_err(|_| {
+                let (length, nodes) = ResultChunk::row_cost(&row).map_err(|_| {
                     Refusal::new(
                         ErrorCode::Execution,
                         "a result value exceeds the wire bounds",
@@ -121,7 +127,7 @@ impl Chunks {
                         "a result row exceeds the negotiated frame limit",
                     ));
                 }
-                Some((row, length))
+                Some((row, length, nodes))
             }
             None => None,
         };
@@ -162,17 +168,21 @@ impl Lane {
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query = crate::query_cx(&contexts);
         let opened = match statement {
-            SourceStatement::Text(text) => match read_session(cx, db, token).await {
-                Ok((mut session, _)) => {
-                    self.send_generation = Some(session.generation());
-                    session
-                        .prepare(&query, text, &parameters)
-                        .map(|prepared| (session, prepared))
+            SourceStatement::Text(text) => {
+                match crate::execute::read_session_for(cx, db, token, &[(text, &parameters)]).await
+                {
+                    Ok((mut session, _)) => {
+                        self.send_generation = Some(session.generation());
+                        session
+                            .prepare(&query, text, &parameters)
+                            .map(|prepared| (session, prepared))
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            },
+            }
             SourceStatement::Prepared(prepared) => {
-                read_prepared_session(cx, db, token, prepared).await
+                crate::execute::read_prepared_session_for(cx, db, token, prepared, &parameters)
+                    .await
             }
         };
         let (mut session, prepared) = match opened {
@@ -207,60 +217,86 @@ impl Lane {
                 .unwrap_or(usize::MAX)
                 .saturating_sub(framing)
                 .min(frame_budget);
-            let row_room = usize::try_from(available.rows).unwrap_or(usize::MAX);
-            // Announce the real stream identity before polling an aggregate.
+            // Announce the real stream identity before polling its source.
             // Metadata uses byte credit but spends no input or output rows.
             let announcing = chunks.columns.is_some();
-            if source.is_aggregate() && !announcing && chunks.needs_row(byte_room, row_room) {
-                let row = match self
-                    .read_progress(
-                        cx,
-                        waiter,
-                        &mut window,
-                        stream,
-                        request,
-                        binding,
-                        source.next(),
-                    )
-                    .await?
-                {
-                    Ok(row) => row,
-                    Err(error) => {
-                        return self
-                            .refuse(cx, request, stream, binding, error.code, &error.message)
-                            .await;
+            let next = if announcing {
+                chunks.next(byte_room, 0, frame_budget, || {
+                    unreachable!("metadata never pulls source rows")
+                })
+            } else {
+                // Keep frame-sized batching. Each additional row is obtained
+                // through one retained cooperative future, so a rejected
+                // suffix cannot monopolize this worker or hide wire CANCEL.
+                // Only this frame and Chunks' one measured pending row exist.
+                let mut rows = Vec::new();
+                let mut size = 0usize;
+                let mut nodes = 0usize;
+                loop {
+                    // Control traffic may have granted credit while a source
+                    // quantum was pending; use it without a redundant wait.
+                    let available = window.available();
+                    let byte_room = usize::try_from(available.bytes)
+                        .unwrap_or(usize::MAX)
+                        .saturating_sub(framing)
+                        .min(frame_budget)
+                        .saturating_sub(size);
+                    let row_room = usize::try_from(available.rows)
+                        .unwrap_or(usize::MAX)
+                        .min(MAX_ROWS_PER_CHUNK)
+                        .saturating_sub(rows.len());
+                    if row_room == 0 {
+                        break;
                     }
-                };
-                if let Err(error) = chunks.accept(row, source.exhausted(), frame_budget) {
-                    return self
-                        .refuse(cx, request, stream, binding, error.code, &error.message)
-                        .await;
+                    if chunks.needs_row(byte_room, row_room) {
+                        let row = match self
+                            .read_progress(
+                                cx,
+                                waiter,
+                                &mut window,
+                                stream,
+                                request,
+                                binding,
+                                source.next(),
+                            )
+                            .await?
+                        {
+                            Ok(row) => row,
+                            Err(error) => {
+                                return self
+                                    .refuse(
+                                        cx,
+                                        request,
+                                        stream,
+                                        binding,
+                                        error.code,
+                                        &error.message,
+                                    )
+                                    .await;
+                            }
+                        };
+                        if let Err(error) = chunks.accept(row, source.exhausted(), frame_budget) {
+                            return self
+                                .refuse(cx, request, stream, binding, error.code, &error.message)
+                                .await;
+                        }
+                        // Recompute against any credit granted during intake.
+                        continue;
+                    }
+                    let Some((_, length, row_nodes)) = &chunks.pending else {
+                        break;
+                    };
+                    if *length > byte_room || *row_nodes > MAX_VALUE_NODES - nodes {
+                        break;
+                    }
+                    size += *length;
+                    nodes += *row_nodes;
+                    rows.push(chunks.pending.take().expect("measured pending row").0);
                 }
-            }
-            // Credit received while the retained row future was Pending is
-            // already available. Never wait for a redundant second grant.
-            let available = window.available();
-            let byte_room = usize::try_from(available.bytes)
-                .unwrap_or(usize::MAX)
-                .saturating_sub(framing)
-                .min(frame_budget);
-            let row_room = if announcing {
-                0
-            } else {
-                usize::try_from(available.rows).unwrap_or(usize::MAX)
-            };
-            let next = if source.is_aggregate() {
-                chunks.next(byte_room, row_room.min(1), frame_budget, || {
-                    Err(Refusal::new(
-                        ErrorCode::Execution,
-                        "native aggregate row was not admitted",
-                    ))
-                })
-            } else {
-                chunks.next(byte_room, row_room, frame_budget, || {
-                    let row = source.next_immediate()?;
-                    Ok((row, source.exhausted()))
-                })
+                Ok((!rows.is_empty()).then_some(ResultChunk {
+                    columns: None,
+                    rows,
+                }))
             };
             let chunk = match next {
                 Ok(Some(chunk)) => chunk,
@@ -413,6 +449,85 @@ mod tests {
         // Dropping a cancelled connection's framing state has no source work.
         drop(chunks);
         assert_eq!(pulls, 2);
+    }
+
+    #[test]
+    fn chunk_node_limit_splits_valid_rows_without_repulling_the_overflow() {
+        let frame_budget = 80 << 20;
+        let mut chunks = Chunks::new(vec!["ids".into()]);
+        accepted(chunks.next(frame_budget, 0, frame_budget, || panic!("metadata only"))).unwrap();
+        // Both rows fit the negotiated frame together, but their list roots
+        // make the combined node count exceed the codec limit by exactly two.
+        let mut source = vec![
+            vec![WireValue::Vertices(vec![1; MAX_VALUE_NODES / 2])],
+            vec![WireValue::Edges(vec![2; MAX_VALUE_NODES / 2])],
+        ]
+        .into_iter();
+        let mut pulls = 0;
+        let first = accepted(chunks.next(frame_budget, 2, frame_budget, || {
+            pulls += 1;
+            let row = source.next();
+            Ok((row, source.len() == 0))
+        }))
+        .unwrap();
+        assert_eq!(pulls, 2);
+        assert_eq!(first.rows.len(), 1);
+        assert!(matches!(&first.rows[0][0], WireValue::Vertices(ids)
+            if ids.len() == MAX_VALUE_NODES / 2 && ids.iter().all(|id| *id == 1)));
+        assert_eq!(
+            ResultChunk::decode(&first.encode().unwrap()).unwrap(),
+            first
+        );
+        assert!(!chunks.done(), "the second row remains pending after EOF");
+        drop(first);
+
+        assert!(
+            accepted(chunks.next(4, 1, frame_budget, || panic!("pending row was repulled")))
+                .is_none()
+        );
+        let last = accepted(chunks.next(frame_budget, 1, frame_budget, || {
+            panic!("the measured overflow row must survive the frame boundary")
+        }))
+        .unwrap();
+        assert_eq!(last.rows.len(), 1);
+        assert!(matches!(&last.rows[0][0], WireValue::Edges(ids)
+            if ids.len() == MAX_VALUE_NODES / 2 && ids.iter().all(|id| *id == 2)));
+        assert_eq!(ResultChunk::decode(&last.encode().unwrap()).unwrap(), last);
+        assert!(chunks.done());
+        assert_eq!(pulls, 2);
+    }
+
+    #[test]
+    fn chunk_row_limit_splits_large_credit_without_pulling_an_extra_row() {
+        let frame_budget = 80 << 20;
+        let mut chunks = Chunks::new(Vec::new());
+        accepted(chunks.next(frame_budget, 0, frame_budget, || panic!("metadata only"))).unwrap();
+        let mut pulls = 0;
+        let first =
+            accepted(
+                chunks.next(frame_budget, MAX_ROWS_PER_CHUNK + 1, frame_budget, || {
+                    pulls += 1;
+                    Ok((Some(Vec::new()), false))
+                }),
+            )
+            .unwrap();
+        assert_eq!(first.rows.len(), MAX_ROWS_PER_CHUNK);
+        assert_eq!(pulls, MAX_ROWS_PER_CHUNK);
+        assert!(first.rows.iter().all(Vec::is_empty));
+        assert_eq!(
+            ResultChunk::decode(&first.encode().unwrap()).unwrap(),
+            first
+        );
+        drop(first);
+        let last = accepted(chunks.next(frame_budget, 1, frame_budget, || {
+            pulls += 1;
+            Ok((Some(Vec::new()), true))
+        }))
+        .unwrap();
+        assert_eq!(last.rows, [Vec::<WireValue>::new()]);
+        assert_eq!(ResultChunk::decode(&last.encode().unwrap()).unwrap(), last);
+        assert_eq!(pulls, MAX_ROWS_PER_CHUNK + 1);
+        assert!(chunks.done());
     }
 
     #[test]

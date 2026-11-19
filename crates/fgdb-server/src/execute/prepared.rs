@@ -11,8 +11,45 @@ pub(crate) struct PreparedRead {
     pub(super) selector: Arc<PreparedGraphBranchText>,
     pub(super) native: Arc<PreparedNativeRead>,
     pub(super) lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
+    pub(super) symbols: crate::Symbols,
     pub(crate) generation: Generation,
     pub(crate) source_bytes: usize,
+}
+
+impl PreparedRead {
+    pub(crate) fn statement(&self) -> &str {
+        self.selector.source()
+    }
+
+    pub(crate) fn catalog_cut(
+        &self,
+        parameters: &GqlParameters,
+    ) -> Result<Option<fgdb_types::CommitSeq>, Refusal> {
+        let derived = self
+            .lowered
+            .as_ref()
+            .map(|lowered| lowered.arguments(parameters))
+            .transpose()
+            .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+        let parameters = derived.as_ref().unwrap_or(parameters);
+        let selected = self
+            .selector
+            .bind_parameters(parameters)
+            .map_err(branch_error)?;
+        authorized_branch(&selected)?;
+        // The native template already owns the parsed selector. Rebinding a
+        // prepared handle must not lex its source again on every execution.
+        match self.native.facade_class() {
+            fgdb::NativeReadClass::TemporalPattern
+            | fgdb::NativeReadClass::TemporalSet
+            | fgdb::NativeReadClass::TemporalAggregate => self
+                .native
+                .bound_snapshot_seq(selected.parameters(), fgdb_types::CommitSeq::ORIGIN)
+                .map(Some)
+                .map_err(query_refusal),
+            _ => Ok(None),
+        }
+    }
 }
 
 pub(crate) enum PreparedWrite {
@@ -28,6 +65,7 @@ pub(crate) struct PreparedScript {
     native: PreparedNativeWriteScript,
     generation: Generation,
     source_bytes: usize,
+    symbols: crate::Symbols,
 }
 
 impl PreparedWrite {
@@ -104,9 +142,9 @@ pub(crate) async fn prepare_statement(
         PrepareMode::Write => prepare_write(cx, db, token, request)
             .await
             .map(PreparedDefinition::Write),
-        PrepareMode::WriteReturning => {
-            prepare_row_write(cx, db, token, request, true).map(PreparedDefinition::WriteReturning)
-        }
+        PrepareMode::WriteReturning => prepare_row_write(cx, db, token, request, true)
+            .await
+            .map(PreparedDefinition::WriteReturning),
     }
 }
 
@@ -153,7 +191,7 @@ pub(crate) async fn prepare_read(
     query
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-    let generation = db.db.generation().map_err(Refusal::from)?;
+    let (view, generation) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     let parameters = query.with_restriction(|| {
         convert::parameters(&request.parameters, None)
             .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
@@ -186,13 +224,26 @@ pub(crate) async fn prepare_read(
         let selected = selector.bind_parameters(parameters).map_err(branch_error)?;
         authorized_branch(&selected)?;
         refuse_element_identity(selected.statement())?;
+        let symbols = symbols_at(
+            &view,
+            &db.symbols,
+            &[statement_catalog_cut(
+                selected.statement(),
+                selected.parameters(),
+            )?],
+        )?;
         let native = PreparedNativeRead::prepare(
             selected.statement(),
             selected.parameters(),
-            db.symbols.clone(),
+            symbols.clone(),
         )
         .map_err(query_refusal)?;
-        Ok::<_, Refusal>((selector, native, lowered.map(|(lowered, _)| lowered)))
+        Ok::<_, Refusal>((
+            selector,
+            native,
+            lowered.map(|(lowered, _)| lowered),
+            symbols,
+        ))
     });
     // A late invalidation wins even over a syntax error. No template is
     // installed after expiry, retirement, cancellation or generation fencing.
@@ -203,11 +254,12 @@ pub(crate) async fn prepare_read(
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
     generation.check().map_err(Refusal::from)?;
-    let (selector, native, lowered) = definition?;
+    let (selector, native, lowered, symbols) = definition?;
     Ok(PreparedRead {
         selector: Arc::new(selector),
         native: Arc::new(native),
         lowered: lowered.map(Arc::new),
+        symbols,
         generation,
         source_bytes: request.statement.len(),
     })
@@ -296,7 +348,9 @@ async fn prepare_write(
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
     generation.check().map_err(Refusal::from)?;
     if chain? {
-        return prepare_row_write(cx, db, token, request, false).map(PreparedWrite::Chain);
+        return prepare_row_write(cx, db, token, request, false)
+            .await
+            .map(PreparedWrite::Chain);
     }
     // Definition admission needs only the authenticated namespace. Pin the
     // published view briefly instead of queuing behind a writer's commit I/O.
@@ -304,6 +358,8 @@ async fn prepare_write(
     let (view, published_generation) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     generation.check().map_err(Refusal::from)?;
     published_generation.check().map_err(Refusal::from)?;
+    authorize_write(db, token)?;
+    let symbols = symbols_at(&view, &db.symbols, &[])?;
     // The native owner must see the originals: its one live permit covers
     // lowering, catalog resolution and representative binding cumulatively.
     // The routing probe above supplies no authority or prepaid input credit.
@@ -315,7 +371,7 @@ async fn prepare_write(
         TRUNK,
         &request.statement,
         &parameters,
-        db.symbols.clone(),
+        symbols.clone(),
         db.write_relation,
         db.max_statements,
         unix_millis,
@@ -325,10 +381,11 @@ async fn prepare_write(
         native: native.map_err(|error| write_refusal(&error))?,
         generation,
         source_bytes: request.statement.len(),
+        symbols,
     }))
 }
 
-fn prepare_row_write(
+async fn prepare_row_write(
     cx: &Cx,
     db: &Served,
     token: &CapabilityToken,
@@ -359,8 +416,9 @@ fn prepare_row_write(
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
     let parameters = write_arguments(&query, &mut permit, &generation, &request.parameters)?;
+    let (symbols, published_generation) = write_catalog(cx, db, token).await?;
     let definition = query.with_restriction(|| {
-        let template = ReturningTemplate::prepare(db, &request.statement, &parameters)?
+        let template = ReturningTemplate::prepare(db, &symbols, &request.statement, &parameters)?
             .filter(|template| template.returns_rows() == returns_rows)
             .ok_or_else(mode_refusal)?;
         // Validate representative types/constant expressions, then discard
@@ -375,6 +433,7 @@ fn prepare_row_write(
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
     generation.check().map_err(Refusal::from)?;
+    published_generation.check().map_err(Refusal::from)?;
     Ok(PreparedReturning {
         template: definition?,
         generation,
@@ -417,10 +476,41 @@ pub(crate) fn run_prepared<'a>(
         )
         | (PreparedDefinition::WriteReturning(prepared), PreparedExecutionMode::WriteReturning) => {
             Box::pin(write_returning_prepared(
-                cx, db, token, prepared, parameters,
+                cx, db, token, prepared, parameters, None,
             ))
         }
         _ => Box::pin(async { Err(mode_refusal()) }),
+    }
+}
+
+/// Apply the connection's negotiated output limit to the same immutable
+/// template and fresh authorized write owner. Read and stats-only script
+/// classes retain their original executor; no handle can change its class.
+pub(crate) fn run_prepared_framed<'a>(
+    cx: &'a Cx,
+    db: &'a Served,
+    token: &'a CapabilityToken,
+    definition: &'a PreparedDefinition,
+    mode: PreparedExecutionMode,
+    parameters: &'a [(String, WireValue)],
+    frame_budget: usize,
+) -> Execution<'a> {
+    match (definition, mode) {
+        (
+            PreparedDefinition::Write(PreparedWrite::Chain(prepared)),
+            PreparedExecutionMode::Write,
+        )
+        | (PreparedDefinition::WriteReturning(prepared), PreparedExecutionMode::WriteReturning) => {
+            Box::pin(write_returning_prepared(
+                cx,
+                db,
+                token,
+                prepared,
+                parameters,
+                Some(frame_budget),
+            ))
+        }
+        _ => run_prepared(cx, db, token, definition, mode, parameters),
     }
 }
 
@@ -562,6 +652,7 @@ async fn write_chain_prepared_batch(
     };
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
     prepared.generation.check().map_err(Refusal::from)?;
+    write_symbols(db, token, &guard, Some(&prepared.template.symbols))?;
     let generation = guard.generation();
     let mut output_refusal = None;
     let result = guard
@@ -632,6 +723,7 @@ async fn write_returning_prepared(
     token: &CapabilityToken,
     prepared: &PreparedReturning,
     parameters: &[(String, WireValue)],
+    frame_budget: Option<usize>,
 ) -> Result<Answer, Refusal> {
     let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
@@ -670,12 +762,14 @@ async fn write_returning_prepared(
     // final wire admission and publication share its cumulative allowance.
     // The original generation is checked again after waiting for the writer.
     // No conversion, new authority check or retry follows native completion.
-    write_returning_checked(
+    write_returning_admitted(
         cx,
         db,
+        &prepared.template.symbols,
         &execution_token,
         bound,
         Some((&prepared.generation, fgdb_types::CommitSeq(0))),
+        frame_budget,
         |_, rows, _, _| Ok(rows),
     )
     .await
@@ -889,6 +983,7 @@ async fn write_prepared_inner(
     // Waiting for a writer cannot revive metadata from an old generation.
     // Bound values carry no authority and have allocated no graph identities.
     prepared.generation.check().map_err(Refusal::from)?;
+    write_symbols(db, token, &guard, Some(&prepared.symbols))?;
     let generation = guard.generation();
     let (stats, completion) = match bound {
         BoundParameters::Single(program) => guard
@@ -950,23 +1045,92 @@ async fn write_prepared_inner(
 /// Reuse trusted catalog bindings in a fresh, capability-governed session.
 /// Only immutable templates are retained by the connection; every execution
 /// gets its own snapshot, owner identity and cumulative native read allowance.
+#[cfg(test)]
 pub(crate) async fn read_prepared_session<'a>(
     cx: &Cx,
     db: &'a Served,
     token: &CapabilityToken,
     prepared: &PreparedRead,
 ) -> Result<(ReadSession<'a>, fgdb::AuthorizedPreparedRead), Refusal> {
+    read_prepared_session_at(cx, db, token, prepared, &[]).await
+}
+
+pub(crate) async fn read_prepared_session_for<'a>(
+    cx: &Cx,
+    db: &'a Served,
+    token: &CapabilityToken,
+    prepared: &PreparedRead,
+    parameters: &GqlParameters,
+) -> Result<(ReadSession<'a>, fgdb::AuthorizedPreparedRead), Refusal> {
+    let now = unix_millis();
+    let capability = db
+        .authority
+        .verify_at(token, TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let mut admission = capability
+        .begin_read_at(TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    admission
+        .charge_work_at(unix_millis(), parameters.canonical_byte_len() as u64)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = crate::query_cx(&contexts);
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    prepared.generation.check().map_err(Refusal::from)?;
+    let cut = query.with_restriction(|| prepared.catalog_cut(parameters));
+    admission
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    prepared.generation.check().map_err(Refusal::from)?;
+    read_prepared_session_at(cx, db, token, prepared, &[cut?]).await
+}
+
+pub(super) async fn read_prepared_session_at<'a>(
+    cx: &Cx,
+    db: &'a Served,
+    token: &CapabilityToken,
+    prepared: &PreparedRead,
+    cuts: &[Option<fgdb_types::CommitSeq>],
+) -> Result<(ReadSession<'a>, fgdb::AuthorizedPreparedRead), Refusal> {
     let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
+    let now = unix_millis();
+    let capability = db
+        .authority
+        .verify_at(token, TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let mut admission = capability
+        .begin_read_at(TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     let (view, generation) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     prepared.generation.check().map_err(Refusal::from)?;
+    let symbols = symbols_at(&view, &db.symbols, cuts);
+    admission
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    prepared.generation.check().map_err(Refusal::from)?;
+    let symbols = symbols?;
+    if !same_symbols(&prepared.symbols, &symbols) {
+        return Err(Refusal::new(
+            ErrorCode::Conflict,
+            "the prepared statement's symbol catalog changed; prepare it again at the selected snapshot",
+        ));
+    }
     let admitted = view.authorized_prepared_read_session(
         &query,
         &db.authority,
         token,
         TRUNK,
-        db.symbols.clone(),
+        symbols.clone(),
         db.query_policy,
         unix_millis as fn() -> u64,
         Arc::clone(&prepared.selector),
@@ -975,7 +1139,14 @@ pub(crate) async fn read_prepared_session<'a>(
     );
     prepared.generation.check().map_err(Refusal::from)?;
     let (native, template) = admitted.map_err(query_refusal)?;
-    Ok((ReadSession { native, generation }, template))
+    Ok((
+        ReadSession {
+            native,
+            generation,
+            symbols,
+        },
+        template,
+    ))
 }
 
 pub(crate) fn read_prepared<'a>(
@@ -1007,7 +1178,8 @@ async fn read_prepared_inner(
     let parameters: GqlParameters = convert::parameters(parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let (mut session, template) = read_prepared_session(cx, db, token, prepared).await?;
+    let (mut session, template) =
+        read_prepared_session_for(cx, db, token, prepared, &parameters).await?;
     let query = crate::query_cx(&contexts);
     let result = session
         .native

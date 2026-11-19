@@ -780,3 +780,84 @@ fn an_unresolved_suffix_discards_the_cache_until_its_owner_is_declared() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn catalog_epochs_preserve_native_creation_and_incremental_composition() {
+    use crate::prepared_write::PreparedDependencies;
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_gql::id_hash::IdSet;
+
+    let ((), report) = run_async_under_lab(0x6972_0112, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let mut db = seeded(&cx).await;
+        let mut catalog = SymbolCatalog::default();
+        catalog.bind("Person", CatalogSymbol::Label(LabelId(1))).unwrap();
+        let mut final_creations = None;
+
+        for epoch in 1..=2 {
+            // The second registration changes only an unnamed allocation floor.
+            catalog.reserve_through(CatalogSymbol::Property(PropertyKeyId(100 + epoch)));
+            db.register_symbols(&cx, &catalog).await.unwrap();
+            let expected_epoch = fgdb_delta_types::SchemaEpoch(epoch);
+
+            let raw = program();
+            let previous = db.prepare_ordered_writes(raw[..3].to_vec()).unwrap();
+            let incremental = db
+                .try_extend_prepared_ordered_writes(&previous, &raw[..3], &raw[3..])
+                .unwrap()
+                .expect("catalog epochs must retain ordered native prefix reuse");
+            let full = db.prepare_ordered_writes(raw).unwrap();
+            assert_same(&incremental, &full);
+            assert!(incremental.template.coordinate_entries().iter().all(|coordinate| {
+                coordinate.schema_epoch == expected_epoch && coordinate.schema_transition.is_none()
+            }));
+
+            let mut first = WriteBatch::new(RelationId(7));
+            first.set_vertex_property(VId(1), P, Some(int(20)));
+            let mut suffix = WriteBatch::new(RelationId(7));
+            suffix.set_vertex_property(VId(2), Q, Some(int(30)));
+            let previous = db.prepare_write(first.clone()).unwrap();
+            let incremental = db
+                .try_extend_prepared_write(&previous, &[first.clone()], &suffix)
+                .unwrap()
+                .expect("catalog epochs must retain single-relation native prefix reuse");
+            let full = db.prepare_ordered_writes(vec![first, suffix]).unwrap();
+            assert_same(&incremental, &full);
+
+            let mut earlier_vertices = IdSet::default();
+            let earlier_edges = IdSet::default();
+            let mut dependencies = PreparedDependencies::default();
+            let mut chunks = Vec::new();
+            let mut combined = WriteBatch::new(RelationId(7));
+            for (id, score) in [(100_u128, 100_i64), (101, 101)] {
+                let mut batch = WriteBatch::new(RelationId(7));
+                batch.create_vertex(VId(id), vec![LabelId(1)], vec![(P, int(score))]);
+                dependencies.extend(PreparedDependencies::capture(&db.writer, &batch));
+                chunks.push(db.prepare_independent_create_chunk(
+                    batch.clone(),
+                    &earlier_vertices,
+                    &earlier_edges,
+                ).unwrap());
+                earlier_vertices.insert(VId(id));
+                combined.rows.extend(batch.rows);
+            }
+            let creations = db.compose_independent_create_chunks(
+                Some(RelationId(7)),
+                &chunks,
+                dependencies,
+                Some(2),
+            ).unwrap();
+            let full = db.prepare_write(combined).unwrap();
+            assert_same(&creations, &full);
+            assert_eq!(creations.template.coordinate_entries()[0].schema_epoch, expected_epoch);
+            final_creations = Some(creations);
+        }
+
+        db.commit_prepared(&cx, final_creations.unwrap()).await.unwrap();
+        assert_eq!(db.vertex(VId(100)).unwrap().unwrap().props, vec![(P, int(100).into())]);
+        assert_eq!(db.vertex(VId(101)).unwrap().unwrap().props, vec![(P, int(101).into())]);
+        assert_eq!(db.snapshot.schema.catalog.epoch(), fgdb_delta_types::SchemaEpoch(2));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -1,5 +1,7 @@
 //! Scoped CALL subqueries retain one atomic owner and their relational contract.
 
+#[path = "unit_call_write_chain/optional.rs"]
+mod optional;
 #[path = "unit_call_write_chain/returning.rs"]
 mod returning;
 
@@ -146,7 +148,7 @@ mod union_arms {
                 R,
                 policy(rows),
                 |request| {
-                    assert!(matches!(request, GraphInsertRequest::Vertex { .. }));
+                    assert!(matches!(request.request, GraphInsertRequest::Vertex { .. }));
                     allocated += 1;
                     Ok::<_, Infallible>(ElementId::Vertex(VId(100 + allocated)))
                 },
@@ -874,6 +876,313 @@ fn cancellation_and_late_authority_expiry_discard_every_call_frame() {
             )
             .await
             .unwrap_err();
+        assert!(expired.load(Ordering::Relaxed));
+        assert_eq!(authorization(&error), Some(Error::Expired));
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+
+#[test]
+fn scoped_write_call_failure_restores_prefix_and_a_following_invocation_uses_fresh_arguments() {
+    let ((), report) = run_async_under_lab(0xca11_0031, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let mut transaction = db.begin(&txn).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![VISIBLE], vec![(P, CanonicalScalar::Int(99))]);
+        transaction.write(&mut db, prefix).unwrap();
+        let before = transaction.staged_effect_digest().unwrap();
+        let mut allocated = 0_u128;
+        let failed = program(
+            "UNWIND [1,2] AS x CALL (x) { WITH 0 AS ignored \
+             CREATE (:Visible {p:x}) WITH 1 AS later \
+             CREATE (:Visible {p:10/(2-x)}) } RETURN x",
+        );
+        let error = transaction
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &query,
+                &failed,
+                insert_policy(2),
+                |_| {
+                    allocated += 1;
+                    Ok::<_, Infallible>(ElementId::Vertex(VId(100 + allocated)))
+                },
+            )
+            .expect_err("a later invocation must roll back the earlier invocation's writes");
+        assert!(format!("{error:?}").contains("DivisionByZero"), "{error:?}");
+        assert_eq!(allocated, 3, "both invocations reached their first write");
+        assert_eq!(transaction.staged_effect_digest().unwrap(), before);
+        assert_eq!(transaction.vertices(&db).unwrap().len(), 1);
+        assert_eq!(
+            transaction.vertex(&db, VId(7)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(99).into())]
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert!(db.vertices().unwrap().is_empty());
+
+        // A subsequent statement has different names, values and nested frame
+        // shape. A failed invocation must not supply any of its old arguments.
+        let (_, output, _) = transaction
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &query,
+                &program(
+                    "WITH 40 AS base CALL (base) { WITH 2 AS delta \
+                     CALL () { WITH 100 AS x RETURN x AS local } \
+                     CREATE (:Visible {p:base+delta}) RETURN base+delta AS value } RETURN value",
+                ),
+                insert_policy(1),
+                |_| Ok::<_, Infallible>(ElementId::Vertex(VId(200))),
+            )
+            .unwrap();
+        assert_eq!(output.value.len(), 1);
+        assert_eq!(output.value[0].values(), &[int(42)]);
+        assert_eq!(transaction.vertices(&db).unwrap().len(), 2);
+        assert_eq!(
+            transaction.vertex(&db, VId(200)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(42).into())]
+        );
+        assert!(db.vertices().unwrap().is_empty());
+        transaction.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn restored_write_call_imports_keep_hidden_graphs_and_all_limits_outside_the_frame() {
+    let ((), report) = run_async_under_lab(0xca11_0032, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let call = program(
+            "UNWIND [1,1,2] AS x CALL (x) { WITH 0 AS ignored \
+             MATCH (n {p:x}) SET n.q=n.q+1 WITH count(*) AS count \
+             CREATE (:Visible {p:x*10+count}) } RETURN x ORDER BY x",
+        );
+        for (creations, local_rows, granted_rows, succeeds) in [
+            (3, 3, 3, true),
+            (2, 3, 3, false),
+            (3, 2, 3, false),
+            (3, 3, 2, false),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for (id, label) in [(1, VISIBLE), (2, HIDDEN)] {
+                seed.create_vertex(
+                    VId(id),
+                    vec![label],
+                    vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(0))],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let original = db.vertices().unwrap();
+            let token = issuer
+                .issue_at(&grant(Rights::ReadWrite, granted_rows), NOW)
+                .unwrap();
+            let result = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &call,
+                    GraphInsertPolicy::new(insert_policy(local_rows).query, creations, 0),
+                    || NOW,
+                )
+                .await;
+            if succeeds {
+                let (stats, rows, _) = result.unwrap();
+                assert_eq!(stats.created_vertices, 3);
+                assert_eq!(
+                    rows.value.iter().map(|row| row.values().to_vec()).collect::<Vec<_>>(),
+                    vec![vec![int(1)], vec![int(1)], vec![int(2)]]
+                );
+                assert_eq!(db.vertices().unwrap().len(), 5);
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props,
+                    vec![
+                        (P, CanonicalScalar::Int(1).into()),
+                        (Q, CanonicalScalar::Int(2).into()),
+                    ]
+                );
+                assert_eq!(db.vertex(VId(2)).unwrap().unwrap(), original[1]);
+                let mut created: Vec<_> = db
+                    .vertices()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|vertex| vertex.vid != VId(1) && vertex.vid != VId(2))
+                    .map(|vertex| vertex.props)
+                    .collect();
+                created.sort();
+                assert_eq!(
+                    created,
+                    [11, 11, 20]
+                        .into_iter()
+                        .map(|value| vec![(P, CanonicalScalar::Int(value).into())])
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            } else {
+                result.expect_err("restoration cannot replenish creation or public-result limits");
+                assert_eq!(db.vertices().unwrap(), original);
+                assert_eq!(db.frontier().unwrap(), basis);
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        for (text, rights, denial) in [
+            (
+                "UNWIND [] AS x CALL (x) { WITH 0 AS ignored \
+                 MATCH (n:Visible) SET n.p=n.secret+x }",
+                Rights::ReadWrite,
+                Error::ScopeDenied,
+            ),
+            (
+                "UNWIND [] AS x CALL (x) { WITH 0 AS ignored \
+                 MATCH (n:Visible) SET n.p=x }",
+                Rights::Write,
+                Error::PermissionDenied,
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let token = issuer.issue_at(&grant(rights, 0), NOW).unwrap();
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program(text),
+                    insert_policy(0),
+                    || NOW,
+                )
+                .await
+                .expect_err("an empty caller cannot skip static scope or read-authority checks");
+            assert_eq!(authorization(&error), Some(denial), "{text}: {error:?}");
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn restored_write_call_imports_remain_cancelled_and_expired_with_their_owner() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let ((), report) = run_async_under_lab(0xca11_0033, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 3), NOW).unwrap();
+        let call = program(
+            "UNWIND [1,2,3] AS x CALL (x) { WITH 0 AS ignored \
+             CREATE (n:Visible {p:x}) WITH n CALL (n,x) { WITH 0 AS later \
+             SET n.q=n.p+x } } RETURN x",
+        );
+        let observed = Arc::new(SimulationCheckpointProbe::new(None));
+        let mut baseline = Database::open_memory(&commit, keys()).await.unwrap();
+        let (_, rows, _) = baseline
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query.with_checkpoint_probe(Arc::clone(&observed)),
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &call,
+                insert_policy(3),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.value.iter().map(|row| row.values().to_vec()).collect::<Vec<_>>(),
+            [1, 2, 3].map(|value| vec![int(value)])
+        );
+        let mut baseline_properties: Vec<_> = baseline
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .map(|vertex| vertex.props)
+            .collect();
+        baseline_properties.sort();
+        assert_eq!(
+            baseline_properties,
+            [1, 2, 3]
+                .into_iter()
+                .map(|value| vec![
+                    (P, CanonicalScalar::Int(value).into()),
+                    (Q, CanonicalScalar::Int(value * 2).into()),
+                ])
+                .collect::<Vec<_>>()
+        );
+        let calls = observed.calls();
+        assert!(calls > 3);
+        for stop in [calls / 2, calls - 1] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            db.execute_graph_write_chain_authorized(
+                &txn,
+                &query.with_checkpoint_probe(Arc::clone(&probe)),
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &call,
+                insert_policy(3),
+                || NOW,
+            )
+            .await
+            .expect_err("cancellation must discard every restored invocation");
+            assert_eq!(probe.calls(), stop);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        let expired = Arc::new(AtomicBool::new(false));
+        let clock = Arc::clone(&expired);
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let error = db
+            .execute_graph_write_chain_authorized_checked(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &call,
+                insert_policy(3),
+                move || if clock.load(Ordering::Relaxed) { 10_000 } else { NOW },
+                |rows, _, _| {
+                    assert_eq!(rows.len(), 3, "all restored imports reached checked output");
+                    expired.store(true, Ordering::Relaxed);
+                    Ok(())
+                },
+            )
+            .await
+            .expect_err("retained CALL arguments cannot outlive signed authority");
         assert!(expired.load(Ordering::Relaxed));
         assert_eq!(authorization(&error), Some(Error::Expired));
         assert_eq!(db.frontier().unwrap(), basis);

@@ -15,7 +15,8 @@
 
 use fgdb_chronicle::marker::{
     CHAIN_ORIGIN, ChainError, ChainVerifyCause, ChainVerifyFailure, ChainedMarker, CommitMarker,
-    EffectSource, HeadCasMismatch, HeadUpdate, IdentityCounters, MarkerChain, decode_canonical,
+    EffectSource, GlobalPredecessorMismatch, HeadCasMismatch, HeadUpdate, IdentityCounterKind,
+    IdentityCounters, MarkerChain, decode_canonical,
 };
 use fgdb_crypto::Digest;
 use fgdb_types::{BranchId, CommitSeq, GraphId, MarkerRef, ObjectId};
@@ -90,6 +91,172 @@ fn an_empty_chain_starts_at_the_origin() {
     // Sequences start at 1, so an uninitialised zero can never look like the
     // first commit.
     assert_eq!(chain.next_commit_seq(), Ok(CommitSeq(1)));
+    assert_eq!(chain.identity_counters(), IdentityCounters::default());
+}
+
+#[test]
+fn identity_counter_regressions_refuse_without_spending_other_counters_or_advancing_heads() {
+    let initial = IdentityCounters { vertex: 9, edge: 4 };
+    let mut chain = MarkerChain::new();
+    chain
+        .append(with_heads(marker(1, 10), vec![head(1, 1, None)]).with_identity_counters(initial))
+        .unwrap();
+    chain.append(marker(2, 20)).unwrap();
+    let settled = chain.entries().to_vec();
+    let prior_head = current_head(&chain, 1, 1);
+    let candidate = with_heads(marker(3, 30), vec![head(1, 1, prior_head)]);
+    for (offered, kind, previous, found) in [
+        (
+            IdentityCounters { vertex: 8, edge: 8 },
+            IdentityCounterKind::Vertex,
+            9,
+            8,
+        ),
+        (
+            IdentityCounters {
+                vertex: 12,
+                edge: 3,
+            },
+            IdentityCounterKind::Edge,
+            4,
+            3,
+        ),
+    ] {
+        let bad = candidate.clone().with_identity_counters(offered);
+        let expected = ChainError::IdentityCounterRegression {
+            kind,
+            previous,
+            found,
+        };
+        assert_eq!(chain.validate(&bad).unwrap_err(), expected);
+        assert_eq!(chain.append(bad).unwrap_err(), expected);
+        assert_eq!(chain.identity_counters(), initial);
+        assert_eq!(chain.entries(), settled);
+        assert_eq!(current_head(&chain, 1, 1), prior_head);
+    }
+    // An otherwise monotonic offer that fails a later CAS also cannot raise
+    // either floor. A subsequent valid commit can still carry the old values.
+    let bad = with_heads(marker(3, 30), vec![head(1, 1, None)]).with_identity_counters(
+        IdentityCounters {
+            vertex: 100,
+            edge: 100,
+        },
+    );
+    assert!(matches!(
+        chain.append(bad),
+        Err(ChainError::HeadCasMismatch(_))
+    ));
+    assert_eq!(chain.identity_counters(), initial);
+    let next = IdentityCounters { vertex: 9, edge: 5 };
+    chain
+        .append(candidate.with_identity_counters(next))
+        .unwrap();
+    assert_eq!(chain.identity_counters(), next);
+    assert_eq!(chain.next_commit_seq(), Ok(CommitSeq(4)));
+    chain.verify().unwrap();
+}
+
+#[test]
+fn identity_counter_floors_reconstruct_across_legacy_markers_and_never_wrap_at_u64_max() {
+    let almost = IdentityCounters {
+        vertex: u64::MAX - 1,
+        edge: u64::MAX - 1,
+    };
+    let exhausted = IdentityCounters {
+        vertex: u64::MAX,
+        edge: u64::MAX,
+    };
+    let mut chain = MarkerChain::new();
+    for (at, counters) in [
+        Some(IdentityCounters::default()),
+        Some(almost),
+        None,
+        Some(exhausted),
+        None,
+        Some(exhausted),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seq = at as u64 + 1;
+        let next = marker(seq, seq * 10);
+        chain
+            .append(counters.map_or(next.clone(), |value| next.with_identity_counters(value)))
+            .unwrap();
+    }
+    assert_eq!(chain.identity_counters(), exhausted);
+    let mut recovered = MarkerChain::from_entries(chain.entries()).unwrap();
+    assert_eq!(recovered.identity_counters(), exhausted);
+    for counters in [
+        IdentityCounters {
+            vertex: u64::MAX - 1,
+            edge: u64::MAX,
+        },
+        IdentityCounters {
+            vertex: u64::MAX,
+            edge: 0,
+        },
+    ] {
+        assert!(matches!(
+            recovered.append(marker(7, 70).with_identity_counters(counters)),
+            Err(ChainError::IdentityCounterRegression { .. })
+        ));
+        assert_eq!(recovered.identity_counters(), exhausted);
+        assert_eq!(recovered.entries(), chain.entries());
+    }
+    // The counter domain's exhaustion does not block unrelated commits or
+    // reset its floor. No addition or wrap is needed to validate equality.
+    recovered.append(marker(7, 70)).unwrap();
+    assert_eq!(recovered.identity_counters(), exhausted);
+}
+
+#[test]
+fn identity_counter_rewinds_in_hash_valid_entries_fail_structural_recovery() {
+    let mut chain = MarkerChain::new();
+    chain.append(marker(1, 10)).unwrap();
+    chain
+        .append(marker(2, 20).with_identity_counters(IdentityCounters { vertex: 9, edge: 4 }))
+        .unwrap();
+    chain.append(marker(3, 30)).unwrap();
+    chain
+        .append(marker(4, 40).with_identity_counters(IdentityCounters {
+            vertex: 10,
+            edge: 5,
+        }))
+        .unwrap();
+    for (counters, kind, previous, found) in [
+        (
+            IdentityCounters { vertex: 8, edge: 5 },
+            IdentityCounterKind::Vertex,
+            9,
+            8,
+        ),
+        (
+            IdentityCounters {
+                vertex: 10,
+                edge: 3,
+            },
+            IdentityCounterKind::Edge,
+            4,
+            3,
+        ),
+    ] {
+        let mut stored = chain.entries().to_vec();
+        stored[3].marker.identity_counters = Some(counters);
+        let hash = stored[3].marker.chain_hash(stored[2].chain_hash).unwrap();
+        stored[3].chain_hash = hash;
+        stored[3].marker_oid = ObjectId(hash.0);
+        let expected = ChainVerifyFailure {
+            commit_seq: 4,
+            cause: ChainVerifyCause::Structure(ChainError::IdentityCounterRegression {
+                kind,
+                previous,
+                found,
+            }),
+        };
+        assert_eq!(MarkerChain::from_entries(&stored).unwrap_err(), expected);
+        assert_eq!(MarkerChain::verify_entries(&stored), Err(expected));
+    }
 }
 
 #[test]
@@ -282,6 +449,219 @@ fn the_logical_command_sequence_must_advance() {
         })
     );
     assert_eq!(chain.len(), 3);
+}
+
+#[test]
+fn supplied_global_predecessors_must_name_the_exact_tail_before_any_state_changes() {
+    let mut chain = MarkerChain::new();
+    let impossible = MarkerRef {
+        marker_oid: oid(0xf1),
+        commit_seq: CommitSeq::ORIGIN,
+    };
+    let mut first = marker(1, 10);
+    first.prev_global = Some(impossible);
+    assert_eq!(
+        chain.append(first).unwrap_err(),
+        ChainError::GlobalPredecessorMismatch(Box::new(GlobalPredecessorMismatch {
+            expected: None,
+            found: impossible,
+        }))
+    );
+    assert!(chain.is_empty());
+
+    let counters = IdentityCounters { vertex: 9, edge: 4 };
+    chain
+        .append(with_heads(marker(1, 10), vec![head(1, 1, None)]).with_identity_counters(counters))
+        .unwrap();
+    let first_ref = current_head(&chain, 1, 1).unwrap();
+    let mut second = marker(2, 40);
+    second.prev_global = Some(first_ref);
+    chain.append(second).unwrap();
+    let tail = chain.entries().last().unwrap();
+    let expected = MarkerRef {
+        marker_oid: tail.marker_oid,
+        commit_seq: CommitSeq(tail.marker.commit_seq),
+    };
+    let settled = chain.entries().to_vec();
+    let mut candidate = with_heads(
+        marker(3, 90),
+        vec![head(1, 1, Some(first_ref)), head(1, 2, None)],
+    )
+    .with_identity_counters(IdentityCounters {
+        vertex: 10,
+        edge: 5,
+    });
+    for found in [
+        MarkerRef {
+            marker_oid: oid(0xf2),
+            ..expected
+        },
+        MarkerRef {
+            commit_seq: CommitSeq(1),
+            ..expected
+        },
+        first_ref,
+        MarkerRef {
+            commit_seq: CommitSeq(3),
+            ..expected
+        },
+        MarkerRef {
+            commit_seq: CommitSeq(4),
+            ..expected
+        },
+    ] {
+        candidate.prev_global = Some(found);
+        let refusal = ChainError::GlobalPredecessorMismatch(Box::new(GlobalPredecessorMismatch {
+            expected: Some(expected),
+            found,
+        }));
+        assert_eq!(chain.validate(&candidate).unwrap_err(), refusal);
+        assert_eq!(chain.append(candidate.clone()).unwrap_err(), refusal);
+        assert_eq!(chain.entries(), settled);
+        assert_eq!(chain.identity_counters(), counters);
+        assert_eq!(current_head(&chain, 1, 1), Some(first_ref));
+        assert_eq!(current_head(&chain, 1, 2), None);
+    }
+    candidate.prev_global = Some(expected);
+    chain.append(candidate).unwrap();
+    // Existing local writers omit this optional field, including after a
+    // linked marker. Strengthening a supplied reference must not reinterpret
+    // their durable encoding or require a format migration.
+    chain.append(marker(4, 120)).unwrap();
+    let recovered = MarkerChain::from_entries(chain.entries()).unwrap();
+    assert_eq!(recovered.entries(), chain.entries());
+    assert_eq!(recovered.verify(), Ok(()));
+}
+
+#[test]
+fn commit_hlc_must_advance_from_genesis_without_consuming_a_refused_proposal() {
+    let mut chain = MarkerChain::new();
+    let mut first = marker(1, 10);
+    first.commit_hlc = 0;
+    assert_eq!(
+        chain.append(first.clone()).unwrap_err(),
+        ChainError::NonMonotonicCommitHlc {
+            previous: 0,
+            found: 0,
+        }
+    );
+    assert!(chain.is_empty());
+    first.commit_hlc = 250;
+    first.head_updates = vec![head(1, 1, None)];
+    chain.append(first).unwrap();
+    let settled = chain.entries().to_vec();
+    let previous_head = current_head(&chain, 1, 1);
+    let mut next = with_heads(marker(2, 90), vec![head(1, 1, previous_head)])
+        .with_identity_counters(IdentityCounters { vertex: 9, edge: 4 });
+    for found in [0, 249, 250] {
+        next.commit_hlc = found;
+        let expected = ChainError::NonMonotonicCommitHlc {
+            previous: 250,
+            found,
+        };
+        assert_eq!(chain.validate(&next).unwrap_err(), expected);
+        assert_eq!(chain.append(next.clone()).unwrap_err(), expected);
+        assert_eq!(chain.entries(), settled);
+        assert_eq!(chain.identity_counters(), IdentityCounters::default());
+        assert_eq!(current_head(&chain, 1, 1), previous_head);
+    }
+    next.commit_hlc = 251;
+    chain.append(next).unwrap();
+    // Control commands may separate transaction markers. Neither logical
+    // command positions nor clock values must be consecutive; commits must.
+    let mut later = marker(3, 1_000);
+    later.commit_hlc = 1_000_000;
+    chain.append(later).unwrap();
+    assert_eq!(chain.verify(), Ok(()));
+}
+
+#[test]
+fn commit_hlc_exhaustion_is_permanent_and_survives_reconstruction() {
+    let mut chain = MarkerChain::new();
+    let mut first = marker(1, 10);
+    first.commit_hlc = u64::MAX - 1;
+    chain.append(first).unwrap();
+    let mut last = marker(2, 20);
+    last.commit_hlc = u64::MAX;
+    chain.append(last).unwrap();
+    let mut recovered = MarkerChain::from_entries(chain.entries()).unwrap();
+    let expected = ChainError::CommitHlcExhausted { frontier: u64::MAX };
+    for found in [0, u64::MAX - 1, u64::MAX] {
+        let mut next = marker(3, 30);
+        next.commit_hlc = found;
+        assert_eq!(recovered.append(next.clone()).unwrap_err(), expected);
+        assert_eq!(recovered.entries(), chain.entries());
+        let mut markers: Vec<_> = chain
+            .entries()
+            .iter()
+            .map(|entry| entry.marker.clone())
+            .collect();
+        markers.push(next);
+        assert_eq!(
+            MarkerChain::verify_entries(&forged(markers)),
+            Err(ChainVerifyFailure {
+                commit_seq: 3,
+                cause: ChainVerifyCause::Structure(expected.clone()),
+            })
+        );
+    }
+}
+
+#[test]
+fn hash_valid_predecessor_and_hlc_defects_fail_structural_recovery() {
+    let prefix = chain_of(2);
+    let tail = &prefix.entries()[1];
+    let expected = MarkerRef {
+        marker_oid: tail.marker_oid,
+        commit_seq: CommitSeq(2),
+    };
+    let wrong = MarkerRef {
+        marker_oid: oid(0xfe),
+        ..expected
+    };
+    for (predecessor, hlc, cause) in [
+        (
+            Some(wrong),
+            1_003,
+            ChainError::GlobalPredecessorMismatch(Box::new(GlobalPredecessorMismatch {
+                expected: Some(expected),
+                found: wrong,
+            })),
+        ),
+        (
+            Some(expected),
+            1_002,
+            ChainError::NonMonotonicCommitHlc {
+                previous: 1_002,
+                found: 1_002,
+            },
+        ),
+        (
+            None,
+            0,
+            ChainError::NonMonotonicCommitHlc {
+                previous: 1_002,
+                found: 0,
+            },
+        ),
+    ] {
+        let mut bad = marker(3, 30);
+        bad.prev_global = predecessor;
+        bad.commit_hlc = hlc;
+        // The wire shape remains legal: it is admission against the actual
+        // history, not a context-free decoder, that knows these values lie.
+        assert_eq!(
+            decode_canonical(&bad.canonical_bytes().unwrap()),
+            Some(bad.clone())
+        );
+        let entries = forged(vec![marker(1, 10), marker(2, 20), bad, marker(4, 40)]);
+        let expected = ChainVerifyFailure {
+            commit_seq: 3,
+            cause: ChainVerifyCause::Structure(cause),
+        };
+        assert_eq!(MarkerChain::verify_entries(&entries), Err(expected.clone()));
+        assert_eq!(MarkerChain::from_entries(&entries).unwrap_err(), expected);
+    }
 }
 
 #[test]

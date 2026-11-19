@@ -48,12 +48,12 @@ mod relational;
 #[path = "query_authorized/tape.rs"]
 mod tape;
 pub use relational::{
-    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
-    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
-    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
-    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSealedReadSession,
-    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
-    AuthorizedSpoolCursor,
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor,
+    AuthorizedBeaconIndex, AuthorizedDifferenceCursor, AuthorizedDifferenceExecution,
+    AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall,
+    AuthorizedPreparedRead, AuthorizedReadOutput, AuthorizedReadSession, AuthorizedReadTransaction,
+    AuthorizedRowCursor, AuthorizedSealedReadSession, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 pub(crate) use admission::{ADMITTED_BYTES, AdmittedCache};
@@ -109,6 +109,9 @@ struct Execution<'cx, 'permit, Clock> {
     // It is not authority: analytics proves complete visibility and request
     // compatibility under this fresh permit before inspecting the image.
     sealed: Option<Arc<analytics::sealed::Source>>,
+    // An explicit read transaction owns one snapshot basis. The shared native
+    // binder rejects a different historical cut before opening any source.
+    required_cut: Option<CommitSeq>,
     // At most one completed count summary awaits final signed delivery. The
     // immutable owner travels with it; a refusal or dropped execution cannot
     // warm another generation or publish a partly admitted population.
@@ -141,6 +144,7 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             in_runs: false,
             beacon_indexes: None,
             sealed: None,
+            required_cut: None,
             pending_counts: None,
         }
     }
@@ -332,7 +336,10 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
         }
         self.node()
     }
-    fn deliver(&mut self, rows: usize) -> Result<(), QueryError> {
+    // Reserve result rows before a trusted output adapter allocates its own
+    // representation. This cannot publish derived cache state: a later output
+    // refusal, cancellation or unwind must leave no successful execution hit.
+    fn admit_rows(&mut self, rows: usize) -> Result<(), QueryError> {
         self.checkpoint()?;
         self.settle()?;
         let rows = u64::try_from(rows).map_err(|_| self.refusal(fgdb_warden::Error::TooLarge))?;
@@ -343,6 +350,10 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
         charged.map_err(|error| self.refusal(error))?;
         self.checkpoint()?;
         self.settle()?;
+        Ok(())
+    }
+    fn deliver(&mut self, rows: usize) -> Result<(), QueryError> {
+        self.admit_rows(rows)?;
         if let Some((snapshot, counts)) = self.pending_counts.take() {
             snapshot.exact_counts.publish(counts);
         }

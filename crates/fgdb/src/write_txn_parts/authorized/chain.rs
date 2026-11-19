@@ -459,6 +459,10 @@ struct ChainSource<'s, 'db, 'run, 'cx, 'permit, V: Vfs, Clock> {
 impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteTxnError>
     for ChainSource<'_, '_, '_, '_, '_, V, Clock>
 {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.transaction.call_arguments.clone()
+    }
+
     fn pattern(
         &mut self,
         pattern: &PreparedGraphPattern<GraphValueRow>,
@@ -481,7 +485,7 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteT
     }
 
     fn supports_seeded_patterns(&self) -> bool {
-        self.scope.sees_all_incidence() && self.scope.sees_all_fields()
+        true
     }
 
     fn seeded_pattern(
@@ -1186,6 +1190,7 @@ impl<V: Vfs + Clone> Database<V> {
                     event,
                 )
             })? {
+                workspace.transaction().call_arguments = cursor.call_arguments();
                 if let GraphWriteChainTask::Read(read) = &task {
                     let allowance =
                         remaining(policy, &used, mutation_effects, read.delivers_rows());
@@ -1415,7 +1420,8 @@ impl<V: Vfs + Clone> Database<V> {
                                     }
                                     result
                                 },
-                            );
+                            )
+                            .with_call_arguments(transaction.call_arguments.clone());
                             let allocate = |request| {
                                 database.borrow_mut().allocate_identity(query_cx, request)
                             };
@@ -1459,28 +1465,31 @@ impl<V: Vfs + Clone> Database<V> {
                                         allowance.query,
                                         allowance.max_mutation_effects,
                                     );
+                                    // The canonical seeded source masks before
+                                    // expansion and declines hidden seed keys.
+                                    // Narrow authority therefore retains the
+                                    // same selective path as other chain steps.
                                     let proposal = mutation
                                         .execute_governed_over_reading_with_seeded_source_and_field_admission(
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),
-                                            (scope.sees_all_incidence() && scope.sees_all_fields())
-                                                .then_some(
-                                                    |pattern: &PreparedGraphPattern<GraphValueRow>,
-                                                     seeds: fgdb_gql::GraphSeeds<'_>,
-                                                     budget| {
-                                                        selection::select_seeded_overlay(
-                                                            transaction,
-                                                            &database.borrow(),
-                                                            query_cx,
-                                                            pattern,
-                                                            seeds,
-                                                            scope,
-                                                            budget,
-                                                            &controls,
-                                                        )
-                                                    },
-                                                ),
+                                            Some(
+                                                |pattern: &PreparedGraphPattern<GraphValueRow>,
+                                                 seeds: fgdb_gql::GraphSeeds<'_>,
+                                                 budget| {
+                                                    selection::select_seeded_overlay(
+                                                        transaction,
+                                                        &database.borrow(),
+                                                        query_cx,
+                                                        pattern,
+                                                        seeds,
+                                                        scope,
+                                                        budget,
+                                                        &controls,
+                                                    )
+                                                },
+                                            ),
                                             elements,
                                             |key| {
                                                 mutation::admit_computed_property(
@@ -1511,23 +1520,22 @@ impl<V: Vfs + Clone> Database<V> {
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),
-                                            (scope.sees_all_incidence() && scope.sees_all_fields())
-                                                .then_some(
-                                                    |pattern: &PreparedGraphPattern<GraphValueRow>,
-                                                     seeds: fgdb_gql::GraphSeeds<'_>,
-                                                     budget| {
-                                                        selection::select_seeded_overlay(
-                                                            transaction,
-                                                            &database.borrow(),
-                                                            query_cx,
-                                                            pattern,
-                                                            seeds,
-                                                            scope,
-                                                            budget,
-                                                            &controls,
-                                                        )
-                                                    },
-                                                ),
+                                            Some(
+                                                |pattern: &PreparedGraphPattern<GraphValueRow>,
+                                                 seeds: fgdb_gql::GraphSeeds<'_>,
+                                                 budget| {
+                                                    selection::select_seeded_overlay(
+                                                        transaction,
+                                                        &database.borrow(),
+                                                        query_cx,
+                                                        pattern,
+                                                        seeds,
+                                                        scope,
+                                                        budget,
+                                                        &controls,
+                                                    )
+                                                },
+                                            ),
                                             elements,
                                             |key| {
                                                 mutation::admit_computed_property(
@@ -1642,6 +1650,9 @@ impl<V: Vfs + Clone> Database<V> {
                 rows = Some(returning.value);
                 at += 1;
             }
+            // No inner lexical value survives into the root continuation,
+            // checked output, commit, or the next explicit statement.
+            workspace.transaction().call_arguments = None;
             if let Some(frozen) = frozen {
                 finish_frozen(
                     workspace.transaction(),

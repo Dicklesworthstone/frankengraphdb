@@ -896,6 +896,7 @@ impl ReadStageTemplate {
     pub(crate) fn depth(&self) -> usize {
         match self {
             Self::Arguments { .. } => 0,
+            Self::RestoreArguments { .. } => 3,
             Self::Page { computed, .. } => usize::from(computed.is_some()) * 2,
             Self::Aggregate { .. } => 3,
             _ => 1,
@@ -912,6 +913,27 @@ impl ReadStageTemplate {
                     bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
                     bytes.extend_from_slice(name.as_bytes());
                     bytes.push(set_column_type_tag(*kind));
+                }
+            }
+            Self::RestoreArguments {
+                columns,
+                types,
+                imports,
+                insert_at,
+                ..
+            } => {
+                bytes.push(11);
+                bytes.extend_from_slice(b"fgdb:gql:restore-call-imports:v1\0");
+                bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
+                for (name, kind) in columns.iter().zip(types) {
+                    bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(name.as_bytes());
+                    bytes.push(set_column_type_tag(*kind));
+                }
+                bytes.extend_from_slice(&(*insert_at as u64).to_be_bytes());
+                bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());
+                for import in imports {
+                    bytes.extend_from_slice(&(*import as u64).to_be_bytes());
                 }
             }
             Self::Aggregate { stage, .. } => {
@@ -1182,6 +1204,16 @@ pub(crate) enum ReadStageTemplate {
     Arguments {
         columns: Vec<String>,
         types: Vec<GraphSetColumnType>,
+    },
+    /// Reattach the missing global imports after a WITH has completed its
+    /// projection, DISTINCT or grouping. The original singleton argument
+    /// relation preserves zero-row aggregate behavior and every left occurrence.
+    RestoreArguments {
+        at: usize,
+        columns: Vec<String>,
+        types: Vec<GraphSetColumnType>,
+        imports: Vec<usize>,
+        insert_at: usize,
     },
     Aggregate {
         at: usize,

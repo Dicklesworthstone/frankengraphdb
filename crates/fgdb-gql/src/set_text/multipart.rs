@@ -46,8 +46,8 @@ pub(crate) enum BoundContinuationOperation {
     Apply {
         body: Box<BoundReadInput>,
         imports: Vec<usize>,
-        /// An OPTIONAL MATCH whose WHERE reads the incoming row: a row the
-        /// body leaves empty is null-extended (PreparedGraphSet::optional_apply).
+        /// An OPTIONAL MATCH or CALL: a row the body leaves empty is
+        /// null-extended (PreparedGraphSet::optional_apply).
         optional: bool,
     },
 }
@@ -105,10 +105,12 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     // only. OPTIONAL MATCH directly after the unwound rows is instead a Left
     // continuation of them: one NULL-extended row per unmatched value.
     let leading_unwind = tokens.first().is_some_and(|token| token.word("UNWIND"));
-    // A leading OPTIONAL MATCH is a Left continuation of the unit relation:
+    // A leading OPTIONAL MATCH or CALL continues the unit relation:
     // its witnesses, or exactly one NULL-extended row.
     if tokens.first().is_some_and(|token| token.word("OPTIONAL"))
-        && tokens.get(1).is_some_and(|token| token.word("MATCH"))
+        && tokens
+            .get(1)
+            .is_some_and(|token| token.word("MATCH") || token.word("CALL"))
     {
         return true;
     }
@@ -124,6 +126,7 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
                 if !name
                     && token.word("CALL")
                     && (matched
+                        || previous.is_some_and(|previous| previous.word("OPTIONAL"))
                         || tokens
                             .get(index + 1)
                             .is_some_and(|next| next.punct(b'{') || next.punct(b'(')))

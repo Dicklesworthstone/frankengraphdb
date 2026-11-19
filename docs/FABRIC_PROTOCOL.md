@@ -64,6 +64,14 @@ these values; callers cannot authenticate merely by constructing the structs.
 | EXECUTE_CONDITIONAL_WRITE | 0x0028 | client |
 | EXECUTE_READ_BATCH | 0x0029 | client |
 | READ_BATCH_RESULT_CHUNK / READ_BATCH_RESULT_END | 0x002a / 0x002b | server |
+| EXECUTE_READ_STATEMENTS | 0x002c | client |
+| EXECUTE_PREPARED_READ_BATCH | 0x002d | client |
+| BEGIN_TRANSACTION / TRANSACTION_BEGUN | 0x002e / 0x002f | client / server |
+| EXECUTE_TRANSACTION | 0x0030 | client |
+| COMMIT_TRANSACTION / TRANSACTION_COMMITTED | 0x0031 / 0x0032 | client / server |
+| ROLLBACK_TRANSACTION / TRANSACTION_ROLLED_BACK | 0x0033 / 0x0034 | client / server |
+| TRANSACTION_RESULT_CHUNK / TRANSACTION_RESULT_END | 0x0035 / 0x0036 | server |
+| BEGIN_READ_TRANSACTION | 0x0037 | client |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -91,7 +99,8 @@ there is no resynchronization by scanning untrusted payload bytes.
 `Connection::validate_client_header` enforces direction, phase, complete binding,
 nonzero request IDs and control/child-stream distinction. EXECUTE, EXECUTE_BATCH, PREPARE,
 EXECUTE_PREPARED, EXECUTE_PREPARED_BATCH, EXECUTE_DIFF, EXECUTE_PREPARED_DIFF,
-EXECUTE_CONDITIONAL_WRITE, EXECUTE_READ_BATCH and RELEASE_PREPARED use the control stream; child stream IDs
+EXECUTE_CONDITIONAL_WRITE, EXECUTE_READ_BATCH, EXECUTE_READ_STATEMENTS,
+EXECUTE_PREPARED_READ_BATCH and RELEASE_PREPARED use the control stream; child stream IDs
 are minted by the server. Cancellation
 and credit address admitted streams. ACK/release may address independent durable
 owners, which the owning service must authenticate and validate separately.
@@ -175,7 +184,16 @@ redacted from `Debug`.
 | EXECUTE_CONDITIONAL_WRITE | `expected_seq u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending); native text writes only, including RETURN |
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | EXECUTE_READ_BATCH | the same body as EXECUTE_BATCH, under an explicit read-only request tag; one read statement and its ordered argument sets |
+| EXECUTE_READ_STATEMENTS | `statements u32` (1–32), then that many EXECUTE payloads: `mode u8` (must be 0), `statement text`, canonical `parameters [(name text, value)]`; one body-wide decoded-value limit |
+| BEGIN_TRANSACTION / BEGIN_READ_TRANSACTION | empty; the former opens a write-capable workspace, the latter a read-only snapshot owner |
+| TRANSACTION_BEGUN | nonzero connection-owned `handle [16]`, `basis u64` |
+| EXECUTE_TRANSACTION | `handle [16]`, then EXECUTE fields with mode restricted to 0 (Read) or 1 (Write); ordinary shared value-node and parameter bounds apply |
+| COMMIT_TRANSACTION / ROLLBACK_TRANSACTION / TRANSACTION_ROLLED_BACK | `handle [16]` |
+| TRANSACTION_COMMITTED | `handle [16]`, outcome tag 1 (WriteCommitted) or 2 (ReadClosed), `seq u64`, `statements u64`; ordinary Rows is invalid |
+| TRANSACTION_RESULT_CHUNK | RESULT_CHUNK encoding: first-frame columns and canonical rows, delivered provisionally |
+| TRANSACTION_RESULT_END | `handle [16]`, positive one-based `statement u64`, exact delivered `rows u64`; no commit claim |
 | EXECUTE_PREPARED_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32`, then that many parameter maps with the same canonical encoding and shared bounds as EXECUTE_BATCH; the handle must name a write template |
+| EXECUTE_PREPARED_READ_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32` (1–32), then canonical parameter maps; all values share one body-wide node allowance and the handle must name a read template |
 | EXECUTE_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_PREPARED_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, nonzero connection-owned `handle [16]`, execution `parameters [(name text, value)]`; the handle must name a read template |
 | PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending), optional terminal `mode u8` (omitted = read, 1 = stats-only write; explicit 0 is noncanonical) |
@@ -212,9 +230,297 @@ exactly the canonical text a server emits — vertex, edge
 `outcome_unknown`, `busy`, `draining`, `cancelled`, `database_recovering`
 (tag 14) and `database_unavailable` (tag 15).
 
+### Explicit transaction client contract
+
+The additive explicit-transaction profile separates provisional statement
+delivery from durable completion. Requests and BEGIN/COMMIT/ROLLBACK replies use
+the selected Ready control stream. Each statement uses a freshly minted child
+stream with TRANSACTION_RESULT_CHUNK/END and the ordinary byte/row flow window.
+The END must echo the current handle, the next one-based statement ordinal and
+the exact delivered row count. It is not a snapshot answer or a commit receipt.
+
+The Rust client exposes `begin_transaction`, `begin_read_transaction`, `execute_transaction`,
+`execute_transaction_streaming`, `commit_transaction` and
+`rollback_transaction`. Both begin methods return `TransactionBegun`; a
+collected statement returns `TransactionAnswer { columns, rows, end }`.
+Only commit returns `Outcome::WriteCommitted` or `Outcome::ReadClosed`.
+The completion count must equal successfully delivered statement calls; a
+read-close retains BEGIN's basis, while a committed write advances it.
+A read-only owner accepts only `ReadClosed`; even an otherwise well-formed
+`WriteCommitted` response poisons that request and requires reconnecting.
+A handle is local to one connection and grants no authority on another one.
+
+The client blocks unrelated business requests and authority refresh while an
+explicit owner is active. Local mode/value/frame admission failures send
+nothing and preserve the owner. Definite execution refusals discard it.
+Invalid, incomplete or foreign responses leave the wire request outstanding:
+subsequent operations refuse locally until reconnect, and no write is retried.
+
+A rejected columns/row callback sends QUERY_CANCEL and drains the response
+before returning the callback error. A serving adapter must abort the owner
+both for an in-flight cancellation and for a late cancellation of its latest
+provisional stream: END may already be in flight when the callback rejects.
+TCP order places the cancellation before the client's next request. Dropping
+an uncompleted future or losing transport requires disconnect, which abandons
+an unpublished workspace. Losing COMMIT's response can instead leave the
+durable outcome unknown. None of these selectors is a durable lease,
+reattachment token, result ACK or replay capability.
+
+The managed client methods `execute_transaction_batch` and
+`execute_transaction_batch_streaming` compose that same owner for 1–32
+independently parameterized Read/Write statements. They canonicalize all
+arguments and admit every complete transaction envelope against the negotiated
+frame limit **before BEGIN**. Server syntax, symbol binding, capability checks
+and cumulative native allowances remain authoritative.
+
+The collected method returns `TransactionBatchAnswer { results, end }` only
+after validated completion. The streaming method invokes indexed schema, row
+and statement-end callbacks; schemas receive the original basis and every
+callback remains provisional. A result-end callback may refuse after the
+statement has drained: the driver rolls back once and never proceeds to the
+next statement or commit. In-result rejection keeps the existing
+cancel-and-drain behavior. A dropped or unwinding managed operation fences an
+active owner, including the otherwise idle interval between statements.
+Unconfirmed cleanup requires reconnecting.
+
+Only the final commit response constructs
+`TransactionBatchEnd { basis, statements, rows, outcome }`. Once COMMIT is
+attempted, the driver sends neither rollback nor another commit. Unknown
+completion does not return a successful prefix or an abort claim. This API
+adds no wire tag, durable ownership lease, recovery lookup or automatic retry.
+The collected client retains all result rows; streaming delivery avoids that
+client-side collection but does not alter the server's buffered statement
+execution profile.
+
+The CLI exposes the managed driver as
+`remote transaction --statements-file <file>`. A bounded regular UTF-8 JSON
+array contains 1–32 records with explicit `mode: "read" | "write"`,
+`statement` and optional typed `parameters`. Local input admission finishes
+before credential access, and negotiated envelope admission still precedes
+BEGIN. This uses the existing server bindings and original signed allowance.
+
+CLI schema and row records carry a one-based `statement` and
+`provisional:true`; schema records also carry `basis_seq`. No statement END
+emits a success record. The final `kind:"transaction"` result carries
+`outcome:"write_committed" | "read_closed"`, the completed `seq`,
+`basis_seq`, `statements` and total row `count`. The CLI flushes each
+provisional record before allowing the next step or COMMIT. Unknown completion
+emits no success and no rollback claim. A final output error after a validated
+receipt retains the known completion sequence in its diagnostic.
+
 ## fgdbd: the served subset
 
-### Consistent parameterized read batches
+### Explicit native transactions
+
+A client with Write or ReadWrite authority may open one connection-scoped
+native workspace with BEGIN_TRANSACTION. Each EXECUTE_TRANSACTION uses the
+same permit, snapshot basis and cumulative native/signed allowances. Buffered
+Read and Write modes are admitted; Read cannot stage mutations. Graph/set
+reads and exact terminal aggregates see earlier staged effects. Native writes
+and reads retain capability masking before observation and expansion.
+
+The server holds no database lock while waiting for another request. COMMIT
+uses the native conflict/completion owner once, publishing all staged effects
+together or returning the native refusal. A purely read-only use of the owner
+returns ReadClosed at its original basis. ROLLBACK, failed statements,
+malformed transaction requests, output-admission failure, disconnect, drain
+and recovery discard the entire unpublished prefix. Source/ordered streaming
+modes, subscriptions, historical writer reads and non-catalog procedure hosts
+are outside this retained-writer subset and refuse without eager fallback.
+
+Provisional output must fit the negotiated schema and row frame limits before
+the native statement succeeds. Delivery is credit-controlled, and only a
+fully sent TRANSACTION_RESULT_END retains the owner for another operation.
+QUERY_CANCEL also aborts the owner when it targets the most recently finished
+provisional stream. Thus a callback rejection cannot leave a staged prefix
+committable merely because END fit the initial credit window.
+
+Ordinary autocommit/prepared requests and AUTH_REFRESH are Busy while the
+owner is active. PING and flow/cancel control remain available. A foreign or
+stale transaction handle has the same bounded refusal as a missing owner and
+discards any current unpublished prefix. Recovery fences both active and idle
+owners; a recovery race after successful COMMIT reports OutcomeUnknown or
+closes the transport, never an apparently safe-to-retry precommit failure.
+
+```rust
+use fgdb_protocol::body::{Execute, ExecuteMode};
+
+let begun = client.begin_transaction(cx).await?;
+client.execute_transaction(cx, begun.handle, &Execute {
+    mode: ExecuteMode::Write,
+    statement: "CREATE (:Person {name:'Ada',age:37})".into(),
+    parameters: vec![],
+}).await?;
+let provisional = client.execute_transaction(cx, begun.handle, &Execute {
+    mode: ExecuteMode::Read,
+    statement: "MATCH (n:Person) RETURN n.name AS name".into(),
+    parameters: vec![],
+}).await?;
+// These rows are provisional. Only this explicit operation publishes writes.
+let completion = client.commit_transaction(cx, begun.handle).await?;
+```
+
+Instead of commit, call `rollback_transaction(cx, begun.handle)` to discard the
+workspace. A lost commit response can leave the durable outcome unknown;
+reconnecting and repeating the statements can duplicate effects. This profile
+provides no durable lease, restart, reattachment or outcome lookup.
+
+The implementation and regression sources are present. Runtime qualification
+is pending: the execution environment disconnected before changed-source
+compilation, formatting, Clippy or tests ran. See IMPLEMENTATION_STATUS.md.
+
+### Explicit read-only transactions
+
+`BEGIN_READ_TRANSACTION` opens an immutable snapshot using **Read authority**.
+ReadWrite credentials can use the same narrowed operation. Admin is a
+maintenance role and does not grant read authority. It uses
+the existing empty begin body and `TRANSACTION_BEGUN` reply, but has its own
+additive mechanism-profile tag, `0x0037`. Existing `BEGIN_TRANSACTION` bytes and
+write-workspace semantics are unchanged; older peers reject the unknown tag.
+The request is legal only on a selected Ready connection's control stream.
+
+The new native `AuthorizedReadTransaction` retains one read pin and one owning
+Warden read permit. Every statement uses the existing native preparation,
+parameter binding and capability-masked source over that pin. The complete
+original text/argument transcript, execution work, visible nodes, result rows,
+wire conversion and encoded-output admission spend that **same cumulative
+signed allowance**. Beginning another statement never replenishes it. The
+trusted host's native query policy applies per statement; the server also
+applies `DatabaseConfig::max_statements` (64 by default) across the transaction.
+
+No writer lock is held while the transaction is idle or while it reads.
+Other connections can commit, but every read remains at the basis returned by
+BEGIN. Structured branch and temporal binding runs before source access:
+another branch or a bound snapshot different from the basis is refused.
+An explicit `AS OF` selecting exactly the basis is accepted. This does not
+provide multiple historical cuts within one read transaction.
+
+```rust
+use fgdb_protocol::body::{Execute, ExecuteMode, Outcome};
+
+let begun = client.begin_read_transaction(cx).await?;
+let count = client.execute_transaction(cx, begun.handle, &Execute {
+    mode: ExecuteMode::Read,
+    statement: "MATCH (n:Person) RETURN count(*) AS people".into(),
+    parameters: vec![],
+}).await?;
+let people = client.execute_transaction(cx, begun.handle, &Execute {
+    mode: ExecuteMode::Read,
+    statement: "MATCH (n:Person) RETURN n.name AS name ORDER BY name".into(),
+    parameters: vec![],
+}).await?;
+// Both answers read the same basis even when another connection commits.
+let completion = client.commit_transaction(cx, begun.handle).await?;
+assert_eq!(completion, Outcome::ReadClosed {
+    seq: begun.basis,
+    statements: 2,
+});
+```
+
+The client refuses a non-Read mode before sending it and leaves its owner usable.
+If a peer bypasses that check, the server refuses Write and discards the owner,
+even when its bearer has write rights. Write text disguised as Read still passes
+through the native read-only compiler and cannot mutate. Source/ordered streams,
+subscriptions and prepared-handle execution are outside this sequential buffered
+interface. Ordinary PREPARE, autocommit and AUTH_REFRESH remain Busy until close.
+
+COMMIT closes the pin after current cancellation, expiry and issuer-retirement
+checks. Its `ReadClosed` reports the original basis and exact successful statement
+count, including zero for an unused owner, and allocates no commit sequence.
+ROLLBACK and disconnect release the same pin. Any execution or checked-output
+error permanently closes it; an earlier successful result cannot restore it.
+Output callbacks reserve rows before conversion, and only the final successful
+delivery boundary may publish a derived exact-count cache entry.
+
+The existing provisional result flow, callback cancellation and generation-fenced
+physical output apply to this owner as well. Recovery can replace an unwritten
+row or source-dependent error with a recovery control; partial output closes the
+transport. Closing a read-only transaction publishes no graph effects and makes
+no durable lease, reattachment or write-conflict-validation claim.
+
+Regression sources cover the public native owner, read-only credentials and
+masked properties, concurrent commits, cumulative budgets, oversized output,
+client and server mode refusal, completion forgery, cancellation, and recovery
+while sending either rows or data-dependent errors. Native/server/transport
+runtime qualification remains pending because the pinned `asupersync` compiler
+process was SIGKILLed before first-party diagnostics; a protocol-core test pass
+does not validate these runtime paths.
+
+### Atomic HTTP transaction scripts
+
+`POST /v1/databases/<name>/transaction` runs 1–32 independently parameterized
+statements through the same native write owner used by explicit FGP transactions.
+The complete JSON body is adapted and checked before opening that owner. Every
+entry requires an explicit `"mode":"read"` or `"mode":"write"`; native
+preparation still classifies the statement, and a read-mode entry cannot mutate.
+
+```json
+{
+  "statements": [
+    {
+      "mode": "write",
+      "statement": "CREATE (:Person {name:$name,age:$age})",
+      "parameters": {"name": "Ada", "age": 37}
+    },
+    {
+      "mode": "read",
+      "statement": "MATCH (n:Person) RETURN n.name AS name,n.age AS age"
+    },
+    {
+      "mode": "write",
+      "statement": "MATCH (n:Person {name:$name}) SET n.age=n.age+1 RETURN n.age AS age",
+      "parameters": {"name": "Ada"}
+    }
+  ]
+}
+```
+
+Save that body as `transaction.json` and send it with the same bearer credential
+used by the other HTTP database routes:
+
+```sh
+curl --fail-with-body http://127.0.0.1:7474/v1/databases/social/transaction \
+  -H "Authorization: Bearer $FGDB_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data-binary @transaction.json
+```
+
+Later statements read earlier staged effects. All statements retain the original
+capability, snapshot basis and cumulative native allowances, including result-row
+limits. The endpoint requires write authority even for a script containing only
+reads; use `/query-batch` with read-only credentials. Reads, `MATCH` and `MERGE`
+also require read rights. Existing label, relation and property restrictions
+apply before observation and effects.
+
+The response has the shape
+`{"v":1,"basis":B,"results":[{"columns":[...],"rows":[...]},...],"seq":N,"statements":M,"committed":true|false}`.
+`basis` is the original pinned cut; each result reflects its statement's private
+workspace at execution time. Results have independent schemas and use the shared
+typed JSON cell encoding. `results[i]` corresponds to `statements[i]` in request
+order, including an empty `columns`/`rows` result for a write without `RETURN`.
+The response becomes available only after the whole script completes.
+The one final native completion supplies `seq`,
+`statements` and `committed`. A script containing only reads closes without a
+write marker. A successfully executed write retains a write completion even if
+it matched no rows or a later statement removed its net graph effect.
+
+The complete retained JSON response, including a reservation for the largest
+possible final completion, must fit `ServerLimits::max_frame_len` (1 MiB by
+default). This is one cumulative response ceiling; JSON escaping and typed cell
+envelopes count. Native row/schema representability and signed execution limits
+also apply. Input uses HTTP's existing 8 MiB body limit, bounded JSON parser and
+native parameter/value limits. The server checks cancellation, authority and
+database generation during adaptation and result assembly.
+
+All result encoding and size admission finish before COMMIT. A failed statement,
+quota, result conversion or output admission discards the complete unpublished
+workspace and returns one error without successful-prefix results. Only the
+final native commit can publish, and the HTTP transport rechecks authority and
+the original recovery generation before every physical write and flush. Lost
+responses and `outcome_unknown` can mean the transaction committed; no request is
+retried and there is no HTTP transaction handle, resume or outcome lookup.
+
+### Consistent read batches
 
 `EXECUTE_READ_BATCH` evaluates one read statement for every supplied argument
 set through one authorized native read session. Ordinary current reads share
@@ -225,7 +531,46 @@ and label/property scope remain identical to individual authorized reads, and
 all results share one signed execution allowance. A later read cannot reset
 the batch's row, node or work budget. Writes refuse without effects.
 
-The body reuses `ExecuteBatch` without adding a mode byte. Parameter names in
+`EXECUTE_READ_STATEMENTS` accepts 1–32 distinct statement texts, each with its
+own parameter map, through the same native batch owner. Each member retains
+the EXECUTE payload layout, but its mode must be `Read` (0); non-read modes
+refuse during encoding or decoding before dispatch. Native compilation still
+checks that every text is a read. A later malformed or write-spelled statement
+may follow earlier private read work, but no mutation or successful result
+prefix escapes. This is the FGP counterpart of HTTP `/query-batch` with a
+`statements` array. It does not create an explicit transaction or durable result.
+
+`EXECUTE_PREPARED_READ_BATCH` reuses one connection-owned prepared read for
+1–32 argument sets. The server attaches the immutable template once to one
+fresh authorized read session and calls its native prepared-batch executor.
+All original argument transcripts and owner/branch bindings are admitted by
+that same permit before graph evaluation. Each execution binds its own values;
+representative values used at PREPARE never become defaults. Current reads
+share the new session's pin, and temporal arguments retain their individual
+selected cuts. No parsing or catalog resolution is repeated for each record.
+
+Prepared handles retain their ordinary connection, authority-refresh, release
+and database-recovery fences. A missing, released, foreign or write-class
+handle refuses; read authorization precedes that refusal. Native execution,
+conversion and complete wire preflight finish before the first schema or row.
+A later binding, execution, quota or representability failure emits no successful
+prefix. The existing read-batch delivery owner provides byte/row flow credit,
+generation and authority checks, callback cancellation and terminal draining.
+
+Rust clients use `execute_prepared_read_batch(cx, handle, argument_sets)` or
+`execute_prepared_read_batch_streaming(cx, handle, argument_sets, on_columns,
+on_row, on_result_end)`. Streaming concerns delivery of the buffered native
+answer. Every callback is provisional until the single batch terminal succeeds.
+This operation adds no write, explicit transaction, durable result or retry
+semantics; the write-only `EXECUTE_PREPARED_BATCH` keeps its existing contract.
+
+These requests keep the existing version-1 header and all existing frame and
+body bytes unchanged. Older servers reject an unknown request kind; clients
+never retry it as independent reads or another operation. Each operation-specific
+count bound is checked before allocating its vector, and all members share
+the same decoded-value-node allowance and negotiated frame limit.
+
+`EXECUTE_READ_BATCH` continues to reuse `ExecuteBatch` without adding a mode byte. Parameter names in
 each set are strictly ascending and unique. The wire codec allows 1–1024 sets;
 the current native served owner admits at most 32 reads. The entire request,
 its argument values and every result are admitted before the first result
@@ -254,7 +599,30 @@ database generation; recovery during credit or socket waits prevents a stale
 successful terminal.
 
 The Rust client offers `execute_read_batch` for a fully buffered answer and
-`execute_read_batch_streaming` for callbacks during delivery. The latter
+`execute_read_batch_streaming` for callbacks during delivery.
+`execute_read_statements` and `execute_read_statements_streaming` accept a
+`Vec<Execute>` of distinct reads and use those same result types and callbacks.
+For example, one request can return a graph summary alongside a detailed list
+without allowing a concurrent writer to move the snapshot between them:
+
+```rust
+use fgdb_protocol::body::{Execute, ExecuteMode};
+
+let answer = client.execute_read_statements(cx, vec![
+    Execute {
+        mode: ExecuteMode::Read,
+        statement: "MATCH (n:Person) RETURN count(*) AS people".into(),
+        parameters: vec![],
+    },
+    Execute {
+        mode: ExecuteMode::Read,
+        statement: "MATCH (n:Person) RETURN n.name AS name ORDER BY name".into(),
+        parameters: vec![],
+    },
+]).await?;
+```
+
+The streaming form
 reports columns as `(index, seq, names)`, rows as `(index, values)`, and each
 result end as `(index, seq, rows)`. These callbacks remain provisional until
 the single successful batch terminal returns. A callback error sends one
@@ -264,10 +632,20 @@ or server refusal permits connection reuse; a dropped future, malformed
 response or incomplete stream requires reconnecting. Neither API retries an
 argument set or falls back to independent reads.
 
-Native execution remains buffered before delivery. This explicit operation
-does not change ordinary queries or existing repeated rows-file reads, and
-does not select native source streaming, ordered spilling, subscription or
-difference execution. No prepared read-batch tag is claimed by this profile.
+Native execution remains buffered before delivery. These explicit operations
+do not change ordinary queries or existing repeated rows-file reads, and
+do not select native source streaming, ordered spilling, subscription or
+difference execution.
+
+The CLI selects the prepared form explicitly with `remote --prepared-batch
+--rows-file <path> query <statement>`. It reads and validates the complete JSON
+or CSV argument file, the 1–32-set bound and both wire envelopes before
+credentials or a connection are opened. It prepares once from the first set's
+structural types, then supplies every complete set through one prepared batch.
+`--prepared-batch` requires buffered reads and is mutually exclusive with
+`--consistent-batch`; the latter keeps its raw-statement semantics. Both paths
+use the same indexed schema/row output and single successful `read_batch`
+terminal. A refusal has no automatic retry or independent-read fallback.
 
 ### Finite historical NET differences
 
@@ -946,53 +1324,107 @@ application output is admitted.
   `fgdb_protocol::json` holds the one strict JSON grammar and the cell
   encoding the CLI and the adapter share.
 - **The Bolt-compat subset** (`fgdbd serve --bolt-listen`, crate
-  `fgdb-bolt` plus `fgdb-server/src/bolt.rs`): Bolt 5.0 read sessions and
-  bounded autocommit writes. This implemented extension does not qualify the
-  complete planned `BoltCompatProfileV2`. HELLO carries the hex
-  capability token as a `bearer` credential or a `basic` password; a token no
-  served database accepts is refused (`Neo.ClientError.Security.Unauthorized`)
-  and the connection closes. RUN/PULL/DISCARD, BEGIN/COMMIT/ROLLBACK, RESET,
-  GOODBYE and ROUTE (a single-server table, so `neo4j://` works) are served.
-  Read RUN executes on an authorized read session, which cannot express a
-  write. An explicit transaction holds one read session, so all its statements
-  read one generation; writes inside it refuse with
-  `Neo.ClientError.Statement.AccessMode`, and no lock is held across round trips.
+  `fgdb-bolt` plus `fgdb-server/src/bolt.rs`): Bolt 5.0 read sessions,
+  bounded autocommit writes, and native explicit read and write transactions.
+  These implemented extensions do not qualify the complete planned
+  `BoltCompatProfileV2`. HELLO carries the hex capability token as a
+  `bearer` credential or a `basic` password; a token no served database
+  accepts is refused (`Neo.ClientError.Security.Unauthorized`) and the
+  connection closes. RUN/PULL/DISCARD, BEGIN/COMMIT/ROLLBACK, RESET, GOODBYE
+  and ROUTE (a single-server table, so `neo4j://` works) are served.
+
+  BEGIN with `mode: "r"`, or with a Read-only capability, retains one native
+  `AuthorizedReadTransaction`: a pinned snapshot and the original owning
+  Warden read permit. Native preparation and execution, result-row admission
+  and checked graph conversion for every RUN spend that same signed allowance.
+  Metadata reads spend nodes and work; they do not count as extra user result
+  rows or extra statements. The host's explicit statement ceiling also applies.
+  A structured temporal selector must resolve to the BEGIN basis; a different
+  sequence or branch refuses before source execution. No writer lock spans
+  round trips. COMMIT consumes the owner, checks live authority and cancellation,
+  and returns the original snapshot bookmark without creating a commit.
+
+  BEGIN with write/default mode and Write or ReadWrite authority retains the
+  existing native `AuthorizedWriteTransaction`. RUN stages statements and
+  provisional results, including reads of earlier staged changes and supported
+  staged fnx/hybrid calls. PULL and DISCARD consume results without publishing
+  the workspace. COMMIT alone publishes the complete prefix once. Empty or
+  read-only completion retains the native ReadClosed result; an admitted write
+  statement preserves write intent even when its net effects are zero. Native
+  cumulative limits, stale-basis checks and uncertain commit outcomes apply.
+  Read mode never gains write authority, and a write attempted through a read
+  owner refuses with `Neo.ClientError.Statement.AccessMode`.
+
+  Both explicit owners retain independently addressed `qid` results. The
+  cursor count and 64 MiB of retained owned capacities bound multiplexing;
+  these are finite result-retention limits, not a process-RSS claim. Read RUN
+  admits the complete converted rows, cursor retention and its SUCCESS schema
+  frame before publishing a qid. Any refused statement or output conversion
+  abandons the owner and all outstanding results. ROLLBACK, RESET, disconnect
+  and cancellation also discard the complete unpublished transaction state.
+  No durable transaction lease or reconnect/reattachment handle is created.
+
   Autocommit write RUN binds a bounded request without effects; PULL or DISCARD
-  consumes it exactly once through the native authorized transaction owner.
-  RESET, GOODBYE or disconnect before consumption abandons that request.
-  Scalar, list, map and graph-valued write RETURN are admitted in full before
-  publication, even for PULL 1 or DISCARD. The graph values' labels, types,
-  endpoints and visible properties come from the final unpublished overlay,
-  through the same signed permit and cumulative native work/scratch allowance.
-  A deleted, absent or hidden identity cannot be hydrated. Metadata, depth,
-  frame-size, budget or authority failure aborts every staged effect. Once
-  committed, retained rows contain their own metadata and never issue a later
-  hydration query or replay the write. Graph-output regression sources are in
-  `tests/bolt_autocommit.rs`; the 2026-11-11 implementation remains unqualified
-  by runtime gates after the execution environment became unavailable.
-  Read vertices, relationships and paths are returned as Bolt
-  graph values, including inside lists and maps. Their labels, relationship
-  types, endpoints and properties are read through the same authorized
-  session at the statement's selected sequence, including historical reads.
-  Paths preserve traversal direction and reuse node/relationship identities;
-  missing relationship metadata or exhausted hydration allowances refuse the
-  whole RUN before records are delivered. Metadata lookup batches each use
-  the ordinary native and signed per-execution limits; these lookups do not
-  yet share one cumulative RUN allowance. `CALL db.labels()`,
+  consumes it exactly once through the native authorized writer. RESET,
+  GOODBYE or disconnect before consumption abandons that request. Scalar,
+  temporal, list, map and graph-valued write RETURN are admitted in full before
+  publication, even for PULL 1 or DISCARD. Labels, types, endpoints and visible
+  properties come from the final unpublished overlay through the same signed
+  permit. A deleted, absent or hidden identity cannot be hydrated. Metadata,
+  depth, frame-size, budget or authority failure aborts every staged effect.
+  Once committed, retained rows contain their own metadata and never issue a
+  later hydration query or replay the write.
+
+  Read graph output uses that same bounded Bolt serializer, with metadata
+  supplied directly by the native read owner at its selected cut.
+  Vertex masks, both relationship endpoints and field masks are checked before
+  catalog lookup or payload copying. Nested lists/maps and paths preserve graph
+  values, traversal direction and repeated identities. No synthetic hydration
+  query or fresh read permit is opened. All metadata calls within one output
+  callback share an additional native work/scratch ceiling, separate from query
+  evaluation; signed node/work limits remain cumulative through both phases
+  and, for explicit transactions, all statements. Refused or swallowed metadata errors prevent output and
+  pending cache publication.
+
+  Ordinary autocommit reads retain their independent per-statement allowance
+  and historical selection behavior. Query evaluation, graph hydration and
+  complete RECORD/RUN SUCCESS admission spend that one allowance before RUN
+  succeeds. Metadata does not start another query or consume another user row.
+  A historical read hydrates every graph value at its exact selected sequence
+  and reports that sequence in its completion bookmark. Each new autocommit
+  statement still receives a fresh permit; explicit transactions retain their
+  original permit across statements. `CALL db.labels()`,
   `db.relationshipTypes()` and `db.propertyKeys()` answer the same
-  scope-filtered schema names as HTTP's schema route. The FGP error classes map
-  onto Neo4j status codes, and Busy/Draining/DatabaseRecovering use a retryable
-  `TransientError`. Bookmarks name the generation read and are not required
-  inputs. A retained transaction, delayed PULL or COMMIT from an invalidated
-  generation refuses even after the database is ready again; start a new read
-  transaction. Failed recovery uses a non-retryable database error. Results are
-  the same ephemeral class as FGP's.
+  scope-filtered schema names as HTTP's schema route.
+
+  FGP error classes map onto Neo4j status codes. Busy, Draining and
+  DatabaseRecovering use a retryable `TransientError`; failed recovery and
+  OutcomeUnknown remain non-retryable. Source-dependent failures retain the
+  generation fence through every physical write and flush, just like result
+  records. Only the typed recovery/unavailable controls and OutcomeUnknown
+  bypass a stale generation so their terminal control can be delivered.
+  A delayed PULL, RUN or COMMIT on an invalidated owner cannot resume after the
+  database becomes ready again. Bookmarks are local database-qualified lower
+  bounds, not signed cluster read proofs. Results remain ephemeral.
+
+  Regression sources include three new TCP tests in
+  `tests/bolt_autocommit.rs` for cumulative nodes/rows, a concurrent FGP writer
+  with masked nested graph values and independent cursors, and oversized
+  hydrated records refused before RUN success. Production-connection lab
+  sources also cover statement/selector failures, final close after issuer
+  retirement, and recovery during unwritten, partially written and
+  flush-pending source-dependent errors, including read/write BEGIN bookmark
+  refusals. These additions are qualification
+  pending: the pinned foundation build was SIGKILLed before first-party
+  diagnostics, then the executor disconnected before final adapter formatting,
+  static analysis, compilation or runtime tests. Source recovery through
+  GitHub does not qualify those gates; see IMPLEMENTATION_STATUS.md.
 
 Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE,
 durable transaction preparation,
-explicit multi-statement transactions with ownership and
-reattachment, durable subscriptions with resume across reconnects, the full
+transaction leases with durable ownership and reattachment,
+durable subscriptions with resume across reconnects, the full
 `BoltCompatProfileV2` contract, and the
 HTTP/2, gRPC and WebSocket adapters. Because results are ephemeral, a disconnect can lose undelivered
 rows but never a commit: a write's outcome is decided before its first frame.
@@ -1159,7 +1591,7 @@ that needs no durable write can instead return `ReadClosed` (`committed:false`).
 
 Authoritative frame-catalog generation, durable
 result machines with ACK/release/resume, durable transaction preparation,
-explicit transactions with
+durable explicit transaction
 ownership and reattachment, SnapshotQuery proofs, durable and capability-masked
 subscriptions, the surface
 adapters, multi-tenant admission/QoS, and the native Python packaging boundary

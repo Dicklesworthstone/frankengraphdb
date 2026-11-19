@@ -1,6 +1,7 @@
 use super::*;
 use crate::{DatabaseKeys, MemVfs, WriteMismatchPolicy};
 use asupersync::lab::run_async_under_lab;
+use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
 use fgdb_delta_types::{PropertyKeyId, SchemaEpoch};
 use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 
@@ -44,6 +45,19 @@ fn edit(property: PropertyKeyId, value: i64) -> WriteBatch {
     let mut batch = WriteBatch::new(R);
     batch.set_vertex_property(VId(1), property, Some(CanonicalScalar::Int(value)));
     batch
+}
+
+fn named_catalog() -> SymbolCatalog {
+    let mut catalog = SymbolCatalog::default();
+    catalog
+        .bind_all([
+            ("Person", CatalogSymbol::Label(LabelId(1))),
+            ("KNOWS", CatalogSymbol::Relation(R)),
+            ("p", CatalogSymbol::Property(P)),
+            ("q", CatalogSymbol::Property(Q)),
+        ])
+        .unwrap();
+    catalog
 }
 
 fn assert_conflict<T: core::fmt::Debug>(result: Result<T, WriteTxnError>, expected: &str) {
@@ -161,6 +175,190 @@ fn ordinary_finish_and_commit_replay_supported_programs_once_and_reopen() {
             assert_eq!(reopened.frontier().unwrap(), seq);
             assert_eq!(reopened.vertices().unwrap(), serial.vertices().unwrap());
             assert_eq!(reopened.edges().unwrap(), serial.edges().unwrap());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn unchanged_durable_catalogs_preserve_automatic_replay_and_serial_recovery() {
+    let ((), report) = run_async_under_lab(0xa170_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        for reopen_before_begin in [false, true] {
+            for case in 0..3 {
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                let catalog = named_catalog();
+                db.register_symbols(&cx, &catalog).await.unwrap();
+                seed(&mut db, &cx).await;
+                if reopen_before_begin {
+                    drop(db);
+                    db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                        .await
+                        .unwrap();
+                }
+                let catalog_ref = db.snapshot.schema.reference;
+                assert_eq!(db.snapshot.schema.catalog.epoch(), SchemaEpoch(1));
+                let pinned = db.pinned_read_view().unwrap();
+                let mut candidate = db.begin(&txcx).unwrap();
+                let mut strict = db.begin(&txcx).unwrap();
+                candidate.vertex(&db, VId(4)).unwrap();
+                assert!(candidate.vertex(&db, VId(99)).unwrap().is_none());
+                let (batches, _) = program(case);
+                candidate.write_ordered(&mut db, batches.clone()).unwrap();
+                strict.write_ordered(&mut db, batches.clone()).unwrap();
+                let original = candidate.prepared.as_ref().unwrap().template.clone();
+                assert!(original.coordinate_entries().iter().all(|coordinate| {
+                    coordinate.schema_epoch == SchemaEpoch(1)
+                        && coordinate.schema_transition.is_none()
+                }));
+                let mut concurrent = edit(Q, 11);
+                concurrent.add_edge(EId(20), VId(1), VId(3), vec![]);
+                let frontier = db.write(&cx, concurrent.clone()).await.unwrap();
+                assert_conflict(strict.commit_strict(&mut db, &cx).await, "FG-LAW-FCW-01");
+                let seq = if case == 1 {
+                    match candidate.finish(&mut db, &cx).await.unwrap() {
+                        EmbeddedTxnCompletion::WriteCommitted { commit_seq } => commit_seq,
+                        EmbeddedTxnCompletion::ReadClosed { .. } => panic!("prepared write"),
+                    }
+                } else {
+                    candidate.commit(&mut db, &cx).await.unwrap()
+                };
+                assert_eq!(seq, CommitSeq(frontier.0 + 1));
+                assert_eq!(candidate.basis(), frontier);
+                assert_eq!(db.snapshot.schema.reference, catalog_ref);
+                assert_eq!(db.symbol_catalog().unwrap(), &catalog);
+                let tail = db.delta_since(frontier).unwrap().collect::<Vec<_>>();
+                assert_eq!(tail.len(), 1);
+                assert_eq!(tail[0].coordinate_entries(), original.coordinate_entries());
+                assert!(pinned.edge(EId(50)).unwrap().is_none());
+                assert_eq!(pinned.symbol_catalog(), &catalog);
+
+                // A separately executed serial schedule is the state oracle.
+                // Full Chronicle replay must keep both the catalog and the
+                // regenerated effects, including original identity metadata.
+                let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
+                serial.register_symbols(&cx, &catalog).await.unwrap();
+                seed(&mut serial, &cx).await;
+                serial.write(&cx, concurrent).await.unwrap();
+                serial.write_ordered(&cx, batches).await.unwrap();
+                assert_eq!(db.vertices().unwrap(), serial.vertices().unwrap());
+                assert_eq!(db.edges().unwrap(), serial.edges().unwrap());
+                drop(db);
+                let rebuilt = Database::bind_with_vfs(&cx, vfs, &path, keys(), true)
+                    .await
+                    .unwrap();
+                assert_eq!(rebuilt.frontier().unwrap(), seq);
+                assert_eq!(rebuilt.symbol_catalog().unwrap(), &catalog);
+                assert_eq!(rebuilt.snapshot.schema.reference, catalog_ref);
+                assert_eq!(rebuilt.vertices().unwrap(), serial.vertices().unwrap());
+                assert_eq!(rebuilt.edges().unwrap(), serial.edges().unwrap());
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn catalog_extensions_and_floor_changes_never_authorize_automatic_replay() {
+    let ((), report) = run_async_under_lab(0xa170_000a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        for floor_only in [false, true] {
+            for before_conflict in [false, true] {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                let catalog = named_catalog();
+                db.register_symbols(&cx, &catalog).await.unwrap();
+                seed(&mut db, &cx).await;
+                let original_catalog = db.snapshot.schema.reference;
+                let mut candidate = db.begin(&txcx).unwrap();
+                let mut strict = db.begin(&txcx).unwrap();
+                candidate.write(&mut db, edit(P, 7)).unwrap();
+                strict.write(&mut db, edit(P, 7)).unwrap();
+                let mut extension = SymbolCatalog::default();
+                if floor_only {
+                    extension.reserve_through(CatalogSymbol::Property(PropertyKeyId(100)));
+                } else {
+                    extension
+                        .bind("Later", CatalogSymbol::Label(LabelId(9)))
+                        .unwrap();
+                }
+                if before_conflict {
+                    db.register_symbols(&cx, &extension).await.unwrap();
+                }
+                db.write(&cx, edit(Q, 8)).await.unwrap();
+                if !before_conflict {
+                    db.register_symbols(&cx, &extension).await.unwrap();
+                }
+                assert_ne!(db.snapshot.schema.reference, original_catalog);
+                assert_eq!(db.snapshot.schema.catalog.epoch(), SchemaEpoch(2));
+                if floor_only {
+                    assert_eq!(
+                        db.symbol_catalog().unwrap().bindings().collect::<Vec<_>>(),
+                        catalog.bindings().collect::<Vec<_>>()
+                    );
+                }
+                let frontier = db.frontier().unwrap();
+                let expected = strict.commit_strict(&mut db, &cx).await.unwrap_err();
+                let actual = candidate.commit(&mut db, &cx).await.unwrap_err();
+                assert_eq!(actual.to_string(), expected.to_string());
+                assert_conflict::<()>(Err(actual), "FG-LAW-FCW-01");
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+                    CanonicalScalar::Int(0).into()
+                );
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!(candidate.state(), EmbeddedTxnState::Aborted);
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn named_catalog_replay_keeps_read_and_write_conflict_witnesses() {
+    let ((), report) = run_async_under_lab(0xa170_000b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        for read_conflict in [false, true] {
+            let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+            db.register_symbols(&cx, &named_catalog()).await.unwrap();
+            seed(&mut db, &cx).await;
+            let catalog_ref = db.snapshot.schema.reference;
+            let mut candidate = db.begin(&txcx).unwrap();
+            candidate.write(&mut db, edit(P, 7)).unwrap();
+            let concurrent = if read_conflict {
+                candidate.vertex(&db, VId(4)).unwrap();
+                let mut batch = edit(Q, 8);
+                batch.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(9)));
+                batch
+            } else {
+                edit(P, 8)
+            };
+            let frontier = db.write(&cx, concurrent).await.unwrap();
+            let before = (db.vertices().unwrap(), db.edges().unwrap());
+            assert_conflict(
+                candidate.finish(&mut db, &cx).await,
+                if read_conflict {
+                    "FG-LAW-FCW-READ-01"
+                } else {
+                    "FG-LAW-FCW-01"
+                },
+            );
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert_eq!(db.snapshot.schema.reference, catalog_ref);
+            assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(candidate.state(), EmbeddedTxnState::Aborted);
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
     });

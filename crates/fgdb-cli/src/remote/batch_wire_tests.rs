@@ -1,14 +1,201 @@
 //! Reuse the existing scripted transport and the actual FGP client. These
 //! assertions inspect emitted wire frames, not a second batch executor.
-use super::super::batch::{CsvSchema, PreparedBatch};
+use super::super::batch::{CsvSchema, PreparedBatch, ReadStatements};
 use super::*;
 use fgdb_protocol::body::{
-    ExecuteBatch, ExecutePrepared, Prepare, Prepared, PreparedHandle, PreparedReadMode,
-    ReadBatchResultChunk, ReadBatchResultEnd,
+    ExecuteBatch, ExecutePrepared, ExecutePreparedReadBatch, ExecuteReadStatements, Prepare,
+    Prepared, PreparedHandle,
+    PreparedReadMode, ReadBatchResultChunk, ReadBatchResultEnd,
 };
 
 const BATCH_QUERY: &str = "CREATE (:Person {name:$name})";
 const BATCH_ROWS: &str = r#"[{"name":"text:Ada"},{"name":"text:Bob"}]"#;
+
+fn mixed_reads() -> ReadStatements {
+    ReadStatements::parse(r#"[
+        {"statement":"RETURN $n AS name","parameters":{"n":"text:Ada"}},
+        {"statement":"MATCH (n) FOR SYSTEM_TIME AS OF 3 RETURN n.id AS id"},
+        {"statement":"RETURN $n AS count, true AS active","parameters":{"n":"uint:18446744073709551615"}}
+    ]"#, || Ok(())).map_err(|error| error.message).expect("valid mixed read fixture")
+}
+
+#[test]
+fn mixed_read_files_send_one_request_and_deliver_distinct_schemas_and_cuts() {
+    let ((), report) = run_async_under_lab(0x79a0_0721, |root| async move {
+        for robot in [true, false] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let io = script(
+                vec![
+                    (
+                        consistent_chunk(
+                            0,
+                            7,
+                            true,
+                            Some(vec!["name".into()]),
+                            vec![vec![WireValue::Text("Ada".into())]],
+                        ),
+                        0,
+                    ),
+                    (
+                        consistent_chunk(1, 3, true, Some(vec!["id".into()]), vec![]),
+                        2,
+                    ),
+                    (
+                        consistent_chunk(
+                            2,
+                            7,
+                            true,
+                            Some(vec!["count".into(), "active".into()]),
+                            vec![vec![WireValue::Count(u64::MAX), WireValue::Bool(true)]],
+                        ),
+                        3,
+                    ),
+                    (consistent_end(3, 2), 5),
+                ],
+                Arc::clone(&flushes),
+            );
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: None,
+            };
+            mixed_reads()
+                .execute(&root, &mut client, robot, &mut out)
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            let output = String::from_utf8(out.bytes).unwrap();
+            if robot {
+                assert_eq!(
+                    output.lines().collect::<Vec<_>>(),
+                    [
+                        r#"{"v":1,"event":"columns","statement":1,"stream":true,"seq":7,"columns":["name"]}"#,
+                        r#"{"v":1,"event":"row","statement":1,"cells":[{"type":"text","value":"Ada"}]}"#,
+                        r#"{"v":1,"event":"columns","statement":2,"stream":true,"seq":3,"columns":["id"]}"#,
+                        r#"{"v":1,"event":"columns","statement":3,"stream":true,"seq":7,"columns":["count","active"]}"#,
+                        r#"{"v":1,"event":"row","statement":3,"cells":[{"type":"count","value":"18446744073709551615"},{"type":"bool","value":true}]}"#,
+                        r#"{"v":1,"event":"result","kind":"read_batch","statements":3,"count":2}"#,
+                    ]
+                );
+            } else {
+                assert!(output.contains("statement 2 at seq 3\nid"));
+                assert!(output.contains("completed 3 statement(s), 2 row(s)"));
+            }
+            assert_eq!(out.flushes.load(Ordering::SeqCst), 6);
+            let frames = sent_frames(&written.lock().unwrap());
+            let requests: Vec<_> = frames
+                .iter()
+                .filter(|frame| frame.header().kind() == FrameKind::ExecuteReadStatements)
+                .collect();
+            assert_eq!(requests.len(), 1);
+            let request = ExecuteReadStatements::decode(requests[0].payload()).unwrap();
+            assert_eq!(request.statements.len(), 3);
+            assert_eq!(request.statements[0].statement, "RETURN $n AS name");
+            assert_eq!(
+                request.statements[0].parameters,
+                [("n".into(), WireValue::Text("Ada".into()))]
+            );
+            assert_eq!(
+                request.statements[2].parameters,
+                [("n".into(), WireValue::Count(u64::MAX))]
+            );
+            assert!(!frames.iter().any(|frame| matches!(
+                frame.header().kind(),
+                FrameKind::Execute
+                    | FrameKind::ExecuteReadBatch
+                    | FrameKind::Prepare
+                    | FrameKind::ExecutePrepared
+            )));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn mixed_read_refusals_and_output_errors_never_retry_or_complete_a_prefix() {
+    let ((), report) = run_async_under_lab(0x79a0_0722, |root| async move {
+        for code in [ErrorCode::Budget, ErrorCode::Statement, ErrorCode::Protocol] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let io = script(vec![(refusal(4, code), 0)], Arc::clone(&flushes));
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: None,
+            };
+            let error = mixed_reads()
+                .execute(&root, &mut client, true, &mut out)
+                .await
+                .err()
+                .expect("batch refused");
+            assert!(matches!(error.code, 3 | 5));
+            assert!(out.bytes.is_empty());
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::ExecuteReadStatements)
+                    .count(),
+                1
+            );
+            assert!(!frames.iter().any(|frame| matches!(
+                frame.header().kind(),
+                FrameKind::Execute | FrameKind::ExecuteReadBatch | FrameKind::Prepare
+            )));
+        }
+        for fail_on in [1, 2] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let io = script(
+                vec![
+                    (
+                        consistent_chunk(
+                            0,
+                            7,
+                            true,
+                            Some(vec!["name".into()]),
+                            vec![vec![WireValue::Text("Ada".into())]],
+                        ),
+                        0,
+                    ),
+                    (refusal(4, ErrorCode::Cancelled), fail_on),
+                ],
+                Arc::clone(&flushes),
+            );
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: Some(fail_on),
+            };
+            let error = mixed_reads()
+                .execute(&root, &mut client, true, &mut out)
+                .await
+                .err()
+                .expect("output failed");
+            assert_eq!(error.code, 5);
+            assert!(
+                !String::from_utf8(out.bytes)
+                    .unwrap()
+                    .contains(r#""event":"result""#)
+            );
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                    .count(),
+                1
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
 
 fn prepared_batch(csv: bool) -> PreparedBatch {
     let result = if csv {
@@ -276,6 +463,229 @@ fn first_prepared_answer() -> Vec<(Frame, usize)> {
         (chunk(5, None, vec![vec![WireValue::Text("Ada".into())]]), 1),
         (read_end(5, 7), 2),
     ]
+}
+
+#[test]
+fn prepared_consistent_reads_send_one_template_and_one_batch_with_fresh_values() {
+    let ((), report) = run_async_under_lab(0x79a0_072d, |root| async move {
+        for csv in [false, true] {
+            for robot in [false, true] {
+                let flushes = Arc::new(AtomicUsize::new(0));
+                let replies = vec![
+                    (prepared_reply(), 0),
+                    (
+                        result(
+                            FrameKind::ReadBatchResultChunk,
+                            5,
+                            &ReadBatchResultChunk {
+                                index: 0,
+                                seq: 7,
+                                last: true,
+                                chunk: ResultChunk {
+                                    columns: Some(vec!["name".into()]),
+                                    rows: vec![vec![WireValue::Text("Ada".into())]],
+                                },
+                            },
+                        ),
+                        0,
+                    ),
+                    (
+                        result(
+                            FrameKind::ReadBatchResultChunk,
+                            5,
+                            &ReadBatchResultChunk {
+                                index: 1,
+                                seq: 3,
+                                last: true,
+                                chunk: ResultChunk {
+                                    columns: Some(vec!["name".into()]),
+                                    rows: vec![vec![WireValue::Text("Bob".into())]],
+                                },
+                            },
+                        ),
+                        2,
+                    ),
+                    (
+                        result(
+                            FrameKind::ReadBatchResultEnd,
+                            5,
+                            &ReadBatchResultEnd { results: 2, rows: 2 },
+                        ),
+                        4,
+                    ),
+                ];
+                let io = script(replies, Arc::clone(&flushes));
+                let written = Arc::clone(&io.written);
+                let batch = prepared_reads(csv);
+                batch
+                    .admit_prepared_reads()
+                    .unwrap_or_else(|error| panic!("{}", error.message));
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "social").await.unwrap();
+                let mut out = Output {
+                    bytes: vec![],
+                    flushes,
+                    fail_on: None,
+                };
+                batch
+                    .execute_prepared_reads(&root, &mut client, robot, &mut out)
+                    .await
+                    .unwrap_or_else(|error| panic!("{}", error.message));
+                assert_eq!(out.flushes.load(Ordering::SeqCst), 5);
+                let output = String::from_utf8(out.bytes).unwrap();
+                if robot {
+                    assert_eq!(
+                        output.lines().collect::<Vec<_>>(),
+                        [
+                            r#"{"v":1,"event":"columns","statement":1,"stream":true,"seq":7,"columns":["name"]}"#,
+                            r#"{"v":1,"event":"row","statement":1,"cells":[{"type":"text","value":"Ada"}]}"#,
+                            r#"{"v":1,"event":"columns","statement":2,"stream":true,"seq":3,"columns":["name"]}"#,
+                            r#"{"v":1,"event":"row","statement":2,"cells":[{"type":"text","value":"Bob"}]}"#,
+                            r#"{"v":1,"event":"result","kind":"read_batch","statements":2,"count":2}"#,
+                        ]
+                    );
+                } else {
+                    assert!(output.contains("argument set 2 at seq 3"));
+                    assert!(output.contains("completed 2 argument set(s), 2 row(s)"));
+                }
+                let frames = sent_frames(&written.lock().unwrap());
+                let prepared: Vec<_> = frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::Prepare)
+                    .collect();
+                assert_eq!(prepared.len(), 1);
+                let prepare = Prepare::decode(prepared[0].payload()).unwrap();
+                assert_eq!(prepare.statement, READ_QUERY);
+                let requests: Vec<_> = frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::ExecutePreparedReadBatch)
+                    .collect();
+                assert_eq!(requests.len(), 1);
+                let request = ExecutePreparedReadBatch::decode(requests[0].payload()).unwrap();
+                assert_eq!(request.handle, READ_HANDLE);
+                assert_eq!(
+                    request.argument_sets,
+                    [
+                        vec![
+                            ("limit".into(), WireValue::Count(u64::MAX)),
+                            ("name".into(), WireValue::Text("Ada".into())),
+                        ],
+                        vec![
+                            ("limit".into(), WireValue::Count(1)),
+                            ("name".into(), WireValue::Text("Bob".into())),
+                        ],
+                    ]
+                );
+                assert_eq!(prepare.parameters, request.argument_sets[0]);
+                assert!(!frames.iter().any(|frame| matches!(
+                    frame.header().kind(),
+                    FrameKind::Execute
+                        | FrameKind::ExecutePrepared
+                        | FrameKind::ExecuteBatch
+                        | FrameKind::ExecutePreparedBatch
+                        | FrameKind::ExecuteReadBatch
+                        | FrameKind::ExecuteReadStatements
+                )));
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_consistent_refusals_and_sink_failures_never_retry_or_complete_a_prefix() {
+    let ((), report) = run_async_under_lab(0x79a0_072e, |root| async move {
+        for (request, code) in [
+            (4, ErrorCode::Statement),
+            (5, ErrorCode::Budget),
+            (5, ErrorCode::Protocol),
+        ] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let mut replies = Vec::new();
+            if request == 5 {
+                replies.push((prepared_reply(), 0));
+            }
+            replies.push((refusal(request, code), 0));
+            let io = script(replies, Arc::clone(&flushes));
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: None,
+            };
+            let error = prepared_reads(false)
+                .execute_prepared_reads(&root, &mut client, true, &mut out)
+                .await
+                .expect_err("prepare or batch refused");
+            assert!(matches!(error.code, 3 | 5));
+            assert!(out.bytes.is_empty());
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames.iter().filter(|frame| frame.header().kind() == FrameKind::Prepare).count(),
+                1
+            );
+            assert_eq!(
+                frames.iter().filter(|frame| frame.header().kind() == FrameKind::ExecutePreparedReadBatch).count(),
+                usize::from(request == 5)
+            );
+            assert!(!frames.iter().any(|frame| matches!(
+                frame.header().kind(),
+                FrameKind::Execute | FrameKind::ExecuteReadBatch | FrameKind::ExecutePrepared
+            )));
+        }
+        for fail_on in [1, 2] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let io = script(
+                vec![
+                    (prepared_reply(), 0),
+                    (
+                        result(
+                            FrameKind::ReadBatchResultChunk,
+                            5,
+                            &ReadBatchResultChunk {
+                                index: 0,
+                                seq: 7,
+                                last: true,
+                                chunk: ResultChunk {
+                                    columns: Some(vec!["name".into()]),
+                                    rows: vec![vec![WireValue::Text("Ada".into())]],
+                                },
+                            },
+                        ),
+                        0,
+                    ),
+                    (refusal(5, ErrorCode::Cancelled), fail_on),
+                ],
+                Arc::clone(&flushes),
+            );
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: Some(fail_on),
+            };
+            let error = prepared_reads(false)
+                .execute_prepared_reads(&root, &mut client, true, &mut out)
+                .await
+                .expect_err("failed output must cancel and drain");
+            assert_eq!(error.code, 5);
+            assert!(!String::from_utf8(out.bytes).unwrap().contains(r#""event":"result""#));
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames.iter().filter(|frame| frame.header().kind() == FrameKind::QueryCancel).count(),
+                1
+            );
+            assert_eq!(
+                frames.iter().filter(|frame| frame.header().kind() == FrameKind::ExecutePreparedReadBatch).count(),
+                1
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

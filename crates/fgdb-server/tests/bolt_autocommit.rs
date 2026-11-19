@@ -161,9 +161,20 @@ impl Bolt {
     }
 
     async fn pull(&mut self, count: i64) -> (Vec<Vec<Value>>, Vec<(String, Value)>) {
+        self.pull_query(count, -1).await
+    }
+
+    async fn pull_query(
+        &mut self,
+        count: i64,
+        qid: i64,
+    ) -> (Vec<Vec<Value>>, Vec<(String, Value)>) {
         self.send(
             0x3f,
-            vec![Value::Map(vec![("n".into(), Value::Int(count))])],
+            vec![Value::Map(vec![
+                ("n".into(), Value::Int(count)),
+                ("qid".into(), Value::Int(qid)),
+            ])],
         )
         .await;
         let mut rows = Vec::new();
@@ -185,6 +196,461 @@ impl Bolt {
             }
         }
     }
+}
+
+#[test]
+fn bolt_explicit_read_hydration_and_statements_spend_the_original_signed_allowance() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "read-owner-allowance").await;
+        let mut writer = Client::connect(cx, fgp, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'Ann',age:7})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        for (nodes, rows) in [(1, 100), (100, 1)] {
+            let mut allowed = grant(Rights::Read);
+            allowed.limits.max_nodes = nodes;
+            allowed.limits.max_rows = rows;
+            let mut client = login(address, &allowed).await;
+            // A read-only capability selects a read owner even when a driver
+            // omits mode and sends the default write-routing hint.
+            client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+            let mut refusal = client
+                .expect(
+                    0x10,
+                    request("MATCH (n:Person) RETURN n", vec![], vec![]),
+                    if nodes == 1 { FAILURE } else { SUCCESS },
+                )
+                .await;
+            if nodes != 1 {
+                let (result, done) = client.pull_all().await;
+                assert_eq!(result.len(), 1);
+                assert_eq!(
+                    get(node_properties(&result[0][0]), "name"),
+                    Some(&Value::string("Ann"))
+                );
+                assert!(get(&done, "bookmark").is_none());
+                // Metadata is not charged as additional user result rows, but
+                // the next user's row cannot acquire a fresh statement grant.
+                refusal = client
+                    .expect(0x10, request("RETURN 2 AS marker", vec![], vec![]), FAILURE)
+                    .await;
+            }
+            assert_eq!(
+                get(&refusal, "code").and_then(Value::as_str),
+                Some("Neo.ClientError.Statement.ExecutionFailed")
+            );
+            assert!(get(&refusal, "qid").is_none());
+            client.expect(0x12, vec![], IGNORED).await;
+            client.expect(0x0f, vec![], SUCCESS).await;
+            client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+            client
+                .expect(0x10, request("RETURN 3 AS marker", vec![], vec![]), SUCCESS)
+                .await;
+            assert_eq!(client.pull_all().await.0, vec![vec![Value::Int(3)]]);
+            let closed = client.expect(0x12, vec![], SUCCESS).await;
+            assert_eq!(
+                get(&closed, "bookmark").and_then(Value::as_str),
+                Some("fgdb:social:1")
+            );
+            client.send(0x02, vec![]).await;
+            assert!(client.receive().await.is_none());
+        }
+        writer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_explicit_read_graph_cursors_keep_the_begin_snapshot_across_an_fgp_commit() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "read-owner-snapshot").await;
+        let mut writer = Client::connect(cx, fgp, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {name:'Ann',age:7})-[r:KNOWS {age:9}]->\
+                 (b:Person {name:'Bob',age:8})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut allowed = grant(Rights::Read);
+        allowed.properties = Scope::only([PropertyKeyId(1)]);
+        allowed.limits.max_rows = 2;
+        let mut reader = login(address, &allowed).await;
+        reader
+            .expect(
+                0x11,
+                vec![Value::Map(vec![("mode".into(), Value::string("r"))])],
+                SUCCESS,
+            )
+            .await;
+        let query = "MATCH p=(a:Person {name:'Ann'})-[r:KNOWS]->(b:Person) \
+                     RETURN {nodes:[a,b], path:p, relationship:r} AS graph";
+        for qid in 0..2 {
+            let prepared = reader
+                .expect(0x10, request(query, vec![], vec![]), SUCCESS)
+                .await;
+            assert_eq!(get(&prepared, "qid"), Some(&Value::Int(qid)));
+            if qid == 0 {
+                // No writer lock spans either outstanding Bolt cursor.
+                let changed = writer
+                    .execute(
+                        cx,
+                        ExecuteMode::Write,
+                        "MATCH (n:Person {name:'Ann'}) SET n.name='Changed'",
+                        vec![],
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    changed.outcome,
+                    Outcome::WriteCommitted { seq: 2, .. }
+                ));
+            }
+        }
+        let (newer, done) = reader.pull_query(-1, 1).await;
+        assert!(get(&done, "bookmark").is_none());
+        let (older, done) = reader.pull_query(-1, 0).await;
+        assert!(get(&done, "bookmark").is_none());
+        assert_eq!(newer, older);
+        assert_eq!(older.len(), 1);
+        let Value::Map(graph) = &older[0][0] else {
+            panic!("expected nested graph metadata");
+        };
+        let Some(Value::List(nodes)) = get(graph, "nodes") else {
+            panic!("expected nodes");
+        };
+        assert_eq!(nodes.len(), 2);
+        for (node, name) in nodes.iter().zip(["Ann", "Bob"]) {
+            assert_eq!(
+                node_properties(node),
+                &[("name".to_owned(), Value::string(name))]
+            );
+        }
+        let path = graph_fields(get(graph, "path").unwrap(), 0x50);
+        assert_eq!(path[0], Value::List(nodes.clone()));
+        let relationship = graph_fields(get(graph, "relationship").unwrap(), 0x52);
+        assert_eq!(relationship[4], Value::Map(vec![]));
+        let closed = reader.expect(0x12, vec![], SUCCESS).await;
+        assert_eq!(
+            get(&closed, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        reader
+            .expect(
+                0x10,
+                request(
+                    "MATCH (n:Person {name:'Changed'}) RETURN n.name AS name",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(
+            reader.pull_all().await.0,
+            vec![vec![Value::string("Changed")]]
+        );
+        reader.send(0x02, vec![]).await;
+        assert!(reader.receive().await.is_none());
+        writer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_explicit_read_rejects_oversized_hydrated_records_before_run_success() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "read-owner-output").await;
+        let mut writer = Client::connect(cx, fgp, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        let name = "x".repeat(3000);
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:$name})",
+                vec![("name".into(), WireValue::Text(name.clone()))],
+            )
+            .await
+            .unwrap();
+        let mut reader = login(address, &grant(Rights::Read)).await;
+        reader.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        let refused = reader
+            .expect(
+                0x10,
+                request("MATCH (n:Person) RETURN [n,n] AS nodes", vec![], vec![]),
+                FAILURE,
+            )
+            .await;
+        assert_eq!(
+            get(&refused, "code").and_then(Value::as_str),
+            Some("Neo.ClientError.Statement.ExecutionFailed")
+        );
+        assert!(
+            get(&refused, "message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("Bolt result exceeds"))
+        );
+        assert!(get(&refused, "fields").is_none());
+        assert!(get(&refused, "qid").is_none());
+        reader.expect(0x12, vec![], IGNORED).await;
+        reader.expect(0x0f, vec![], SUCCESS).await;
+        reader.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        reader
+            .expect(
+                0x10,
+                request("MATCH (n:Person) RETURN n.name AS name", vec![], vec![]),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(reader.pull_all().await.0, vec![vec![Value::string(name)]]);
+        reader.expect(0x12, vec![], SUCCESS).await;
+        reader.send(0x02, vec![]).await;
+        assert!(reader.receive().await.is_none());
+        writer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_autocommit_read_hydration_spends_the_statement_allowance_before_run_success() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "autocommit-read-allowance").await;
+        let mut writer = Client::connect(cx, fgp, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'Ann',age:7})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut allowed = grant(Rights::Read);
+        allowed.limits.max_nodes = 1;
+        allowed.limits.max_rows = 1;
+        let mut reader = login(address, &allowed).await;
+        let refused = reader
+            .expect(
+                0x10,
+                request("MATCH (n:Person) RETURN n", vec![], vec![]),
+                FAILURE,
+            )
+            .await;
+        assert_eq!(
+            get(&refused, "code").and_then(Value::as_str),
+            Some("Neo.ClientError.Statement.ExecutionFailed")
+        );
+        assert!(get(&refused, "fields").is_none());
+        assert!(get(&refused, "qid").is_none());
+        reader.expect(0x3f, consume(), IGNORED).await;
+        reader.expect(0x0f, vec![], SUCCESS).await;
+        // A scalar projection spends the same one-node statement allowance
+        // without requesting another source observation for graph metadata.
+        // Each new autocommit gets its own allowance; there is no BEGIN here.
+        for _ in 0..2 {
+            reader
+                .expect(
+                    0x10,
+                    request("MATCH (n:Person) RETURN n.name AS name", vec![], vec![]),
+                    SUCCESS,
+                )
+                .await;
+            assert_eq!(reader.pull_all().await.0, vec![vec![Value::string("Ann")]]);
+        }
+        reader.send(0x02, vec![]).await;
+        assert!(reader.receive().await.is_none());
+
+        // Metadata is work, not another delivered user row. A one-row grant
+        // can hydrate all of this node's admitted fields in one statement.
+        allowed.limits.max_nodes = 100;
+        allowed.properties = Scope::only([PropertyKeyId(1)]);
+        let mut reader = login(address, &allowed).await;
+        reader
+            .expect(
+                0x10,
+                request("MATCH (n:Person) RETURN n", vec![], vec![]),
+                SUCCESS,
+            )
+            .await;
+        let (rows, done) = reader.pull_all().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            node_properties(&rows[0][0]),
+            &[("name".to_owned(), Value::string("Ann"))]
+        );
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        reader.send(0x02, vec![]).await;
+        assert!(reader.receive().await.is_none());
+        writer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_autocommit_history_hydrates_masked_graphs_and_reports_its_actual_bookmark() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "autocommit-read-history").await;
+        let mut writer = Client::connect(cx, fgp, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {name:'Ann',age:7})-[r:KNOWS {age:9}]->(b:Person {name:'Bob',age:8})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person {name:'Ann'}) SET n.name='Changed'",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut allowed = grant(Rights::Read);
+        allowed.properties = Scope::only([PropertyKeyId(1)]);
+        let mut reader = login(address, &allowed).await;
+        reader
+            .expect(
+                0x10,
+                request(
+                    "MATCH p=(a:Person {name:'Ann'})-[r:KNOWS]->(b:Person) FOR SYSTEM_TIME AS OF SEQ 1 RETURN {nodes:[a,b], path:p, relationship:r} AS graph",
+                    vec![],
+                    vec![("bookmarks".into(), Value::List(vec![Value::string("fgdb:social:2")]))],
+                ),
+                SUCCESS,
+            )
+            .await;
+        // Neither a newer publication nor delayed transport can replace the
+        // selected historical graph or its response's reported sequence.
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) DETACH DELETE n",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let (rows, done) = reader.pull_all().await;
+        assert_eq!(rows.len(), 1);
+        let Value::Map(graph) = &rows[0][0] else {
+            panic!("nested graph metadata");
+        };
+        let Some(Value::List(nodes)) = get(graph, "nodes") else {
+            panic!("graph nodes");
+        };
+        assert_eq!(nodes.len(), 2);
+        for (node, name) in nodes.iter().zip(["Ann", "Bob"]) {
+            assert_eq!(
+                node_properties(node),
+                &[("name".to_owned(), Value::string(name))]
+            );
+        }
+        let path = graph_fields(get(graph, "path").unwrap(), 0x50);
+        assert_eq!(path[0], Value::List(nodes.clone()));
+        let relationship = graph_fields(get(graph, "relationship").unwrap(), 0x52);
+        assert_eq!(relationship[4], Value::Map(vec![]));
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        reader.send(0x02, vec![]).await;
+        assert!(reader.receive().await.is_none());
+        writer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_autocommit_read_rejects_oversized_hydration_before_any_run_success() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "autocommit-read-output").await;
+        let mut writer = Client::connect(cx, fgp, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        let name = "x".repeat(3000);
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:$name})",
+                vec![("name".into(), WireValue::Text(name.clone()))],
+            )
+            .await
+            .unwrap();
+        let mut reader = login(address, &grant(Rights::Read)).await;
+        let refused = reader
+            .expect(
+                0x10,
+                request("MATCH (n:Person) RETURN [n,n] AS nodes", vec![], vec![]),
+                FAILURE,
+            )
+            .await;
+        assert_eq!(
+            get(&refused, "code").and_then(Value::as_str),
+            Some("Neo.ClientError.Statement.ExecutionFailed")
+        );
+        assert!(
+            get(&refused, "message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("Bolt result exceeds"))
+        );
+        assert!(get(&refused, "fields").is_none());
+        reader.expect(0x3f, consume(), IGNORED).await;
+        reader.expect(0x0f, vec![], SUCCESS).await;
+        reader
+            .expect(
+                0x10,
+                request("MATCH (n:Person) RETURN n", vec![], vec![]),
+                SUCCESS,
+            )
+            .await;
+        let (rows, done) = reader.pull_all().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            get(node_properties(&rows[0][0]), "name"),
+            Some(&Value::string(name))
+        );
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        reader.send(0x02, vec![]).await;
+        assert!(reader.receive().await.is_none());
+        writer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
 }
 
 async fn start_both(
@@ -1659,6 +2125,225 @@ fn bolt_explicit_write_only_grants_commit_without_rows_and_refuse_read_followups
             .unwrap();
         assert_eq!(observed.rows, vec![vec![text("Kept")]]);
         assert_eq!(observed.outcome, Outcome::Rows { seq: 1 });
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+        observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_explicit_hybrid_reads_track_the_staged_graph_and_rollback() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "explicit-staged-hybrid").await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        let stored = "MATCH (n:Person) RETURN n.name AS name,n.age AS age ORDER BY name";
+        let search = "CALL hybrid.search(text => $needle, text_property => 'name', \
+            label => 'Person', candidates => 1, k => 1) YIELD node \
+            RETURN node,node.name AS name,node.age AS age";
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (a:Person {name:'stagedneedle',age:7}), \
+                     (b:Person {name:'quiet',age:2}), (a)-[:KNOWS]->(b)",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let created = client.expect(0x2f, consume(), SUCCESS).await;
+        assert!(get(&created, "bookmark").is_none());
+
+        client
+            .expect(
+                0x10,
+                request(
+                    search,
+                    vec![("needle".into(), Value::string("stagedneedle"))],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (rows, provisional) = client.pull_all().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1..], [Value::string("stagedneedle"), Value::Int(7)]);
+        assert_eq!(
+            get(node_properties(&rows[0][0]), "name"),
+            Some(&Value::string("stagedneedle")),
+            "Bolt graph hydration must use the private workspace"
+        );
+        assert_eq!(
+            get(&provisional, "fgdb_transaction_local"),
+            Some(&Value::Bool(true))
+        );
+        assert!(get(&provisional, "bookmark").is_none());
+
+        for (query, expected) in [
+            (
+                "CALL hybrid.search(vector => [8], vector_properties => ['age'], \
+                 metric => 'l2', candidates => 1, k => 1) YIELD node \
+                 RETURN node.name AS name",
+                "stagedneedle",
+            ),
+            (
+                "MATCH (seed:Person {name:'stagedneedle'}) \
+                 CALL hybrid.search(seeds => [seed], relation => 'KNOWS', \
+                 max_hops => 1, include_seeds => false, graph_candidates => 1, k => 1) \
+                 YIELD node RETURN node.name AS name",
+                "quiet",
+            ),
+        ] {
+            client
+                .expect(0x10, request(query, vec![], vec![]), SUCCESS)
+                .await;
+            let (rows, provisional) = client.pull_all().await;
+            assert_eq!(rows, [vec![Value::string(expected)]], "{query}");
+            assert!(get(&provisional, "bookmark").is_none());
+        }
+        let before = observer
+            .execute(cx, ExecuteMode::Read, stored, vec![])
+            .await
+            .unwrap();
+        assert!(
+            before.rows.is_empty(),
+            "search cannot publish staged effects"
+        );
+        assert_eq!(before.outcome, Outcome::Rows { seq: 0 });
+
+        client
+            .expect(
+                0x10,
+                request(
+                    "MATCH (n:Person {name:'stagedneedle'}) \
+                     SET n.name='revisedneedle',n.age=11",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        client.expect(0x2f, consume(), SUCCESS).await;
+        for needle in ["stagedneedle", "revisedneedle"] {
+            client
+                .expect(
+                    0x10,
+                    request(
+                        search,
+                        vec![("needle".into(), Value::string(needle))],
+                        vec![],
+                    ),
+                    SUCCESS,
+                )
+                .await;
+            let (rows, provisional) = client.pull_all().await;
+            if needle == "stagedneedle" {
+                assert!(rows.is_empty(), "a later search must retract old text");
+            } else {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    rows[0][1..],
+                    [Value::string("revisedneedle"), Value::Int(11)]
+                );
+                assert_eq!(
+                    get(node_properties(&rows[0][0]), "age"),
+                    Some(&Value::Int(11))
+                );
+            }
+            assert!(get(&provisional, "bookmark").is_none());
+        }
+        let committed = client.expect(0x12, vec![], SUCCESS).await;
+        assert_eq!(
+            get(&committed, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        let expected = [
+            vec![text("quiet"), WireValue::Int(2)],
+            vec![text("revisedneedle"), WireValue::Int(11)],
+        ];
+        let visible = observer
+            .execute(cx, ExecuteMode::Read, stored, vec![])
+            .await
+            .unwrap();
+        assert_eq!(visible.rows, expected);
+        assert_eq!(visible.outcome, Outcome::Rows { seq: 1 });
+
+        client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (:Person {name:'rollbackneedle',age:9})",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        client.expect(0x2f, consume(), SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    search,
+                    vec![("needle".into(), Value::string("rollbackneedle"))],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (own, _) = client.pull_all().await;
+        assert_eq!(own.len(), 1);
+        assert_eq!(
+            own[0][1..],
+            [Value::string("rollbackneedle"), Value::Int(9)]
+        );
+        client.expect(0x13, vec![], SUCCESS).await;
+
+        // A requested access profile cannot retry the privileged snapshot
+        // host. Its refusal aborts all previous statements in this owner.
+        client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (:Person {name:'refusedneedle',age:13})",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        client.expect(0x2f, consume(), SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    "CALL hybrid.search(seeds => [1], max_hops => 0, \
+                     include_seeds => true, graph_access => 'demand') \
+                     YIELD node RETURN node.name AS name",
+                    vec![],
+                    vec![],
+                ),
+                FAILURE,
+            )
+            .await;
+        client.expect(0x12, vec![], IGNORED).await;
+        client.expect(0x0f, vec![], SUCCESS).await;
+        let unchanged = observer
+            .execute(cx, ExecuteMode::Read, stored, vec![])
+            .await
+            .unwrap();
+        assert_eq!(unchanged.rows, expected);
+        assert_eq!(unchanged.outcome, Outcome::Rows { seq: 1 });
+
         client.send(0x02, vec![]).await;
         assert!(client.receive().await.is_none());
         observer.close(cx).await.unwrap();

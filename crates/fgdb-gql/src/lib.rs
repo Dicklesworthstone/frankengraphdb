@@ -254,7 +254,7 @@ pub use temporal_aggregate_text::{
 };
 pub use temporal_set_text::{
     BoundTemporalGraphSetQuery, GraphTemporalSetTextError, GraphTemporalSetTextErrorKind,
-    PreparedTemporalGraphSetText,
+    PreparedTemporalGraphSetText, bind_graph_snapshot_selector,
 };
 pub use temporal_text::{
     BoundTemporalGraphQuery, GraphTemporalTextError, GraphTemporalTextErrorKind,

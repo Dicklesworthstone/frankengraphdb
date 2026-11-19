@@ -59,9 +59,10 @@ serve opens each database and accepts FGP connections. Options after a
 capability token minted by `fgdbd token` for that database's key file and
 issuer key; it can select exactly the databases whose issuer accepts it.
 Statements run through capability-authorized sessions, so a token's label,
-relation and property scope applies before expansion. Names resolve through
-the bindings given here (there is no durable catalog yet); --bindings-file reads
-them once from the fgdb CLI's bindings file format. serve prints one
+relation and property scope applies before expansion. Names are discovered from
+the durable database catalog. Flags and --bindings-file may add process-local
+names or repeat exact durable bindings; conflicting names or ids refuse startup.
+The bindings file uses the fgdb CLI's format. serve prints one
 NDJSON line {\"v\":1,\"event\":\"listening\",\"protocol\":\"fgp\",\"addr\":...} per
 listener once bound, drains on SIGINT/SIGTERM (in-flight statements finish,
 idle connections say GOODBYE), and exits 0.
@@ -75,7 +76,7 @@ own --max-nodes/--max-work/--max-rows caveats still bound each statement too.
 --beacon-index declares a maintained retrieval index for that database. The
 following --beacon-* fields belong to that index until the next declaration.
 Supply a text lane, a vector lane, or both. Properties and optional labels
-must be declared by the database's bindings; they may come from --bindings-file.
+resolve from the durable catalog and explicit flags or --bindings-file.
 Coordinate properties keep the stated order and round to f32; packed vectors
 contain exactly <dimensions> little-endian f32 values in one bytes property.
 The default metric is l2. Each database admits at most 64 named definitions,
@@ -359,8 +360,8 @@ impl BeaconIndexOptions {
         Ok(())
     }
 
-    /// Bind only after the complete operator catalog (including a bindings
-    /// file) is available. Never introduce schema names through index options.
+    /// Bind only after durable names and the complete operator declarations
+    /// are available. Never introduce schema names through index options.
     fn bind(&self, symbols: &Symbols, limits: [u64; 4]) -> Result<BeaconIndexConfig, Failure> {
         self.validate()?;
         let property = |name: &str| match symbols.resolve(GraphSymbolKind::Property, name) {
@@ -704,6 +705,36 @@ async fn read_bindings_bytes(path: &std::path::Path) -> Result<Vec<u8>, Failure>
     Ok(bytes)
 }
 
+/// Index options contain names, while the native index owner consumes ids.
+/// Discover only authenticated catalog metadata here, then pin its publication
+/// through the ordinary full open so a concurrent writer cannot change the
+/// meaning of those prebound definitions between the two opens.
+async fn configured_beacon_indexes(
+    cx: &Cx,
+    path: &std::path::Path,
+    keys: &fgdb::DatabaseKeys,
+    declarations: &Symbols,
+    definitions: &[BeaconIndexOptions],
+    limits: [u64; 4],
+) -> Result<(Vec<BeaconIndexConfig>, Option<fgdb_types::CommitSeq>), Failure> {
+    if definitions.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+    let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(cx);
+    let catalog = fgdb::Database::open_symbol_catalog(&contexts.commit(), path, keys.clone())
+        .await
+        .map_err(Failure::open)?;
+    let symbols = declarations
+        .with_catalog(catalog.symbol_catalog())
+        .map_err(Failure::usage)?;
+    let mut indexes = Vec::with_capacity(definitions.len());
+    for definition in definitions {
+        cx.checkpoint().map_err(Failure::io)?;
+        indexes.push(definition.bind(&symbols, limits)?);
+    }
+    Ok((indexes, Some(catalog.frontier())))
+}
+
 async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
     let mut limits = ServerLimits::default();
     if let Some(max) = options.max_connections {
@@ -753,15 +784,21 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
             fgdb_server::read_issuer_key(cx, db.issuer_key_file.as_deref().expect("checked"))
                 .await
                 .map_err(Failure::open)?;
-        let mut config = DatabaseConfig::new(db.name, keys, issuer_key);
         let query_limits = core::array::from_fn(|at| {
             db.query_limits[at].unwrap_or(DatabaseConfig::DEFAULT_QUERY_LIMITS[at])
         });
-        config.beacon_indexes = db
-            .beacon_indexes
-            .iter()
-            .map(|index| index.bind(&db.symbols, query_limits))
-            .collect::<Result<_, _>>()?;
+        let (beacon_indexes, catalog_frontier) = configured_beacon_indexes(
+            cx,
+            &db.path,
+            &keys,
+            &db.symbols,
+            &db.beacon_indexes,
+            query_limits,
+        )
+        .await?;
+        let mut config = DatabaseConfig::new(db.name, keys, issuer_key);
+        config.beacon_indexes = beacon_indexes;
+        config.catalog_frontier = catalog_frontier;
         config.policy_epoch = db.policy_epoch;
         config.write_relation = RelationId(db.write_relation);
         config.symbols = db.symbols;
@@ -1427,6 +1464,127 @@ mod tests {
         };
         assert_eq!(bound.options.policy, policy);
         assert_eq!(bound.maintenance, policy);
+    }
+
+    #[test]
+    fn beacon_discovery_uses_durable_names_and_refuses_a_changed_startup_publication() {
+        use asupersync::lab::run_async_under_lab;
+        use asupersync::security::key::AuthKey;
+        use fgdb::{Database, DatabaseKeys, WriteBatch};
+        use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+        use fgdb_types::{CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+
+        let ((), report) = run_async_under_lab(0x7a8c_0020, |root| async move {
+            let path =
+                std::env::temp_dir().join(format!("fgdbd-beacon-catalog-{}", std::process::id()));
+            let keys = DatabaseKeys::new(
+                [0x81; 32],
+                DatabaseSecurityNamespaceId([0x82; 32]),
+                [0x83; 32],
+            );
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let mut database = Database::create(&contexts.commit(), &path, keys.clone())
+                .await
+                .unwrap();
+            let mut catalog = SymbolCatalog::default();
+            catalog
+                .bind_all([
+                    ("Document", CatalogSymbol::Label(LabelId(23))),
+                    ("body", CatalogSymbol::Property(PropertyKeyId(41))),
+                    ("x", CatalogSymbol::Property(PropertyKeyId(42))),
+                ])
+                .unwrap();
+            assert_eq!(
+                database
+                    .register_symbols(&contexts.commit(), &catalog)
+                    .await
+                    .unwrap(),
+                CommitSeq(1)
+            );
+            drop(database);
+            let parsed = beacon_options(&[
+                "--beacon-index",
+                "retrieval",
+                "--beacon-text",
+                "body",
+                "--beacon-vector",
+                "x",
+                "--beacon-label",
+                "Document",
+            ])
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            let definitions = &parsed.databases[0].beacon_indexes;
+            let mut declarations = Symbols::new();
+            declarations
+                .bind(GraphSymbolKind::Property, "ephemeral", 99)
+                .unwrap();
+            let (indexes, frontier) = configured_beacon_indexes(
+                &root,
+                &path,
+                &keys,
+                &declarations,
+                definitions,
+                [100, 100, 10_000, 10_000],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(frontier, Some(CommitSeq(1)));
+            assert_eq!(indexes.len(), 1);
+            assert_eq!(indexes[0].options.vertex_label, Some(LabelId(23)));
+            assert_eq!(indexes[0].options.projection.text, Some(PropertyKeyId(41)));
+            assert_eq!(
+                indexes[0].options.projection.vector,
+                vec![PropertyKeyId(42)]
+            );
+            assert_eq!(
+                declarations.resolve(GraphSymbolKind::Property, "body"),
+                None
+            );
+
+            let mut conflicting = declarations.clone();
+            conflicting
+                .bind(GraphSymbolKind::Property, "body", 7)
+                .unwrap();
+            let error = match configured_beacon_indexes(
+                &root,
+                &path,
+                &keys,
+                &conflicting,
+                definitions,
+                [100, 100, 10_000, 10_000],
+            )
+            .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("a conflicting durable name must refuse"),
+            };
+            assert_eq!(error.code, 2);
+            assert!(error.message.contains("conflicting property binding"));
+
+            // An ordinary commit between metadata discovery and full startup
+            // makes the prebound configuration stale. It must not be admitted.
+            let mut database = Database::open(&contexts.commit(), &path, keys.clone())
+                .await
+                .unwrap();
+            assert_eq!(database.symbol_catalog().unwrap(), &catalog);
+            let mut write = WriteBatch::new(RelationId(1));
+            write.create_vertex(VId(1), vec![], vec![]);
+            database.write(&contexts.commit(), write).await.unwrap();
+            drop(database);
+            let mut config = DatabaseConfig::new("test", keys, AuthKey::from_seed(0x7a8c_0020));
+            config.beacon_indexes = indexes;
+            config.catalog_frontier = frontier;
+            config.symbols = declarations;
+            let mut server = Server::new(&root, ServerLimits::default()).unwrap();
+            assert!(matches!(
+                server.open_database(&root, &path, config).await,
+                Err(fgdb_server::ServerError::CatalogChanged {
+                    expected: CommitSeq(1),
+                    actual: CommitSeq(2),
+                })
+            ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

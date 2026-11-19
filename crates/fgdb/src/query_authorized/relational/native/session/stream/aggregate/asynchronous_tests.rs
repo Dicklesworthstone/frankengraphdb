@@ -55,6 +55,175 @@ async fn read_all(cursor: &mut AuthorizedAsyncAggregateCursor<'_>) -> QueryResul
 }
 
 #[test]
+fn cooperative_rows_match_scoped_vertex_edge_join_and_projected_streams() {
+    let ((), report) = run_async_under_lab(0x5ec0_84b1, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = large_database(&c.commit()).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, "host-main", symbols, policy(), || 100)
+            .unwrap();
+        for text in [
+            "MATCH (n) RETURN n,n.p AS p,n.hidden AS hidden SKIP 100 LIMIT 4",
+            "MATCH (a)-[r:R]->(b) RETURN r,a,b,r.p AS p SKIP 100 LIMIT 4",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r,s,a,b,c SKIP 100 LIMIT 4",
+            "MATCH (n) RETURN n AS id,n.p+1 AS q SKIP 100 LIMIT 4",
+            "MATCH (a)-[r:R]->(b) RETURN r AS id,a.p+1 AS q SKIP 100 LIMIT 4",
+        ] {
+            let prepared = session.prepare(&cx, text, &args).unwrap();
+            let expected = session
+                .stream_send(&cx, &prepared, &args)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let mut cursor = session.stream_async(&cx, &prepared, &args).unwrap();
+            fn is_send<T: Send>(_: &T) {}
+            is_send(&cursor);
+            let mut actual = Vec::new();
+            loop {
+                let next = cursor.next_row();
+                is_send(&next);
+                match next.await.unwrap() {
+                    Some(row) => actual.push(row),
+                    None => break,
+                }
+            }
+            assert_eq!(actual, expected, "{text}");
+            assert_eq!(actual.len(), 4, "{text}");
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            assert!(cursor.next_row().await.unwrap().is_none());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn pending_row_scans_observe_expiry_and_drop_their_single_session_pin() {
+    let ((), report) = run_async_under_lab(0x5ec0_84b2, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = large_database(&c.commit()).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new();
+        for text in [
+            "MATCH (n) WHERE n.p+0 < 0 RETURN n",
+            "MATCH (a)-[r:R]->(b) WHERE a.p+0 < 0 RETURN r,a,b",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r,s,a,b,c SKIP 180",
+            "MATCH (n) RETURN n AS id,n.p+1 AS value SKIP 180",
+        ] {
+            for abandon in [false, true] {
+                let now = Arc::new(AtomicU64::new(100));
+                let clock = Arc::clone(&now);
+                let mut session = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "host-main",
+                        symbols,
+                        policy(),
+                        move || clock.load(Ordering::SeqCst),
+                    )
+                    .unwrap();
+                let prepared = session.prepare(&cx, text, &args).unwrap();
+                let mut cursor = session.stream_async(&cx, &prepared, &args).unwrap();
+                let mut future = Box::pin(cursor.next_row());
+                assert!(
+                    future
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending(),
+                    "{text}"
+                );
+                if abandon {
+                    drop(future);
+                } else {
+                    now.store(1001, Ordering::SeqCst);
+                    assert!(
+                        matches!(
+                            future.await,
+                            Err(QueryError::Authorization(Denied::Expired))
+                        ),
+                        "{text}"
+                    );
+                }
+                assert_eq!(cursor.state(), VertexScanState::Failed);
+                assert!(cursor.next_row().await.unwrap().is_none());
+                cursor.close();
+                drop(cursor);
+                assert!(session.is_closed(), "{text}");
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cooperative_row_open_is_lazy_and_a_pending_row_keeps_its_original_snapshot() {
+    let ((), report) = run_async_under_lab(0x5ec0_84b3, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = large_database(&c.commit()).await;
+        let issuer = authority();
+        let args = GqlParameters::new();
+        let mut zero = grant();
+        zero.limits.max_nodes = 0;
+        let token = issuer.issue_at(&zero, 100).unwrap();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, "host-main", symbols, policy(), || 100)
+            .unwrap();
+        let prepared = session.prepare(&cx, "MATCH (n) RETURN n", &args).unwrap();
+        let mut cursor = session.stream_async(&cx, &prepared, &args).unwrap();
+        cursor.close();
+        drop(cursor);
+        assert!(
+            !session.is_closed(),
+            "opening/closing consumes no source node"
+        );
+        let mut cursor = session.stream_async(&cx, &prepared, &args).unwrap();
+        assert!(matches!(
+            cursor.next_row().await,
+            Err(QueryError::Authorization(Denied::LimitExceeded(
+                LimitDimension::Nodes
+            )))
+        ));
+        drop(cursor);
+        drop(session);
+
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, "host-main", symbols, policy(), || 100)
+            .unwrap();
+        let text = "MATCH (n) RETURN n SKIP 100 LIMIT 1";
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        let expected = session
+            .stream_send(&cx, &prepared, &args)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut cursor = session.stream_async(&cx, &prepared, &args).unwrap();
+        let at = cursor.snapshot_seq();
+        let mut future = Box::pin(cursor.next_row());
+        assert!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(VId(500), vec![LabelId(1)], vec![]);
+        db.write(&c.commit(), batch).await.unwrap();
+        assert_eq!(future.await.unwrap(), Some(expected[0].clone()));
+        assert_eq!(cursor.snapshot_seq(), at);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn cooperative_groups_match_synchronous_masked_vertex_and_join_aggregates() {
     let ((), report) = run_async_under_lab(0x5ec0_84a1, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

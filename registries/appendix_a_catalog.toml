@@ -39,9 +39,9 @@ occurrence_count = 2456
 occurrence_transcript_sha256 = "f797542209a7411cde460324bcfa1d6b9be65c9ee536059c520dccae9844c822"
 
 [target_manifest]
-target_count = 4221
-projection_fallback_count = 493
-target_source_assignment_sha256 = "4d7a145d86278ab30496525bfe93a01f1cfae17c6541a60e196fca3bee05515b"
+target_count = 4238
+projection_fallback_count = 510
+target_source_assignment_sha256 = "39cfd8887dbd67aa9d70c38b5b3210c5270a3a4296f8f88fd9bc0897bdefcb95"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 77
+registry_epoch = 78
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 50
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 106
+registry_epoch = 107
 
 [[logical_kind]]
 slice_id = "a03"
@@ -50282,7 +50282,7 @@ symbol = "SchemaTransition"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x042d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:sealed-pre-bootstrap-dispatch-journal-import"
@@ -122499,7 +122499,7 @@ name = "PartitionManifest"
 status = "active"
 construction_order = 35
 role_predicate = "true"
-max_size_bytes = 134217728
+max_size_bytes = 152043530
 golden_corpus = "corpus/logical/partition_manifest/"
 
 
@@ -149013,5 +149013,409 @@ row_id = "a09:target:field-delta-partition-root-run-membership-digest"
 target_row_id = "a09:field:delta-partition-root-run-membership-digest"
 slice_id = "a09"
 source_key = "projection|durable_fields|DeltaPartitionRoot.run_membership_digest"
+target_kind = "field"
+definition_status = "declared"
+
+# Durable immutable symbol-name catalog, fgdb-7r8sy. This active subset
+# preserves the existing Schema effect and excludes constraints and schema DDL.
+
+[[logical_kind]]
+slice_id = "a10"
+row_id = "a10:logical-kind:schema-transition"
+object_kind = 0x042d
+name = "SchemaTransition"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 160
+golden_corpus = "crates/fgdb-strata/src/catalog.rs"
+
+[[logical_kind]]
+slice_id = "a10"
+row_id = "a10:logical-kind:schema-catalog"
+object_kind = 0x058e
+name = "SchemaCatalog"
+status = "active"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "crates/fgdb-strata/src/catalog.rs"
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-catalog-graph"
+containing_schema = "SchemaCatalog"
+field_tag = 0x0001
+stable_name = "graph"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "FGSC-v1 graph coordinate; exact scope of the immutable name generation. All fixed-width integers are big-endian"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-catalog-branch"
+containing_schema = "SchemaCatalog"
+field_tag = 0x0002
+stable_name = "branch"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "FGSC-v1 branch coordinate; a transition cannot transplant bindings between coordinates"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-catalog-epoch"
+containing_schema = "SchemaCatalog"
+field_tag = 0x0003
+stable_name = "epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "Zero denotes the empty unnamed generation; each nonempty name/floor extension advances exactly once. Epoch is independent of future commit ordering"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-catalog-changed-after"
+containing_schema = "SchemaCatalog"
+field_tag = 0x0004
+stable_name = "changed_after"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "Known predecessor CommitSeq at preparation, never a future assigned commit sequence; actual apply validates this exact predecessor. Historical names are visible strictly after their recorded predecessor"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-catalog-ordinal-floors"
+containing_schema = "SchemaCatalog"
+field_tag = 0x0005
+stable_name = "ordinal_floors"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "Three u64 high-water marks in label, relation, property order, including unnamed existing data; floors never decrease or wrap and the full u64 domains remain distinct"
+version_status = "active"
+max_size_bytes = 24
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-catalog-bindings"
+containing_schema = "SchemaCatalog"
+field_tag = 0x0006
+stable_name = "bindings"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "u32 count <=65536, then strictly namespace-and-name-sorted entries: kind u8 1=Label,2=Relation,3=Property; ordinal u64; introduced_after u64; UTF-8 byte length u32; exact UTF-8 name bytes. Names are nonempty, at most1048576 bytes, and bijective within each kind; no normalization. Total FGSC frame <=16777216 bytes; introductions never change in a successor"
+version_status = "active"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-transition-graph"
+containing_schema = "SchemaTransition"
+field_tag = 0x0001
+stable_name = "graph"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "FGST-v1 scope equals both catalogs and the owning coordinate's Schema delta; big-endian fixed-width integers"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-transition-branch"
+containing_schema = "SchemaTransition"
+field_tag = 0x0002
+stable_name = "branch"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "FGST-v1 scope equals both catalogs and the owning coordinate's Schema delta"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-transition-apply-basis"
+containing_schema = "SchemaTransition"
+field_tag = 0x0003
+stable_name = "apply_basis"
+exact_wire_type = "MarkerRef"
+cardinality = "optional"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "u8 presence then known predecessor marker OID32 and CommitSeq u64. Comparison identity only, never a reachability edge. None only at genesis admission. Equality with the actual previous marker is mandatory; no future marker or assigned commit sequence appears"
+version_status = "active"
+max_size_bytes = 41
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-transition-before-root"
+containing_schema = "SchemaTransition"
+field_tag = 0x0004
+stable_name = "before_root"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SchemaCatalog"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "u8 presence then previous catalog OID32 and before_epoch u64; retained while this transition's replay obligation remains. None denotes epoch-zero unnamed schema"
+version_status = "active"
+max_size_bytes = 33
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-transition-before-epoch"
+containing_schema = "SchemaTransition"
+field_tag = 0x0005
+stable_name = "before_epoch"
+exact_wire_type = "u64"
+cardinality = "optional"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "Encoded only with before_root; equals the selected predecessor catalog epoch, never an ambient process epoch"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-transition-after-root"
+containing_schema = "SchemaTransition"
+field_tag = 0x0006
+stable_name = "after_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SchemaCatalog"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "New immutable catalog OID32 stored durably before the capsule D1; strong while the Schema effect or its replay obligation retains this transition"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:schema-transition-after-epoch"
+containing_schema = "SchemaTransition"
+field_tag = 0x0007
+stable_name = "after_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "Exactly before_epoch+1, nonzero, matching the referenced catalog; same names and allocation floors are a no-op and cannot mint an epoch"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:partition-manifest-schema-root"
+containing_schema = "PartitionManifest"
+field_tag = 0x0006
+stable_name = "schema_root"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SchemaCatalog"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "FGSM-v4 per-record optional selected catalog: tag0 followed by forty zero bytes means unnamed epoch0; tag1 carries catalog OID32 and epoch u64. Retained with every live or historical manifest. V2/V3 decode absent; catalog-free encodings retain exact V3 bytes"
+version_status = "active"
+max_size_bytes = 33
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:partition-manifest-schema-epoch"
+containing_schema = "PartitionManifest"
+field_tag = 0x0007
+stable_name = "schema_epoch"
+exact_wire_type = "u64"
+cardinality = "many"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "FGSM-v4 nonzero epoch exactly matching schema_root; mixed manifests use fixed145-byte records. Maximum frame is10+1048576*145=152043530 bytes; catalog-free V4 is noncanonical"
+version_status = "active"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a10:target:logical-kind-schema-transition"
+target_row_id = "a10:logical-kind:schema-transition"
+slice_id = "a10"
+source_key = "projection|logical_object_kinds|SchemaTransition"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:logical-kind-schema-catalog"
+target_row_id = "a10:logical-kind:schema-catalog"
+slice_id = "a10"
+source_key = "projection|logical_object_kinds|SchemaCatalog"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-catalog-graph"
+target_row_id = "a10:field:schema-catalog-graph"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaCatalog.graph"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-catalog-branch"
+target_row_id = "a10:field:schema-catalog-branch"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaCatalog.branch"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-catalog-epoch"
+target_row_id = "a10:field:schema-catalog-epoch"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaCatalog.epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-catalog-changed-after"
+target_row_id = "a10:field:schema-catalog-changed-after"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaCatalog.changed_after"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-catalog-ordinal-floors"
+target_row_id = "a10:field:schema-catalog-ordinal-floors"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaCatalog.ordinal_floors"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-catalog-bindings"
+target_row_id = "a10:field:schema-catalog-bindings"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaCatalog.bindings"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-transition-graph"
+target_row_id = "a10:field:schema-transition-graph"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaTransition.graph"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-transition-branch"
+target_row_id = "a10:field:schema-transition-branch"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaTransition.branch"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-transition-apply-basis"
+target_row_id = "a10:field:schema-transition-apply-basis"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaTransition.apply_basis"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-transition-before-root"
+target_row_id = "a10:field:schema-transition-before-root"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaTransition.before_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-transition-before-epoch"
+target_row_id = "a10:field:schema-transition-before-epoch"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaTransition.before_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-transition-after-root"
+target_row_id = "a10:field:schema-transition-after-root"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaTransition.after_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-schema-transition-after-epoch"
+target_row_id = "a10:field:schema-transition-after-epoch"
+slice_id = "a10"
+source_key = "projection|durable_fields|SchemaTransition.after_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-partition-manifest-schema-root"
+target_row_id = "a09:field:partition-manifest-schema-root"
+slice_id = "a09"
+source_key = "projection|durable_fields|PartitionManifest.schema_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-partition-manifest-schema-epoch"
+target_row_id = "a09:field:partition-manifest-schema-epoch"
+slice_id = "a09"
+source_key = "projection|durable_fields|PartitionManifest.schema_epoch"
 target_kind = "field"
 definition_status = "declared"

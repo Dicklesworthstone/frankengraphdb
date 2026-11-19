@@ -98,6 +98,127 @@ fn wide() -> GqlQueryPolicy {
 }
 
 #[test]
+fn cooperative_rows_preserve_values_admission_and_skip_work_across_suspension() {
+    use core::task::{Context, Poll, Waker};
+    let rows: Vec<_> = (0..257)
+        .map(|id| sample(id, id as i64, id % 5 != 0))
+        .collect();
+    let predicates = [VertexPredicate::IntegerProperty {
+        key: KEY,
+        comparison: IntegerComparison::GreaterOrEqual,
+        value: 200,
+    }];
+    let plan = VertexScanPlan::compile(pattern(3, Some(7), &predicates).plan()).unwrap();
+    let mut synchronous = VertexScanCursor::new(source(rows.clone()), plan.clone(), wide(), || {
+        Ok::<(), &'static str>(())
+    });
+    let expected = synchronous.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let mut cooperative =
+        VertexScanCursor::new(source(rows), plan, wide(), || Ok::<(), &'static str>(()));
+    let mut context = Context::from_waker(Waker::noop());
+    let mut actual = Vec::new();
+    let mut suspended = 0;
+    loop {
+        let before = cooperative.row_stats().snapshot_records;
+        match cooperative.poll_next(&mut context) {
+            Poll::Pending => suspended += 1,
+            Poll::Ready(Some(row)) => actual.push(row.unwrap()),
+            Poll::Ready(None) => break,
+        }
+        assert!(cooperative.row_stats().snapshot_records - before <= 64);
+    }
+    assert!(
+        suspended >= 3,
+        "the rejected prefix must yield before a row exists"
+    );
+    assert_eq!(actual, expected);
+    assert_eq!(actual, [204, 206, 207, 208, 209, 211, 212].map(VId));
+    assert_eq!(cooperative.row_stats(), synchronous.row_stats());
+    assert_eq!(cooperative.evaluator_stats(), synchronous.evaluator_stats());
+    assert_eq!(cooperative.state(), VertexScanState::Exhausted);
+}
+
+#[test]
+fn cooperative_failure_after_multiple_quanta_fuses_and_releases_the_source() {
+    use core::task::{Context, Poll, Waker};
+    let mut fixture = source((0..257).map(|id| sample(id, -1, true)).collect());
+    fixture.fail_at = Some(150);
+    let dropped = fixture.dropped.clone();
+    let plan = VertexScanPlan::compile(pattern(200, None, &[]).plan()).unwrap();
+    let mut cursor = VertexScanCursor::new(fixture, plan, wide(), || Ok::<(), &str>(()));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(cursor.poll_next(&mut context).is_pending());
+    assert!(cursor.poll_next(&mut context).is_pending());
+    assert!(matches!(
+        cursor.poll_next(&mut context),
+        Poll::Ready(Some(Err(GqlQueryError::Source(VertexScanError::Source(
+            "source failed"
+        )))))
+    ));
+    assert_eq!(cursor.row_stats().snapshot_records, 150);
+    assert_eq!(cursor.row_stats().result_rows, 0);
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(dropped.get());
+    let stats = cursor.evaluator_stats();
+    assert!(matches!(cursor.poll_next(&mut context), Poll::Ready(None)));
+    assert_eq!(cursor.evaluator_stats(), stats);
+}
+
+#[test]
+fn cooperative_projected_windows_keep_late_errors_and_original_row_ordinals() {
+    use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphSetText};
+    use core::task::{Context, Poll, Waker};
+    for skip in [0, 220] {
+        let text = format!("MATCH (n) RETURN n, 1 / (n.p - 200) AS q SKIP {skip} LIMIT 1");
+        let query = PreparedGraphSetText::prepare(&text, |kind, name: &str| {
+            (kind == GraphSymbolKind::Property && name == "p").then_some(GraphSymbol::Property(KEY))
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let pull = query.vertex_graph_row_pull().unwrap();
+        let plan = VertexScanPlan::compile(pull.pattern().plan()).unwrap();
+        let rows: Vec<_> = (0..257).map(|id| sample(id, id as i64, true)).collect();
+        let mut synchronous =
+            VertexScanCursor::new(source(rows.clone()), plan.clone(), wide(), || {
+                Ok::<(), &str>(())
+            });
+        let mut cooperative =
+            VertexScanCursor::new(source(rows), plan, wide(), || Ok::<(), &str>(()));
+        let scan = |error| format!("{error:?}");
+        let arithmetic = |row, column, error| format!("row {row} column {column}: {error:?}");
+        let mut expected = Vec::new();
+        while let Some(row) = synchronous.next_projected(&pull, scan, arithmetic) {
+            expected.push(row);
+        }
+        let mut actual = Vec::new();
+        let mut pending = 0;
+        let mut context = Context::from_waker(Waker::noop());
+        loop {
+            match cooperative.poll_next_projected(&mut context, &pull, scan, arithmetic) {
+                Poll::Pending => pending += 1,
+                Poll::Ready(Some(row)) => actual.push(row),
+                Poll::Ready(None) => break,
+            }
+        }
+        assert!(pending >= 3);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), if skip == 0 { 2 } else { 1 });
+        assert!(
+            actual
+                .last()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .contains("row 200 column 1")
+        );
+        assert_eq!(cooperative.row_stats(), synchronous.row_stats());
+        assert_eq!(cooperative.evaluator_stats(), synchronous.evaluator_stats());
+        assert_eq!(cooperative.state(), VertexScanState::Failed);
+    }
+}
+
+#[test]
 fn zero_page_needs_no_work_allowance_but_still_observes_cancellation() {
     for cancelled in [false, true] {
         let source = source(vec![sample(1, 1, true)]);

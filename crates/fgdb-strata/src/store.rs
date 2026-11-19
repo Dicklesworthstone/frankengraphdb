@@ -151,7 +151,7 @@ pub(crate) const MAX_STORED_OBJECT_BYTES: u64 = (crate::MAX_BLOCK_ENTRIES as u64
 /// The largest manifest this store will materialize: header plus the record
 /// ceiling, derived beside the format exactly as the root ceiling is.
 const MANIFEST_HEADER_AND_RECORDS_CEILING: u64 =
-    (10 + crate::manifest::MAX_MANIFEST_RECORDS as usize * 72) as u64;
+    crate::manifest::MAX_ENCODED_MANIFEST_BYTES as u64;
 
 /// Creation-only crash instants that distinguish inode durability from
 /// namespace durability.
@@ -279,6 +279,8 @@ pub(crate) enum StoredObjectKind {
     VertexPatch,
     EdgePropertyPatch,
     Manifest,
+    SchemaCatalog,
+    SchemaTransition,
 }
 
 impl StoredObjectKind {
@@ -292,6 +294,8 @@ impl StoredObjectKind {
             Self::VertexPatch => ExtentObjectKind::VertexPatch,
             Self::EdgePropertyPatch => ExtentObjectKind::EdgePropertyPatch,
             Self::Manifest => ExtentObjectKind::Manifest,
+            Self::SchemaCatalog => ExtentObjectKind::SchemaCatalog,
+            Self::SchemaTransition => ExtentObjectKind::SchemaTransition,
         }
     }
 
@@ -312,6 +316,8 @@ impl StoredObjectKind {
                 crate::edge_props::property_patch_id(k_oid, namespace, bytes)
             }
             Self::Manifest => crate::manifest::manifest_id(k_oid, namespace, bytes),
+            Self::SchemaCatalog => crate::catalog::catalog_id(k_oid, namespace, bytes),
+            Self::SchemaTransition => crate::catalog::transition_id(k_oid, namespace, bytes),
         }
     }
 
@@ -330,6 +336,9 @@ impl StoredObjectKind {
             Self::Root => crate::root::MAX_ENCODED_ROOT_BYTES as u64,
             Self::Segment => crate::root_segment::MAX_SEGMENT_BYTES as u64,
             Self::IndexSegment => crate::root_segment::INDEX_BYTES as u64,
+            Self::Manifest => crate::manifest::MAX_ENCODED_MANIFEST_BYTES as u64,
+            Self::SchemaCatalog => crate::catalog::MAX_CATALOG_BYTES as u64,
+            Self::SchemaTransition => crate::catalog::MAX_TRANSITION_BYTES as u64,
             _ => MAX_STORED_OBJECT_BYTES,
         }
     }
@@ -707,6 +716,8 @@ pub enum StoreError {
     },
     /// The stored bytes are not a lawful partition manifest (fgdb-63w2).
     MalformedManifest(crate::manifest::ManifestError),
+    /// A catalog or transition violated its versioned, bounded canonical form.
+    MalformedCatalog(crate::catalog::CatalogError),
     /// Loading one of a manifest's named partition roots failed — the missing
     /// identity is IN the error, because a manifest that quietly resolved to
     /// fewer partitions would look exactly like correct operation.
@@ -778,6 +789,9 @@ impl core::fmt::Display for StoreError {
             Self::MalformedManifest(error) => {
                 write!(f, "stored manifest is malformed: {error}")
             }
+            Self::MalformedCatalog(error) => {
+                write!(f, "stored schema object is malformed: {error}")
+            }
             Self::ManifestRootLoad { at, root, error } => {
                 write!(f, "loading manifest record {at}'s root {root:?}: {error}")
             }
@@ -797,6 +811,7 @@ impl core::error::Error for StoreError {
             Self::MalformedPatch(error) => Some(error),
             Self::MalformedEdgePropertyPatch(error) => Some(error),
             Self::MalformedManifest(error) => Some(error),
+            Self::MalformedCatalog(error) => Some(error),
             Self::RootBlockLoad { error, .. }
             | Self::RootPatchLoad { error, .. }
             | Self::ManifestRootLoad { error, .. }
@@ -2421,6 +2436,41 @@ impl<V: Vfs> BlockStore<V> {
         .await
     }
 
+    /// Verify and, when possible, repair every authenticated physical extent
+    /// used for an admitted catalog without following any other metadata.
+    pub async fn scrub_catalog_bytes(
+        &self,
+        cx: &CommitCx,
+        id: crate::catalog::CatalogVersion,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id.0,
+            StoredObjectKind::SchemaCatalog,
+            crate::catalog::MAX_CATALOG_BYTES as u64,
+            repaired_pack_members,
+        )
+        .await
+    }
+
+    /// Re-verify the sequence-neutral transition retained by a schema effect.
+    pub async fn scrub_schema_transition_bytes(
+        &self,
+        cx: &CommitCx,
+        id: crate::catalog::SchemaTransitionVersion,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id.0,
+            StoredObjectKind::SchemaTransition,
+            crate::catalog::MAX_TRANSITION_BYTES as u64,
+            repaired_pack_members,
+        )
+        .await
+    }
+
     pub async fn scrub_manifest_bytes(
         &self,
         cx: &CommitCx,
@@ -2919,6 +2969,66 @@ impl<V: Vfs> BlockStore<V> {
         )
         .await
         .map(EdgePropertyPatchVersion)
+    }
+
+    /// Store a complete immutable catalog before its Schema effect is ordered.
+    /// Publication through this method alone does not make its names visible.
+    pub async fn put_catalog(
+        &self,
+        cx: &CommitCx,
+        catalog: &crate::catalog::SchemaCatalog,
+    ) -> Result<crate::catalog::CatalogVersion, StoreError> {
+        let bytes = catalog.canonical_bytes().map_err(StoreError::MalformedCatalog)?;
+        self.put_object_with_steps(StoredObjectKind::SchemaCatalog, cx, &bytes, None, || {}, || {})
+            .await
+            .map(crate::catalog::CatalogVersion)
+    }
+
+    /// Load by the catalog's registered identity, preserving the existing
+    /// authenticated extent, physical-copy recovery and finite-byte rules.
+    pub async fn get_catalog(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::catalog::CatalogVersion,
+    ) -> Result<crate::catalog::SchemaCatalog, StoreError> {
+        self.read_object_proven(
+            cx, StoredObjectKind::SchemaCatalog, id.0, crate::catalog::MAX_CATALOG_BYTES as u64,
+            |bytes| async move {
+                let actual = crate::catalog::catalog_id(self.k_oid.expose(), self.namespace, &bytes);
+                if actual != id.0 {
+                    return Err(StoreError::IdentityMismatch { expected: id.0, actual });
+                }
+                crate::catalog::SchemaCatalog::decode(&bytes).map_err(StoreError::MalformedCatalog)
+            },
+        ).await
+    }
+
+    pub async fn put_schema_transition(
+        &self,
+        cx: &CommitCx,
+        transition: &crate::catalog::SchemaTransition,
+    ) -> Result<crate::catalog::SchemaTransitionVersion, StoreError> {
+        let bytes = transition.canonical_bytes().map_err(StoreError::MalformedCatalog)?;
+        self.put_object_with_steps(StoredObjectKind::SchemaTransition, cx, &bytes, None, || {}, || {})
+            .await
+            .map(crate::catalog::SchemaTransitionVersion)
+    }
+
+    pub async fn get_schema_transition(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::catalog::SchemaTransitionVersion,
+    ) -> Result<crate::catalog::SchemaTransition, StoreError> {
+        self.read_object_proven(
+            cx, StoredObjectKind::SchemaTransition, id.0, crate::catalog::MAX_TRANSITION_BYTES as u64,
+            |bytes| async move {
+                let actual = crate::catalog::transition_id(self.k_oid.expose(), self.namespace, &bytes);
+                if actual != id.0 {
+                    return Err(StoreError::IdentityMismatch { expected: id.0, actual });
+                }
+                crate::catalog::SchemaTransition::decode(&bytes).map_err(StoreError::MalformedCatalog)
+            },
+        ).await
     }
 
     /// Store a partition manifest's canonical bytes (fgdb-63w2) — the object

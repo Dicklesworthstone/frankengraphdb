@@ -559,3 +559,233 @@ fn indexed_overlay_membership_and_refused_attempts_survive_later_success() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+
+#[allow(clippy::too_many_arguments)]
+fn seeded_sparse(
+    database: &Database<MemVfs>,
+    transaction: &WriteTxn,
+    cx: &QueryCx,
+    pattern: &PreparedGraphPattern<GraphValueRow>,
+    seeds: fgdb_gql::GraphSeeds<'_>,
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    trace: &Trace,
+) -> Governed<GraphValueRow> {
+    let owner = OverlayRows::new(
+        transaction,
+        database,
+        pattern.plan().reads_edges(),
+        &mut || Ok(()),
+    )
+    .unwrap();
+    database.select_for_authorized_overlay_with_seeds(
+        cx,
+        &owner,
+        pattern,
+        Some(seeds),
+        scope,
+        policy,
+        || trace.charge(2),
+        || Ok(()),
+        || trace.charge(1),
+    )
+}
+
+#[test]
+fn scoped_seeded_overlay_matches_full_rows_and_masks_hidden_transit_before_charges() {
+    let ((), report) = run_async_under_lab(0xa728, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (query, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+        let authority = authority();
+        let token = authority.issue_at(&grant(), 100).unwrap();
+        let verified = authority.verify_at(&token, "main", 100).unwrap();
+        for (text, root_id, property) in [
+            ("MATCH (a:L {p:10}) RETURN a, a.p, a.secret", 10, 10),
+            ("MATCH (a:L {p:10})-[e:R]->(b:L) RETURN a, b, e.p", 10, 10),
+            ("MATCH (a:L {p:21})<-[e:R]-(b:L) RETURN a, b, e.p", 20, 21),
+            ("MATCH (a:L {p:10})-[e:R]-(b:L) RETURN a, b, e.p", 10, 10),
+            ("MATCH (a:L {p:10})-[:R*1..2]->(b:L) RETURN a, b", 10, 10),
+        ] {
+            for disposition in 0..3 {
+                for property_seed in [false, true] {
+                    let mut clean = None;
+                    for hidden in [false, true] {
+                        let mut db = seed(&commit, hidden).await;
+                        let mut transaction = db.begin(&txcx).unwrap();
+                        let mut staged = WriteBatch::new(R);
+                        staged.create_vertex(VId(30), vec![L], vec![(P, CanonicalScalar::Int(30))]);
+                        for id in 40..56 {
+                            staged.create_vertex(VId(id), vec![L], vec![]);
+                        }
+                        staged.set_vertex_property(VId(20), P, Some(CanonicalScalar::Int(21)));
+                        staged.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(31)));
+                        staged.delete_edge(EId(11));
+                        staged.add_edge(EId(30), VId(20), VId(30), vec![]);
+                        staged.add_edge(EId(31), VId(10), VId(10), vec![]);
+                        if hidden {
+                            // Reaching the visible 30 through hidden 99 must
+                            // never affect the closure or a charged threshold.
+                            staged.add_edge(EId(98), VId(99), VId(30), vec![]);
+                        }
+                        transaction.write(&mut db, staged).unwrap();
+                        if disposition > 0 {
+                            let mut suffix = WriteBatch::new(R);
+                            if disposition == 1 {
+                                suffix.set_vertex_label(VId(20), L, false);
+                            } else {
+                                suffix.delete_vertex(VId(20));
+                            }
+                            transaction.write(&mut db, suffix).unwrap();
+                        }
+                        let pattern = pattern(text);
+                        let ids = [VId(root_id), VId(99), VId(999)];
+                        let values = [CanonicalScalar::Int(property)];
+                        let seeds = if property_seed {
+                            fgdb_gql::GraphSeeds::Property { key: P, values: &values }
+                        } else {
+                            fgdb_gql::GraphSeeds::Identities(&ids)
+                        };
+                        let trace = Trace::default();
+                        let result = seeded_sparse(
+                            &db, &transaction, &query, &pattern, seeds,
+                            verified.predicates(), policy(), &trace,
+                        )
+                        .unwrap();
+                        let full = incumbent(
+                            &db, &transaction, &query, &pattern,
+                            verified.predicates(), policy(), &Trace::default(),
+                        )
+                        .unwrap();
+                        assert_eq!(result.value, full.value, "{text}, disposition {disposition}");
+                        assert!(
+                            result.rows.snapshot_records < full.rows.snapshot_records,
+                            "unrelated visible vertices cannot join a seeded source",
+                        );
+                        let charged = trace.events.into_inner();
+                        let signature = (
+                            result.value.clone(), result.rows, result.evaluator, charged.clone(),
+                        );
+                        if hidden {
+                            assert_eq!(Some(signature.clone()), clean, "{text}");
+                        } else {
+                            clean = Some(signature);
+                        }
+                        let limits = [
+                            result.rows.snapshot_records,
+                            result.rows.result_rows,
+                            result.evaluator.work_units,
+                            result.evaluator.scratch_entries,
+                        ];
+                        for below in [None, Some(0), Some(1), Some(2), Some(3)] {
+                            let mut budget = limits;
+                            if let Some(at) = below {
+                                if budget[at] == 0 {
+                                    continue;
+                                }
+                                budget[at] -= 1;
+                            }
+                            let outcome = seeded_sparse(
+                                &db, &transaction, &query, &pattern, seeds,
+                                verified.predicates(),
+                                GqlQueryPolicy::new(budget[0], budget[1], budget[2], budget[3]),
+                                &Trace::default(),
+                            );
+                            assert_eq!(outcome.is_ok(), below.is_none(), "{text}, {below:?}");
+                        }
+                        // Every signed boundary interrupts the real admission
+                        // body; neither an accepted prefix nor a new full-scan
+                        // allowance may escape after the first refusal.
+                        for stop in 1..=charged.len() {
+                            let trace = Trace { stop: Some(stop), ..Trace::default() };
+                            let outcome = seeded_sparse(
+                                &db, &transaction, &query, &pattern, seeds,
+                                verified.predicates(), policy(), &trace,
+                            );
+                            assert!(matches!(outcome, Err(GqlQueryError::Interrupted(_))));
+                            assert_eq!(*trace.events.borrow(), charged[..stop]);
+                        }
+                        transaction.abort();
+                        assert_eq!(txcx.outstanding_obligations(), 0);
+                    }
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn scoped_seeded_observations_survive_empty_results_refusal_and_savepoint_rollback() {
+    let ((), report) = run_async_under_lab(0xa729, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (query, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+        let authority = authority();
+        let token = authority.issue_at(&grant(), 100).unwrap();
+        let verified = authority.verify_at(&token, "main", 100).unwrap();
+        for case in 0..8 {
+            let mut db = seed(&commit, true).await;
+            let mut extra = WriteBatch::new(R);
+            extra.create_vertex(VId(50), vec![L], vec![(P, CanonicalScalar::Int(50))]);
+            extra.set_vertex_property(VId(99), P, Some(CanonicalScalar::Int(10)));
+            db.write(&commit, extra).await.unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.set_vertex_property(VId(50), SECRET, Some(CanonicalScalar::Int(51)));
+            transaction.write(&mut db, prefix).unwrap();
+            transaction.savepoint(&db, "before_seeded_read").unwrap();
+            let query_text = match case {
+                5 => "MATCH (a:L) RETURN a.p",
+                6 | 7 => "MATCH (a:L {p:10})-[e:R]->(b:L) RETURN b.p",
+                _ => "MATCH (a:L {p:10}) RETURN a.p",
+            };
+            let pattern = pattern(query_text);
+            let ids = [VId(if case == 5 { 777 } else { 10 })];
+            let values = [CanonicalScalar::Int(10)];
+            let seeds = if case >= 5 {
+                fgdb_gql::GraphSeeds::Identities(&ids)
+            } else {
+                fgdb_gql::GraphSeeds::Property { key: P, values: &values }
+            };
+            if case == 4 {
+                assert!(seeded_sparse(
+                    &db, &transaction, &query, &pattern, seeds, verified.predicates(),
+                    GqlQueryPolicy::new(0, 100, 100_000, 100_000), &Trace::default(),
+                ).is_err());
+            }
+            let result = seeded_sparse(
+                &db, &transaction, &query, &pattern, seeds,
+                verified.predicates(), policy(), &Trace::default(),
+            )
+            .unwrap();
+            if case == 5 {
+                assert!(result.value.is_empty());
+            }
+            transaction.rollback_to_savepoint(&db, "before_seeded_read").unwrap();
+            let mut concurrent = WriteBatch::new(R);
+            match case {
+                0 | 4 => concurrent.set_vertex_property(VId(20), SECRET, Some(CanonicalScalar::Int(7))),
+                1 => concurrent.set_vertex_property(VId(20), P, Some(CanonicalScalar::Int(10))),
+                2 => concurrent.create_vertex(VId(30), vec![L], vec![(P, CanonicalScalar::Int(10))]),
+                3 => concurrent.set_vertex_label(VId(99), L, true),
+                5 => concurrent.create_vertex(VId(777), vec![L], vec![]),
+                6 => concurrent.set_vertex_label(VId(20), L, false),
+                7 => concurrent.add_edge(EId(70), VId(10), VId(50), vec![]),
+                _ => unreachable!(),
+            }
+            db.write(&commit, concurrent).await.unwrap();
+            let completion = transaction.commit(&mut db, &commit).await;
+            if case == 0 {
+                assert!(completion.is_ok(), "unrelated field outside completed source: {completion:?}");
+            } else {
+                assert!(
+                    completion.as_ref().is_err_and(|error|
+                        format!("{error:?}").contains("FG-LAW-FCW-READ-01")),
+                    "case {case}: a point, membership, relation or refused-read witness was lost: {completion:?}",
+                );
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

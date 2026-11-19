@@ -309,6 +309,9 @@ struct Iteration<'a> {
     scope: ScopedWrite<'a>,
     incoming: std::vec::IntoIter<GraphValueRow>,
     outer: Option<GraphValueRow>,
+    /// One immutable import row per CALL arm, independent of its local bag.
+    /// FOREACH keeps the enclosing CALL frame instead of creating a new one.
+    arguments: Option<std::sync::Arc<GraphValueRow>>,
     member: usize,
     body_at: usize,
     body_running: bool,
@@ -340,6 +343,16 @@ impl<'a> GraphWriteChainCursor<'a> {
         }
     }
 
+    /// Lexical arguments for the task most recently emitted by `next`.
+    /// Hosts retain this admitted frame through that task's native reads and
+    /// post-write projections. A child CALL shadows even with an empty row;
+    /// its input and outer tail execute with the parent's frame.
+    pub fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.iterations
+            .last()
+            .and_then(|iteration| iteration.arguments.clone())
+    }
+
     pub fn next<E: From<GraphIntegerError>>(
         &mut self,
         rows: &mut Option<Vec<GraphValueRow>>,
@@ -358,10 +371,15 @@ impl<'a> GraphWriteChainCursor<'a> {
             // Reserve the live frame before moving its input or growing the
             // stack. A child shares the host's cumulative scratch allowance.
             control(ScratchEntry)?;
+            let arguments = match scope {
+                ScopedWrite::Foreach(_) => self.call_arguments(),
+                ScopedWrite::UnitCall(_) | ScopedWrite::ReturningCall(_) => None,
+            };
             self.iterations.push(Iteration {
                 scope,
                 incoming: rows.take().ok_or_else(invalid)?.into_iter(),
                 outer: None,
+                arguments,
                 member: 0,
                 body_at: 0,
                 body_running: false,
@@ -454,8 +472,9 @@ impl<'a> GraphWriteChainCursor<'a> {
                                     &mut iteration.restored,
                                     control,
                                 )?;
-                                // Empty UNION output removes only this outer
-                                // occurrence, after every arm's effects ran.
+                                // Empty UNION output removes this occurrence
+                                // or null-extends it for OPTIONAL CALL, only
+                                // after every arm's effects ran.
                                 iteration.outer = None;
                             }
                         }
@@ -551,6 +570,21 @@ impl<'a> GraphWriteChainCursor<'a> {
                                 value => value.copy_with_control(control)?,
                             };
                             values.push(value);
+                        }
+                        if collection.is_none() {
+                            // Local rows may be projected away or become empty.
+                            // Retain the imports separately, admitting every
+                            // copied payload and allocation before the body runs.
+                            control(ScratchEntry)?;
+                            let mut arguments = Vec::new();
+                            for value in &values {
+                                control(ScratchEntry)?;
+                                arguments.push(value.copy_with_control(control)?);
+                            }
+                            control(ScratchEntry)?;
+                            iteration.arguments = Some(std::sync::Arc::new(
+                                GraphValueRow::from_owned_values(arguments),
+                            ));
                         }
                         control(ScratchEntry)?;
                         *rows = Some(vec![GraphValueRow::from_owned_values(values)]);

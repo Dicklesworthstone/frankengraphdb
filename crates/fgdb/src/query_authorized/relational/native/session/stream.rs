@@ -21,6 +21,10 @@ pub use aggregate::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedSendAggregateCursor,
 };
 
+#[path = "stream/asynchronous.rs"]
+mod asynchronous;
+pub use asynchronous::AuthorizedAsyncRowCursor;
+
 #[path = "stream/ordered.rs"]
 mod ordered;
 pub use ordered::{
@@ -47,6 +51,13 @@ impl<'q, Clock> Shared<'q, Clock> {
 }
 type Pull<'q, Row> = Box<dyn FnMut() -> Result<(Option<Row>, bool), QueryError> + 'q>;
 type SendPull<'q, Row> = Box<dyn FnMut() -> Result<(Option<Row>, bool), QueryError> + Send + 'q>;
+type AsyncPull<'q, Row> = Box<
+    dyn FnMut(
+            &mut core::task::Context<'_>,
+        ) -> core::task::Poll<Result<(Option<Row>, bool), QueryError>>
+        + Send
+        + 'q,
+>;
 type Opened<'q, Row, Metadata, Driver = Pull<'q, Row>> =
     Result<(AuthorizedRowCursor<'q, Row, Driver>, Metadata), QueryError>;
 
@@ -191,6 +202,46 @@ where
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, (self.state != VertexScanState::Open).then_some(0))
+    }
+}
+
+impl<'q, Row> AuthorizedRowCursor<'q, Row, AsyncPull<'q, Row>> {
+    // Rows and aggregates share one cancellation/ownership transition. Taking
+    // both guards into the future makes dropping a pending pull terminal: no
+    // half-advanced source can be resumed under a recovered session pin.
+    async fn next_async(&mut self) -> Result<Option<Row>, QueryError> {
+        if self.state != VertexScanState::Open {
+            return Ok(None);
+        }
+        self.state = VertexScanState::Failed;
+        let mut guard = self.guard.take();
+        if let Some(guard) = &mut guard {
+            guard.armed = true;
+        }
+        let mut driver = self.driver.take().expect("open cursor owns driver");
+        let result = core::future::poll_fn(|context| driver(context)).await;
+        match result {
+            Ok((value, finished)) => {
+                if let Some(guard) = &mut guard {
+                    guard.armed = false;
+                }
+                if finished || value.is_none() {
+                    self.state = VertexScanState::Exhausted;
+                } else {
+                    self.state = VertexScanState::Open;
+                    self.driver = Some(driver);
+                    self.guard = guard;
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let result = Err(error);
+                if let Some(guard) = &mut guard {
+                    guard.armed = terminal(&result);
+                }
+                result
+            }
+        }
     }
 }
 impl<Row, Driver> FusedIterator for AuthorizedRowCursor<'_, Row, Driver> where

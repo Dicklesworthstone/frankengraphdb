@@ -101,8 +101,11 @@ async fn difference_inner(
     let after = CommitSeq(after);
     let changes = match definition {
         Definition::Text(text) => {
-            let (mut session, _) =
-                ordered::in_generation(&generation, read_session(cx, db, token)).await?;
+            let (mut session, _) = ordered::in_generation(
+                &generation,
+                read_session_at(cx, db, token, &[Some(before), Some(after)]),
+            )
+            .await?;
             let _operation = generation.enter().map_err(Refusal::from)?;
             let result = session
                 .native
@@ -111,9 +114,17 @@ async fn difference_inner(
             result.map_err(difference_refusal)?
         }
         Definition::Prepared(prepared) => {
-            let (mut session, template) =
-                ordered::in_generation(&generation, read_prepared_session(cx, db, token, prepared))
-                    .await?;
+            let (mut session, template) = ordered::in_generation(
+                &generation,
+                prepared::read_prepared_session_at(
+                    cx,
+                    db,
+                    token,
+                    prepared,
+                    &[Some(before), Some(after)],
+                ),
+            )
+            .await?;
             let _operation = generation.enter().map_err(Refusal::from)?;
             let result = session
                 .native

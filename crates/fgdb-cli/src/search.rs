@@ -134,6 +134,10 @@ impl SearchFlags {
         "--graph-weight",
     ];
 
+    pub(super) const fn as_of(&self) -> Option<CommitSeq> {
+        self.as_of
+    }
+
     /// Every flag but `--vector-property` (one per coordinate) is given once.
     pub(super) fn set(&mut self, flag: &str, value: &str) -> Result<(), Failure> {
         fn once<T>(slot: &mut Option<T>, value: T, flag: &str) -> Result<(), Failure> {

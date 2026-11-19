@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-12 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-16 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,975 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Automatic symbol allocation and local schema administration — qualification pending
+
+Native commit `057bb8b3682391301ab49849dcd63cb8e91a06e9` adds
+`Database::register_symbol_names` to the existing durable catalog owner. Explicit
+bindings and floors are merged privately, automatic requests are sorted and
+deduplicated by namespace/name, and the entire extension publishes through one
+ordinary schema transaction. Returned bindings are available only after success.
+
+Before allocating a new name, the owner authenticates complete retained Chronicle
+history and reserves every numeric label, relationship type and property key it
+has used, including removals, deleted elements, counters, escrow properties and
+numeric writes since an earlier registration. It does not infer unused IDs from
+the current graph. Unavailable or explicitly retired origin history refuses new
+allocation. An already-bound request remains a no-op without that census.
+The cost is proportional to retained history for new automatic names; ordinary
+graph writes gain no additional history scan.
+
+The CLI exposes `schema` for current/historical metadata inspection and atomic
+registration with mixed `NAME` and `NAME=ID` declarations. `--if-current` checks
+the real writer's frontier before effects. `--as-of` is read-only and incompatible
+with registration flags. `create --persist-bindings` also accepts name-only
+declarations. Robot output uses existing row framing with kind/name/id columns,
+an exact selected/committed sequence, and decimal-string wide integers for IDs
+above the signed 64-bit range. Inspection reads authenticated catalog metadata,
+without requiring resident graph payloads.
+
+Five native regression sources cover canonical/native-width allocation, real
+query use, deleted numeric history, compaction/reopen, intervening numeric writes,
+atomic refusal, idempotence, retired history and cancellation. Four process-level
+CLI sources cover name-only creation, later writes/reads without flags, guarded
+registration, historical catalogs, compaction/reopen, deleted IDs, conflicts,
+exhaustion, input-mode refusal, Unicode/escaped names and full-width output.
+
+Independent source review completed. Local changed-source Rustfmt and whitespace
+checks passed before the execution environment disconnected. The final GitHub
+files reconstruct the reviewed logical patches against their immutable base,
+preserving base formatting rather than guessing the unavailable formatted bytes.
+Exact-anchor reversal and GitHub blob readback verify that reconstruction; the
+robot schema and expected JSON rows parse. These are source checks, not a Rust
+compiler or runtime verdict. Compiler checks, runtime regressions, final-tree
+Rustfmt, Clippy, UBS, the full mandatory gate and exact-tree proof remain
+**UNRUN**. Earlier pinned asupersync compiler processes received SIGKILL; this session's
+smaller attempt was interrupted before first-party
+diagnostics, and the executor subsequently became unavailable.
+
+`fgdb-7r8sy` remains in progress. General DDL, constraints, durable index
+lifecycle, multi-coordinate catalogs, and automatic interning within graph writes
+remain outside this increment. The unavailable executor also prevents the
+normal Beads export helper; this entry records qualification without claiming a
+closed bead or a passing gate.
+
+### Server sessions resolve durable names at their selected snapshots — qualification pending
+
+Startup discovery landed in `0e8ecd25d0b8373c394d37064ffaf672ae78a0ec`.
+The server merges persisted label, relationship-type and property-key names with
+explicit operator declarations; exact redeclarations are harmless and conflicts
+refuse. Current and historical sessions bind and hydrate graph results with the
+catalog at their selected cut. Requests spanning incompatible name maps refuse.
+
+Prepared reads and writes retain their effective name map. Data commits and
+allocation-floor changes remain compatible; a changed mapping returns `Conflict`
+and requires preparation again. FGP and Bolt explicit transactions pin names at
+BEGIN. Deferred Bolt RETURN also retains its catalog through output admission
+and checks compatibility under the writer before publication.
+
+HTTP schema discovery reads the current authorized view and masks names by token
+scope. Subscription registration uses the live catalog; a later incompatible
+mapping explicitly invalidates the retained definition. Configured Beacon indexes
+resolve durable names before binding, and a startup frontier check rejects a
+publication change between metadata discovery and full opening.
+
+Regression sources cover startup conflicts, historical and prepared reads,
+ordinary/batch/conditional/explicit/prepared writes, Bolt graph metadata and
+deferred-write refusal, HTTP masking, and subscription invalidation. Edited
+server sources pass Rustfmt and diff checks. The workspace formatting check
+reports existing drift in unchanged native/schema sources; those sources are
+not reformatted here. Compiler/runtime results, Clippy, UBS and exact-tree
+qualification remain pending. General schema DDL, constraints, index lifecycle
+and multi-coordinate catalogs remain open under `fgdb-7r8sy`.
+
+### CLI resolves durable names at the selected snapshot — qualification pending
+
+The CLI now discovers persisted label, relationship-type and property-key names
+before preparing local queries, writes, transactions, CSV imports, loads and
+searches. `create --persist-bindings` explicitly registers supplied flags and
+bindings-file declarations through the native schema transaction. Existing
+flag-only creation keeps sequence zero; a nonempty registration consumes its own
+commit sequence. Exact redeclarations are harmless, conflicting names or IDs
+refuse, and extra declarations supplied to a read stay local to that invocation.
+
+A native `SymbolCatalogReadView` retains only the authenticated immutable catalog
+and selected frontier. Its current-publication path does not materialize graph
+payloads. Ordinary opening retains the existing interrupted-publication recovery
+and live-writer arbitration behavior. Buffered and direct sealed CLI profiles
+select a current-only metadata opener that refuses lagging or unavailable
+publication without a resident graph fallback.
+
+Historical binding uses the existing bounded, comment-aware temporal selector
+parser and native UInt64 parameter rules. Certificate replay selects names at the
+certificate's retained snapshot. Diff and ordered transaction requests that
+would share one resolver across different visible catalogs explicitly refuse;
+floor-only changes do not cause that refusal. Ordinary reader and writer opens
+check the selected frontier before executing or emitting output. Direct sealed
+readers pin their existing as-of argument to that frontier. A concurrent
+publication therefore cannot silently pair a prepared resolver with another
+current generation.
+
+Existing pure input and plan validation still completes before a deferred
+metadata-open failure takes precedence. This preserves missing-database refusal
+ordering for malformed CSV, invalid batch rows, unsupported buffered plans and
+bad analytics arguments. Catalog conflicts and incompatible selected cuts remain
+immediate errors. Ordinary metadata discovery may finish recovery of an already
+committed publication before later input validation refuses a command; the
+refused command contributes no new graph effects.
+
+Regression sources cover cross-process discovery for named graph reads and
+writes, streamed and buffered reads, compaction/reopen, historical names and
+certificate replay, conflict refusal, ephemeral declarations, old creation
+behavior, and a deterministic concurrent-publication import race. Native tests
+exercise current, pinned and historical metadata, damaged graph payloads,
+interrupted publication and strict bounded-host admission; GQL tests cover
+selector syntax, comments, types and limits. Compiler checks, runtime tests,
+Rustfmt, Clippy, UBS and exact-tree qualification remain **UNRUN** because the
+execution environment is unavailable. Independent source review and exact-base
+blob reconstruction are recorded separately from executable qualification.
+
+General schema DDL and constraints, index lifecycle and multi-coordinate catalog
+behavior remain open under `fgdb-7r8sy`. This increment makes the durable name
+catalog directly usable from the local CLI; it does not close that broader owner.
+
+### Durable symbol catalogs share Chronicle and Strata publication — qualification pending
+
+The native embedded owner now registers immutable label, relationship-type and
+property-key names with `Database::register_symbols`. A registration merges
+explicit native-width bindings and caller-supplied allocation floors; identical
+declarations are a no-op and conflicting names or IDs refuse before publication.
+This does not infer allocation floors from unnamed numeric IDs in existing graph
+data and does not allocate new symbol IDs on a caller's behalf.
+
+Each accepted extension is one existing Schema delta in the ordinary
+capsule/marker transaction stream. Its immutable registered catalog and transition
+objects become durable before D1. Admission checks the exact existing predecessor
+marker, before root/epoch, coordinate and immutable successor; neither object
+names a future assigned commit sequence. FGSM V4 pins the selected catalog beside
+the partition root. Catalog-free manifests keep their V3 bytes, and V2/V3 decode
+with no catalog.
+
+Normal writes, full replay, checkpoint suffix recovery, read-only and sealed
+reads, compaction and adjacency-run publication carry the same catalog generation.
+Pinned views keep their names. Historical name selection hides later bindings and
+retains conservative allocation floors. Synchronous historical preparation uses
+the exact admitted schema generation, including floor-only epochs; explicit
+origin history materialization rebuilds that cache before replacing the retained
+window. Ordinary prepared writes remain subject to FCW; read-dependent
+transactions and refresh/rebase paths may conservatively refuse after a schema
+change. No broader schema-compatibility claim is made.
+
+Scrub re-verifies the selected catalog and all retained capsule-referenced
+transitions and before/after catalog roots through the ordinary authenticated
+storage path. Missing or damaged schema dependencies fence the handle, including
+historical objects needed by full recovery. Catalog objects are immutable
+transaction dependencies, not graph blocks that derived-data repair can invent.
+
+Eight native regression functions cover named GQL reads without external bindings,
+pins/history, idempotence/conflict, normal and full reopen, floor-only historical
+preparation, nine post-D2 publication stages, three pre-marker crash boundaries,
+forged apply-basis refusal, missing/corrupt schema objects, nonzero-epoch creation
+and incremental composition, and standing-view initialization. New standing views
+start at the selected catalog epoch; a later schema transition still requires an
+explicit rebuild. Eight codec, manifest and storage tests cover canonical bounds,
+Unicode/u64 IDs, conservative
+floors, epoch/coordinate refusal, legacy bytes and authenticated kind separation.
+All new test execution, compiler checks, final Rustfmt, Clippy, registry-check,
+UBS and exact-tree qualification remain **UNRUN** because the execution
+environment is unavailable. Independent source review and exact-base patch/blob
+reconstruction are complete; JavaScript registry transcript checks do not replace
+the Rust registry gate.
+
+This is the name-catalog subset of `fgdb-7r8sy`; schema constraints, general DDL,
+index lifecycle and multi-coordinate catalogs remain open.
+
+### Write CALL scope imports survive every mutation phase — qualification pending
+
+Commit `07dfae3ba3e8711aff2612ab860f1d32633ef546` extends explicit and wildcard
+scope imports through write-bearing CALL bodies: WITH, aggregation and DISTINCT,
+CREATE and mutation selection, node/edge MERGE, FOREACH, and nested unit,
+returning, optional and UNION calls. Each native invocation retains its metered
+immutable argument frame. FOREACH inherits it; nested CALL scopes shadow it and
+restore the enclosing frame on completion or error. Typed Arguments and
+RestoreArguments stay in the existing algebra and executor. Legacy importing
+WITH retains ordinary projection lifetime.
+
+Three GQL and five native regression functions cover the mutation phases,
+duplicate/NULL inputs, empty aggregates, nested scopes, late refusal and atomic
+rollback. The change is committed directly on main and mirrored to master.
+Independent source review and exact-base reconstruction are complete. Compiler,
+runtime tests, final formatting, Clippy, UBS and exact-tree qualification remain
+**UNRUN** after executor disconnection. Broader parser and write-CALL owners remain
+open; this is an unqualified source increment.
+
+### Read CALL scope imports survive WITH — qualification pending
+
+Explicit `CALL (x, ...)` and wildcard `CALL (*)` read subqueries retain
+their imported variables across inner WITH projections, DISTINCT, grouping and
+ordering. The compiler restores missing names from that invocation's immutable
+Apply argument frame through the existing relational operators. Imports are
+reattached after aggregation or DISTINCT rather than becoming implicit grouping
+keys, preserving the single aggregate row over empty input and each duplicate
+outer occurrence.
+
+Nested scopes use their own argument frames, including empty scopes, and restore
+the enclosing scope on return. Legacy importing WITH keeps its existing ordinary
+projection lifetime. A same-name pass-through of an imported column is legal;
+rebinding it to a computed value or aggregate is rejected before catalog access.
+Imported names remain available to ORDER BY after DISTINCT, while a truly dropped
+local ordering key retains the existing refusal. Hidden property and expression
+columns stay behind the visible schema and have their offsets shifted together.
+The new restore stage contributes to template identity and definition depth and
+uses existing execution work, scratch and cancellation controls.
+
+Five focused GQL regression functions and one native integration regression cover
+scope boundaries, NULLs and duplicate rows, empty aggregates, ordered collections,
+graph identities, redeclaration preflight on empty inputs, wildcard/explicit
+template identity, exact budget refusal, pinned snapshots, staged writes and
+capability masking. Independent source review corrected an imported-variable
+DISTINCT ordering edge and a test value's boxed-list type. Compiler/runtime tests,
+final formatting, Clippy, UBS and exact-tree qualification remain UNRUN after the
+execution environment disconnected during dependency compilation.
+
+Read CALL uses its actual Apply frame. The newer write-scope increment above
+adds native invocation-frame integration across mutation phases. The broader
+`fgdb-w5-parsers-nje` and `fgdb-unit-write-call-z7amx` work remains open.
+
+### Bolt explicit write output admission — qualification pending
+
+The explicit write-transaction adapter now keeps graph serialization, retained
+cursor capacity accounting and complete RUN SUCCESS admission inside the native
+checked-output callback. It uses the shared graph serializer's measured owned
+capacities instead of scanning the result again after native authority checks.
+Column copies, summary construction, metadata traversal and encoding spend the
+same cumulative signed work allowance as the statement.
+
+The callback reserves the statement completion summary, including maximum-width
+integer counter slots, before exposing the private cursor. After native success,
+actual counters replace those scalar slots and zero counters are removed without
+growing retained allocations. This conservative reservation can refuse a very
+small frame limit even when the eventual short counters would fit. Failure in
+serialization, frame admission, retained capacity, signed work or live authority
+drops the taken transaction and its complete unpublished prefix. No result cursor
+is returned before the native final checks succeed.
+
+Regression sources cover exact RUN metadata bounds, one-byte-over refusal with
+whole-prefix rollback, retained capacity and counter preservation, cumulative
+signed work, and authority retirement during metadata admission. The tight RUN
+frame test drives the production connection directly; it does not claim a
+demonstrated socket-level exploit. Scoped formatter execution, compiler/runtime
+tests, Clippy, UBS and exact-tree proof have no completed passing verdict: the
+execution environment disconnected during dependency compilation. Source review
+and exact-base reconstruction are complete; this is an unqualified source
+increment. The broader Bolt profile beads remain open
+(`fgdb-roadmap-bolt-v2-vb6e`, `fgdb-w10-bolt-a0s`).
+
+### Autocommit read graph output retains its selected snapshot — qualification pending
+
+Native commit `5c249eb4` adds `AuthorizedReadSession::query_with_graph_output`.
+The query, trusted host conversion and graph metadata reads share one signed
+execution permit and the exact bound snapshot, including historical selectors.
+The shared output boundary also serves explicit read transactions. User rows
+are reserved once before conversion; metadata spends cumulative node/work limits
+and an additional native work/scratch ceiling without becoming another user
+row. Field, label and both-endpoint masks apply before catalog access or copying.
+Late authority, cancellation and swallowed metadata failures prevent delivery
+and pending cache publication.
+
+The Bolt autocommit adapter uses this boundary and the existing checked graph
+serializer for nodes, relationships, paths and nested values. Complete RECORD
+and RUN SUCCESS sizes are admitted before RUN succeeds. The older per-field
+metadata queries are removed. Historical output and completion bookmarks use
+the selected sequence, while each independent autocommit statement still
+receives its own allowance. Unsatisfied-bookmark errors retain the selected
+source generation before frontier validation, including recovery during a
+partial send or pending flush.
+
+Four native regression sources cover historical/pinned metadata, cumulative
+node/work/row limits, opaque host error mapping and late expiry. Three TCP
+sources cover signed hydration limits, masked historical graph values across
+later writes, exact bookmarks and oversized records before RUN SUCCESS;
+existing recovery-output tests also cover autocommit bookmark failures.
+Scoped pinned Rustfmt and whitespace checks pass. Compiler/runtime, Clippy,
+UBS and exact-tree qualification are still pending.
+This increment does not complete durable output retention or the full Bolt
+compatibility profile.
+
+### Wildcard correlated read imports — qualification pending
+
+The read compiler now accepts `CALL (*)` and `OPTIONAL CALL (*)`, expanding
+the caller's visible variables through the existing explicit-import Apply and
+UNION operators. Hidden boundary columns remain private. Write-bearing CALL
+already accepted wildcard imports; nested read bodies now use the same spelling
+inside atomic write chains. Focused regression sources cover duplicate and NULL
+occurrences, empty scopes and inputs, nested/optional/UNION bodies, malformed
+imports, canonical-plan and budget parity, pinned and staged graph reads,
+capability masking, reopen and complete rollback on late result-limit failure.
+Scoped pinned Rustfmt and whitespace checks passed for that wildcard increment;
+its runtime qualification remains pending. Read CALL import lifetime and
+redeclaration enforcement are added by the newer scope increment above.
+Write-bearing CALL lifetime parity is added by the newer write-scope increment
+above; broader conformance remains open.
+
+### Bolt read transactions retain native authority — qualification pending
+
+The 2026-11-14 Bolt read adapter retains `AuthorizedReadTransaction` across
+BEGIN, RUN and COMMIT. Read-mode BEGIN and Read-only grants select this owner;
+write-mode BEGIN with Write or ReadWrite authority retains the existing native
+writer. Each read RUN uses the original immutable snapshot and cumulative signed
+input, work, node and delivered-row allowances. The host's statement ceiling
+also applies. A structured temporal selector must resolve to the BEGIN basis.
+There is no database lock between messages.
+
+Graph values, including nested lists, maps, relationships and paths, are hydrated
+through `query_with_graph_output` under the original permit and masks. Metadata
+does not count as another user row or statement. The shared Bolt encoder admits
+actual owned capacities, complete RECORD sizes, transaction cursor retention and
+the RUN SUCCESS frame before native final delivery. Failures discard the owner
+and all provisional cursors. COMMIT consumes the native owner and rechecks live
+authority/cancellation, returning the original snapshot bookmark without a new
+commit sequence.
+
+Data-dependent failures now retain the source recovery-generation fence through
+physical writes and flushes. Read and write BEGIN retain their exact selected
+generation before basis-dependent bookmark refusals. Only typed recovery and
+unavailable controls and unknown write completion are generation independent; successful publication cannot be
+turned into a retryable precommit failure. The read owner and its graph output
+stay pinned while independent FGP writes advance the head. Durable transaction
+leases, reattachment, full Bolt V2 and full SSI remain outside this increment.
+Autocommit reads now use the same native output boundary through their
+per-execution ReadSession, as described in the newer autocommit increment above.
+
+Six added regression functions cover signed metadata-node and user-row budgets,
+concurrent FGP writes with frozen/masked graph cursors, original bookmarks,
+oversized graph output before RUN success, statement and temporal limits, live
+authority at an unused owner's close, and recovery fencing for source-derived
+query and read/write BEGIN failures at unwritten, partially written and pending
+flush boundaries. Independent native/API and adapter source reviews completed.
+The executor disconnected before final Bolt formatting, static scanning, compilation
+or runtime checks, so those gates remain **UNRUN**. The prior 58-test protocol
+result excludes the server adapter and is not Bolt qualification. The recovered
+sources were reviewed through GitHub; no passing integrated-tree claim is made.
+
+### Optional write subqueries and graph-output admission — qualification pending
+
+The 2026-11-14 write-bearing `OPTIONAL CALL` increment uses the existing native
+write-chain owner. A returning body that produces no rows preserves each outer
+occurrence with NULL exports, after all UNION arms complete. Body effects remain
+staged even if its later filters remove every result. Duplicate and NULL outer
+values retain their occurrence semantics; typed graph export domains are
+preserved. Unit bodies accept OPTIONAL as redundant. Nested calls and preceding
+or following reads and writes retain the existing transaction owner. Errors,
+cancellation, authority and budget refusals propagate without null extension.
+
+The ordinary `Database::query_write`, native transaction and server prepared
+write paths all reach the same compiler. Parser regressions and six native
+integration scenarios cover public dispatch, UNION, unit/nested calls, empty
+input, aggregates, durable effects and reopen, rollback preserving a staged
+prefix, preflight refusals, cumulative creation/result limits and late expiry.
+[The README](README.md#writing-optional-subqueries--qualification-pending)
+shows a writing optional subquery.
+
+The original eight-file working patch passed pinned scoped Rustfmt, whitespace
+checks and independent source review. Static UBS exited 1: its sole critical
+report is the integration-test helper's intentional panic on an unexpected query
+failure (632 warnings and 211 informational findings were also reported). No
+suppression or gate change was made. After the executor disconnected, the reviewed
+patches were recovered through GitHub; reconstructed test formatting has not been
+rechecked, so the earlier checks are not a final-tree verdict. Compilation,
+runtime and Clippy remain UNRUN under the foundation build failure and outage.
+
+Commit `cdc19771` separately adds
+`AuthorizedReadTransaction::query_with_graph_output` and the bounded
+`AuthorizedReadOutput` metadata interface. Trusted host conversion can hydrate
+graph values from the original immutable snapshot under the original owning
+Read permit. Existing field/label and both-endpoint masks apply before catalog
+access and copying. Metadata calls spend cumulative signed work and node limits;
+a shared output-phase evaluator bound limits their work and scratch independently
+of the statement evaluator. A swallowed metadata refusal still closes the owner.
+Only successful final delivery publishes pending exact-count cache entries.
+
+Native metadata regression sources cover concurrent graph changes, masked labels
+and properties, graph identity hydration, hidden endpoints, cumulative
+limits, missing catalog entries, swallowed errors and pin release. The committed
+API passed scoped Rustfmt, whitespace checks and independent source review.
+Its static UBS scan exited 1 on the already-reviewed diagnostic-enum equality
+false positive. Native runtime and full integrated qualification remain UNRUN.
+
+### Marker clocks and supplied predecessor identity — qualification pending
+
+Commit `c0671b7` validates committed time and supplied global predecessors in
+Chronicle admission and both retained and streaming recovery. The first marker
+must have positive commit HLC, each successor must strictly advance it, and a
+history ending at `u64::MAX` cannot accept a successor. A supplied `prev_global`
+must match both the immediately preceding marker OID and commit sequence; no
+predecessor is valid at genesis. Existing writers and histories that use the
+optional `None` representation remain supported. No durable encoding changed.
+
+Invalid proposals leave commit sequence, heads and allocation floors untouched
+and refuse before capsule D1 publication. Regression sources include exact-link
+and clock failures, exhaustion across reopen, and fully rehashed on-disk
+corruptions rejected by complete and checkpoint-prefix recovery. Complete
+corruption is not truncated as an incomplete tail. Scoped pinned Rustfmt,
+whitespace checks and static UBS passed (0 critical findings). Runtime tests and
+Clippy remain UNRUN because the pinned foundation build was SIGKILLed before
+first-party compilation. This increment does not supply the normative root,
+predecessor-population or HLC evidence owners.
+
+### Cumulative read-only transactions and allocation floors — qualification pending
+
+Source added 2026-11-14 implements an explicit native read owner in `eb3c3e7`
+and a connection-scoped FGP adapter. `Database::begin_authorized_read` and the
+matching pinned-view method admit Read credentials, then retain one snapshot
+and one owning Warden `ReadAccess` permit. Sequential requests use the existing
+selector, compiler and masked native executor. Original input, execution, nodes,
+rows and checked output spend cumulative signed limits; per-statement native
+policy remains separate. A statement never renews the permit or borrows a past
+request's context. Different bound temporal cuts refuse before source access.
+
+FGP `BEGIN_READ_TRANSACTION` (`0x0037`) and Rust
+`Client::begin_read_transaction` use the existing transaction handles and
+provisional result/completion machines. Client-side wrong-mode admission sends
+nothing; a raw Write request aborts the server owner. Read-only completion must
+be `ReadClosed` at the original basis with the exact statement count. Closing
+allocates no commit sequence. Other writers can advance independently, and
+recovery fences both physical rows and source-dependent errors from the old
+generation. The client transaction regression helpers were also moved out of
+the accidentally unclosed production `server_error` function and back into
+their test module. This repairs compilation structure and test registration;
+transport-feature runtime execution is still unqualified.
+
+Native regression sources cover scoped Read credentials, stable snapshots,
+cumulative node/work/row limits, pre-conversion row admission, swallowed meter
+failures, temporal selection, cancellation, expiry, retirement, clock rollback,
+unwind and pin release. Adapter sources add four TCP scenarios, client mode and
+completion-forgery cases, and generation-fenced row/error delivery. Row admission
+does not publish pending exact-count caches; only final successful output does.
+The [Fabric protocol](docs/FABRIC_PROTOCOL.md#explicit-read-only-transactions)
+documents the API and bounds. Durable leases, reattachment, outcome lookup and
+full SSI remain outside this increment; the broader transaction and FGP beads
+remain open.
+
+Chronicle commit `c6eacb2` independently protects committed allocation floors.
+Both retained and streaming marker validators reject a decrease in either vertex
+or edge counters, preserve floors across legacy counter-less markers, and update
+their constant-size state only after all admission checks succeed. Engine reopen
+uses that validated floor. Regression sources include pre-D1 refusal, later CAS
+failure, exhausted counters, fully rehashed corrupt logs, complete recovery and
+checkpoint-prefix recovery. No durable encoding changed. This does **not** solve
+the separate CREATE RETURN / rollback / reopen first-escape reservation gap;
+`fgdb-w2-id-allocator-3kd` and `fgdb-w2-escape-bindings-qcp` remain open.
+
+Validation on the pinned toolchain: `cargo test --locked -p fgdb-protocol --lib
+--test protocol` passed **41 unit and 17 integration tests**. That default-feature
+run excludes transport and therefore proves neither client nor server runtime
+behavior. Scoped Rustfmt and whitespace checks passed. Static UBS passed for the
+Chronicle repair. The native-owner scan exited 1 on a reviewed false positive
+comparing diagnostic error enums. The adapter scan also exited 1: its eight
+critical reports concern existing public binding equality, binary frame-header
+test assertions and an unreachable constant nonzero-construction panic. Those
+were reviewed as false positives; neither scan is reported as a green gate.
+Static scanning is not runtime qualification.
+
+The restored combined production check was SIGKILLed in pinned `asupersync`
+before first-party compilation, both with the repository frontend scheduling
+and with one compiler frontend thread. A distinct normal-profile Chronicle test
+attempt without server TLS features was also killed there. No dependency pin,
+source, test profile or assertion setting was changed to obtain a passing gate.
+Native/Chronicle/GQL/server runtime tests, Clippy and complete integrated-tree
+qualification remain **UNRUN**. These terminal build observations supersede the
+earlier interrupted-build report below. The final HTTP regression file was also
+rechecked with pinned Rustfmt after the executor returned.
+
+### Atomic HTTP transactions and OPTIONAL CALL — qualification pending
+
+Source added 2026-11-14 in `ad50728` and `84d5aac` implements two bounded surface
+features through the existing native transaction and relational owners.
+
+`POST /v1/databases/<name>/transaction` accepts 1–32 independently parameterized
+Read/Write statements. Later statements see earlier staged effects, while the
+original capability, basis and cumulative allowances remain in force. All input
+adaptation precedes BEGIN; all result conversion and admission of the complete
+typed JSON response precede the sole COMMIT. Retention includes JSON escaping
+and a reservation for maximum completion counters. A definite earlier failure
+discards the unpublished workspace and exposes no successful prefix. Native
+unknown completion remains unknown, and physical response bytes retain the
+original recovery-generation fence. Read-only scripts still require write
+authority because this endpoint owns a write-capable transaction; read-only
+credentials use `/query-batch`. The full request, response, limits and curl
+example are in [the Fabric protocol](docs/FABRIC_PROTOCOL.md#atomic-http-transaction-scripts).
+
+Inline returning read-only `OPTIONAL CALL` and named optional procedures lower
+through native Optional Apply. Empty invocations preserve each caller occurrence
+and null-extend only exported columns. A procedure's attached `YIELD ... WHERE`
+belongs inside optional evaluation; an explicit following `WITH ... WHERE`
+filters the completed row. Existing typed identities, imports, aggregation,
+UNION, host errors, capability masking and cumulative cancellation/resource
+controls remain owned by the native operators. Optional write bodies are added
+by the later write-chain increment above. Wildcard scope imports for read-only
+CALL and full language conformance remain outside this read increment.
+[The README](README.md#optional-subqueries-and-procedures--qualification-pending)
+shows the syntax.
+
+Committed regression sources cover HTTP staged visibility, one completion,
+rollback, empty/net-zero writes, cumulative and escaped output limits,
+authorization, input cancellation and recovery fences; query sources cover
+empty results, duplicates, parallel edges, NULL correlation, aggregate/UNION
+semantics, procedure filtering and errors, cumulative limits, cancellation,
+private transaction topology, pinned snapshots, certificate replay and masked
+authorized results. The late arithmetic HTTP regression preserves the existing
+native `execution` class (HTTP 500), including a data-dependent mutation failure.
+
+Qualification is incomplete. Pinned Rustfmt and whitespace checks passed for
+the two feature checkpoints. Scoped static UBS over the four changed HTTP Rust
+files exited 0 with 0 critical findings, 285 warnings and 55 informational
+findings; it ran with `--no-cargo` and is not runtime evidence. Whole-workspace
+`cargo fmt --check` exited 1 on pre-existing formatting differences.
+
+The pinned `nightly-2026-08-31` toolchain and `cargo fetch --locked` completed.
+`cargo check --locked -p fgdb-gql -p fgdb -p fgdb-server -p fgdb-cli --lib --bins`
+was still compiling dependencies (last observed: `nix` and `num-bigint`) when
+the execution environment became unavailable. No terminal compiler verdict was
+received. Changed-source compilation is interrupted/unqualified; targeted
+runtime tests, Clippy, full workspace tests and exact-tree proof remain
+**UNRUN**, and the final documentation/test-expectation update could not be
+rechecked locally. No passing integrated-tree verdict is claimed. The existing
+`fgdb-w10-adapters-b1f` and `fgdb-w5-parsers-nje` beads remain open with their
+original broader scope and blockers.
+
+### Explicit no-effect writes retain write completion — qualification pending
+
+Source updated 2026-11-14 preserves the compiler's write classification when
+an authorized explicit statement selects no rows or emits no intents. After
+successful statement and output admission, the native owner retains an empty
+canonical prepared template if no write is already prepared. Subsequent reads
+cannot downgrade it to `ReadClosed`; completion validates the original read
+and absence observations, binds the authorization decision, and publishes once
+through the existing Chronicle path. Public empty `WriteBatch` admission and
+ordinary read-only completion retain their existing contracts.
+
+Regression sources cover empty MATCH mutations with and without RETURN,
+empty UNWIND creation, later reads and real writes, exactly one committed
+sequence with unchanged graph data, signed decision persistence on reopen,
+rollback/drop/output refusal, and a concurrent insertion into the previously
+empty selection. Independent source review, pinned Rustfmt for the changed
+files and whitespace checks passed. Compilation, runtime tests and complete
+exact-tree qualification remain pending under shared-host resource pressure.
+`fgdb-w2-txn-lifecycle-mhae` remains open.
+
+The same review identified a separate unresolved first-escape gap under
+`fgdb-w2-escape-bindings-qcp`: provisional engine identities are allocated in
+memory, and their counter floor is persisted only by a later engine commit.
+CREATE RETURN followed by rollback and immediate close/reopen can therefore
+reissue the provisional identity. This is source-traced, not yet a runtime
+verdict. It requires an ordered, recoverable allocation reservation before
+escape; the existing transaction snapshot and graph atomicity must survive
+that reservation. No durable first-escape guarantee is claimed by this slice.
+
+### Capability-scoped point mutations — qualification pending
+
+Source updated 2026-11-14 routes both returning and nonreturning mutation
+continuations through the canonical seeded overlay selector under narrowed
+capabilities. The selector applies visibility masks before expansion, declines
+hidden seed properties and retains its existing fallback and transaction
+observations. Point-target SET/REMOVE continuations no longer require full
+incidence and property authority to avoid admitting the unrelated graph.
+
+The focused regression covers property roots, earlier staged creation and
+rekeying, returning and nonreturning mutations, equal-key hidden vertices,
+hidden properties, and identical accounting across 8- and 128-vertex visible
+populations. It also checks exact allowances and atomic rollback one work unit
+below the measured requirement. Independent source review, pinned Rustfmt for
+the changed files, and whitespace checks passed. Runtime and exact-tree
+qualification remain pending; no performance or full-SSI claim is made.
+The existing `fgdb-2acff` and `fgdb-cpny9` work remains open.
+
+### Managed FGP transaction batches — qualification pending
+
+The Rust client's `execute_transaction_batch` and callback-based counterpart
+compose the existing explicit transaction owner for 1–32 independent Read/Write
+statements. All modes, values and complete transaction request envelopes are
+admitted against the negotiated frame limit before BEGIN, including selector
+overhead. The server retains the original signed authority, cumulative native
+limits and staged own-write visibility. No new wire operation or commit lane
+is introduced.
+
+Collected results become available only after a validated native completion.
+Streaming callbacks carry statement indexes and the original basis; all remain
+provisional until the final completion. A rejected statement-end callback rolls
+back the drained owner before another statement or commit. Existing row/schema
+rejection uses cancellation and terminal draining. A guard fences active
+ownership on future drop or unwind; unconfirmed rollback cannot leave the
+connection available for another operation. Once COMMIT is attempted, the
+driver sends no rollback or retry and preserves unknown completion.
+
+Regression sources cover mixed statements, independent typed arguments, exact
+negotiated-envelope admission before BEGIN, late local and server refusals,
+callback rollback, cleanup fencing and missing or invalid commit receipts.
+Source review is separate from execution evidence. Compilation, Rustfmt,
+Clippy, UBS, runtime tests and exact-tree qualification remain **UNRUN**: the
+workspace disk was full, then the executor disconnected during dependency
+setup before a compiler process was acknowledged. The existing
+`fgdb-w2-txn-lifecycle-mhae`, `fgdb-w10-fgp-core-5b1` and
+`fgdb-w10-result-machines-eh7` work remains open. This is the connection-scoped
+local transaction subset, without durable leases, reattachment, outcome lookup
+or full SSI.
+
+
+### Transaction dependencies and subscription wire bounds — qualification pending
+
+The first ordinary graph read in an authorized native transaction now retains
+the canonical transaction source even before any mutation has been staged.
+Both ordinary pattern selection and factorized endpoint selection therefore
+keep the existing positive and absence observations for final validation.
+A concurrent change after the last statement can no longer evade that native
+validation through the former immutable-source fallback. This preserves the
+existing conservative conflict profile; it does not establish full SSI or
+new commit-refusal noninterference.
+
+Subscription delivery now caps each fragment by encoded bytes, row count and
+cumulative value nodes. The subscription codec exposes entry costs through the
+same result-row cost owner. A schema and first row that fit in separate frames
+are sent separately; a row that cannot fit by itself remains a typed refusal.
+The original flow-credit, cancellation, signed-weight and frontier owners
+continue to govern delivery.
+
+FGP explicit transactions retain the execution generation while sending an
+ordinary statement or definite commit refusal. Recovery before the first byte
+replaces the stale diagnostic with a recovery terminal; recovery after partial
+output closes the transport. OutcomeUnknown and recovery/unavailability
+terminals remain independent of the invalidated generation, so a completed
+write cannot be presented as a retryable statement failure.
+
+Regression sources cover changed and absent read dependencies before the first
+write, read-close and staged-write completion, MERGE endpoint phantoms and a
+label-domain-disjoint control; subscription frame/node/entry boundaries and
+schema separation; and blocked or partial transaction refusal delivery.
+Independent source/API reviews completed. The local executor disconnected
+during validation. Final-tree compilation, runtime tests, Rustfmt, Clippy, UBS
+and full exact-tree qualification remain **UNRUN**. These repairs do not close
+`fgdb-w2-txn-lifecycle-mhae`, `fgdb-w4-ssi-witnesses-jds`,
+`fgdb-w10-fgp-core-5b1` or `fgdb-w10-result-machines-eh7`.
+
+The CLI now exposes this driver as `remote transaction --statements-file`.
+Its complete regular UTF-8 JSON array contains 1–32 explicitly classified
+read/write statements with independent typed arguments. Controlled parsing,
+input/value bounds and client frame admission precede credentials. The command
+rejects unrelated input, read-mode, conditional-write and prepared-mode flags.
+
+Columns and rows flush without collecting the full answer and carry an
+explicit provisional marker plus a one-based statement index; columns retain
+the original basis sequence. Only the final `transaction` result asserts
+write-commit or read-close completion. Original output failures are retained.
+Unknown completion produces no success or rollback claim, while output failure
+after a validated receipt retains the known sequence and forbids automatic
+replay. Established-connection transport failures keep the I/O exit class.
+
+The CLI regression sources exercise literal robot/human output, empty results,
+full-width and fresh parameters, late refusals, callback cancellation with END
+in flight, exact negotiated frame boundaries, lost completion and failed final
+flush. Parser controls cover malformed late input, finite count and byte/value
+bounds, and cancellation. The independent robot schema freeze is extended for
+the transaction fields; its previously missing prepared-batch description is
+also reconciled with the already implemented contract. Source/API review and
+JSON parsing of the embedded schema completed. All Rust compilation, runtime
+tests and repository gates remain **UNRUN** under the executor failure above.
+
+### Consistent prepared read batches across FGP and the CLI — qualification pending
+
+Source added 2026-11-14 exposes `EXECUTE_PREPARED_READ_BATCH` (0x002d)
+and the Rust client's collected and callback APIs. One connection-owned
+prepared read accepts 1–32 fresh argument sets. The server attaches the frozen
+template once to one authorized native read session and executes all sets
+through its existing prepared-batch owner. Ordinary reads share the session's
+pin; explicit temporal arguments retain their selected cuts. Every set shares
+the same cumulative signed allowance.
+
+Handle ownership, read-rights precedence, release/refresh invalidation and
+database-generation fences apply. Complete execution, conversion and wire
+admission finish before the first schema or row. Later binding, quota or
+representability failures expose no successful prefix. Existing batch result
+framing, flow credit, cancellation and terminal draining remain the delivery
+owner. Unsupported peers or refused requests never trigger independent reads
+or an automatic retry.
+
+The CLI selects this operation explicitly with `remote --prepared-batch
+--rows-file <path> query <statement>`. Complete JSON/CSV and typed-value
+admission, the 32-set limit and both request envelopes are checked before
+credentials or connection creation. The first set supplies representative
+structural types for one PREPARE; every execution supplies its own complete
+values. The flag requires buffered reads, is mutually exclusive with
+`--consistent-batch`, and uses the same indexed output and one final
+`read_batch` terminal. Raw consistent batches retain their existing semantics.
+Parameterized rows-file JSON now uses the controlled parser so cancellation
+also reaches input parsing.
+
+Regression sources cover exact wire and aggregate value bounds, fresh binding,
+current/historical cuts, scoped visibility, cumulative budgets, late refusal
+without a successful prefix, foreign/released/refreshed handles, callback
+cancellation, recovery before send and while credit-blocked, JSON/CSV CLI
+requests, failed output, and local rejection before credential access.
+Independent protocol, server and CLI source/API reviews completed; the embedded
+robot schema parses as JSON. Before these changes, the pinned compiler ran
+**37 core unit tests and 17 protocol integration tests** on an immutable
+baseline. Those results do not validate this implementation. The executor
+disconnected before changed-source compilation; compilation, Rustfmt, Clippy,
+UBS, new runtime tests and full exact-tree qualification remain **UNRUN**.
+The broader `fgdb-w10-fgp-core-5b1`, `fgdb-w10-result-machines-eh7` and
+`fgdb-5jyok` work remains open.
+
+### Capability-scoped seeded lookups over staged writes — qualification pending
+
+Source added 2026-11-14 removes the all-fields/all-incidence restriction from
+eligible identity- and property-seeded write continuations. Narrowed write
+chains and mutation sources can follow carried vertex identities or visible
+property roots without admitting the unrelated visible graph. This includes
+relational continuations after UNWIND or staged hybrid retrieval. The existing
+immutable-read closure now shares one borrowed-source interface with the
+canonical transaction overlay; masking, connected closure discovery and GLA
+evaluation have one implementation.
+
+The overlay resolves staged winners and tombstones before admission, so
+earlier CREATE, SET, rekey and DELETE effects are visible without reviving
+basis rows. Label, relation and endpoint masks apply before expansion;
+property masks apply before values reach the evaluator. Reverse, undirected
+and bounded quantified traversals use the same visible closure. A lazy
+incidence index over staged edge coordinates avoids rescanning every staged
+edge at every reached vertex. Hidden seed properties and unsupported
+definitions retain ordinary masked admission.
+
+Point absence, property membership and relation-gap observations are retained
+before source probes. A property observation completes only after successful
+evaluation; refusal, cancellation and savepoint rollback retain the existing
+conservative conflict dependencies. Native budgets and the original signed
+permit continue through every continuation. Physical hidden-source probes
+only poll, while visible admission and execution consume their existing
+allowances. This remains the native bounded conflict-checking profile, not a
+claim of complete SSI or a whole-process memory bound.
+
+Three regression sources compare seeded answers against complete masked
+admission, clean versus hidden graphs, staged rekeys/deletions and forward/
+reverse/undirected/quantified traversal; check exact and one-less native
+thresholds and every signed interruption boundary; exercise post-read
+concurrent point, membership, relation and absence conflicts plus savepoint
+rollback; and run a public narrowed write chain with an initial CREATE and
+successive SETs across 8- and 128-vertex populations, including full rollback
+on late refusal. Source/API review completed independently. Changed-source
+compilation, formatting, Clippy, UBS, runtime tests and exact-tree
+qualification remain **UNRUN** after the executor disconnect described above.
+The broader `fgdb-2acff`, `fgdb-cpny9` and
+`fgdb-authorized-staged-hybrid-w7g9p` work remains open.
+
+### Explicit FGP native transactions — qualification pending
+
+Source added 2026-11-13 under `fgdb-w2-txn-lifecycle-mhae` and
+`fgdb-w10-fgp-core-5b1`. FGP now connects BEGIN, transactional execution,
+COMMIT and ROLLBACK to the existing `AuthorizedWriteTransaction`. One Ready
+connection owns one private workspace, original signed permit and recovery
+generation. It holds no database lock between requests. Graph/set reads and
+exact terminal aggregates observe earlier staged writes; other connections
+see only committed state. Native scope, source/work/scratch, result-row,
+creation, mutation and statement allowances remain cumulative.
+
+The wire uses additive tags 0x002e–0x0036, following the independently added
+prepared-read-batch tag 0x002d. Provisional rows have distinct transaction
+chunk/end frames with a connection-owned handle, one-based statement ordinal
+and exact delivered row count. Existing autocommit encodings are unchanged.
+The Rust client exposes collected and callback-based execution, validates
+every result and terminal binding, and reports durable completion only after
+the correct handle, original basis and completed statement count agree.
+An empty owner may read-close; it cannot claim a committed write.
+
+The dispatcher takes ownership before fallible operations and restores it only
+after the complete provisional result was delivered. Statement refusal,
+cancellation, frame/value admission failure, disconnect, drain and recovery
+discard the unpublished prefix. Cancellation of the latest completed stream
+also aborts its retained owner, covering callback rejection after END was
+already sent. Idle recovery wakes the connection and releases the owner.
+Unrelated business requests and credential refresh are Busy while a
+transaction is active, preserving the same authority and allowance.
+
+COMMIT consumes the owner before awaiting native publication. Subscription
+notification follows completion and writer-lock release. No late recovery
+fence turns a committed write into a retryable refusal: it produces
+OutcomeUnknown or closes the transport, and the client never replays it.
+The native scoped binder is shared with Bolt, preserving its classification
+and error mapping. Negotiated schema/row admission covers ordinary and exact
+aggregate output before native statement success.
+
+Regression sources add three body laws, six client laws, four native owner
+laws and four real TCP laws, plus the existing phase/direction test extension.
+They cover exact bytes, malformed/truncated bodies, shared node bounds,
+provisional delivery, own-writes, one publication, rollback/drop, cumulative
+limits, mode/handle isolation, callback cancellation including a deterministic
+post-END cancel, stale basis and ambiguous completion. Independent source/API
+reviews and whitespace inspection completed. The pinned compiler was located,
+but the executor disconnected during dependency setup before compilation.
+Compilation, Rustfmt, Clippy, UBS, runtime tests and the full exact-tree proof
+remain **UNRUN**. Broader lifecycle and FGP beads remain open.
+
+This is the connection-scoped local transaction subset. Durable ownership
+leases, restart/reattachment, durable outcome lookup, full SSI, general
+historical writer reads and non-catalog transaction procedure hosts remain
+separate. Concurrent basis advancement retains native conservative refusal
+and native final conflict validation.
+
+### FGP value and write-result admission — qualification pending
+
+The protocol codec now shares one value-node allowance across each complete
+request or result body. Encoder admission matches the decoder for nested
+lists/maps, packed identity vectors and paths, including parameters spread
+across batch records. Collection decoding refuses a declared count that cannot
+fit the remaining node allowance before reserving member storage. Row-cost
+measurement exposes both encoded bytes and value nodes to chunk assembly;
+zero-weight subscription entries refuse symmetrically.
+
+Raw, prepared and exact-frontier conditional FGP writes admit their complete
+RETURN schema and every delivered row against the negotiated frame limit
+inside the existing checked native write owner, while rollback is still
+available. The same signed permit pays the existing conversion/codec work.
+Schemas and rows are admitted separately, allowing a schema-only first frame.
+Ordinary result chunks respect both the row-count and cumulative value-node
+ceilings. A defensive framing refusal reached after a committed write reports
+OutcomeUnknown, with no automatic retry. Cancellation and transport failure
+continue to govern delivery and do not establish rollback.
+
+Five protocol regression sources cover exact and one-over node boundaries
+across nine request bodies and four output bodies, literal row costs, early
+collection refusal and nonzero subscription weights. A collector regression
+covers independent schema/row thresholds and unchanged work. Three TCP
+regression sources cover raw/prepared/conditional rollback, freshly rebound
+parameters, stale-frontier precedence, a late oversized row with zero result
+prefix, exact-size schema-separated delivery, LIMIT 0 and durable reopen.
+
+Source review and independent boundary arithmetic are complete. Compilation,
+Rustfmt, Clippy, UBS, runtime tests and full exact-tree qualification remain
+UNRUN because the execution environment disconnected after its workspace disk
+filled. This bounded work belongs to `fgdb-w10-fgp-core-5b1` and
+`fgdb-w10-result-machines-eh7`; neither broader bead is closed.
+
+### Heterogeneous consistent read batches from the CLI — qualification pending
+
+Source added 2026-11-12 for `fgdb-5jyok.1` exposes the existing
+`EXECUTE_READ_STATEMENTS` operation as `fgdb remote query-batch
+--statements-file reads.json`. A finite JSON array supplies 1–32 independent
+read texts and typed parameter maps. Ordinary reads share one pinned native
+session and one cumulative signed allowance; historical selectors keep their
+own cuts. Each result retains its own schema, one-based statement index and
+exact sequence. The existing `read_batch` robot terminal confirms the entire
+delivery, with no new result framing.
+
+Complete regular-file, controlled JSON, typed-value and encoded-frame admission
+precedes credential access and connection. Output failure uses the existing
+cancel-and-drain owner. Refused or unsupported operations never fall back to
+independent reads. Existing parameterized consistent batches share the same
+delivery implementation and retain their human and robot output.
+
+Eight regression sources cover flags, independent parameter domains, malformed
+late input, raw and encoded size bounds, cancellation during JSON parsing,
+different schemas and historical cuts, refusals, and failed output delivery.
+Changed-file pinned formatting and whitespace checks pass; independent source
+review found and corrected a JSON-parser cancellation gap. Production-only
+static UBS checking reports zero critical findings (65 warnings
+and 111 informational findings in the selected files). Compilation and
+runtime qualification remain pending after the pinned asupersync compiler
+was SIGKILLed before first-party compilation in ordinary and serial/no-debug
+checks. This source change does not claim a passing workspace gate.
+
+### Heterogeneous consistent read batches over FGP — transport qualification pending
+
+Source added 2026-11-13 exposes the existing native mixed-statement read batch
+through `EXECUTE_READ_STATEMENTS` (0x002c). The Rust client provides
+`execute_read_statements` and `execute_read_statements_streaming` for 1–32
+independent read texts, parameter maps and result schemas. Ordinary current
+reads share one pinned session; explicit historical selectors retain their
+individual cuts. All reads share the same cumulative signed execution allowance.
+
+The request uses the existing authorized batch executor and result delivery
+owner. Native execution and whole-answer wire preflight finish before the
+first schema or row; a later execution/preflight refusal exposes no successful
+prefix. Streaming refers to delivery of that buffered result. Existing flow
+credit, cancellation/draining, authority and database-generation fences apply.
+Structural non-read modes refuse before dispatch; write-spelled read text
+cannot mutate. The client and decoder both enforce one body-wide value-node
+allowance across every statement. Existing frame encodings are unchanged;
+older servers reject the new request without a client fallback.
+
+Three codec regressions cover fixed bytes, truncated/trailing payloads,
+count/mode/parameter rules and exact cumulative node admission. Five TCP
+regression sources cover mixed schemas and historical cuts, masking, shared
+budgets, late errors, connection reuse, flow windows and callback cancellation.
+The pinned core protocol suite passes **32 unit tests and 17 protocol tests**
+with one test thread; core protocol Clippy with `-D warnings`, changed-file
+formatting and whitespace checks pass. The optional transport/client and
+server compilation and TCP execution remain **UNRUN** after the pinned
+asupersync compiler was SIGKILLed in both ordinary and reduced-memory builds.
+Full workspace and exact-tree qualification remain open. This closes a native
+SDK entry-point gap, without claiming explicit FGP transactions or full FGP
+conformance.
+
+### Capability-scoped maintained analytics — qualification pending
+
+Source added 2026-11-12 for `fgdb-scoped-maintained-analytics-s047k` connects
+the existing component, core and triangle maintainers to capability-projected
+subscription inputs. Connected, weakly connected and strongly connected
+components, core numbers, triangles and clustering coefficients can now
+register through native and server subscription owners under narrowed label,
+relation and property scopes, within their existing maintained profiles.
+
+Scoped registrations always compile the selected row topology, including
+isolated visible vertices and both endpoint masks. They never use privileged
+direct graph sources. Resource preflight accounts for the complete projected
+circuit. Selected maintainers validate and bootstrap at the capability-visible
+frontier, so hidden history does not change their public sequence or make the
+parent frontier inconsistent. Unsupported procedures and profiles still refuse
+before source access. Existing polling authority, replay, ACK and cleanup owners
+remain in force.
+
+The six-algorithm server regression compares literal expected answers, deltas,
+frontiers and registration reservations across clean and hidden-data databases.
+It covers hidden prehistory and later hidden-only commits, reciprocal/parallel
+edges, isolates, deletion, insertion, and physical endpoint deletion versus
+loss of its permitted label. It also checks budgets and changed/expired tokens.
+Pinned formatting of changed Rust files and independent source/API review pass. The pinned compiler
+was SIGKILLed inside unchanged `asupersync`, before first-party compilation;
+runtime tests, Clippy and exact-tree qualification remain UNRUN.
+
+### Authorized hybrid retrieval over staged writes — qualification pending
+
+Source added 2026-11-12 for `fgdb-authorized-staged-hybrid-w7g9p` connects
+`CALL hybrid.search` to the canonical authorized transaction overlay. Text,
+vector and materialized graph retrieval observe earlier CREATE, SET and DELETE
+effects, and returned vertex identities can feed later writes in the same
+statement. All authorized write-source families share the adapter.
+
+Vertex, property, relation and endpoint masks apply before corpus statistics,
+vector validation and routing, or graph expansion. Native work, scratch and
+source limits share the original signed permit and retain the first typed
+refusal. Private search rows do not consume the final delivery allowance.
+The surrounding statement owns rollback and its single final publication.
+Explicit indexed and demand graph profiles refuse before overlay acquisition;
+this adapter does not substitute a materialized scan for those requests.
+
+Source extended 2026-11-13 requires exact vector retrieval: explicit ANN
+requests refuse before source acquisition because these private rows can feed
+later mutation. The retained permit is revalidated after result conversion.
+
+Regression sources cover staged multimodal retrieval, hidden malformed data,
+exact native and signed resource boundaries, private rows with zero public
+allowance, rollback under LIMIT 0, and live capability expiry. The FGP
+conditional-write regression covers create/search/update, stale-frontier
+rejection and late result errors without publication. Further FGP regressions
+cover raw and freshly rebound prepared write chains; Bolt explicit transactions
+cover staged text, vectors, topology, property hydration, commit, rollback and
+failed-transaction reset after a refused search profile.
+
+Pinned-nightly formatting of the changed Rust files and whitespace checks pass.
+Workspace formatting reports existing differences in untouched files. Two
+focused build attempts, including single-job compilation without debug info or
+incremental state, were SIGKILLed in the pinned asupersync dependency before
+first-party compilation. Product compilation, runtime tests, Clippy, UBS and
+exact-tree qualification remain **UNRUN**; the bead stays in progress.
 
 ### UNION inside write-bearing CALL — qualification pending
 
@@ -65,9 +1034,10 @@ construction, retains the native table witnesses, and charges the same live
 write permit throughout source admission, projection, kernel work and private
 row conversion. The complete-source mutation collector preserves optional seeded
 reads and feeds the existing simultaneous proposal reducer; computed-map fields
-retain their individual authorization checks. Catalog calls retain their scoped owner. Authorized staged
-hybrid procedures remain unavailable; a selected procedure error never retries
-through a privileged host. Only final statement rows spend delivery allowance.
+retain their individual authorization checks. Catalog calls retain their scoped
+owner. Authorized staged hybrid procedures now use the masked Beacon adapter
+described above; a selected procedure error never retries through a privileged
+host. Only final statement rows spend delivery allowance.
 
 Six native and eight authorized regression sources cover literal staged BFS and
 weighted shortest-path results, earlier body effects, creation and MERGE from
@@ -344,7 +1314,8 @@ Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e` and
 `fgdb-w2-txn-lifecycle-mhae`. The Bolt adapter now composes the native
 `AuthorizedWriteTransaction` owner across BEGIN, RUN and COMMIT.
 Write/default BEGIN with signed Write or ReadWrite rights opens a writer;
-read-only grants and read mode retain the existing pinned read session.
+read-only grants and read mode retain the native read owner described above
+(added 2026-11-14).
 
 Each accepted statement stages into the same private workspace. Later graph/set
 and exact terminal aggregate reads see earlier staged effects, while other
@@ -380,11 +1351,12 @@ the exact-tree proof remain **UNRUN**; whole-workspace formatting also reports
 pre-existing differences. The broader roadmap beads remain open.
 
 This is a bounded local owner, not durable reattachment or full Bolt V2.
-Explicit writer reads use the native graph/set and exact aggregate subset;
-non-catalog procedure hosts and historical/branch forms refuse and discard
-the staged prefix. Explicit read mode retains the
-broader committed-snapshot reader. Concurrent basis advancement retains the
-native conservative refusal, and full SSI remains separate.
+Explicit writer reads use native graph/set, exact aggregates, catalog calls and
+supported staged fnx/hybrid hosts. Historical and branch forms outside the
+native writer's basis contract refuse and discard the staged prefix. Explicit
+read mode uses the retained committed-snapshot owner described above. Concurrent
+write-basis advancement retains the native conservative refusal, and full SSI
+remains separate.
 See `docs/bolt-autocommit-writes.md` for the protocol boundary.
 
 ### Correlated COLLECT subqueries — qualification pending
@@ -653,8 +1625,8 @@ Compilation, runtime tests and exact-tree formatting/Clippy/UBS/full proof are
 **UNRUN** because dependency compilation was killed by resource exhaustion and
 the executor became unavailable before product validation.
 
-This is a local native API. The Bolt adapter above uses this owner. FGP explicit
-write adapters, durable ownership leases, reattachment and full SSI remain
+This is a local native API. The Bolt adapter and the explicit FGP adapter above
+use this owner. Durable ownership leases, reattachment and full SSI remain
 separate work; the lifecycle roadmap bead remains open. Ambiguous commit outcomes retain their native meaning and
 are never automatically replayed.
 

@@ -1,18 +1,20 @@
 //! A finite typed file is admitted before authentication. Writes become one
 //! atomic native batch; queries reuse one prepared read on one connection.
-//! Every read has its own current or explicitly selected snapshot and complete
-//! output block, in file order. The server owns binding, authority and budgets.
+//! Ordinary prepared reads complete independently. Consistent read batches
+//! share one pinned session and allowance, with one final output completion.
+//! The server owns binding, authority and budgets.
 //! Refusals never retry, reprepare or switch execution modes.
 
-use super::{Failure, Json, emit, failure, parameter, parse_json};
+use super::{Failure, Json, emit, failure, parameter};
 use asupersync::Cx;
 use asupersync::io::AsyncReadExt;
 use fgdb_gql::csv_parameters::{CsvParameterLimits, decode_csv_parameters};
 use fgdb_gql::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters};
 use fgdb_protocol::MAX_HEADER_LEN;
 use fgdb_protocol::body::{
-    Body, ExecuteBatch, ExecuteMode, MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS,
-    Outcome, PreparedReadMode, WireValue,
+    Body, Execute, ExecuteBatch, ExecuteMode, ExecutePreparedReadBatch, ExecuteReadStatements,
+    MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS, MAX_READ_BATCH_STATEMENTS,
+    Outcome, Prepare, PrepareMode, PreparedHandle, PreparedReadMode, WireValue,
 };
 use fgdb_protocol::client::{CLIENT_MAX_FRAME, Client, ClientError};
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
@@ -22,6 +24,164 @@ use std::path::Path;
 /// Bounds raw input separately from the complete encoded request. The
 /// negotiated peer limit can be smaller; the client enforces it before send.
 const MAX_INPUT_BYTES: usize = CLIENT_MAX_FRAME as usize;
+
+/// Read a finite file before credentials or transport are acquired. Metadata
+/// and actual bytes both enforce the bound, including a file growing mid-read.
+pub(super) async fn read_input(cx: &Cx, path: &Path, flag: &str) -> Result<Vec<u8>, Failure> {
+    cx.checkpoint().map_err(Failure::io)?;
+    let named = asupersync::fs::metadata(path)
+        .await
+        .map_err(|_| Failure::io(format!("cannot inspect {flag}")))?;
+    if !named.is_file() {
+        return Err(Failure::usage(format!("{flag} must be a regular file")));
+    }
+    let mut file = asupersync::fs::File::open(path)
+        .await
+        .map_err(|_| Failure::io(format!("cannot open {flag}")))?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|_| Failure::io(format!("cannot inspect {flag}")))?;
+    if !metadata.is_file() {
+        return Err(Failure::usage(format!("{flag} must be a regular file")));
+    }
+    if metadata.len() > MAX_INPUT_BYTES as u64 {
+        return Err(Failure::usage(format!("{flag} exceeds 1048576 bytes")));
+    }
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        cx.checkpoint().map_err(Failure::io)?;
+        let capacity = buffer.len().min(MAX_INPUT_BYTES - bytes.len() + 1);
+        let count = match file.read(&mut buffer[..capacity]).await {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(Failure::io(format!("cannot read {flag}"))),
+        };
+        if count == 0 {
+            break;
+        }
+        if count > MAX_INPUT_BYTES - bytes.len() {
+            return Err(Failure::usage(format!("{flag} exceeds 1048576 bytes")));
+        }
+        bytes.try_reserve(count).map_err(Failure::io)?;
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    cx.checkpoint().map_err(Failure::io)?;
+    Ok(bytes)
+}
+
+/// Heterogeneous reads retain separate texts and argument maps. They use the
+/// server's native batch operation; never a loop of independent read calls.
+pub(super) struct ReadStatements {
+    body: ExecuteReadStatements,
+}
+
+impl ReadStatements {
+    pub(super) fn parse(
+        input: &str,
+        mut checkpoint: impl FnMut() -> Result<(), Failure>,
+    ) -> Result<Self, Failure> {
+        checkpoint()?;
+        if input.len() > MAX_INPUT_BYTES {
+            return Err(Failure::usage("--statements-file exceeds 1048576 bytes"));
+        }
+        let json = fgdb_protocol::json::parse_json_controlled(
+            input,
+            super::MAX_JSON_VALUES,
+            super::MAX_JSON_TOKEN_BYTES,
+            |_| checkpoint(),
+        )
+        .map_err(|error| match error {
+            fgdb_protocol::json::JsonParseError::Invalid(_) => {
+                Failure::usage("--statements-file must contain one valid JSON array")
+            }
+            fgdb_protocol::json::JsonParseError::Interrupted(error) => error,
+        })?;
+        checkpoint()?;
+        let Json::Array(records) = json else {
+            return Err(Failure::usage(
+                "--statements-file must contain a JSON array",
+            ));
+        };
+        if records.is_empty() || records.len() > MAX_READ_BATCH_STATEMENTS {
+            return Err(Failure::usage(format!(
+                "--statements-file needs 1..={MAX_READ_BATCH_STATEMENTS} reads"
+            )));
+        }
+        let mut statements = Vec::new();
+        statements
+            .try_reserve_exact(records.len())
+            .map_err(Failure::io)?;
+        for (index, record) in records.into_iter().enumerate() {
+            checkpoint()?;
+            let at = index + 1;
+            let Json::Object(mut fields) = record else {
+                return Err(Failure::usage(format!("read {at} must be an object")));
+            };
+            let Some(Json::String(statement)) = fields.remove("statement") else {
+                return Err(Failure::usage(format!(
+                    "read {at} needs a statement string"
+                )));
+            };
+            if statement.trim().is_empty() {
+                return Err(Failure::usage(format!("read {at} has an empty statement")));
+            }
+            let arguments = fields.remove("parameters");
+            if !fields.is_empty() {
+                return Err(Failure::usage(format!(
+                    "read {at} accepts only statement and parameters fields"
+                )));
+            }
+            let parameters = match arguments {
+                Some(arguments) => parameters(arguments, at, &mut checkpoint)?,
+                None => Vec::new(),
+            };
+            statements.push(Execute {
+                mode: ExecuteMode::Read,
+                statement,
+                parameters,
+            });
+        }
+        checkpoint()?;
+        let body = ExecuteReadStatements { statements };
+        // The codec applies one value-node allowance to the WHOLE body, as
+        // well as per-read limits. The Ready header has its own wire charge.
+        let encoded = body.encode().map_err(Failure::usage)?;
+        if encoded.len() > (CLIENT_MAX_FRAME as usize).saturating_sub(MAX_HEADER_LEN) {
+            return Err(Failure::usage(
+                "read statements exceed the client frame limit; they were not sent",
+            ));
+        }
+        drop(encoded);
+        checkpoint()?;
+        Ok(Self { body })
+    }
+
+    pub(super) async fn read(cx: &Cx, path: &Path) -> Result<Self, Failure> {
+        let bytes = read_input(cx, path, "--statements-file").await?;
+        let input = core::str::from_utf8(&bytes)
+            .map_err(|_| Failure::usage("--statements-file must be UTF-8"))?;
+        Self::parse(input, || cx.checkpoint().map_err(Failure::io))
+    }
+
+    pub(super) async fn execute(
+        self,
+        cx: &Cx,
+        client: &mut Client,
+        robot: bool,
+        out: &mut impl Write,
+    ) -> Result<(), Failure> {
+        execute_consistent_reads(
+            cx,
+            client,
+            ConsistentReads::Statements(self.body),
+            robot,
+            out,
+        )
+        .await
+    }
+}
 
 /// A decoding schema, not a statement/capability schema. The native server
 /// still binds the resulting values and may refuse them. No values infer types.
@@ -88,8 +248,18 @@ impl PreparedBatch {
         if input.len() > MAX_INPUT_BYTES {
             return Err(Failure::usage("--rows-file exceeds 1048576 bytes"));
         }
-        let json = parse_json(input, super::MAX_JSON_VALUES, super::MAX_JSON_TOKEN_BYTES)
-            .map_err(|_| Failure::usage("--rows-file must contain one valid JSON array"))?;
+        let json = fgdb_protocol::json::parse_json_controlled(
+            input,
+            super::MAX_JSON_VALUES,
+            super::MAX_JSON_TOKEN_BYTES,
+            |_| checkpoint(),
+        )
+        .map_err(|error| match error {
+            fgdb_protocol::json::JsonParseError::Invalid(_) => {
+                Failure::usage("--rows-file must contain one valid JSON array")
+            }
+            fgdb_protocol::json::JsonParseError::Interrupted(error) => error,
+        })?;
         checkpoint()?;
         let Json::Array(records) = json else {
             return Err(Failure::usage("--rows-file must contain a JSON array"));
@@ -188,47 +358,7 @@ impl PreparedBatch {
         statement: &str,
         csv: Option<&CsvSchema>,
     ) -> Result<Self, Failure> {
-        cx.checkpoint().map_err(Failure::io)?;
-        // Refuse ordinary FIFOs/devices before opening. Recheck the opened
-        // handle and bound actual reads too; path metadata is not a byte cap.
-        let named = asupersync::fs::metadata(path)
-            .await
-            .map_err(|_| Failure::io("cannot inspect --rows-file"))?;
-        if !named.is_file() {
-            return Err(Failure::usage("--rows-file must be a regular file"));
-        }
-        let mut file = asupersync::fs::File::open(path)
-            .await
-            .map_err(|_| Failure::io("cannot open --rows-file"))?;
-        let metadata = file
-            .metadata()
-            .await
-            .map_err(|_| Failure::io("cannot inspect --rows-file"))?;
-        if !metadata.is_file() {
-            return Err(Failure::usage("--rows-file must be a regular file"));
-        }
-        if metadata.len() > MAX_INPUT_BYTES as u64 {
-            return Err(Failure::usage("--rows-file exceeds 1048576 bytes"));
-        }
-        let mut bytes = Vec::new();
-        let mut buffer = [0u8; 8192];
-        loop {
-            cx.checkpoint().map_err(Failure::io)?;
-            let capacity = buffer.len().min(MAX_INPUT_BYTES - bytes.len() + 1);
-            let count = match file.read(&mut buffer[..capacity]).await {
-                Ok(count) => count,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(Failure::io("cannot read --rows-file")),
-            };
-            if count == 0 {
-                break;
-            }
-            if count > MAX_INPUT_BYTES - bytes.len() {
-                return Err(Failure::usage("--rows-file exceeds 1048576 bytes"));
-            }
-            bytes.try_reserve(count).map_err(Failure::io)?;
-            bytes.extend_from_slice(&buffer[..count]);
-        }
+        let bytes = read_input(cx, path, "--rows-file").await?;
         let input = core::str::from_utf8(&bytes)
             .map_err(|_| Failure::usage("--rows-file must be UTF-8"))?;
         match csv {
@@ -363,32 +493,153 @@ impl PreparedBatch {
         robot: bool,
         out: &mut impl Write,
     ) -> Result<(), Failure> {
-        let sink = std::sync::Mutex::new(BatchReadOutput {
-            out,
+        execute_consistent_reads(
+            cx,
+            client,
+            ConsistentReads::Parameters(self.body),
             robot,
-            active: None,
-            completed: 0,
-            sent: 0,
-            failed: None,
-        });
-        let lock = || {
-            sink.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        };
-        let result = client
-            .execute_read_batch_streaming(
-                cx,
-                &self.body.statement,
-                self.body.argument_sets,
-                |index, seq, columns| lock().columns(cx, index, seq, columns),
-                |index, row| lock().row(cx, index, &row),
-                |index, seq, rows| lock().result_end(index, seq, rows),
-            )
-            .await;
-        sink.into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish(result)
+            out,
+        )
+        .await
     }
+
+    /// Both requests must fit before credentials are read. The handle is
+    /// fixed-width and nonzero; these placeholder bytes never leave the client.
+    /// The negotiated limit is checked again by the client before each send.
+    pub(super) fn admit_prepared_reads(&self) -> Result<(), Failure> {
+        if self.body.argument_sets.is_empty()
+            || self.body.argument_sets.len() > MAX_READ_BATCH_STATEMENTS
+        {
+            return Err(Failure::usage(format!(
+                "--prepared-batch needs 1..={MAX_READ_BATCH_STATEMENTS} argument sets"
+            )));
+        }
+        let prepare = Prepare {
+            mode: PrepareMode::Read,
+            statement: self.body.statement.clone(),
+            parameters: self.body.argument_sets[0].clone(),
+        };
+        let execute = ExecutePreparedReadBatch {
+            handle: PreparedHandle([1; 16]),
+            argument_sets: self.body.argument_sets.clone(),
+        };
+        let maximum = (CLIENT_MAX_FRAME as usize).saturating_sub(MAX_HEADER_LEN);
+        if prepare.encode().map_err(Failure::usage)?.len() > maximum
+            || execute.encode().map_err(Failure::usage)?.len() > maximum
+        {
+            return Err(Failure::usage(
+                "prepared read batch exceeds the client frame limit; it was not sent",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Prepare once, then rebind every argument set in one native read batch.
+    /// Preparing does not acquire the execution snapshot or consume a row.
+    pub(super) async fn execute_prepared_reads(
+        self,
+        cx: &Cx,
+        client: &mut Client,
+        robot: bool,
+        out: &mut impl Write,
+    ) -> Result<(), Failure> {
+        cx.checkpoint().map_err(Failure::query)?;
+        let representative = self
+            .body
+            .argument_sets
+            .first()
+            .ok_or_else(|| Failure::usage("--rows-file needs at least one argument set"))?
+            .clone();
+        let handle = client
+            .prepare_read(cx, &self.body.statement, representative)
+            .await
+            .map_err(failure)?;
+        execute_consistent_reads(
+            cx,
+            client,
+            ConsistentReads::Prepared(ExecutePreparedReadBatch {
+                handle,
+                argument_sets: self.body.argument_sets,
+            }),
+            robot,
+            out,
+        )
+        .await
+        // Closing the invocation's connection releases its prepared template.
+    }
+}
+
+enum ConsistentReads {
+    Parameters(ExecuteBatch),
+    Prepared(ExecutePreparedReadBatch),
+    Statements(ExecuteReadStatements),
+}
+
+async fn execute_consistent_reads(
+    cx: &Cx,
+    client: &mut Client,
+    request: ConsistentReads,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let label = match &request {
+        ConsistentReads::Parameters(_) | ConsistentReads::Prepared(_) => "argument set",
+        ConsistentReads::Statements(_) => "statement",
+    };
+    let sink = std::sync::Mutex::new(BatchReadOutput {
+        out,
+        robot,
+        label,
+        active: None,
+        completed: 0,
+        sent: 0,
+        failed: None,
+    });
+    let lock = || {
+        sink.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let result = match request {
+        ConsistentReads::Parameters(body) => {
+            client
+                .execute_read_batch_streaming(
+                    cx,
+                    &body.statement,
+                    body.argument_sets,
+                    |index, seq, columns| lock().columns(cx, index, seq, columns),
+                    |index, row| lock().row(cx, index, &row),
+                    |index, seq, rows| lock().result_end(index, seq, rows),
+                )
+                .await
+        }
+
+        ConsistentReads::Prepared(body) => {
+            client
+                .execute_prepared_read_batch_streaming(
+                    cx,
+                    body.handle,
+                    body.argument_sets,
+                    |index, seq, columns| lock().columns(cx, index, seq, columns),
+                    |index, row| lock().row(cx, index, &row),
+                    |index, seq, rows| lock().result_end(index, seq, rows),
+                )
+                .await
+        }
+        ConsistentReads::Statements(body) => {
+            client
+                .execute_read_statements_streaming(
+                    cx,
+                    body.statements,
+                    |index, seq, columns| lock().columns(cx, index, seq, columns),
+                    |index, row| lock().row(cx, index, &row),
+                    |index, seq, rows| lock().result_end(index, seq, rows),
+                )
+                .await
+        }
+    };
+    sink.into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .finish(result)
 }
 
 /// Holds only one result's shape and counters, never its answer bag.
@@ -396,6 +647,7 @@ impl PreparedBatch {
 struct BatchReadOutput<'a, W> {
     out: &'a mut W,
     robot: bool,
+    label: &'static str,
     active: Option<(u32, u64, usize, u64)>,
     completed: u32,
     sent: u64,
@@ -438,7 +690,8 @@ impl<W: Write> BatchReadOutput<'_, W> {
                 )
             } else {
                 format!(
-                    "argument set {statement} at seq {seq}\n{}",
+                    "{} {statement} at seq {seq}\n{}",
+                    self.label,
                     columns
                         .iter()
                         .map(|name| name
@@ -541,8 +794,8 @@ impl<W: Write> BatchReadOutput<'_, W> {
                 )
             } else {
                 format!(
-                    "completed {} argument set(s), {} row(s)",
-                    end.results, end.rows
+                    "completed {} {}(s), {} row(s)",
+                    end.results, self.label, end.rows
                 )
             };
             emit(self.out, &line)?;
@@ -722,6 +975,56 @@ mod tests {
     }
 
     #[test]
+    fn prepared_read_admission_checks_its_own_count_and_both_wire_requests() {
+        for count in [1, MAX_READ_BATCH_STATEMENTS] {
+            let input = format!("[{}]", vec!["{}"; count].join(","));
+            let batch = PreparedBatch::parse("RETURN 1", &input, || Ok(()))
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            batch
+                .admit_prepared_reads()
+                .unwrap_or_else(|error| panic!("{}", error.message));
+        }
+        // The ordinary file grammar allows more independent reads than one
+        // consistent native batch. Refuse this before reading credentials.
+        let input = format!("[{}]", vec!["{}"; MAX_READ_BATCH_STATEMENTS + 1].join(","));
+        let batch = PreparedBatch::parse("RETURN 1", &input, || Ok(()))
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let error = batch.admit_prepared_reads().expect_err("batch count bound");
+        assert_eq!(error.code, 2);
+        assert!(error.message.contains("1..=32"));
+
+        // Both encodings differ from the ordinary argument-file envelope.
+        // Exercise the fixed handle overhead with a short, unexecuted text.
+        let mut batch = PreparedBatch {
+            body: ExecuteBatch {
+                statement: "x".into(),
+                argument_sets: vec![vec![("x".into(), WireValue::Text(String::new()))]],
+            },
+        };
+        let overhead = ExecutePreparedReadBatch {
+            handle: PreparedHandle([1; 16]),
+            argument_sets: batch.body.argument_sets.clone(),
+        }
+        .encode()
+        .unwrap()
+        .len();
+        let payload = (CLIENT_MAX_FRAME as usize) - MAX_HEADER_LEN - overhead;
+        batch.body.argument_sets[0][0].1 = WireValue::Text("x".repeat(payload));
+        batch
+            .admit_prepared_reads()
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let WireValue::Text(value) = &mut batch.body.argument_sets[0][0].1 else {
+            unreachable!();
+        };
+        value.push('x');
+        assert!(batch.body.encode().unwrap().len()
+            <= (CLIENT_MAX_FRAME as usize) - MAX_HEADER_LEN);
+        let error = batch.admit_prepared_reads().expect_err("fixed handle overhead");
+        assert_eq!(error.code, 2);
+        assert!(error.message.contains("frame limit"));
+    }
+
+    #[test]
     fn every_preparation_checkpoint_can_refuse_without_a_request() {
         let source = r#"[{"name":"text:Ada","n":"int:1"},{"name":"text:Bob","n":"int:2"}]"#;
         let mut total = 0;
@@ -743,6 +1046,147 @@ mod tests {
             assert_eq!(result.err().expect("no admitted request").code, 5);
             assert_eq!(seen, stop);
         }
+    }
+}
+
+#[cfg(test)]
+mod read_statement_tests {
+    use super::*;
+
+    fn parse(input: &str) -> Result<ReadStatements, Failure> {
+        ReadStatements::parse(input, || Ok(()))
+    }
+
+    #[test]
+    fn distinct_reads_keep_their_text_and_independent_typed_parameters() {
+        let batch = parse(r#"[
+            {"statement":"RETURN $n AS count","parameters":{"n":"uint:18446744073709551615"}},
+            {"statement":"RETURN $n AS name, $m AS map","parameters":{"n":"text:λ\nAda","m":"json:{\"k\":[true,null]}"}},
+            {"statement":"RETURN 1 AS one"}
+        ]"#).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(batch.body.statements.len(), 3);
+        assert!(
+            batch
+                .body
+                .statements
+                .iter()
+                .all(|read| read.mode == ExecuteMode::Read)
+        );
+        assert_eq!(batch.body.statements[0].statement, "RETURN $n AS count");
+        assert_eq!(
+            batch.body.statements[0].parameters,
+            [("n".into(), WireValue::Count(u64::MAX))]
+        );
+        assert_eq!(
+            batch.body.statements[1].parameters[1],
+            ("n".into(), WireValue::Text("λ\nAda".into()))
+        );
+        assert!(batch.body.statements[2].parameters.is_empty());
+        assert_eq!(
+            ExecuteReadStatements::decode(&batch.body.encode().unwrap()).unwrap(),
+            batch.body
+        );
+    }
+
+    #[test]
+    fn malformed_late_reads_and_unrecognized_fields_refuse_the_complete_file() {
+        for input in [
+            "",
+            "[]",
+            "{}",
+            "[null]",
+            "[{}]",
+            "[{}]junk",
+            r#"[{"statement":7}]"#,
+            r#"[{"statement":"   "}]"#,
+            r#"[{"statement":"RETURN 1","statement":"RETURN 2"}]"#,
+            r#"[{"statement":"RETURN 1","mode":"write"}]"#,
+            r#"[{"statement":"RETURN 1"},{"statement":"RETURN $n","parameters":[]} ]"#,
+            r#"[{"statement":"RETURN 1"},{"statement":"RETURN $n","parameters":{"n":1}}]"#,
+            r#"[{"statement":"RETURN 1"},{"statement":"RETURN $n","parameters":{"n":"uint:-1"}}]"#,
+            r#"[{"statement":"RETURN 1"},{"statement":"RETURN $n","parameters":{"n":"int:1","n":"int:2"}}]"#,
+        ] {
+            assert_eq!(
+                parse(input).err().expect("whole file must refuse").code,
+                2,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_read_count_input_and_cumulative_wire_bounds_are_enforced() {
+        let record = r#"{"statement":"RETURN 1"}"#;
+        let records = vec![record; MAX_READ_BATCH_STATEMENTS].join(",");
+        assert!(parse(&format!("[{records}]")).is_ok());
+        assert!(parse(&format!("[{records},{record}]")).is_err());
+        let source = format!("[{record}]");
+        let exact = format!("{source}{}", " ".repeat(MAX_INPUT_BYTES - source.len()));
+        assert!(parse(&exact).is_ok());
+        assert!(parse(&(exact + " ")).is_err());
+
+        // Packed coordinates expand from short decimal strings to four-byte
+        // binary values. A legal raw file can exceed the whole Ready frame.
+        let values = vec!["0"; 16_384].join(",");
+        let record =
+            format!(r#"{{"statement":"RETURN $p","parameters":{{"p":"vector:{values}"}}}}"#);
+        assert!(parse(&format!("[{record}]")).is_ok());
+        let oversized = format!("[{}]", vec![record; 17].join(","));
+        assert!(oversized.len() < MAX_INPUT_BYTES);
+        let error = parse(&oversized)
+            .err()
+            .expect("whole encoded frame exceeds limit");
+        assert_eq!(error.code, 2);
+        assert!(error.message.contains("frame limit"));
+    }
+
+    #[test]
+    fn every_mixed_read_admission_checkpoint_can_cancel_before_submission() {
+        let source =
+            r#"[{"statement":"RETURN $x","parameters":{"x":"int:1"}},{"statement":"RETURN 2"}]"#;
+        let mut total = 0;
+        ReadStatements::parse(source, || {
+            total += 1;
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        for stop in 1..=total {
+            let mut seen = 0;
+            let error = ReadStatements::parse(source, || {
+                seen += 1;
+                if seen == stop {
+                    Err(Failure::io("cancelled"))
+                } else {
+                    Ok(())
+                }
+            })
+            .err()
+            .expect("cancelled input cannot be sent");
+            assert_eq!(error.code, 5);
+            assert_eq!(seen, stop);
+        }
+    }
+
+    #[test]
+    fn mixed_read_json_checks_cancellation_while_consuming_a_large_document() {
+        let source = format!(
+            r#"[{{"statement":"RETURN 1"}},{}invalid]"#,
+            " ".repeat(2 * fgdb_protocol::json::JSON_PARSE_RUN_BYTES)
+        );
+        let mut polls = 0;
+        let error = ReadStatements::parse(&source, || {
+            polls += 1;
+            if polls == 3 {
+                Err(Failure::io("cancelled during JSON parsing"))
+            } else {
+                Ok(())
+            }
+        })
+        .err()
+        .expect("interrupted before the malformed suffix");
+        assert_eq!(polls, 3);
+        assert_eq!(error.code, 5);
+        assert_eq!(error.message, "cancelled during JSON parsing");
     }
 }
 

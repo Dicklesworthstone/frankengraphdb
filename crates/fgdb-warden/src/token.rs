@@ -309,7 +309,9 @@ impl<'a> VerifiedCapability<'a> {
 
     /// Compile this verified capability's read projection into [`fgdb_policy::ReadPolicy`]
     /// when exact lowering exists without approximation.
-    pub fn to_read_policy(&self) -> Result<Option<fgdb_policy::ReadPolicy>, fgdb_policy::PolicyError> {
+    pub fn to_read_policy(
+        &self,
+    ) -> Result<Option<fgdb_policy::ReadPolicy>, fgdb_policy::PolicyError> {
         self.program.to_read_policy()
     }
 
@@ -340,6 +342,26 @@ impl<'a> VerifiedCapability<'a> {
             return Err(Error::PermissionDenied);
         }
         Ok(ExecutionPermit::new(&self.program, self._authority, now_ms))
+    }
+
+    /// Consume this verified definition into one movable read execution.
+    /// An explicit read transaction can retain this unique allowance across
+    /// statements without borrowing the definition or renewing its budgets.
+    pub fn into_read_at(
+        self,
+        branch: &str,
+        now_ms: u64,
+    ) -> Result<ExecutionPermit<'a, ReadAccess>, Error> {
+        self._authority.check_active()?;
+        self.program.check_at(branch, now_ms)?;
+        if !self.program.rights.can_read() {
+            return Err(Error::PermissionDenied);
+        }
+        Ok(ExecutionPermit::owning(
+            self.program,
+            self._authority,
+            now_ms,
+        ))
     }
 
     /// This grants an operation allowance, not authority over arbitrary

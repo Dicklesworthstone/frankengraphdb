@@ -7,9 +7,11 @@
 //! QUERY_CANCEL, PING and DRAIN are never starved by the data they control.
 
 use crate::commits::CommitWatcher;
+#[cfg(test)]
+use crate::execute::run_prepared;
 use crate::execute::{
-    Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared,
-    run_prepared_batch, subscribe, write, write_batch, write_if_current,
+    Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared_batch,
+    run_prepared_framed, subscribe, write_batch, write_framed, write_if_current_framed,
 };
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
@@ -21,7 +23,8 @@ use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
     Execute, ExecuteBatch, ExecuteConditionalWrite, ExecuteDiff, ExecuteMode, ExecutePrepared,
-    ExecutePreparedBatch, ExecutePreparedDiff, Hello, HelloAck, Outcome, Ping, Prepare, Prepared,
+    ExecutePreparedBatch, ExecutePreparedDiff, ExecutePreparedReadBatch, ExecuteReadStatements,
+    Hello, HelloAck, MAX_ROWS_PER_CHUNK, MAX_VALUE_NODES, Outcome, Ping, Prepare, Prepared,
     PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd,
     SelectDatabase, WindowUpdate, WireValue,
 };
@@ -41,6 +44,7 @@ mod difference;
 mod ordered_stream;
 mod read_batch;
 mod source_stream;
+mod transaction;
 
 /// Finished child streams whose late WINDOW_UPDATE/QUERY_CANCEL is benign: a
 /// client may grant credit for a stream the server has just ended.
@@ -137,6 +141,7 @@ enum Statement {
     Native(Execute),
     Batch(ExecuteBatch),
     ReadBatch(ExecuteBatch),
+    ReadStatements(ExecuteReadStatements),
     ConditionalWrite(ExecuteConditionalWrite),
     Difference(ExecuteDiff),
     PreparedDifference {
@@ -149,6 +154,10 @@ enum Statement {
         parameters: Vec<(String, WireValue)>,
     },
     PreparedBatch {
+        definition: Result<Arc<PreparedDefinition>, Refusal>,
+        argument_sets: Vec<Vec<(String, WireValue)>>,
+    },
+    PreparedReadBatch {
         definition: Result<Arc<PreparedDefinition>, Refusal>,
         argument_sets: Vec<Vec<(String, WireValue)>>,
     },
@@ -239,8 +248,16 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
     let mut token: Option<CapabilityToken> = None;
     let mut selected: Option<Arc<Served>> = None;
     let mut prepared_statements = PreparedStatements::default();
+    let mut active_transaction: Option<transaction::ActiveTransaction<'_>> = None;
     loop {
-        let frame = match lane.receive(cx, &waiter).await {
+        let inbound = match active_transaction.as_ref() {
+            Some(transaction) => {
+                lane.receive_transaction(cx, &waiter, transaction.generation())
+                    .await
+            }
+            None => lane.receive(cx, &waiter).await,
+        };
+        let frame = match inbound {
             Inbound::Frame(frame) => frame,
             Inbound::Closed => return,
             Inbound::Shutdown => {
@@ -250,6 +267,38 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
         };
         let header = *frame.header();
         let request = header.request_id();
+        // An explicit transaction owns one native signed allowance. Ordinary
+        // requests cannot interleave a fresh autocommit session or replace its
+        // authority; the owner remains available for explicit completion.
+        if active_transaction.is_some()
+            && !matches!(
+                header.kind(),
+                FrameKind::ExecuteTransaction
+                    | FrameKind::CommitTransaction
+                    | FrameKind::RollbackTransaction
+                    | FrameKind::Ping
+                    | FrameKind::Drain
+                    | FrameKind::WindowUpdate
+                    | FrameKind::QueryCancel
+            )
+        {
+            let binding = lane.conn.binding();
+            if lane
+                .refuse(
+                    cx,
+                    request,
+                    StreamId::CONTROL,
+                    binding,
+                    ErrorCode::Busy,
+                    "an explicit transaction is active; commit or roll it back first",
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
+            continue;
+        }
         match header.kind() {
             FrameKind::Hello => {
                 let Ok(hello) = Hello::decode(frame.payload()) else {
@@ -558,6 +607,35 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 }
                 lane.send_generation = None;
             }
+            FrameKind::BeginTransaction
+            | FrameKind::BeginReadTransaction
+            | FrameKind::ExecuteTransaction
+            | FrameKind::CommitTransaction
+            | FrameKind::RollbackTransaction => {
+                let (Some(selected), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                // Borrow the server's permanent database map, not the local
+                // Arc clone: the retained native owner borrows its issuer.
+                let Some(db) = server
+                    .databases
+                    .values()
+                    .find(|db| Arc::ptr_eq(db, selected))
+                else {
+                    return;
+                };
+                match lane
+                    .transaction_request(cx, &waiter, db, token, &mut active_transaction, &frame)
+                    .await
+                {
+                    Ok(()) | Err(Stop::Cancelled) => {}
+                    Err(Stop::Transport | Stop::Recovery(_)) => return,
+                    Err(Stop::Drain) => {
+                        lane.goodbye(cx).await;
+                        return;
+                    }
+                }
+            }
             FrameKind::Prepare => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
@@ -798,29 +876,40 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     }
                 }
             }
-            FrameKind::ExecuteReadBatch => {
+            FrameKind::ExecuteReadBatch
+            | FrameKind::ExecuteReadStatements
+            | FrameKind::ExecutePreparedReadBatch => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
                 };
-                let Ok(statement) = ExecuteBatch::decode(frame.payload()) else {
+                let (statement, malformed) = match header.kind() {
+                    FrameKind::ExecuteReadBatch => (
+                        ExecuteBatch::decode(frame.payload()).map(Statement::ReadBatch),
+                        "malformed EXECUTE_READ_BATCH",
+                    ),
+                    FrameKind::ExecuteReadStatements => (
+                        ExecuteReadStatements::decode(frame.payload())
+                            .map(Statement::ReadStatements),
+                        "malformed EXECUTE_READ_STATEMENTS",
+                    ),
+                    FrameKind::ExecutePreparedReadBatch => (
+                        ExecutePreparedReadBatch::decode(frame.payload()).map(|statement| {
+                            Statement::PreparedReadBatch {
+                                definition: prepared_statements.get(statement.handle),
+                                argument_sets: statement.argument_sets,
+                            }
+                        }),
+                        "malformed EXECUTE_PREPARED_READ_BATCH",
+                    ),
+                    _ => unreachable!("read batch request selected"),
+                };
+                let Ok(statement) = statement else {
                     return lane
-                        .fatal(
-                            cx,
-                            request,
-                            ErrorCode::Protocol,
-                            "malformed EXECUTE_READ_BATCH",
-                        )
+                        .fatal(cx, request, ErrorCode::Protocol, malformed)
                         .await;
                 };
                 match lane
-                    .execute_statement(
-                        cx,
-                        &waiter,
-                        db,
-                        token,
-                        request,
-                        Statement::ReadBatch(statement),
-                    )
+                    .execute_statement(cx, &waiter, db, token, request, statement)
                     .await
                 {
                     Ok(()) | Err(Stop::Cancelled) => {}
@@ -900,9 +989,24 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 lane.goodbye(cx).await;
                 return;
             }
-            // Only a recently finished stream can be addressed here (header
-            // validation refuses any other): its credit or cancel is moot.
-            FrameKind::WindowUpdate | FrameKind::QueryCancel => {}
+            // Credit for a finished stream is moot. A late cancellation of
+            // the latest provisional statement is not: its END may have fit
+            // the initial window before the client's callback rejected a row.
+            // TCP ordering places that cancellation before its next request.
+            FrameKind::WindowUpdate | FrameKind::QueryCancel => {
+                if header.kind() == FrameKind::QueryCancel
+                    && active_transaction.as_ref().is_some_and(|transaction| {
+                        transaction.last_stream == Some(header.stream_id())
+                    })
+                {
+                    if Empty::decode(frame.payload()).is_err() {
+                        return lane
+                            .fatal(cx, request, ErrorCode::Protocol, "malformed QUERY_CANCEL")
+                            .await;
+                    }
+                    active_transaction = None;
+                }
+            }
             FrameKind::ResultAck | FrameKind::ResultRelease => {
                 let refusal = ErrorBody {
                     code: ErrorCode::Protocol,
@@ -1187,7 +1291,31 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
-        if let Statement::ReadBatch(statement) = &statement {
+        let read_batch = match &statement {
+            Statement::ReadBatch(statement) => {
+                Some(read_batch::ReadBatchStatement::Parameterized(statement))
+            }
+            Statement::ReadStatements(statement) => Some(
+                read_batch::ReadBatchStatement::Statements(&statement.statements),
+            ),
+            Statement::PreparedReadBatch {
+                definition,
+                argument_sets,
+            } => Some(read_batch::ReadBatchStatement::Prepared {
+                definition: match definition {
+                    Ok(definition) => definition.read().ok_or_else(|| {
+                        Refusal::new(
+                            ErrorCode::Statement,
+                            "a prepared read batch requires a read handle",
+                        )
+                    }),
+                    Err(error) => Err(Refusal::new(error.code, error.message.clone())),
+                },
+                arguments: argument_sets,
+            }),
+            _ => None,
+        };
+        if let Some(statement) = read_batch {
             let delivered = self
                 .read_batch(cx, waiter, db, token, request, stream, binding, statement)
                 .await;
@@ -1343,25 +1471,36 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
+        // Deterministic output representability belongs to the private write
+        // workspace, before its sole completion. Schema and rows may occupy
+        // separate frames; current flow credit does not constrain admission.
+        let frame_budget = self.send_limits.max_frame_len() - binding.header_len() - CHUNK_OVERHEAD;
         let answer = match statement {
             Statement::Native(statement) => match statement.mode {
                 ExecuteMode::Read => read(cx, db, token, &statement).await,
-                ExecuteMode::Write => write(cx, db, token, &statement).await,
+                ExecuteMode::Write => write_framed(cx, db, token, &statement, frame_budget).await,
                 ExecuteMode::Subscribe | ExecuteMode::ReadStream | ExecuteMode::ReadOrdered => {
                     unreachable!("stream dispatched above")
                 }
             },
             Statement::Batch(statement) => write_batch(cx, db, token, &statement).await,
-            Statement::ReadBatch(_) => unreachable!("read batch dispatched above"),
+            Statement::ReadBatch(_)
+            | Statement::ReadStatements(_)
+            | Statement::PreparedReadBatch { .. } => {
+                unreachable!("read batch dispatched above")
+            }
             Statement::ConditionalWrite(statement) => {
-                write_if_current(cx, db, token, &statement).await
+                write_if_current_framed(cx, db, token, &statement, frame_budget).await
             }
             Statement::Prepared {
                 definition,
                 parameters,
                 mode,
             } => match definition {
-                Ok(definition) => run_prepared(cx, db, token, &definition, mode, &parameters).await,
+                Ok(definition) => {
+                    run_prepared_framed(cx, db, token, &definition, mode, &parameters, frame_budget)
+                        .await
+                }
                 Err(refusal) => Err(refusal),
             },
             Statement::PreparedBatch {
@@ -1650,7 +1789,9 @@ impl Lane {
                 .unwrap_or(usize::MAX)
                 .saturating_sub(framing)
                 .min(frame_budget);
-            let row_room = usize::try_from(available.rows).unwrap_or(usize::MAX);
+            let row_room = usize::try_from(available.rows)
+                .unwrap_or(usize::MAX)
+                .min(MAX_ROWS_PER_CHUNK);
             let mut size = columns.as_ref().map_or(0, |names| {
                 4 + names.iter().map(|name| 4 + name.len()).sum::<usize>()
             });
@@ -1668,12 +1809,15 @@ impl Lane {
                     .and(Err(Stop::Cancelled));
             }
             let mut part = Vec::new();
+            let mut nodes = 0;
             if size <= byte_room {
                 while part.len() < row_room {
                     let Some((_, row)) = entries.peek() else {
                         break;
                     };
-                    let Ok(len) = fgdb_protocol::body::SubscriptionBatch::entry_len(row) else {
+                    let Ok((len, entry_nodes)) =
+                        fgdb_protocol::body::SubscriptionBatch::entry_cost(row)
+                    else {
                         return self
                             .refuse(
                                 cx,
@@ -1686,7 +1830,10 @@ impl Lane {
                             .await
                             .and(Err(Stop::Cancelled));
                     };
-                    if size + len > frame_budget && part.is_empty() {
+                    // A schema and the first entry can each fit alone even
+                    // when their sum does not. Send a schema-only fragment,
+                    // then retry that entry without inventing a refusal.
+                    if len > frame_budget {
                         return self
                             .refuse(
                                 cx,
@@ -1699,10 +1846,11 @@ impl Lane {
                             .await
                             .and(Err(Stop::Cancelled));
                     }
-                    if size + len > byte_room {
+                    if len > byte_room - size || entry_nodes > MAX_VALUE_NODES - nodes {
                         break;
                     }
                     size += len;
+                    nodes += entry_nodes;
                     part.extend(entries.next());
                 }
             }
@@ -1830,9 +1978,16 @@ impl Lane {
                     Err(Stop::Transport)
                 }
             }
-            FrameKind::Execute
+            FrameKind::BeginTransaction
+            | FrameKind::BeginReadTransaction
+            | FrameKind::ExecuteTransaction
+            | FrameKind::CommitTransaction
+            | FrameKind::RollbackTransaction
+            | FrameKind::Execute
             | FrameKind::ExecuteBatch
             | FrameKind::ExecuteReadBatch
+            | FrameKind::ExecuteReadStatements
+            | FrameKind::ExecutePreparedReadBatch
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
@@ -1895,6 +2050,26 @@ impl Lane {
         binding: Binding,
         answer: Answer,
     ) -> Result<(), Stop> {
+        self.stream_with_transaction(cx, waiter, request, stream, binding, answer, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// A provisional statement shares ordinary flow control and live guards,
+    /// but carries transaction identity instead of a committed/snapshot claim.
+    /// Only a fully delivered END returns true; a typed result refusal is false.
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_with_transaction(
+        &mut self,
+        cx: &Cx,
+        waiter: &Waiter,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        answer: Answer,
+        transaction: Option<(fgdb_protocol::body::TransactionHandle, u64)>,
+    ) -> Result<bool, Stop> {
+        let committed = matches!(&answer.outcome, Outcome::WriteCommitted { .. });
         self.send_generation = Some(answer.generation);
         let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
             .map_err(|_| Stop::Transport)?;
@@ -1909,54 +2084,64 @@ impl Lane {
                 .unwrap_or(usize::MAX)
                 .saturating_sub(framing)
                 .min(frame_budget);
-            let row_room = usize::try_from(available.rows).unwrap_or(usize::MAX);
+            let row_room = usize::try_from(available.rows)
+                .unwrap_or(usize::MAX)
+                .min(MAX_ROWS_PER_CHUNK);
             let mut size = columns.as_ref().map_or(0, |names| {
                 4 + names.iter().map(|name| 4 + name.len()).sum::<usize>()
             });
             if size > frame_budget {
                 return self
-                    .refuse(
+                    .refuse_result(
                         cx,
                         request,
                         stream,
                         binding,
-                        ErrorCode::Execution,
+                        committed,
                         "the column list exceeds the negotiated frame limit",
                     )
-                    .await;
+                    .await
+                    .map(|()| false);
             }
             let mut chunk_rows = Vec::new();
+            let mut nodes = 0;
             if size <= byte_room {
                 while chunk_rows.len() < row_room {
                     let Some(row) = rows.peek() else { break };
-                    let Ok(len) = ResultChunk::row_len(row) else {
+                    let Ok((len, row_nodes)) = ResultChunk::row_cost(row) else {
                         return self
-                            .refuse(
+                            .refuse_result(
                                 cx,
                                 request,
                                 stream,
                                 binding,
-                                ErrorCode::Execution,
+                                committed,
                                 "a result value exceeds the wire bounds",
                             )
-                            .await;
+                            .await
+                            .map(|()| false);
                     };
-                    if size + len > frame_budget && chunk_rows.is_empty() && columns.is_none() {
+                    if len > frame_budget.saturating_sub(size)
+                        && chunk_rows.is_empty()
+                        && columns.is_none()
+                    {
                         return self
-                            .refuse(
+                            .refuse_result(
                                 cx,
                                 request,
                                 stream,
                                 binding,
-                                ErrorCode::Execution,
+                                committed,
                                 "a result row exceeds the negotiated frame limit",
                             )
-                            .await;
+                            .await
+                            .map(|()| false);
                     }
-                    if size + len > byte_room {
+                    if len > byte_room - size || row_nodes > MAX_VALUE_NODES - nodes {
                         break;
                     }
                     size += len;
+                    nodes += row_nodes;
                     chunk_rows.extend(rows.next());
                 }
             }
@@ -1973,18 +2158,23 @@ impl Lane {
             };
             let Ok(payload) = chunk.encode() else {
                 return self
-                    .refuse(
+                    .refuse_result(
                         cx,
                         request,
                         stream,
                         binding,
-                        ErrorCode::Execution,
+                        committed,
                         "a result value exceeds the wire bounds",
                     )
-                    .await;
+                    .await
+                    .map(|()| false);
             };
             let frame = Frame::new(
-                FrameKind::SnapshotResultChunk,
+                if transaction.is_some() {
+                    FrameKind::TransactionResultChunk
+                } else {
+                    FrameKind::SnapshotResultChunk
+                },
                 request,
                 stream,
                 binding,
@@ -1996,21 +2186,57 @@ impl Lane {
                 .await?;
             delivered += count;
         }
-        let end = ResultEnd {
-            outcome: answer.outcome,
-            rows: delivered,
+        let (kind, payload) = match transaction {
+            Some((handle, statement)) => {
+                let end = fgdb_protocol::body::TransactionResultEnd {
+                    handle,
+                    statement,
+                    rows: delivered,
+                };
+                (
+                    FrameKind::TransactionResultEnd,
+                    end.encode().map_err(|_| Stop::Transport)?,
+                )
+            }
+            None => {
+                let end = ResultEnd {
+                    outcome: answer.outcome,
+                    rows: delivered,
+                };
+                (
+                    FrameKind::SnapshotResultEnd,
+                    end.encode().map_err(|_| Stop::Transport)?,
+                )
+            }
         };
-        let payload = end.encode().map_err(|_| Stop::Transport)?;
-        let frame = Frame::new(
-            FrameKind::SnapshotResultEnd,
-            request,
-            stream,
-            binding,
-            payload,
-            self.send_limits,
-        )
-        .map_err(|_| Stop::Transport)?;
+        let frame = Frame::new(kind, request, stream, binding, payload, self.send_limits)
+            .map_err(|_| Stop::Transport)?;
         self.credited(cx, waiter, &mut window, stream, &frame, 0)
+            .await
+            .map(|()| true)
+    }
+
+    /// Native writes preflight deterministic framing before completion. If a
+    /// later invariant or codec refusal still prevents delivery, a committed
+    /// effect must never look like a statement failure safe to retry.
+    async fn refuse_result(
+        &mut self,
+        cx: &Cx,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        committed: bool,
+        message: &str,
+    ) -> Result<(), Stop> {
+        let (code, message) = if committed {
+            (
+                ErrorCode::OutcomeUnknown,
+                "write completed, but its result could not be fully delivered; do not replay the write",
+            )
+        } else {
+            (ErrorCode::Execution, message)
+        };
+        self.refuse(cx, request, stream, binding, code, message)
             .await
     }
 
@@ -2191,9 +2417,16 @@ impl Lane {
                     .await;
                 Err(Stop::Drain)
             }
-            FrameKind::Execute
+            FrameKind::BeginTransaction
+            | FrameKind::BeginReadTransaction
+            | FrameKind::ExecuteTransaction
+            | FrameKind::CommitTransaction
+            | FrameKind::RollbackTransaction
+            | FrameKind::Execute
             | FrameKind::ExecuteBatch
             | FrameKind::ExecuteReadBatch
+            | FrameKind::ExecuteReadStatements
+            | FrameKind::ExecutePreparedReadBatch
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared

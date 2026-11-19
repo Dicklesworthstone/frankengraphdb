@@ -5151,6 +5151,54 @@ pub(super) fn bind_stages(
                     }
                 })?
             }
+            ReadStageTemplate::RestoreArguments {
+                at,
+                columns,
+                types,
+                imports,
+                insert_at,
+            } => {
+                let width = input.column_types().len();
+                let names = input.columns().to_vec();
+                let arguments = PreparedGraphSet::arguments(columns.clone(), types.clone())
+                    .and_then(|arguments| {
+                        arguments.project_ordered_output(
+                            imports
+                                .iter()
+                                .map(|&column| {
+                                    GraphSetProjection::new(
+                                        columns[column].clone(),
+                                        GraphSetValue::Column(column),
+                                    )
+                                })
+                                .collect(),
+                        )
+                    })
+                    .map_err(|kind| GraphSetTextError {
+                        offset: *at,
+                        kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                    })?;
+                let joined = input.cross_join(arguments).map_err(|kind| GraphSetTextError {
+                    offset: *at,
+                    kind: GraphSetTextErrorKind::SetBuild(kind),
+                })?;
+                // Keep private boundary columns behind the visible imports.
+                // Ordered projection preserves the body's explicit row order.
+                let projection = (0..*insert_at)
+                    .map(|column| (names[column].clone(), column))
+                    .chain(imports.iter().enumerate().map(|(index, &column)| {
+                        (columns[column].clone(), width + index)
+                    }))
+                    .chain((*insert_at..width).map(|column| (names[column].clone(), column)))
+                    .map(|(name, column)| {
+                        GraphSetProjection::new(name, GraphSetValue::Column(column))
+                    })
+                    .collect();
+                joined.project_ordered_output(projection).map_err(|kind| GraphSetTextError {
+                    offset: *at,
+                    kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                })?
+            }
             ReadStageTemplate::Aggregate { at, stage } => stage.bind(input, values, *at)?,
             // Only the CSV chain binder constructs this validated first
             // stage. It retains the same one-column schema and source order

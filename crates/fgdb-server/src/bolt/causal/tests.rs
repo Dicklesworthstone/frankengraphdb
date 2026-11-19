@@ -298,7 +298,12 @@ fn autocommit_reads_observe_satisfied_write_bookmarks_but_keep_explicit_history(
             .await
             .unwrap();
         assert_markers(&reader, 0);
-        reader.pull(&root, &mut io(), -1, true).await.unwrap();
+        assert_eq!(reader.pending.as_ref().unwrap().seq, Some(CommitSeq(0)));
+        let done = reader.pull(&root, &mut io(), -1, true).await.unwrap();
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:test:0")
+        );
         assert_eq!(
             reader
                 .run(&root, "RETURN 7 AS marker", &vec![], &extra(2))

@@ -9,8 +9,9 @@
 //! - [`symbolize`] and [`capsule`]: asupersync-backed RaptorQ symbolization,
 //!   capsule sealing/container framing, erasure recovery, and fail-closed
 //!   recomputation of the requested `ObjectId`;
-//! - [`marker`]: canonical `CommitMarker` encoding, hash-chained history, and
-//!   compare-and-swap head updates for the landed local effect source;
+//! - [`marker`]: canonical `CommitMarker` encoding, hash-chained history,
+//!   increasing committed logical time, exact supplied global predecessors,
+//!   and compare-and-swap head updates for the landed local effect source;
 //! - [`commit`] and [`store`]: [`CommitCoordinator`], its sole-writer lock,
 //!   validation seam, the capsule-D1/marker-D2 two-fsync protocol, bounded
 //!   capsule reads, torn-tail recovery, orphan discovery, and directory
@@ -59,8 +60,9 @@ pub use identity::{
     VerificationOperation, VerificationOutcome,
 };
 pub use marker::{
-    ChainError, ChainedMarker, CommitMarker, EffectSource, HeadCasMismatch, HeadUpdate,
-    IdentityCounters, MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
+    ChainError, ChainedMarker, CommitMarker, EffectSource, GlobalPredecessorMismatch,
+    HeadCasMismatch, HeadUpdate, IdentityCounterKind, IdentityCounters,
+    MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
 };
 pub use pack::{
     DomainAxis, PackBuilder, PackDomain, PackError, PackProtectionProfile, PackedObjectGroup,

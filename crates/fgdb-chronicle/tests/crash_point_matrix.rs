@@ -35,11 +35,12 @@ use asupersync::fs::UnixVfs;
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{
-    CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CommitError, CrashPoint, MAX_ENTRY_BODY,
+    CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CommitError, CrashPoint, ENTRY_MAGIC,
+    MAX_ENTRY_BODY,
 };
 use fgdb_chronicle::marker::{
-    ChainError, CommitMarker, EffectSource, HeadUpdate, IdentityCounters,
-    MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
+    CHAIN_ORIGIN, ChainError, CommitMarker, EffectSource, GlobalPredecessorMismatch, HeadUpdate,
+    IdentityCounterKind, IdentityCounters, MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
 };
 use fgdb_crypto::Digest;
 use fgdb_types::context::{CommitCx, PurposeContexts};
@@ -2287,6 +2288,463 @@ fn prefix_selection_refuses_complete_corruption_after_the_requested_checkpoint()
             .await
             .unwrap();
         assert_prefix_summaries_match_history(&cx, &dir, &history).await;
+    });
+}
+
+#[test]
+fn identity_counter_regression_is_refused_before_d1_without_consuming_the_next_commit() {
+    let dir = scratch_dir("identity-counter-refusal-before-d1");
+    under_lab(0x4944_4431, move |cx| async move {
+        let initial = IdentityCounters { vertex: 9, edge: 4 };
+        let mut coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        let snapshot = coordinator.chain().clone();
+        coordinator
+            .commit(&cx, &capsule_bytes(1), |seq, oid| {
+                marker_for(seq, oid, &snapshot).with_identity_counters(initial)
+            })
+            .await
+            .unwrap();
+        // A raw marker without counters cannot erase a committed floor.
+        commit_ok(&mut coordinator, &cx, 2).await;
+        let settled_bytes = log_bytes(&dir);
+        let settled = coordinator.chain().clone();
+        for (offered, kind, previous, found) in [
+            (
+                IdentityCounters { vertex: 8, edge: 8 },
+                IdentityCounterKind::Vertex,
+                9,
+                8,
+            ),
+            (
+                IdentityCounters {
+                    vertex: 12,
+                    edge: 3,
+                },
+                IdentityCounterKind::Edge,
+                4,
+                3,
+            ),
+        ] {
+            let error = coordinator
+                .commit(&cx, &capsule_bytes(3), |seq, oid| {
+                    assert_eq!(seq, 3);
+                    marker_for(seq, oid, &settled).with_identity_counters(offered)
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                CommitError::Chain(ChainError::IdentityCounterRegression {
+                    kind: actual_kind,
+                    previous: actual_previous,
+                    found: actual_found,
+                }) if (actual_kind, actual_previous, actual_found) == (kind, previous, found)
+            ));
+            assert_eq!(log_bytes(&dir), settled_bytes);
+            assert_eq!(coordinator.chain().entries(), settled.entries());
+            assert_eq!(coordinator.chain().identity_counters(), initial);
+            assert_eq!(coordinator.chain().next_commit_seq(), Ok(CommitSeq(3)));
+            assert!(!coordinator.capsule_exists(&cx, capsule_oid(3)).await);
+            assert!(!coordinator.is_poisoned());
+        }
+        // A refused proposal does not spend either of its counters, including
+        // the other kind that it offered to advance.
+        let next = IdentityCounters { vertex: 9, edge: 5 };
+        coordinator
+            .commit(&cx, &capsule_bytes(3), |seq, oid| {
+                marker_for(seq, oid, &settled).with_identity_counters(next)
+            })
+            .await
+            .unwrap();
+        commit_ok(&mut coordinator, &cx, 4).await;
+        drop(coordinator);
+        let recovered = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(recovered.chain().identity_counters(), next);
+        assert_eq!(recovered.chain().next_commit_seq(), Ok(CommitSeq(5)));
+        assert_prefix_summaries_match_history(&cx, &dir, recovered.chain()).await;
+    });
+}
+
+#[test]
+fn identity_counter_regressions_in_hash_valid_logs_refuse_full_and_checkpoint_recovery() {
+    let dir = scratch_dir("identity-counter-hash-valid-corruption");
+    under_lab(0x4944_4348, move |cx| async move {
+        let initial = IdentityCounters { vertex: 9, edge: 4 };
+        let latest = IdentityCounters {
+            vertex: 10,
+            edge: 5,
+        };
+        let mut coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        for (at, counters) in [Some(initial), None, Some(latest), None]
+            .into_iter()
+            .enumerate()
+        {
+            let seq = at as u64 + 1;
+            let snapshot = coordinator.chain().clone();
+            coordinator
+                .commit(&cx, &capsule_bytes(seq), |allocated, oid| {
+                    assert_eq!(allocated, seq);
+                    let marker = marker_for(allocated, oid, &snapshot);
+                    match counters {
+                        Some(value) => marker.with_identity_counters(value),
+                        None => marker,
+                    }
+                })
+                .await
+                .unwrap();
+        }
+        let original = log_bytes(&dir);
+        let entries = coordinator.chain().entries().to_vec();
+        drop(coordinator);
+
+        // Reframe an authenticated, complete log with one semantic defect.
+        // Recompute every downstream hash and branch-head CAS so recovery
+        // cannot reject the fixture merely for ordinary hash corruption.
+        let encode_with_counters = |third_counters: IdentityCounters| {
+            let mut bytes = Vec::new();
+            let mut prior_hash = CHAIN_ORIGIN;
+            let mut prior_head = None;
+            for entry in &entries {
+                let mut marker = entry.marker.clone();
+                marker.head_updates[0].expected_previous = prior_head;
+                if marker.commit_seq == 3 {
+                    marker.identity_counters = Some(third_counters);
+                }
+                let body = marker.canonical_bytes().unwrap();
+                let body_len = u32::try_from(body.len()).unwrap().to_be_bytes();
+                let hash = marker.chain_hash(prior_hash).unwrap();
+                bytes.extend_from_slice(&ENTRY_MAGIC);
+                bytes.extend_from_slice(&body_len);
+                bytes.extend_from_slice(&body);
+                bytes.extend_from_slice(&hash.0);
+                bytes.extend_from_slice(&body_len);
+                bytes.extend_from_slice(b"FGE3");
+                prior_hash = hash;
+                prior_head = Some(MarkerRef {
+                    marker_oid: ObjectId(hash.0),
+                    commit_seq: CommitSeq(marker.commit_seq),
+                });
+            }
+            bytes
+        };
+        assert_eq!(encode_with_counters(latest), original);
+        for counters in [
+            IdentityCounters { vertex: 8, edge: 5 },
+            IdentityCounters {
+                vertex: 10,
+                edge: 3,
+            },
+        ] {
+            let bytes = encode_with_counters(counters);
+            write_log(&dir, &bytes);
+            assert!(matches!(
+                CommitCoordinator::scan_committed_chain(&cx, &UnixVfs::new(), &dir).await,
+                Err(CommitError::CorruptLogEntry { commit_seq: 3 })
+            ));
+            assert!(
+                matches!(
+                    CommitCoordinator::scan_committed_prefix(
+                        &cx,
+                        &UnixVfs::new(),
+                        &dir,
+                        CommitSeq::FIRST
+                    )
+                    .await,
+                    Err(CommitError::CorruptLogEntry { commit_seq: 3 })
+                ),
+                "an earlier checkpoint cannot excuse a corrupt committed suffix"
+            );
+            assert!(matches!(
+                CommitCoordinator::open(&cx, &dir, keys()).await,
+                Err(CommitError::CorruptLogEntry { commit_seq: 3 })
+            ));
+            assert_eq!(
+                log_bytes(&dir),
+                bytes,
+                "complete corrupt markers are not a torn tail"
+            );
+        }
+        write_log(&dir, &original);
+        let recovered = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(recovered.chain().identity_counters(), latest);
+        assert_eq!(recovered.chain().entries(), entries);
+        assert_prefix_summaries_match_history(&cx, &dir, recovered.chain()).await;
+        assert_eq!(log_bytes(&dir), original);
+    });
+}
+
+#[test]
+fn supplied_predecessor_and_commit_hlc_refusals_happen_before_d1() {
+    let dir = scratch_dir("marker-integrity-pre-d1");
+    under_lab(0x4d49_4431, move |cx| async move {
+        let mut coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        commit_ok(&mut coordinator, &cx, 1).await;
+        commit_ok(&mut coordinator, &cx, 2).await;
+        let settled = coordinator.chain().clone();
+        let settled_bytes = log_bytes(&dir);
+        let tail = &settled.entries()[1];
+        let previous = MarkerRef {
+            marker_oid: tail.marker_oid,
+            commit_seq: CommitSeq(2),
+        };
+        let wrong_oid = MarkerRef {
+            marker_oid: ObjectId([0xf3; 32]),
+            ..previous
+        };
+        let wrong_seq = MarkerRef {
+            commit_seq: CommitSeq(1),
+            ..previous
+        };
+        for (prev_global, commit_hlc, expected) in [
+            (
+                Some(wrong_oid),
+                1_003,
+                ChainError::GlobalPredecessorMismatch(Box::new(GlobalPredecessorMismatch {
+                    expected: Some(previous),
+                    found: wrong_oid,
+                })),
+            ),
+            (
+                Some(wrong_seq),
+                1_003,
+                ChainError::GlobalPredecessorMismatch(Box::new(GlobalPredecessorMismatch {
+                    expected: Some(previous),
+                    found: wrong_seq,
+                })),
+            ),
+            (
+                Some(previous),
+                1_002,
+                ChainError::NonMonotonicCommitHlc {
+                    previous: 1_002,
+                    found: 1_002,
+                },
+            ),
+            (
+                None,
+                0,
+                ChainError::NonMonotonicCommitHlc {
+                    previous: 1_002,
+                    found: 0,
+                },
+            ),
+        ] {
+            let error = coordinator
+                .commit(&cx, &capsule_bytes(3), |seq, oid| {
+                    assert_eq!(seq, 3);
+                    let mut marker =
+                        marker_for(seq, oid, &settled).with_identity_counters(IdentityCounters {
+                            vertex: 100,
+                            edge: 100,
+                        });
+                    marker.prev_global = prev_global;
+                    marker.commit_hlc = commit_hlc;
+                    marker
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(error, CommitError::Chain(actual) if actual == expected));
+            assert_eq!(log_bytes(&dir), settled_bytes);
+            assert_eq!(coordinator.chain().entries(), settled.entries());
+            assert_eq!(
+                coordinator.chain().identity_counters(),
+                IdentityCounters::default()
+            );
+            assert_eq!(
+                coordinator.chain().head(GraphId(1), BranchId(1)),
+                Some(previous)
+            );
+            assert_eq!(coordinator.next_commit_seq(), Ok(CommitSeq(3)));
+            assert!(!coordinator.capsule_exists(&cx, capsule_oid(3)).await);
+            assert_eq!(capsule_file_count(&dir), 2);
+            assert!(!coordinator.is_poisoned());
+        }
+        coordinator
+            .commit(&cx, &capsule_bytes(3), |seq, oid| {
+                let mut marker = marker_for(seq, oid, &settled);
+                marker.prev_global = Some(previous);
+                marker
+            })
+            .await
+            .unwrap();
+        // The ordinary producer's absent predecessor is still lawful after a
+        // supplied link, and both forms survive actual durable recovery.
+        commit_ok(&mut coordinator, &cx, 4).await;
+        let accepted = coordinator.chain().entries().to_vec();
+        drop(coordinator);
+        let recovered = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(recovered.chain().entries(), accepted);
+        assert_prefix_summaries_match_history(&cx, &dir, recovered.chain()).await;
+    });
+}
+
+#[test]
+fn commit_hlc_exhaustion_survives_reopen_and_refuses_before_d1() {
+    let dir = scratch_dir("commit-hlc-exhaustion");
+    under_lab(0x484c_4358, move |cx| async move {
+        let mut coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        let empty = coordinator.chain().clone();
+        coordinator
+            .commit(&cx, &capsule_bytes(1), |seq, oid| {
+                let mut marker = marker_for(seq, oid, &empty);
+                marker.commit_hlc = u64::MAX;
+                marker
+            })
+            .await
+            .unwrap();
+        let accepted = coordinator.chain().entries().to_vec();
+        let settled_bytes = log_bytes(&dir);
+        for _ in 0..2 {
+            let snapshot = coordinator.chain().clone();
+            let error = coordinator
+                .commit(&cx, &capsule_bytes(2), |seq, oid| {
+                    marker_for(seq, oid, &snapshot)
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                CommitError::Chain(ChainError::CommitHlcExhausted { frontier: u64::MAX })
+            ));
+            assert_eq!(coordinator.chain().entries(), accepted);
+            assert_eq!(coordinator.next_commit_seq(), Ok(CommitSeq(2)));
+            assert_eq!(log_bytes(&dir), settled_bytes);
+            assert!(!coordinator.capsule_exists(&cx, capsule_oid(2)).await);
+            assert!(!coordinator.is_poisoned());
+            drop(coordinator);
+            coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        }
+        assert_eq!(coordinator.chain().entries(), accepted);
+        assert_prefix_summaries_match_history(&cx, &dir, coordinator.chain()).await;
+    });
+}
+
+#[test]
+fn hash_valid_predecessor_and_clock_corruption_refuses_full_and_checkpoint_recovery() {
+    let dir = scratch_dir("marker-integrity-rehashed-corruption");
+    under_lab(0x4d49_4348, move |cx| async move {
+        let mut coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        for seq in 1..=4 {
+            let snapshot = coordinator.chain().clone();
+            coordinator
+                .commit(&cx, &capsule_bytes(seq), |allocated, oid| {
+                    assert_eq!(allocated, seq);
+                    let mut marker = marker_for(seq, oid, &snapshot);
+                    if seq >= 3 {
+                        marker.prev_global = snapshot.entries().last().map(|last| MarkerRef {
+                            marker_oid: last.marker_oid,
+                            commit_seq: CommitSeq(last.marker.commit_seq),
+                        });
+                    }
+                    marker
+                })
+                .await
+                .unwrap();
+        }
+        let original = log_bytes(&dir);
+        let entries = coordinator.chain().entries().to_vec();
+        drop(coordinator);
+        let reference = |index: usize| MarkerRef {
+            marker_oid: entries[index].marker_oid,
+            commit_seq: CommitSeq(entries[index].marker.commit_seq),
+        };
+
+        // Rewrite every downstream hash, branch CAS and supplied predecessor.
+        // Only the selected semantic defect remains: ordinary hash damage or
+        // a stale dependent reference must not make these cases pass.
+        let encode = |target: u64, predecessor: Option<MarkerRef>, hlc: Option<u64>| {
+            let mut bytes = Vec::new();
+            let mut prior_hash = CHAIN_ORIGIN;
+            let mut prior = None;
+            for entry in &entries {
+                let mut marker = entry.marker.clone();
+                marker.head_updates[0].expected_previous = prior;
+                if marker.prev_global.is_some() {
+                    marker.prev_global = prior;
+                }
+                if marker.commit_seq == target {
+                    if let Some(predecessor) = predecessor {
+                        marker.prev_global = Some(predecessor);
+                    }
+                    if let Some(hlc) = hlc {
+                        marker.commit_hlc = hlc;
+                    }
+                }
+                let body = marker.canonical_bytes().unwrap();
+                let body_len = u32::try_from(body.len()).unwrap().to_be_bytes();
+                let hash = marker.chain_hash(prior_hash).unwrap();
+                bytes.extend_from_slice(&ENTRY_MAGIC);
+                bytes.extend_from_slice(&body_len);
+                bytes.extend_from_slice(&body);
+                bytes.extend_from_slice(&hash.0);
+                bytes.extend_from_slice(&body_len);
+                bytes.extend_from_slice(b"FGE3");
+                prior_hash = hash;
+                prior = Some(MarkerRef {
+                    marker_oid: ObjectId(hash.0),
+                    commit_seq: CommitSeq(marker.commit_seq),
+                });
+            }
+            bytes
+        };
+        assert_eq!(encode(0, None, None), original);
+        for (target, refused_at, predecessor, hlc) in [
+            (1, 1, Some(reference(0)), None),
+            (
+                3,
+                3,
+                Some(MarkerRef {
+                    marker_oid: ObjectId([0xf4; 32]),
+                    ..reference(1)
+                }),
+                None,
+            ),
+            (
+                3,
+                3,
+                Some(MarkerRef {
+                    commit_seq: CommitSeq(1),
+                    ..reference(1)
+                }),
+                None,
+            ),
+            (3, 3, Some(reference(0)), None),
+            (3, 3, Some(reference(2)), None),
+            (3, 3, Some(reference(3)), None),
+            (1, 1, None, Some(0)),
+            (3, 3, None, Some(1_001)),
+            (3, 3, None, Some(1_002)),
+            // The second marker may consume the final instant. Its otherwise
+            // valid successor then fails at 3, with all links rehashed above.
+            (2, 3, None, Some(u64::MAX)),
+        ] {
+            let bytes = encode(target, predecessor, hlc);
+            write_log(&dir, &bytes);
+            assert!(matches!(
+                CommitCoordinator::scan_committed_chain(&cx, &UnixVfs::new(), &dir).await,
+                Err(CommitError::CorruptLogEntry { commit_seq }) if commit_seq == refused_at
+            ));
+            for requested in [CommitSeq::ORIGIN, CommitSeq::FIRST, CommitSeq(4)] {
+                assert!(matches!(
+                    CommitCoordinator::scan_committed_prefix(&cx, &UnixVfs::new(), &dir, requested).await,
+                    Err(CommitError::CorruptLogEntry { commit_seq }) if commit_seq == refused_at
+                ));
+            }
+            assert!(matches!(
+                CommitCoordinator::open(&cx, &dir, keys()).await,
+                Err(CommitError::CorruptLogEntry { commit_seq }) if commit_seq == refused_at
+            ));
+            assert_eq!(
+                log_bytes(&dir),
+                bytes,
+                "complete corruption is never truncated as a tail"
+            );
+        }
+        write_log(&dir, &original);
+        let recovered = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(recovered.chain().entries(), entries);
+        assert_prefix_summaries_match_history(&cx, &dir, recovered.chain()).await;
+        assert_eq!(log_bytes(&dir), original);
     });
 }
 

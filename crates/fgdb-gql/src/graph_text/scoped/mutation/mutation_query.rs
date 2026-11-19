@@ -1047,7 +1047,9 @@ impl<'a> Parser<'a> {
             Some(row) => self.return_reads_row_element(row, true)?,
             None => false,
         };
-        let implicit = (self.chain_write && self.at_chained_write()?) || row_element;
+        let implicit = (self.chain_write && self.at_chained_write()?)
+            || row_element
+            || (self.call_scope.is_some() && self.is_word("WITH"));
         let head = implicit || self.take_word("WITH")?;
         if !head {
             self.word("RETURN")?;

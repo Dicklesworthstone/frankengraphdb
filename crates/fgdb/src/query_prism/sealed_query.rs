@@ -277,9 +277,19 @@ impl<V: Vfs + Clone> Database<V> {
                 // Reuse the complete admitted source, including unselected
                 // relations needed by ordinary GQL patterns and properties.
                 // This is the same snapshot construction as read_published,
-                // without rereading or decoding any immutable payload.
+                // without rereading or decoding the admitted graph payloads.
+                // Names are admitted from this same manifest-selected cut.
+                let schema = crate::schema_catalog::SchemaState::load(
+                    cx,
+                    &published.store,
+                    published.schema,
+                    root.published_at,
+                )
+                .await
+                .map_err(crate::OpenError::Rebuild)?;
                 let mut snapshot = crate::current_generation(
                     published.manifest,
+                    schema,
                     published.root_id,
                     &root,
                     blocks,

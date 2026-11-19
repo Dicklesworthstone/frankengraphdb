@@ -162,6 +162,23 @@ impl UnresolvedGraphText<'_> {
             if let ReadStageTemplate::Aggregate { stage, .. } = stage {
                 (names, types) = stage.column_schema();
             }
+            if let ReadStageTemplate::RestoreArguments {
+                columns,
+                types: arguments,
+                imports,
+                insert_at,
+                ..
+            } = stage
+            {
+                names.splice(
+                    *insert_at..*insert_at,
+                    imports.iter().map(|&column| columns[column].clone()),
+                );
+                types.splice(
+                    *insert_at..*insert_at,
+                    imports.iter().map(|&column| arguments[column]),
+                );
+            }
             if let ReadStageTemplate::Project { projection, .. } = stage {
                 let next = projection
                     .iter()

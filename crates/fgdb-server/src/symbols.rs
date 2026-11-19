@@ -1,10 +1,9 @@
-//! The operator-declared name bindings a served database resolves through.
+//! Immutable native catalog names with explicit operator declarations.
 //!
-//! The engine has no durable catalog yet (`fgdb-w4-schema-catalog-ea4e`), so a
-//! label, relation or property name means exactly what the operator bound it
-//! to when the database was served, the same contract as the CLI's
-//! `--label/--relation/--property` flags. Request text can never introduce or
-//! rebind a name: an unbound name is an ordinary statement refusal.
+//! A served database discovers its durable catalog before admitting requests.
+//! Operator declarations may add names or repeat an exact durable binding;
+//! neither axis of an existing binding may change. Request text can never
+//! introduce or rebind a name: an unbound name is a statement refusal.
 
 use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -17,6 +16,9 @@ pub struct Symbols {
     // Sessions retain this immutable catalog. Operator changes fork its state
     // only when an older resolver still owns a reference.
     catalog: Arc<SymbolCatalog>,
+    // Preserve provenance: refreshing or selecting an older snapshot must
+    // overlay only operator declarations, never another snapshot's names.
+    declarations: Arc<SymbolCatalog>,
     // Hydration borrows the same immutable name generation without rebuilding
     // a catalog on each result row or charging for unrelated hidden names.
     reverse: Arc<ReverseSymbolCatalog>,
@@ -55,10 +57,13 @@ impl Symbols {
         name: &str,
         id: u64,
     ) -> Result<(), SymbolConflict> {
-        // Explicit operator inputs retain their duplicate-input refusal,
-        // including exact redeclarations. The catalog itself also serves
-        // transactional owners, for whom exact redeclarations are idempotent.
-        if self.resolve(kind, name).is_some() {
+        // Repeated explicit inputs refuse, including exact duplicates. A
+        // first declaration of an already hydrated durable pair is valid and
+        // must retain its explicit provenance for later historical rebinding.
+        if CatalogSymbolResolver::new(&self.declarations)
+            .resolve_symbol(kind, name)
+            .is_some()
+        {
             return Err(SymbolConflict {
                 kind,
                 name: name.to_owned(),
@@ -75,6 +80,14 @@ impl Symbols {
                 kind,
                 name: name.to_owned(),
             })?;
+        // Declarations are a subset of the effective catalog. The admission
+        // above therefore establishes both uniqueness axes here as well.
+        Arc::make_mut(&mut self.declarations)
+            .bind(name, symbol)
+            .map_err(|_| SymbolConflict {
+                kind,
+                name: name.to_owned(),
+            })?;
         let reverse = Arc::make_mut(&mut self.reverse);
         match symbol {
             CatalogSymbol::Label(id) => reverse.insert_label(id, name),
@@ -82,6 +95,43 @@ impl Symbols {
             CatalogSymbol::Property(id) => reverse.insert_property(id, name),
         }
         Ok(())
+    }
+
+    /// Merge these declarations with one selected immutable durable catalog.
+    /// Exact redeclarations are harmless; a different name or ordinal refuses
+    /// without changing either input. Durable allocator floors remain intact.
+    ///
+    /// A hydrated resolver retains declaration provenance. Rebinding it to an
+    /// earlier snapshot therefore drops later durable names while preserving
+    /// explicit operator names. Both name directions share that selected set.
+    pub fn with_catalog(&self, durable: &SymbolCatalog) -> Result<Self, SymbolConflict> {
+        if self.catalog.as_ref() == durable {
+            return Ok(self.clone());
+        }
+        let mut catalog = durable.clone();
+        for (symbol, name) in self.declarations.bindings() {
+            catalog.bind(name, symbol).map_err(|_| SymbolConflict {
+                kind: match symbol {
+                    CatalogSymbol::Label(_) => GraphSymbolKind::Label,
+                    CatalogSymbol::Relation(_) => GraphSymbolKind::Relation,
+                    CatalogSymbol::Property(_) => GraphSymbolKind::Property,
+                },
+                name: name.to_owned(),
+            })?;
+        }
+        let mut reverse = ReverseSymbolCatalog::new();
+        for (symbol, name) in catalog.bindings() {
+            match symbol {
+                CatalogSymbol::Label(id) => reverse.insert_label(id, name),
+                CatalogSymbol::Relation(id) => reverse.insert_relation(id, name),
+                CatalogSymbol::Property(id) => reverse.insert_property(id, name),
+            }
+        }
+        Ok(Self {
+            catalog: Arc::new(catalog),
+            declarations: Arc::clone(&self.declarations),
+            reverse: Arc::new(reverse),
+        })
     }
 
     /// Resolve a name in exactly the requested kind; never across kinds.
@@ -142,6 +192,7 @@ mod tests {
     use super::*;
     use asupersync::lab::run_async_under_lab;
     use fgdb::WriteBatch;
+    use fgdb_delta_types::catalog::CatalogSymbolKind;
     use fgdb_protocol::body::{Execute, ExecuteMode, WireValue};
     use fgdb_types::{CanonicalScalar, EId, PurposeContexts, VId};
     use fgdb_warden::{Restriction, Scope};
@@ -167,6 +218,146 @@ mod tests {
         assert_eq!(symbols.resolve(GraphSymbolKind::Property, "Person"), None);
         assert_eq!(symbols.reverse_label(LabelId(1)).as_deref(), Some("Person"));
         assert_eq!(symbols.reverse_relation(RelationId(2)), None);
+    }
+
+    #[test]
+    fn durable_names_merge_with_declarations_without_changing_pinned_generations() {
+        let mut durable = SymbolCatalog::default();
+        durable
+            .bind_all([
+                ("Person", CatalogSymbol::Label(LabelId(7))),
+                ("KNOWS", CatalogSymbol::Relation(RelationId(u64::MAX))),
+                ("name", CatalogSymbol::Property(PropertyKeyId(3))),
+            ])
+            .unwrap();
+        durable.reserve_through(CatalogSymbol::Label(LabelId(500)));
+        durable.reserve_through(CatalogSymbol::Property(PropertyKeyId(u64::MAX)));
+        let durable_before = durable.clone();
+        let mut declarations = Symbols::new();
+        declarations
+            .bind(GraphSymbolKind::Label, "Person", 7)
+            .unwrap();
+        declarations
+            .bind(GraphSymbolKind::Property, "ephemeral", 4)
+            .unwrap();
+        let declarations_before = declarations.clone();
+
+        let pinned = declarations.with_catalog(&durable).unwrap();
+        assert_eq!(pinned.labels().collect::<Vec<_>>(), vec![("Person", 7)]);
+        assert_eq!(
+            pinned.relations().collect::<Vec<_>>(),
+            vec![("KNOWS", u64::MAX)]
+        );
+        assert_eq!(
+            pinned.properties().collect::<Vec<_>>(),
+            vec![("ephemeral", 4), ("name", 3)]
+        );
+        let reverse = pinned.reverse_catalog().unwrap();
+        assert_eq!(reverse.labels[&LabelId(7)], "Person");
+        assert_eq!(reverse.relations[&RelationId(u64::MAX)], "KNOWS");
+        assert_eq!(reverse.properties[&PropertyKeyId(3)], "name");
+        assert_eq!(reverse.properties[&PropertyKeyId(4)], "ephemeral");
+        assert_eq!(
+            pinned.catalog.high_water_mark(CatalogSymbolKind::Label),
+            500
+        );
+        assert_eq!(
+            pinned.catalog.high_water_mark(CatalogSymbolKind::Relation),
+            u64::MAX
+        );
+        assert_eq!(
+            pinned.catalog.high_water_mark(CatalogSymbolKind::Property),
+            u64::MAX
+        );
+        assert_eq!(durable, durable_before);
+        assert_eq!(declarations, declarations_before);
+
+        let mut next = durable.clone();
+        next.bind("later", CatalogSymbol::Property(PropertyKeyId(8)))
+            .unwrap();
+        let refreshed = pinned.with_catalog(&next).unwrap();
+        assert_eq!(pinned.resolve(GraphSymbolKind::Property, "later"), None);
+        assert_eq!(
+            refreshed.resolve(GraphSymbolKind::Property, "later"),
+            Some(GraphSymbol::Property(PropertyKeyId(8)))
+        );
+        assert_eq!(
+            refreshed.with_catalog(&durable).unwrap().reverse_catalog(),
+            Some(reverse)
+        );
+        assert_eq!(refreshed.with_catalog(&durable).unwrap(), pinned);
+        assert_eq!(
+            declarations.resolve(GraphSymbolKind::Relation, "KNOWS"),
+            None
+        );
+
+        // Host declarations added after hydration are not mistaken for
+        // snapshot-owned names, including a first exact durable redeclaration.
+        let mut declared_later = refreshed.clone();
+        declared_later
+            .bind(GraphSymbolKind::Property, "later", 8)
+            .unwrap();
+        declared_later
+            .bind(GraphSymbolKind::Label, "EphemeralLabel", 9)
+            .unwrap();
+        let before_duplicate = declared_later.clone();
+        assert!(
+            declared_later
+                .bind(GraphSymbolKind::Property, "later", 8)
+                .is_err()
+        );
+        assert_eq!(declared_later, before_duplicate);
+        let selected_old = declared_later.with_catalog(&durable).unwrap();
+        assert_eq!(
+            selected_old.resolve(GraphSymbolKind::Property, "later"),
+            Some(GraphSymbol::Property(PropertyKeyId(8)))
+        );
+        assert_eq!(
+            selected_old.resolve(GraphSymbolKind::Label, "EphemeralLabel"),
+            Some(GraphSymbol::Label(LabelId(9)))
+        );
+        assert_eq!(pinned.resolve(GraphSymbolKind::Property, "later"), None);
+    }
+
+    #[test]
+    fn durable_name_and_ordinal_conflicts_refuse_atomically_in_every_namespace() {
+        for (kind, durable_symbol) in [
+            (
+                GraphSymbolKind::Label,
+                CatalogSymbol::Label(LabelId(u64::MAX)),
+            ),
+            (
+                GraphSymbolKind::Relation,
+                CatalogSymbol::Relation(RelationId(u64::MAX)),
+            ),
+            (
+                GraphSymbolKind::Property,
+                CatalogSymbol::Property(PropertyKeyId(u64::MAX)),
+            ),
+        ] {
+            let mut durable = SymbolCatalog::default();
+            durable.bind("bound", durable_symbol).unwrap();
+            let durable_before = durable.clone();
+            for (name, id) in [("bound", 7), ("alias", u64::MAX)] {
+                let mut declarations = Symbols::new();
+                declarations.bind(kind, "a_extra", 2).unwrap();
+                declarations.bind(kind, name, id).unwrap();
+                let before = declarations.clone();
+                assert_eq!(
+                    declarations.with_catalog(&durable),
+                    Err(SymbolConflict {
+                        kind,
+                        name: name.to_owned(),
+                    })
+                );
+                assert_eq!(declarations, before);
+                assert_eq!(durable, durable_before);
+                assert_eq!(durable.name(durable_symbol), Some("bound"));
+            }
+            let mut exact = Symbols::new();
+            exact.bind(kind, "bound", u64::MAX).unwrap();
+            assert_eq!(exact.with_catalog(&durable).unwrap(), exact);
+        }
     }
 
     #[test]
@@ -267,7 +458,8 @@ mod tests {
                     native,
                 )])))
                 .unwrap();
-            let schema = crate::execute::schema(db, &token)
+            let schema = crate::execute::schema(&root, db, &token)
+                .await
                 .unwrap_or_else(|error| panic!("{}", error.message));
             assert_eq!(schema.labels, vec!["Person"]);
             assert_eq!(schema.relations, vec!["MENTORS"]);
@@ -332,7 +524,8 @@ mod tests {
                 .unwrap()
                 .attenuate(Restriction::Properties(Scope::only([PropertyKeyId(low)])))
                 .unwrap();
-            let schema = crate::execute::schema(db, &denied)
+            let schema = crate::execute::schema(&root, db, &denied)
+                .await
                 .unwrap_or_else(|error| panic!("{}", error.message));
             assert!(schema.labels.is_empty());
             assert!(schema.relations.is_empty());

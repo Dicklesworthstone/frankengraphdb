@@ -36,9 +36,9 @@ fn source(error: WriteTxnError) -> Fault {
 }
 
 /// The mutation's relational input and native procedure leaves share the same
-/// staged graph and signed permit. Restricted scopes keep seed construction
-/// disabled, exactly as the previous optional seeded callback did. Element
-/// reads retain the separate mutation reader and its interruption carrier.
+/// staged graph and signed permit. Seeded continuations use the shared masked
+/// closure over canonical overlay winners. Element reads retain the separate
+/// mutation reader and its interruption carrier.
 struct MutationGraphSource<'s, 'run, 'cx, 'permit, V: Vfs, Clock> {
     transaction: &'s WriteTxn,
     database: &'s Database<V>,
@@ -70,7 +70,7 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64> fgdb_gql::GraphSetSource<WriteTxnErr
     }
 
     fn supports_seeded_patterns(&self) -> bool {
-        self.scope.sees_all_incidence() && self.scope.sees_all_fields()
+        true
     }
 
     fn seeded_pattern(

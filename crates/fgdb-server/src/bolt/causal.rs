@@ -7,7 +7,7 @@
 //! A future local bookmark refuses promptly; this adapter has no causal wait
 //! queue and never silently drops a requested timeout or impersonated identity.
 
-use super::{CommitSeq, Cx, Failure, Map, ReadSession, Served, Value, get};
+use super::{CommitSeq, Cx, Failure, Generation, Map, ReadSession, Served, Value, get};
 use fgdb_warden::CapabilityToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +76,7 @@ pub(super) fn options(extra: &Map, database: &str) -> Result<Options, Failure> {
     })
 }
 
-fn require_frontier(pinned: CommitSeq, minimum: CommitSeq) -> Result<(), Failure> {
+pub(super) fn require_frontier(pinned: CommitSeq, minimum: CommitSeq) -> Result<(), Failure> {
     if pinned < minimum {
         // No current position is disclosed. No statement has executed, and
         // the caller does not retain this insufficient session for a retry.
@@ -98,11 +98,17 @@ pub(super) async fn session<'s>(
     token: &CapabilityToken,
     database: &str,
     extra: &Map,
+    output_generation: &mut Option<Generation>,
+    statement: (&str, &fgdb_gql::GqlParameters),
 ) -> Result<(ReadSession<'s>, CommitSeq), Failure> {
     let minimum = options(extra, database)?.minimum_seq;
-    let (session, frontier) = super::read_session(cx, db, token)
+    let (session, frontier) = crate::execute::read_session_for(cx, db, token, &[statement])
         .await
         .map_err(Failure::from_refusal)?;
+    // A future-bookmark refusal depends on this exact source frontier, just
+    // like BEGIN's refusal. Keep its fence even though no owner is returned;
+    // recovery controls retain their separate generation-independent class.
+    *output_generation = Some(session.generation());
     session
         .generation()
         .check()

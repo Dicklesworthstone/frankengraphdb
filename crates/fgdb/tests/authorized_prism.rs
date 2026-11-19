@@ -1725,6 +1725,138 @@ fn an_authorized_read_hosts_call_over_the_masked_projection() {
 }
 
 #[test]
+fn optional_calls_null_extend_masked_empty_results_without_hiding_authorization_failures() {
+    use fgdb::{QueryResult, QueryValue};
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0x5ec0_3078, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = simple_database(&c.commit(), true).await;
+        let oracle = simple_database(&c.commit(), false).await;
+        // Vertex 3 has a real outgoing edge, but its only target is hidden.
+        // Optionality must see the masked empty relation before null extension.
+        let mut hidden = WriteBatch::new(RelationId(1));
+        hidden.add_edge(EId(92), VId(3), VId(99), vec![]);
+        db.write(&c.commit(), hidden).await.unwrap();
+        let issuer = authority(318, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                Some(fgdb_gql::GraphSymbol::Relation(RelationId(1)))
+            }
+            _ => None,
+        };
+        let text = "MATCH (n) OPTIONAL CALL (n) { MATCH (n)-[:R]->(m) RETURN m } \
+                    RETURN n,m ORDER BY n,m";
+        let masked = db
+            .query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                text,
+                &params,
+                symbols,
+                policy,
+                || 100,
+            )
+            .unwrap();
+        let vertex = |id| QueryValue::Value(GraphValue::Vertex(VId(id)));
+        let null = QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        assert_eq!(
+            masked,
+            QueryResult::Rows {
+                columns: vec!["n".to_owned(), "m".to_owned()],
+                rows: vec![
+                    vec![vertex(1), vertex(2)],
+                    vec![vertex(2), vertex(3)],
+                    vec![vertex(3), null.clone()],
+                ],
+            }
+        );
+        assert_eq!(
+            masked,
+            oracle.query(&cx, text, &params, symbols, policy).unwrap()
+        );
+        assert_ne!(
+            masked,
+            db.query(&cx, text, &params, symbols, policy).unwrap()
+        );
+
+        let optional_procedure = "WITH 7 AS kept \
+            OPTIONAL CALL fnx.bridges(direction => 'undirected') YIELD node,neighbor \
+            WHERE false RETURN kept,node,neighbor";
+        let masked = db
+            .query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                optional_procedure,
+                &params,
+                symbols,
+                policy,
+                || 100,
+            )
+            .unwrap();
+        assert_eq!(
+            masked,
+            QueryResult::Rows {
+                columns: ["kept", "node", "neighbor"].map(str::to_owned).to_vec(),
+                rows: vec![vec![
+                    QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(7))),
+                    null.clone(),
+                    null,
+                ]],
+            }
+        );
+        assert_eq!(
+            masked,
+            oracle
+                .query(&cx, optional_procedure, &params, symbols, policy)
+                .unwrap()
+        );
+        let tight = token.attenuate(Restriction::MaxNodes(2)).unwrap();
+        for text in [text, optional_procedure] {
+            assert!(matches!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &tight,
+                    BRANCH,
+                    text,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
+                ),
+                Err(QueryError::Authorization(Error::LimitExceeded(
+                    LimitDimension::Nodes
+                )))
+            ));
+            assert!(matches!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &params,
+                    symbols,
+                    policy,
+                    || 1001,
+                ),
+                Err(QueryError::Authorization(_))
+            ));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn authorized_bridge_endpoints_keep_property_masks_and_seeded_match_identity() {
     use fgdb::{QueryResult, QueryValue};
     use fgdb_gql::algebra::GraphValue;

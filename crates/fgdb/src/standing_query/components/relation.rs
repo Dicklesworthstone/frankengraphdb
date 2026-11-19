@@ -335,7 +335,7 @@ impl<V: Vfs + Clone> Database<V> {
         let parent = sets::input_at(
             &self.standing_queries,
             definition.input,
-            self.snapshot.frontier,
+            self.registration_frontier(),
         )?;
         if !definition.matches_schema(parent) {
             return Err(StandingQueryFailure::DependencyUnavailable);
@@ -349,7 +349,13 @@ impl<V: Vfs + Clone> Database<V> {
         {
             return Err(StandingQueryFailure::SnapshotBudget);
         }
-        State::from_selected(rows, definition, relation, self.snapshot.frontier, meter)
+        State::from_selected(
+            rows,
+            definition,
+            relation,
+            self.registration_frontier(),
+            meter,
+        )
     }
 }
 

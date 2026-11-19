@@ -816,3 +816,127 @@ fn fgp_map_parameters_bind_as_property_maps() {
         task.join(cx).await.unwrap();
     });
 }
+
+#[test]
+fn fgp_staged_hybrid_search_rebinds_raw_and_prepared_write_chains() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "staged-hybrid-write-chains").await;
+        let mut writer = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        let mut observer = Client::connect(cx, addr, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        let statement = "CREATE (:Person {name:$name,age:$age}) WITH 1 AS ignored \
+            CALL hybrid.search(text => $needle, text_property => 'name', label => 'Person', \
+            candidates => 1, k => 1) YIELD node \
+            RETURN node.name AS name, node.age AS age";
+        let arguments = |name: &str, age| {
+            vec![
+                ("name".into(), text(name)),
+                ("age".into(), WireValue::Int(age)),
+                ("needle".into(), text(name)),
+            ]
+        };
+        let stored = "MATCH (n:Person) RETURN n.name AS name,n.age AS age ORDER BY age";
+        let handle = writer
+            .prepare_write_returning(cx, statement, arguments("prepareonly", 99))
+            .await
+            .unwrap();
+        let before = observer
+            .execute(cx, ExecuteMode::Read, stored, vec![])
+            .await
+            .unwrap();
+        assert!(
+            before.rows.is_empty(),
+            "PREPARE cannot create or search data"
+        );
+        assert_eq!(before.outcome, Outcome::Rows { seq: 0 });
+
+        for (seq, name, age, prepared) in [
+            (1, "stagealpha", 1, false),
+            (2, "stagebeta", 2, true),
+            (3, "stagegamma", 3, true),
+        ] {
+            let answer = if prepared {
+                writer
+                    .execute_prepared_write_returning(cx, handle, arguments(name, age))
+                    .await
+                    .unwrap()
+            } else {
+                writer
+                    .execute(cx, ExecuteMode::Write, statement, arguments(name, age))
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(answer.columns, ["name", "age"]);
+            assert_eq!(answer.rows, [vec![text(name), WireValue::Int(age)]]);
+            assert_eq!(
+                answer.outcome,
+                Outcome::WriteCommitted { seq, statements: 1 },
+                "the staged search and creation have one completion"
+            );
+        }
+        let expected = [
+            vec![text("stagealpha"), WireValue::Int(1)],
+            vec![text("stagebeta"), WireValue::Int(2)],
+            vec![text("stagegamma"), WireValue::Int(3)],
+        ];
+        let committed = observer
+            .execute(cx, ExecuteMode::Read, stored, vec![])
+            .await
+            .unwrap();
+        assert_eq!(committed.rows, expected);
+        assert_eq!(committed.outcome, Outcome::Rows { seq: 3 });
+
+        // The private CALL row may feed RETURN, but it is not a separate
+        // delivered result. Refusal of that final result must undo the CREATE
+        // and cannot leak a schema/row or publish a partial write.
+        let mut limited_grant = grant(Rights::ReadWrite);
+        limited_grant.limits.max_rows = 0;
+        let mut limited = Client::connect(cx, addr, token(&limited_grant))
+            .await
+            .unwrap();
+        limited.select(cx, "social").await.unwrap();
+        let limited_handle = limited
+            .prepare_write_returning(cx, statement, arguments("representative", 99))
+            .await
+            .unwrap();
+        let mut columns = 0;
+        let mut rows = 0;
+        let failed = limited
+            .execute_prepared_write_returning_streaming(
+                cx,
+                limited_handle,
+                arguments("rolledbackneedle", 4),
+                |_| {
+                    columns += 1;
+                    Ok(())
+                },
+                |_| {
+                    rows += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(failed), ErrorCode::Budget);
+        assert_eq!((columns, rows), (0, 0));
+        let unchanged = observer
+            .execute(cx, ExecuteMode::Read, stored, vec![])
+            .await
+            .unwrap();
+        assert_eq!(unchanged.rows, expected);
+        assert_eq!(unchanged.outcome, Outcome::Rows { seq: 3 });
+
+        limited.release_prepared(cx, limited_handle).await.unwrap();
+        writer.release_prepared(cx, handle).await.unwrap();
+        limited.close(cx).await.unwrap();
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}

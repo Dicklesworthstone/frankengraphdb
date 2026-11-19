@@ -15,9 +15,26 @@ fn lane(
     writes: impl IntoIterator<Item = usize>,
     flush_pending: bool,
 ) -> (Lane, Arc<WireState>) {
+    lane_with_limits(
+        cx,
+        db,
+        token,
+        writes,
+        flush_pending,
+        FrameLimits::new(4096).unwrap(),
+    )
+}
+
+fn lane_with_limits(
+    cx: &Cx,
+    db: &Arc<Served>,
+    token: &CapabilityToken,
+    writes: impl IntoIterator<Item = usize>,
+    flush_pending: bool,
+    limits: FrameLimits,
+) -> (Lane, Arc<WireState>) {
     let (io, state) = WireIo::new(writes, flush_pending);
     let (reader, writer) = split_duplex(cx, Box::new(io) as Box<dyn DuplexIo>).unwrap();
-    let limits = FrameLimits::new(4096).unwrap();
     let session = SessionBinding {
         transcript: [0x71; 32],
         auth_generation: 1,
@@ -57,7 +74,11 @@ fn lane(
 }
 
 fn frames(bytes: &[u8]) -> Vec<Frame> {
-    let mut decoder = fgdb_protocol::Decoder::new(FrameLimits::new(4096).unwrap());
+    frames_with_limits(bytes, FrameLimits::new(4096).unwrap())
+}
+
+fn frames_with_limits(bytes: &[u8], limits: FrameLimits) -> Vec<Frame> {
+    let mut decoder = fgdb_protocol::Decoder::new(limits);
     let mut offset = 0;
     let mut result = Vec::new();
     while offset < bytes.len() {
@@ -70,6 +91,203 @@ fn frames(bytes: &[u8]) -> Vec<Frame> {
         );
     }
     result
+}
+
+#[test]
+fn subscription_schema_and_exact_frame_entry_can_use_separate_fragments() {
+    let ((), report) = run_async_under_lab(0x79a0_0110, |root| async move {
+        let (server, token, _) = served(&root, "subscription-schema-fragment").await;
+        let db = &server.databases["test"];
+        for oversized in [false, true] {
+            let (mut lane, wire) = lane(&root, db, &token, [], false);
+            let binding = lane.conn.binding();
+            let stream = StreamId([0x39; 16]);
+            let child = lane
+                .conn
+                .admit_child(stream, ChildKind::Subscription)
+                .unwrap();
+            lane.send_generation = Some(db.db.generation().unwrap());
+            let waiter = server.shutdown.waiter();
+            let mut window = FlowWindow::new(lane.initial_window, lane.maximum_window).unwrap();
+            let framing = binding.header_len() + 15;
+            let budget = lane.send_limits.max_frame_len() - framing;
+            // The entry is exactly weight(16) + row width(4) + text tag(1)
+            // + text length(4) + payload. Its column list fits separately.
+            let text = "x".repeat(budget - 25 + usize::from(oversized));
+            let columns = vec!["payload".repeat(100)];
+            let mut pending_columns = Some(columns.clone());
+            let result = lane
+                .send_batch(
+                    &root,
+                    &waiter,
+                    &mut window,
+                    1,
+                    stream,
+                    binding,
+                    7,
+                    true,
+                    &mut pending_columns,
+                    vec![(1, vec![WireValue::Text(text.clone())])],
+                )
+                .await;
+            let sent = frames(&wire.bytes());
+            if oversized {
+                assert!(matches!(result, Err(Stop::Cancelled)));
+                assert_eq!(sent.len(), 1, "no baseline prefix before refusal");
+                assert_eq!(sent[0].header().kind(), FrameKind::Error);
+                assert_eq!(
+                    ErrorBody::decode(sent[0].payload()).unwrap().code,
+                    ErrorCode::Execution
+                );
+                assert_eq!(pending_columns, Some(columns));
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(sent.len(), 2);
+                assert!(sent.iter().all(|frame| {
+                    frame.header().kind() == FrameKind::SubscriptionBatch
+                        && frame.header().stream_id() == stream
+                        && frame.header().request_id() == 1
+                }));
+                let schema = SubscriptionBatch::decode(sent[0].payload()).unwrap();
+                assert_eq!(schema.columns, Some(columns));
+                assert!(schema.entries.is_empty());
+                assert!(!schema.last);
+                let data = SubscriptionBatch::decode(sent[1].payload()).unwrap();
+                assert!(data.columns.is_none());
+                assert_eq!(data.entries, [(1, vec![WireValue::Text(text)])]);
+                assert!(data.last);
+                assert!(schema.snapshot && data.snapshot);
+                assert_eq!((schema.frontier, data.frontier), (7, 7));
+                assert_eq!(sent[1].header().frame_len(), 4096);
+                assert!(pending_columns.is_none());
+                assert_eq!(
+                    window.available(),
+                    SendCost {
+                        bytes: lane.initial_window.bytes
+                            - sent
+                                .iter()
+                                .map(|frame| frame.header().frame_len() as u64)
+                                .sum::<u64>(),
+                        rows: 0,
+                    }
+                );
+            }
+            lane.conn
+                .child_terminal(stream, child, ChildTerminus::EphemeralCompleted)
+                .unwrap();
+            assert_eq!(lane.conn.sends_in_flight(), 0);
+        }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn subscription_fragments_obey_body_node_and_entry_limits_with_large_flow_credit() {
+    let ((), report) = run_async_under_lab(0x79a0_0111, |root| async move {
+        let (server, token, _) = served(&root, "subscription-body-fragments").await;
+        let db = &server.databases["test"];
+        for node_bound in [true, false] {
+            let limits = FrameLimits::new(80 << 20).unwrap();
+            let (mut lane, wire) = lane_with_limits(&root, db, &token, [], false, limits);
+            lane.initial_window = SendCost {
+                bytes: 160 << 20,
+                rows: MAX_ROWS_PER_CHUNK as u64 + 2,
+            };
+            lane.maximum_window = lane.initial_window;
+            let binding = lane.conn.binding();
+            let stream = StreamId([0x3a; 16]);
+            let child = lane
+                .conn
+                .admit_child(stream, ChildKind::Subscription)
+                .unwrap();
+            lane.send_generation = Some(db.db.generation().unwrap());
+            let waiter = server.shutdown.waiter();
+            let mut window = FlowWindow::new(lane.initial_window, lane.maximum_window).unwrap();
+            let (mut columns, entries) = if node_bound {
+                // Both packed lists fit separately; their roots make the
+                // combined node count exceed the body limit by exactly two.
+                (
+                    Some(vec!["ids".to_owned()]),
+                    vec![
+                        (3, vec![WireValue::Vertices(vec![1; MAX_VALUE_NODES / 2])]),
+                        (-2, vec![WireValue::Edges(vec![2; MAX_VALUE_NODES / 2])]),
+                    ],
+                )
+            } else {
+                (
+                    Some(Vec::new()),
+                    vec![(1, Vec::new()); MAX_ROWS_PER_CHUNK + 1],
+                )
+            };
+            let expected_rows = entries.len() as u64;
+            assert!(
+                lane.send_batch(
+                    &root,
+                    &waiter,
+                    &mut window,
+                    1,
+                    stream,
+                    binding,
+                    9,
+                    false,
+                    &mut columns,
+                    entries,
+                )
+                .await
+                .is_ok()
+            );
+            let sent = frames_with_limits(&wire.bytes(), limits);
+            assert_eq!(sent.len(), 2);
+            let mut delivered = 0;
+            for (index, frame) in sent.iter().enumerate() {
+                assert_eq!(frame.header().kind(), FrameKind::SubscriptionBatch);
+                assert_eq!(frame.header().stream_id(), stream);
+                let part = SubscriptionBatch::decode(frame.payload()).unwrap();
+                assert_eq!(part.frontier, 9);
+                assert!(!part.snapshot);
+                assert_eq!(part.last, index == 1);
+                assert_eq!(part.columns.is_some(), index == 0);
+                delivered += part.entries.len() as u64;
+                if node_bound {
+                    assert_eq!(part.entries.len(), 1);
+                    assert_eq!(part.entries[0].0, if index == 0 { 3 } else { -2 });
+                    match &part.entries[0].1[..] {
+                        [WireValue::Vertices(ids)] if index == 0 => {
+                            assert_eq!(ids.len(), MAX_VALUE_NODES / 2);
+                            assert!(ids.iter().all(|id| *id == 1));
+                        }
+                        [WireValue::Edges(ids)] if index == 1 => {
+                            assert_eq!(ids.len(), MAX_VALUE_NODES / 2);
+                            assert!(ids.iter().all(|id| *id == 2));
+                        }
+                        other => panic!("unexpected subscription fragment: {other:?}"),
+                    }
+                } else {
+                    assert_eq!(
+                        part.entries.len(),
+                        if index == 0 { MAX_ROWS_PER_CHUNK } else { 1 }
+                    );
+                    assert!(
+                        part.entries
+                            .iter()
+                            .all(|(weight, row)| *weight == 1 && row.is_empty())
+                    );
+                }
+            }
+            assert_eq!(delivered, expected_rows);
+            assert_eq!(
+                window.available().rows,
+                lane.initial_window.rows - expected_rows
+            );
+            lane.conn
+                .child_terminal(stream, child, ChildTerminus::EphemeralCompleted)
+                .unwrap();
+            assert_eq!(lane.conn.sends_in_flight(), 0);
+        }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 /// Feed real FGP frames through the complete connection dispatcher while the
@@ -378,13 +596,16 @@ fn recovery_resets_credit_blocked_subscriptions_at_the_last_complete_batch() {
 #[test]
 fn recovery_refuses_consistent_read_batches_before_send_and_while_credit_blocked() {
     let ((), report) = run_async_under_lab(0x79a0_0109, |root| async move {
-        for before_first_byte in [true, false] {
+        for (before_first_byte, prepared) in
+            [(true, false), (false, false), (true, true), (false, true)]
+        {
             let (server, token, _) = served(
                 &root,
-                if before_first_byte {
-                    "read-batch-unwritten"
-                } else {
-                    "read-batch-credit"
+                match (before_first_byte, prepared) {
+                    (true, false) => "read-batch-unwritten",
+                    (false, false) => "read-batch-credit",
+                    (true, true) => "prepared-read-batch-unwritten",
+                    (false, true) => "prepared-read-batch-credit",
                 },
             )
             .await;
@@ -405,17 +626,31 @@ fn recovery_refuses_consistent_read_batches_before_send_and_while_credit_blocked
                 false,
             );
             let waiter = server.shutdown.waiter();
-            let mut execution = Box::pin(lane.execute_statement(
-                &root,
-                &waiter,
-                db,
-                &token,
-                1,
+            let statement = if prepared {
+                let definition = crate::execute::prepare_read(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        mode: fgdb_protocol::body::PrepareMode::Read,
+                        statement: "MATCH (n) RETURN 7 AS value".into(),
+                        parameters: vec![],
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+                Statement::PreparedReadBatch {
+                    definition: Ok(Arc::new(PreparedDefinition::from(definition))),
+                    argument_sets: vec![vec![], vec![]],
+                }
+            } else {
                 Statement::ReadBatch(ExecuteBatch {
                     statement: "MATCH (n) RETURN 7 AS value".into(),
                     argument_sets: vec![vec![], vec![]],
-                }),
-            ));
+                })
+            };
+            let mut execution =
+                Box::pin(lane.execute_statement(&root, &waiter, db, &token, 1, statement));
             poll_fn(|task| {
                 assert!(execution.as_mut().poll(task).is_pending());
                 if wire.writes.load(Ordering::Acquire) > 0 {
@@ -602,6 +837,345 @@ fn generation_fence_cancels_unwritten_frames_but_closes_partial_frames_and_flush
             }
             assert_eq!(lane.conn.sends_in_flight(), 0);
             settled(db).await;
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn read_transaction_fences_rows_and_data_dependent_refusals_during_recovery() {
+    let ((), report) = run_async_under_lab(0x79a0_0114, |root| async move {
+        for fails in [false, true] {
+            for recovery in [false, true] {
+                let name = format!("read-transaction-output-{fails}-{recovery}");
+                let (mut server, token, _) = served(&root, &name).await;
+                let db = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+                db.symbols
+                    .bind(fgdb_gql::GraphSymbolKind::Property, "age", 1)
+                    .unwrap();
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let mut seed = fgdb::WriteBatch::new(fgdb_delta_types::RelationId(1));
+                seed.create_vertex(
+                    fgdb_types::VId(1),
+                    vec![],
+                    vec![(
+                        fgdb_delta_types::PropertyKeyId(1),
+                        fgdb_types::CanonicalScalar::Int(0),
+                    )],
+                );
+                db.db
+                    .write(&root)
+                    .await
+                    .unwrap()
+                    .write(&contexts.commit(), seed)
+                    .await
+                    .unwrap();
+                let db = &server.databases["test"];
+                let writes = if recovery {
+                    vec![usize::MAX, 0]
+                } else {
+                    vec![]
+                };
+                let (mut lane, wire) = lane(&root, db, &token, writes, false);
+                let waiter = server.shutdown.waiter();
+                let binding = lane.conn.binding();
+                let request = |kind, id, payload| {
+                    Frame::new(
+                        kind,
+                        id,
+                        StreamId::CONTROL,
+                        binding,
+                        payload,
+                        FrameLimits::new(4096).unwrap(),
+                    )
+                    .unwrap()
+                };
+                let begin = request(FrameKind::BeginReadTransaction, 1, Empty.encode().unwrap());
+                let mut active = None;
+                assert!(
+                    lane.transaction_request(&root, &waiter, db, &token, &mut active, &begin,)
+                        .await
+                        .is_ok()
+                );
+                let sent = frames(&wire.bytes());
+                let begun =
+                    fgdb_protocol::body::TransactionBegun::decode(sent[0].payload()).unwrap();
+                assert_eq!(begun.basis, 1);
+                let statement = request(
+                    FrameKind::ExecuteTransaction,
+                    2,
+                    fgdb_protocol::body::ExecuteTransaction {
+                        handle: begun.handle,
+                        statement: Execute {
+                            mode: ExecuteMode::Read,
+                            statement: if fails {
+                                "MATCH (n) RETURN 1/n.age AS value"
+                            } else {
+                                "MATCH (n) RETURN n.age AS value"
+                            }
+                            .to_owned(),
+                            parameters: vec![],
+                        },
+                    }
+                    .encode()
+                    .unwrap(),
+                );
+                let mut sending = Box::pin(lane.transaction_request(
+                    &root,
+                    &waiter,
+                    db,
+                    &token,
+                    &mut active,
+                    &statement,
+                ));
+                if recovery {
+                    poll_fn(|task| {
+                        assert!(sending.as_mut().poll(task).is_pending());
+                        if wire.writes.load(Ordering::Acquire) > 1 {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                    assert_eq!(frames(&wire.bytes()).len(), 1);
+                    fail_after_marker(&root, db, 777).await;
+                }
+                assert!(sending.await.is_ok());
+                let sent = frames(&wire.bytes());
+                if recovery || fails {
+                    assert!(active.is_none());
+                    assert_eq!(sent.len(), 2);
+                    assert_eq!(sent[1].header().kind(), FrameKind::Error);
+                    let error = ErrorBody::decode(sent[1].payload()).unwrap();
+                    if recovery {
+                        assert!(matches!(
+                            error.code,
+                            ErrorCode::DatabaseRecovering | ErrorCode::DatabaseUnavailable
+                        ));
+                        settled(db).await;
+                    } else {
+                        assert_eq!(error.code, ErrorCode::Execution);
+                    }
+                } else {
+                    assert!(active.is_some());
+                    assert_eq!(sent.len(), 3);
+                    assert_eq!(sent[1].header().kind(), FrameKind::TransactionResultChunk);
+                    assert_eq!(sent[2].header().kind(), FrameKind::TransactionResultEnd);
+                }
+                drop(active.take());
+                assert_eq!(lane.conn.children_in_flight(), 0);
+                assert_eq!(lane.conn.sends_in_flight(), 0);
+                server.join_database_workers(&root).await;
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn explicit_transaction_native_refusal_is_fenced_and_discards_staged_prefix() {
+    let ((), report) = run_async_under_lab(0x79a0_0112, |root| async move {
+        for recovery in [false, true] {
+            let name = if recovery {
+                "transaction-refusal-recovery"
+            } else {
+                "transaction-refusal-current"
+            };
+            let (server, token, _) = served(&root, name).await;
+            let db = &server.databases["test"];
+            // BEGIN, the provisional schema and its END complete. The next
+            // native refusal blocks before any byte, without timing races.
+            let writes = if recovery {
+                vec![usize::MAX, usize::MAX, usize::MAX, 0]
+            } else {
+                vec![]
+            };
+            let (mut lane, wire) = lane(&root, db, &token, writes, false);
+            let waiter = server.shutdown.waiter();
+            let binding = lane.conn.binding();
+            let mut active = None;
+            let request = |kind, id, body| {
+                Frame::new(
+                    kind,
+                    id,
+                    StreamId::CONTROL,
+                    binding,
+                    body,
+                    FrameLimits::new(4096).unwrap(),
+                )
+                .unwrap()
+            };
+            let begin = request(FrameKind::BeginTransaction, 1, Empty.encode().unwrap());
+            assert!(
+                lane.transaction_request(&root, &waiter, db, &token, &mut active, &begin)
+                    .await
+                    .is_ok()
+            );
+            let sent = frames(&wire.bytes());
+            assert_eq!(sent.len(), 1);
+            let begun = fgdb_protocol::body::TransactionBegun::decode(sent[0].payload()).unwrap();
+            let statement = |mode| fgdb_protocol::body::ExecuteTransaction {
+                handle: begun.handle,
+                statement: Execute {
+                    mode,
+                    statement: "CREATE (n)".to_owned(),
+                    parameters: vec![],
+                },
+            };
+            let write = request(
+                FrameKind::ExecuteTransaction,
+                2,
+                statement(ExecuteMode::Write).encode().unwrap(),
+            );
+            assert!(
+                lane.transaction_request(&root, &waiter, db, &token, &mut active, &write)
+                    .await
+                    .is_ok()
+            );
+            let sent = frames(&wire.bytes());
+            assert_eq!(sent.len(), 3);
+            assert_eq!(sent[1].header().kind(), FrameKind::TransactionResultChunk);
+            assert_eq!(sent[2].header().kind(), FrameKind::TransactionResultEnd);
+            assert!(active.is_some());
+            assert_eq!(
+                db.db.read(&root).await.unwrap().frontier().unwrap(),
+                CommitSeq(0)
+            );
+
+            let refused = request(
+                FrameKind::ExecuteTransaction,
+                3,
+                statement(ExecuteMode::Read).encode().unwrap(),
+            );
+            let mut execution = Box::pin(lane.transaction_request(
+                &root,
+                &waiter,
+                db,
+                &token,
+                &mut active,
+                &refused,
+            ));
+            if recovery {
+                poll_fn(|task| {
+                    assert!(execution.as_mut().poll(task).is_pending());
+                    if wire.writes.load(Ordering::Acquire) > 3 {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                assert_eq!(frames(&wire.bytes()).len(), 3);
+                fail_after_marker(&root, db, 777).await;
+            }
+            assert!(execution.await.is_ok());
+            assert!(
+                active.is_none(),
+                "a refused statement cannot retain its staged prefix"
+            );
+            let sent = frames(&wire.bytes());
+            assert_eq!(sent.len(), 4);
+            let last = sent.last().unwrap();
+            assert_eq!(last.header().kind(), FrameKind::Error);
+            assert_eq!(last.header().request_id(), 3);
+            let error = ErrorBody::decode(last.payload()).unwrap();
+            if recovery {
+                assert!(matches!(
+                    error.code,
+                    ErrorCode::DatabaseRecovering | ErrorCode::DatabaseUnavailable,
+                ));
+                assert!(!error.message.contains("Read request"));
+                settled(db).await;
+            } else {
+                assert_eq!(error.code, ErrorCode::PermissionDenied);
+                assert!(error.message.contains("Read request"));
+            }
+            let guard = db.db.read(&root).await.unwrap();
+            assert_eq!(guard.frontier().unwrap(), CommitSeq(u64::from(recovery)));
+            assert_eq!(guard.vertices().unwrap().len(), usize::from(recovery));
+            drop(guard);
+            assert_eq!(lane.conn.children_in_flight(), 0);
+            assert_eq!(lane.conn.sends_in_flight(), 0);
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn transaction_refusal_fence_closes_partial_output_but_preserves_unknown_outcomes() {
+    let ((), report) = run_async_under_lab(0x79a0_0113, |root| async move {
+        for flush_pending in [false, true] {
+            let name = if flush_pending {
+                "transaction-refusal-flush"
+            } else {
+                "transaction-refusal-partial"
+            };
+            let (server, token, _) = served(&root, name).await;
+            let db = &server.databases["test"];
+            let generation = db.db.generation().unwrap();
+            let writes = if flush_pending { vec![] } else { vec![3, 0] };
+            let (mut lane, wire) = lane(&root, db, &token, writes, flush_pending);
+            let binding = lane.conn.binding();
+            let mut sending = Box::pin(lane.refuse_transaction(
+                &root,
+                1,
+                StreamId::CONTROL,
+                binding,
+                generation.clone(),
+                Refusal::new(ErrorCode::Conflict, "private transaction diagnostic"),
+            ));
+            poll_fn(|task| {
+                assert!(sending.as_mut().poll(task).is_pending());
+                if wire.writes.load(Ordering::Acquire) > 0 {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            let before = wire.bytes();
+            if flush_pending {
+                assert_eq!(frames(&before).len(), 1);
+                assert!(wire.flushes.load(Ordering::Acquire) > 0);
+            } else {
+                assert_eq!(before.len(), 3);
+            }
+            fail_after_marker(&root, db, 778).await;
+            assert!(matches!(sending.await, Err(Stop::Transport)));
+            assert_eq!(
+                wire.bytes(),
+                before,
+                "no replacement can follow a partial diagnostic"
+            );
+            assert_eq!(lane.conn.sends_in_flight(), 0);
+            settled(db).await;
+
+            // An outcome control is deliberately independent of the retired
+            // result generation. Suppressing it would lose the no-replay warning.
+            let (mut terminal_lane, terminal_wire) = self::lane(&root, db, &token, [], false);
+            let binding = terminal_lane.conn.binding();
+            assert!(
+                terminal_lane
+                    .refuse_transaction(
+                        &root,
+                        2,
+                        StreamId::CONTROL,
+                        binding,
+                        generation,
+                        Refusal::new(ErrorCode::OutcomeUnknown, "outcome unknown; do not replay"),
+                    )
+                    .await
+                    .is_ok()
+            );
+            let terminal = frames(&terminal_wire.bytes());
+            assert_eq!(terminal.len(), 1);
+            let error = ErrorBody::decode(terminal[0].payload()).unwrap();
+            assert_eq!(error.code, ErrorCode::OutcomeUnknown);
+            assert_eq!(error.message, "outcome unknown; do not replay");
+            assert_eq!(terminal_lane.conn.sends_in_flight(), 0);
             server.join_database_workers(&root).await;
         }
     });

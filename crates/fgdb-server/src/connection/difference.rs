@@ -4,7 +4,7 @@
 
 use super::source_stream::SourceStatement;
 use super::*;
-use crate::execute::ordered::{ordered_generation, read_ordered_session};
+use crate::execute::ordered::{ordered_generation, read_ordered_session_at};
 use crate::execute::{read_difference, read_prepared_difference};
 use fgdb_protocol::body::{DiffMode, DiffResultChunk, DiffResultEnd};
 use fgdb_types::PurposeContexts;
@@ -307,6 +307,10 @@ impl Lane {
             SourceStatement::Prepared(prepared) => Some(prepared),
             SourceStatement::Text(_) => None,
         };
+        let cuts = [
+            Some(fgdb_types::CommitSeq(before)),
+            Some(fgdb_types::CommitSeq(after)),
+        ];
         let (mut session, imported) = match self
             .read_progress(
                 cx,
@@ -315,7 +319,7 @@ impl Lane {
                 stream,
                 request,
                 binding,
-                read_ordered_session(cx, db, token, definition, generation),
+                read_ordered_session_at(cx, db, token, definition, generation, &cuts),
             )
             .await?
         {

@@ -72,3 +72,43 @@ fn prepared_returning_first_input_is_admitted_before_credentials() {
     assert!(!stdout.contains("secret"));
     assert!(!stdout.contains("missing-token"));
 }
+
+#[test]
+fn prepared_read_batch_admits_the_complete_file_before_credentials() {
+    let too_many = format!("[{}]", vec!["{}"; 33].join(","));
+    let oversized = vec![b' '; 1_048_577];
+    for bytes in [
+        b"[]".as_slice(),
+        b"not JSON".as_slice(),
+        br#"[{"name":"text:Ada"},{"name":7}]"#.as_slice(),
+        too_many.as_bytes(),
+        oversized.as_slice(),
+    ] {
+        let (path, token) = input(bytes);
+        let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+            .args(["--robot", "remote", "--addr", "127.0.0.1:9", "--token-file"])
+            .arg(&token)
+            .args(["--database", "social", "--prepared-batch", "--rows-file"])
+            .arg(&path)
+            .args(["query", "RETURN $name AS name"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains(r#""class":"usage""#));
+        assert!(!stdout.contains(r#""event":"result""#));
+        assert!(!stdout.contains("missing-token"));
+    }
+    let maximum = format!("[{}]", vec!["{}"; 32].join(","));
+    let (path, token) = input(maximum.as_bytes());
+    let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "remote", "--addr", "127.0.0.1:9", "--token-file"])
+        .arg(&token)
+        .args(["--database", "social", "--prepared-batch", "--rows-file"])
+        .arg(&path)
+        .args(["query", "RETURN 1 AS value"])
+        .output()
+        .unwrap();
+    // Exactly 32 sets pass local admission and reach the absent credential.
+    assert_eq!(output.status.code(), Some(4));
+}

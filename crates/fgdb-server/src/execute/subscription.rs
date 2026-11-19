@@ -128,18 +128,6 @@ fn subscribe_refusal(error: SubscribeError) -> Refusal {
     }
 }
 
-fn unrestricted(capability: &fgdb_warden::VerifiedCapability) -> Result<(), Refusal> {
-    let scope = capability.predicates();
-    if scope.sees_all_incidence() && scope.sees_all_fields() {
-        Ok(())
-    } else {
-        Err(Refusal::new(
-            ErrorCode::PermissionDenied,
-            "analytic CALL fnx.* subscriptions require a read capability with unrestricted label, relation and property scope",
-        ))
-    }
-}
-
 fn checkpoint(cx: &QueryCx) -> Result<(), Refusal> {
     cx.checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))
@@ -450,14 +438,27 @@ pub(crate) async fn subscribe(
         (statement.statement.as_str(), parameters.as_ref()),
         |(lowered, derived)| (lowered.text(), derived),
     );
-    let prepared =
-        PreparedNativeRead::prepare_subscription(&query, text, parameters, db.symbols.clone())
-            .map_err(subscribe_refusal)?;
-    if prepared.has_procedure_call() {
-        unrestricted(&capability)?;
-    }
+    // Name binding and registration use the same guarded native publication.
+    // The resulting circuit keeps this catalog; a later schema transition
+    // follows the native rebuild/refusal contract instead of rebinding it.
+    let symbols = guard
+        .symbol_catalog()
+        .map_err(|error| query_refusal(QueryError::Read(error)))
+        .and_then(|catalog| {
+            db.symbols.with_catalog(catalog).map_err(|_| {
+                Refusal::new(
+                    ErrorCode::Conflict,
+                    "configured symbol bindings conflict with the selected catalog",
+                )
+            })
+        });
+    permit.checkpoint_at(unix_millis()).map_err(authorization)?;
+    checkpoint(&query)?;
+    generation.check().map_err(Refusal::from)?;
+    let prepared = PreparedNativeRead::prepare_subscription(&query, text, parameters, symbols?)
+        .map_err(subscribe_refusal)?;
     let (nodes, source_width) = prepared
-        .subscription_footprint(&query, parameters)
+        .subscription_footprint_authorized(&query, parameters, &scope)
         .map_err(native_refusal)?;
     let reservation = reserve(
         db.query_policy,

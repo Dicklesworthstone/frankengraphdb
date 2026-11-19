@@ -40,6 +40,9 @@ impl PreparedNativeRead {
     /// labels, relations, or properties, a private `CapabilityScope` (`Pi_C`)
     /// homomorphically projects both the initial snapshot and every committed
     /// `LogicalDeltaBatch` before any downstream circuit stage observes them.
+    /// Supported maintained analytics use that same masked row topology,
+    /// including isolated visible vertices, rather than the privileged direct
+    /// graph source. Other procedures and unsupported profiles still refuse.
     pub fn subscribe_authorized<V: Vfs + Clone, T, E>(
         &self,
         database: &mut Database<V>,
@@ -55,9 +58,6 @@ impl PreparedNativeRead {
         if scope.is_unrestricted_graph() {
             return self.subscribe_scoped(database, cx, params, setup, admit);
         }
-        if self.has_procedure_call() {
-            return Err(SubscriptionError::from(StandingQueryError::Unsupported).into());
-        }
         cx.checkpoint()
             .map_err(StandingQueryError::Interrupted)
             .map_err(SubscriptionError::from)?;
@@ -69,6 +69,13 @@ impl PreparedNativeRead {
             cx.checkpoint()
                 .map_err(|_| crate::StandingQueryFailure::Interrupted)
         };
+        if self.has_procedure_call() {
+            // Prove the complete maintained recipe before inspecting any
+            // graph. The compiler uses this same scoped analytic dispatch;
+            // unsupported descendants do not gain an eager fallback.
+            self.subscription_footprint_authorized(cx, params, scope)
+                .map_err(SubscriptionError::from)?;
+        }
         let cap_state = crate::standing_query::capability::State::build(
             database,
             scope.clone(),

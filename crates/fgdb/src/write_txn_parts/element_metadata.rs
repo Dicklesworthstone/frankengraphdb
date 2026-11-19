@@ -74,5 +74,6 @@ impl WriteTxn {
                 )
             },
         )
+        .with_call_arguments(self.call_arguments.clone())
     }
 }

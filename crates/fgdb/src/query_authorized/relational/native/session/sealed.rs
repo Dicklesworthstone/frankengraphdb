@@ -147,11 +147,12 @@ pub(super) fn check_selected_cut(
     execution: &Live<'_, '_, '_>,
     selected: CommitSeq,
 ) -> Result<(), QueryError> {
-    if execution
-        .borrow()
-        .sealed
-        .as_ref()
-        .is_some_and(|source| source.as_of() != selected)
+    let execution = execution.borrow();
+    if execution.required_cut.is_some_and(|cut| cut != selected)
+        || execution
+            .sealed
+            .as_ref()
+            .is_some_and(|source| source.as_of() != selected)
     {
         return Err(QueryError::Unsupported {
             diagnostics: vec![

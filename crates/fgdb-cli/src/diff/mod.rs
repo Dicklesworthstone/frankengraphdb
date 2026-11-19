@@ -56,6 +56,11 @@ impl DiffOptions {
         ))
     }
 
+    pub(super) fn catalog_cuts(&self) -> Result<[CommitSeq; 2], Failure> {
+        let (before, after) = self.endpoints()?;
+        Ok([before, after])
+    }
+
     fn policy(&self) -> GqlQueryPolicy {
         self.budget.policy()
     }

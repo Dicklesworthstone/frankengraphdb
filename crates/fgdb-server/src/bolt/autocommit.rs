@@ -27,6 +27,7 @@ enum WriteRequest {
     Program(Execute),
     Returning {
         definition: Returning,
+        symbols: crate::Symbols,
         // RUN's definition/binding debit narrows the execution allowance.
         // The native owner still checks live authority at consumption.
         token: CapabilityToken,
@@ -45,17 +46,14 @@ pub(super) enum PendingWrite {
 const MAX_RETURN_BYTES: usize = 64 * 1024 * 1024;
 
 fn output_budget() -> Refusal {
-    Refusal::new(
-        ErrorCode::Budget,
-        "Bolt write RETURN exceeds the output limit",
-    )
+    Refusal::new(ErrorCode::Budget, "Bolt result exceeds the output limit")
 }
 
 fn output_work(
-    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
     units: u64,
 ) -> Result<(), Refusal> {
-    work(units).map_err(|error| crate::execute::write_refusal(&error))
+    work(units)
 }
 
 fn output_bytes(total: &mut usize, bytes: usize) -> Result<(), Refusal> {
@@ -81,7 +79,7 @@ fn admit_scalar_value(
     value: &WireValue,
     depth: usize,
     total: &mut usize,
-    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
     if depth > fgdb_bolt::packstream::MAX_DEPTH {
         return Err(output_budget());
@@ -155,7 +153,7 @@ fn retained_value(
     value: &Value,
     depth: usize,
     total: &mut usize,
-    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
     output_work(work, 1)?;
     if depth > fgdb_bolt::packstream::MAX_DEPTH {
@@ -192,6 +190,60 @@ pub(super) fn collect_returning(
     metadata: &mut dyn fgdb::AuthorizedWriteOutput,
     catalog: &fgdb_gql::ReverseSymbolCatalog,
 ) -> Result<VecDeque<Vec<Value>>, Refusal> {
+    collect_write(rows, max_frame_len, work, metadata, catalog).map(|(rows, _)| rows)
+}
+
+/// Explicit write transactions retain the same measured representation while
+/// their native checked-output callback still owns authority and rollback.
+pub(super) fn collect_write(
+    rows: Vec<Vec<WireValue>>,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    metadata: &mut dyn fgdb::AuthorizedWriteOutput,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
+) -> Result<(VecDeque<Vec<Value>>, usize), Refusal> {
+    collect_graph_output(
+        rows,
+        max_frame_len,
+        &mut |units| work(units).map_err(|error| crate::execute::write_refusal(&error)),
+        &mut |element, kind, catalog| {
+            metadata
+                .metadata(element, kind, catalog)
+                .map_err(|error| crate::execute::write_refusal(&error))
+        },
+        catalog,
+    )
+}
+
+/// Read-only explicit transactions hydrate with the very same representation
+/// code, while their native owner retains its original read permit and pin.
+pub(super) fn collect_read(
+    rows: Vec<Vec<WireValue>>,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), QueryError>,
+    metadata: &mut dyn fgdb::AuthorizedReadOutput,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
+) -> Result<(VecDeque<Vec<Value>>, usize), Refusal> {
+    collect_graph_output(
+        rows,
+        max_frame_len,
+        &mut |units| work(units).map_err(query_refusal),
+        &mut |element, kind, catalog| {
+            metadata
+                .metadata(element, kind, catalog)
+                .map_err(query_refusal)
+        },
+        catalog,
+    )
+}
+
+fn collect_graph_output(
+    rows: Vec<Vec<WireValue>>,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
+    metadata: &mut graph_return::Metadata<'_>,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
+) -> Result<(VecDeque<Vec<Value>>, usize), Refusal> {
     output_work(work, 1)?;
     let mut reserved = 0;
     output_slots::<Vec<Value>>(&mut reserved, rows.len())?;
@@ -206,7 +258,7 @@ pub(super) fn collect_returning(
         let mut cells = Vec::with_capacity(row.len());
         for cell in row {
             // The record and field list occupy depths 0 and 1. Metadata is
-            // read from the final unpublished overlay before any rows escape.
+            // read from the authorized native source before any rows escape.
             cells.push(encoder.cell(cell, 2, &mut reserved)?);
         }
         let before = retained;
@@ -233,7 +285,57 @@ pub(super) fn collect_returning(
         };
         output.push_back(cells);
     }
-    Ok(output)
+    Ok((output, retained))
+}
+
+/// Admit RUN's complete SUCCESS frame before the read owner can finish its
+/// checked output. Columns are moved from the already-admitted native schema;
+/// no second copy of their payloads is needed for this preflight.
+pub(super) fn admit_read_metadata(
+    metadata: Map,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), QueryError>,
+) -> Result<Map, Refusal> {
+    admit_metadata(metadata, max_frame_len, &mut |units| {
+        work(units).map_err(query_refusal)
+    })
+    .map(|(metadata, _)| metadata)
+}
+
+/// The write owner's summaries use the same complete-frame preflight. Return
+/// their actual owned capacity so cursor admission need not rescan it later.
+pub(super) fn admit_write_metadata(
+    metadata: Map,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+) -> Result<(Map, usize), Refusal> {
+    admit_metadata(metadata, max_frame_len, &mut |units| {
+        work(units).map_err(|error| crate::execute::write_refusal(&error))
+    })
+}
+
+fn admit_metadata(
+    metadata: Map,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
+) -> Result<(Map, usize), Refusal> {
+    let value = Value::Map(metadata);
+    let mut retained = 0;
+    retained_value(&value, 1, &mut retained, work)?;
+    output_work(work, retained.div_ceil(64) as u64 + 1)?;
+    let mut encoded = Vec::new();
+    fgdb_bolt::packstream::encode(&value, &mut encoded);
+    if encoded
+        .len()
+        .checked_add(2) // SUCCESS's structure header and tag.
+        .is_none_or(|bytes| bytes > max_frame_len)
+    {
+        return Err(output_budget());
+    }
+    let Value::Map(metadata) = value else {
+        unreachable!("constructed map")
+    };
+    Ok((metadata, retained))
 }
 
 /// Validate metadata whose meaning matters to a write before retaining it.
@@ -251,19 +353,15 @@ fn write_options(extra: &Map, database: &str) -> Result<CommitSeq, Failure> {
 /// The old keyword detector is only a hint, never execution authority. A
 /// valid native read wins even when an alias, label or comment spells CREATE.
 /// Branch selectors use the same native owner as normal read preparation.
-fn is_native_read(db: &Served, text: &str, parameters: &GqlParameters) -> bool {
+fn is_native_read(symbols: &crate::Symbols, text: &str, parameters: &GqlParameters) -> bool {
     let Ok(selector) = PreparedGraphBranchText::prepare(text) else {
         return false;
     };
     let Ok(selected) = selector.bind_parameters(parameters) else {
         return false;
     };
-    PreparedNativeRead::prepare(
-        selected.statement(),
-        selected.parameters(),
-        db.symbols.clone(),
-    )
-    .is_ok()
+    PreparedNativeRead::prepare(selected.statement(), selected.parameters(), symbols.clone())
+        .is_ok()
 }
 
 /// Admission probes native definitions, not expanded rows. The resolver
@@ -271,18 +369,17 @@ fn is_native_read(db: &Served, text: &str, parameters: &GqlParameters) -> bool {
 /// binder runs again at consumption, under its cooperative execution budget.
 fn is_native_write(
     db: &Served,
+    symbols: &crate::Symbols,
     text: &str,
     parameters: &GqlParameters,
     scope: &PlannerPredicates,
 ) -> bool {
     let resolve = |kind, name: &str| {
-        db.symbols
-            .resolve(kind, name)
-            .filter(|symbol| match symbol {
-                GraphSymbol::Label(label) => scope.allows_label(*label),
-                GraphSymbol::Relation(relation) => scope.allows_relation(*relation),
-                GraphSymbol::Property(property) => scope.allows_property(*property),
-            })
+        symbols.resolve(kind, name).filter(|symbol| match symbol {
+            GraphSymbol::Label(label) => scope.allows_label(*label),
+            GraphSymbol::Relation(relation) => scope.allows_relation(*relation),
+            GraphSymbol::Property(property) => scope.allows_property(*property),
+        })
     };
     if PreparedGraphWriteChainText::is_chain(text).unwrap_or(false) {
         // Preparing the definition does not expand parameter rows or allocate
@@ -309,11 +406,12 @@ fn is_native_write(
 }
 
 impl<'s> Connection<'s> {
-    /// No graph access, identity allocation or transaction opening occurs here.
+    /// Catalog discovery pins only the published generation. No graph traversal,
+    /// identity allocation or transaction opening occurs here.
     /// RETURN binds its immutable native definition to obtain the output schema;
     /// its preparation debit follows it into the checked execution owner. Only
     /// PULL/DISCARD evaluates the statement or publishes its admitted effects.
-    pub(super) fn queue_autocommit_write(
+    pub(super) async fn queue_autocommit_write(
         &mut self,
         cx: &Cx,
         query: &str,
@@ -327,14 +425,29 @@ impl<'s> Connection<'s> {
         let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
         let token = self.token.as_ref().expect("authenticated");
+        db.authority
+            .verify_at(token, crate::TRUNK, crate::unix_millis())
+            .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
+        let (view, generation) = db
+            .db
+            .read_view(cx)
+            .await
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        self.output_generation = Some(generation.clone());
+        // Waiting for publication cannot extend this credential's lifetime.
         let capability = db
             .authority
             .verify_at(token, crate::TRUNK, crate::unix_millis())
             .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
-        if is_native_read(db, query, parameters) {
+        let symbols =
+            crate::execute::symbols_at(&view, &db.symbols, &[]).map_err(Failure::from_refusal)?;
+        generation
+            .check()
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        if is_native_read(&symbols, query, parameters) {
             return Ok(None);
         }
-        let program = is_native_write(db, query, parameters, capability.predicates());
+        let program = is_native_write(db, &symbols, query, parameters, capability.predicates());
         let minimum_seq = write_options(extra, &name)?;
         if !matches!(
             capability.predicates().rights(),
@@ -352,10 +465,6 @@ impl<'s> Connection<'s> {
         statement
             .encode()
             .map_err(|error| Failure::invalid(error.to_string()))?;
-        let generation = db
-            .db
-            .generation()
-            .map_err(|error| Failure::from_refusal(error.into()))?;
         let (request, columns) = if program {
             (WriteRequest::Program(statement), Vec::new())
         } else {
@@ -374,7 +483,7 @@ impl<'s> Connection<'s> {
             crate::execute::admit_write_parameters(&mut permit, parameters)
                 .map_err(Failure::from_refusal)?;
             let template = query_cx.with_restriction(|| {
-                ReturningTemplate::prepare(db, query, parameters)
+                ReturningTemplate::prepare(db, &symbols, query, parameters)
                     .map(|template| template.filter(ReturningTemplate::returns_rows))
             });
             let definition = template.and_then(|template| {
@@ -400,7 +509,14 @@ impl<'s> Connection<'s> {
             let token = crate::execute::write_execution_token(&permit, token)
                 .map_err(Failure::from_refusal)?;
             let columns = definition.columns().to_vec();
-            (WriteRequest::Returning { definition, token }, columns)
+            (
+                WriteRequest::Returning {
+                    definition,
+                    symbols,
+                    token,
+                },
+                columns,
+            )
         };
         generation
             .check()
@@ -456,11 +572,17 @@ impl<'s> Connection<'s> {
                     created: answer.created,
                 }
             }
-            WriteRequest::Returning { definition, token } => {
+            WriteRequest::Returning {
+                definition,
+                symbols,
+                token,
+            } => {
+                let output_symbols = symbols.clone();
                 let execution: crate::execute::Execution<'_, VecDeque<Vec<Value>>> =
                     Box::pin(crate::execute::write_returning_checked(
                         cx,
                         pending.db,
+                        &symbols,
                         &token,
                         definition,
                         Some((&pending.generation, deferred.minimum_seq)),
@@ -470,7 +592,7 @@ impl<'s> Connection<'s> {
                                 max_frame_len,
                                 work,
                                 metadata,
-                                pending.db.symbols.borrowed_reverse_catalog(),
+                                output_symbols.borrowed_reverse_catalog(),
                             )
                         },
                     ));

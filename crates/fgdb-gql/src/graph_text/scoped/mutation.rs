@@ -15,7 +15,7 @@ pub(in crate::graph_text) mod script;
 
 use super::*;
 use crate::GraphSymbolResolver;
-use crate::graph_text::GraphPathFunction;
+use crate::graph_text::{CallScope, GraphPathFunction};
 use crate::mutation_text::{
     MutationActionTemplate, MutationIntegerTemplateOp, MutationReturnTemplate, MutationTextInput,
 };
@@ -1819,6 +1819,7 @@ pub(crate) struct ChainContinuation<'a> {
     row: Vec<(Name<'a>, crate::GraphSetColumnType)>,
     boundary: Option<BoundaryReads<'a>>,
     parameters: Vec<GqlParameterSpec>,
+    call_scope: Option<CallScope<'a>>,
 }
 
 impl<'a> ChainContinuation<'a> {
@@ -1915,6 +1916,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         let (incoming, owned) = match from {
             Some(from) => {
                 let owned = Some(Box::new(from.owned_columns()));
+                parser.call_scope = from.call_scope;
                 parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
                 (Some(from.row), owned)
             }
@@ -1991,6 +1993,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         let (columns, types) = from.owned_columns();
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones())
+            .with_call_scope(from.call_scope)
             .resume_after(from.boundary, &from.parameters, from.at)?;
         let (source, row) = if parser.is_word("MATCH") {
             let (source, row) = parser.owned_match_row_prefix(statement, from.row)?;
@@ -2301,6 +2304,13 @@ impl<'a> Parser<'a> {
     /// through RETURN or up to another write over its completed relation.
     /// ON MATCH is consumed by the MERGE owner before this boundary is asked.
     pub(super) fn at_chained_read(&self) -> Result<bool, GraphPatternTextError> {
+        let optional_call = if self.optional_call()? {
+            let mut lexer = self.lexer.clone();
+            lexer.next()?; // CALL
+            matches!(lexer.next()?.kind, TokenKind::Punct(b'{' | b'('))
+        } else {
+            false
+        };
         Ok(self.is_word("MATCH")
             || (self.is_word("OPTIONAL")
                 && matches!(self.lexer.clone().next()?.kind,
@@ -2309,7 +2319,20 @@ impl<'a> Parser<'a> {
                 && matches!(
                     self.lexer.clone().next()?.kind,
                     TokenKind::Punct(b'{' | b'(')
-                )))
+                ))
+            || optional_call)
+    }
+
+    /// Framing only: retain OPTIONAL with its writing CALL when a read
+    /// prefix stops. The complete scoped compiler owns the body and imports.
+    fn at_writing_call(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        if self.optional_call()? {
+            lexer.next()?; // CALL
+        } else if !self.is_word("CALL") {
+            return Ok(false);
+        }
+        crate::PreparedGraphWriteChainText::call_has_write(lexer)
     }
 
     /// A next write or graph read over the carried row (fgdb-cpny9).
@@ -2356,7 +2379,13 @@ impl<'a> Parser<'a> {
             row,
             boundary: self.boundary_reads.take(),
             parameters: self.syntax.parameters.clone(),
+            call_scope: self.call_scope.clone(),
         })
+    }
+
+    fn with_call_scope(mut self, scope: Option<CallScope<'a>>) -> Self {
+        self.call_scope = scope;
+        self
     }
 
     /// Start a later write of a chain at its own clause, in the scope the

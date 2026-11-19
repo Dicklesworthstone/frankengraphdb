@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 106
+registry_epoch = 107
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -9170,6 +9170,35 @@ digest_class = "transcript"
 transcript_recipe = "the Chronicle marker-chain value AFTER the marker at the root's published_at (ChainedMarker.chain_hash, re-derived and verified by chain recovery), or the chain origin for a publication over the empty stream (fgdb-90hw)"
 
 [[field]]
+containing_schema = "PartitionManifest"
+field_tag = 0x0006
+stable_name = "schema_root"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SchemaCatalog"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "FGSM-v4 per-record optional selected catalog: tag0 followed by forty zero bytes means unnamed epoch0; tag1 carries catalog OID32 and epoch u64. Retained with every live or historical manifest. V2/V3 decode absent; catalog-free encodings retain exact V3 bytes"
+version_status = "active"
+max_size_bytes = 33
+
+[[field]]
+containing_schema = "PartitionManifest"
+field_tag = 0x0007
+stable_name = "schema_epoch"
+exact_wire_type = "u64"
+cardinality = "many"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "FGSM-v4 nonzero epoch exactly matching schema_root; mixed manifests use fixed145-byte records. Maximum frame is10+1048576*145=152043530 bytes; catalog-free V4 is noncanonical"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
 containing_schema = "PayloadAvailabilityCertificate"
 field_tag = 0x0001
 stable_name = "ciphertext_id"
@@ -15348,6 +15377,190 @@ role_predicate = "true"
 retention_and_cut_rule = "torn-write detector over bytes 0..4064 at offset 4064; slot total exactly 4096 bytes"
 version_status = "active"
 max_size_bytes = 32
+
+[[field]]
+containing_schema = "SchemaCatalog"
+field_tag = 0x0001
+stable_name = "graph"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "FGSC-v1 graph coordinate; exact scope of the immutable name generation. All fixed-width integers are big-endian"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "SchemaCatalog"
+field_tag = 0x0002
+stable_name = "branch"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "FGSC-v1 branch coordinate; a transition cannot transplant bindings between coordinates"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "SchemaCatalog"
+field_tag = 0x0003
+stable_name = "epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "Zero denotes the empty unnamed generation; each nonempty name/floor extension advances exactly once. Epoch is independent of future commit ordering"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "SchemaCatalog"
+field_tag = 0x0004
+stable_name = "changed_after"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "Known predecessor CommitSeq at preparation, never a future assigned commit sequence; actual apply validates this exact predecessor. Historical names are visible strictly after their recorded predecessor"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "SchemaCatalog"
+field_tag = 0x0005
+stable_name = "ordinal_floors"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "Three u64 high-water marks in label, relation, property order, including unnamed existing data; floors never decrease or wrap and the full u64 domains remain distinct"
+version_status = "active"
+max_size_bytes = 24
+
+[[field]]
+containing_schema = "SchemaCatalog"
+field_tag = 0x0006
+stable_name = "bindings"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "u32 count <=65536, then strictly namespace-and-name-sorted entries: kind u8 1=Label,2=Relation,3=Property; ordinal u64; introduced_after u64; UTF-8 byte length u32; exact UTF-8 name bytes. Names are nonempty, at most1048576 bytes, and bijective within each kind; no normalization. Total FGSC frame <=16777216 bytes; introductions never change in a successor"
+version_status = "active"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "SchemaTransition"
+field_tag = 0x0001
+stable_name = "graph"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "FGST-v1 scope equals both catalogs and the owning coordinate's Schema delta; big-endian fixed-width integers"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "SchemaTransition"
+field_tag = 0x0002
+stable_name = "branch"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "FGST-v1 scope equals both catalogs and the owning coordinate's Schema delta"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "SchemaTransition"
+field_tag = 0x0003
+stable_name = "apply_basis"
+exact_wire_type = "MarkerRef"
+cardinality = "optional"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "u8 presence then known predecessor marker OID32 and CommitSeq u64. Comparison identity only, never a reachability edge. None only at genesis admission. Equality with the actual previous marker is mandatory; no future marker or assigned commit sequence appears"
+version_status = "active"
+max_size_bytes = 41
+
+[[field]]
+containing_schema = "SchemaTransition"
+field_tag = 0x0004
+stable_name = "before_root"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SchemaCatalog"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "u8 presence then previous catalog OID32 and before_epoch u64; retained while this transition's replay obligation remains. None denotes epoch-zero unnamed schema"
+version_status = "active"
+max_size_bytes = 33
+
+[[field]]
+containing_schema = "SchemaTransition"
+field_tag = 0x0005
+stable_name = "before_epoch"
+exact_wire_type = "u64"
+cardinality = "optional"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "Encoded only with before_root; equals the selected predecessor catalog epoch, never an ambient process epoch"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "SchemaTransition"
+field_tag = 0x0006
+stable_name = "after_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SchemaCatalog"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "New immutable catalog OID32 stored durably before the capsule D1; strong while the Schema effect or its replay obligation retains this transition"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "SchemaTransition"
+field_tag = 0x0007
+stable_name = "after_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "Exactly before_epoch+1, nonzero, matching the referenced catalog; same names and allocation floors are a no-op and cannot mint an epoch"
+version_status = "active"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "SequenceNeutralAuditEventBody"

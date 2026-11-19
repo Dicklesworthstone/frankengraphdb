@@ -896,3 +896,300 @@ fn relationship_merge_chains_share_the_hosts_creation_allowance() {
         .await;
     });
 }
+
+#[derive(Clone, Copy)]
+enum FramedWrite {
+    Text,
+    Prepared(fgdb_protocol::body::PreparedHandle),
+    Conditional(u64),
+}
+
+fn frame_arguments(bytes: usize) -> Vec<(String, WireValue)> {
+    vec![("p".into(), WireValue::Text("x".repeat(bytes)))]
+}
+
+async fn frame_refusal(
+    cx: &Cx,
+    client: &mut Client,
+    mode: FramedWrite,
+    statement: &str,
+    parameters: Vec<(String, WireValue)>,
+) {
+    let mut columns = 0;
+    let mut rows = 0;
+    let on_columns = |_: &[String]| {
+        columns += 1;
+        Ok(())
+    };
+    let on_row = |_: Vec<WireValue>| {
+        rows += 1;
+        Ok(())
+    };
+    let result = match mode {
+        FramedWrite::Text => {
+            client
+                .execute_streaming(
+                    cx,
+                    ExecuteMode::Write,
+                    statement,
+                    parameters,
+                    on_columns,
+                    on_row,
+                )
+                .await
+        }
+        FramedWrite::Prepared(handle) => {
+            client
+                .execute_prepared_write_returning_streaming(
+                    cx,
+                    handle,
+                    parameters,
+                    on_columns,
+                    on_row,
+                )
+                .await
+        }
+        FramedWrite::Conditional(sequence) => {
+            client
+                .execute_write_if_current_streaming(
+                    cx,
+                    sequence,
+                    statement,
+                    parameters,
+                    on_columns,
+                    on_row,
+                )
+                .await
+        }
+    };
+    match result {
+        Err(ClientError::Server { code, message }) => {
+            assert_eq!(code, ErrorCode::Budget, "{message}");
+            assert!(
+                message.contains("negotiated frame limit"),
+                "not the expected output-frame refusal: {message}"
+            );
+        }
+        other => panic!("an unrepresentable write result must refuse: {other:?}"),
+    }
+    assert_eq!((columns, rows), (0, 0), "a refused write exposed a prefix");
+}
+
+#[test]
+fn returning_frame_limit_refuses_before_commit_and_admits_a_separate_schema_frame() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "wire-frame-boundary").await;
+        let mut writer = fixture.client(cx, Rights::ReadWrite, 100).await;
+        let mut observer = fixture.client(cx, Rights::Read, 100).await;
+        let before = state(cx, &mut observer).await;
+        let exact = "MATCH (n:Person {name:'Ada'}) SET n.age=n.age+1 \
+                     RETURN [$p,$p,NULL] AS payload";
+        let oversized = "MATCH (n:Person {name:'Ada'}) SET n.age=n.age+1 \
+                         RETURN [$p,$p,NULL,NULL] AS payload";
+        let expected = vec![WireValue::List(vec![
+            WireValue::Text("x".repeat(1946)),
+            WireValue::Text("x".repeat(1946)),
+            WireValue::Null,
+        ])];
+        // The 4096-byte frame has a 179-byte Ready header and five bytes
+        // of chunk framing. The exact row is 3912 bytes; its schema must
+        // therefore travel in a separate chunk. A fourth NULL adds one byte.
+        assert_eq!(
+            fgdb_protocol::body::ResultChunk::row_len(&expected).unwrap(),
+            3912
+        );
+        frame_refusal(
+            cx,
+            &mut writer,
+            FramedWrite::Text,
+            oversized,
+            frame_arguments(1946),
+        )
+        .await;
+        assert_eq!(state(cx, &mut observer).await, before);
+        let accepted = writer
+            .execute(cx, ExecuteMode::Write, exact, frame_arguments(1946))
+            .await
+            .unwrap();
+        assert_eq!(accepted.columns, vec!["payload"]);
+        assert_eq!(accepted.rows, vec![expected]);
+        assert_eq!(
+            accepted.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1,
+            }
+        );
+
+        // Only delivered rows need a frame. Native evaluation still runs,
+        // but LIMIT 0 must not price discarded output as a transport frame.
+        let empty = writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                &format!("{oversized} LIMIT 0"),
+                frame_arguments(1946),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty.columns, vec!["payload"]);
+        assert!(empty.rows.is_empty());
+        assert_eq!(
+            empty.outcome,
+            Outcome::WriteCommitted {
+                seq: 3,
+                statements: 1,
+            }
+        );
+        let after = state(cx, &mut observer).await;
+        assert_eq!(after.0.rows[0][2], WireValue::Int(3));
+        assert_eq!(after.0.rows[1][2], WireValue::Int(2));
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.finish(cx, &after).await;
+    });
+}
+
+#[test]
+fn prepared_and_conditional_returning_use_current_frame_sizes_before_publication() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "wire-frame-prepared-conditional").await;
+        let mut writer = fixture.client(cx, Rights::ReadWrite, 100).await;
+        let mut observer = fixture.client(cx, Rights::Read, 100).await;
+        let statement = "MATCH (n:Person {name:'Ada'}) SET n.age=n.age+1 \
+                         RETURN [$p,$p,NULL] AS payload";
+        let before = state(cx, &mut observer).await;
+        let handle = writer
+            .prepare_write_returning(cx, statement, frame_arguments(1))
+            .await
+            .unwrap();
+        assert_eq!(state(cx, &mut observer).await, before);
+        frame_refusal(
+            cx,
+            &mut writer,
+            FramedWrite::Prepared(handle),
+            statement,
+            frame_arguments(1947),
+        )
+        .await;
+        assert_eq!(state(cx, &mut observer).await, before);
+        let accepted = writer
+            .execute_prepared_write_returning(cx, handle, frame_arguments(1946))
+            .await
+            .unwrap();
+        assert_eq!(accepted.rows.len(), 1);
+        assert_eq!(
+            accepted.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1,
+            }
+        );
+        let after_prepared = state(cx, &mut observer).await;
+        frame_refusal(
+            cx,
+            &mut writer,
+            FramedWrite::Conditional(2),
+            statement,
+            frame_arguments(1947),
+        )
+        .await;
+        assert_eq!(state(cx, &mut observer).await, after_prepared);
+        // A stale frontier takes precedence over output admission and cannot
+        // be disguised as a frame error from a write that never executed.
+        let stale = writer
+            .execute_write_if_current(cx, 1, statement, frame_arguments(1947))
+            .await;
+        assert!(
+            matches!(
+                stale,
+                Err(ClientError::Server {
+                    code: ErrorCode::Conflict,
+                    ..
+                })
+            ),
+            "{stale:?}"
+        );
+        assert_eq!(state(cx, &mut observer).await, after_prepared);
+        let accepted = writer
+            .execute_write_if_current(cx, 2, statement, frame_arguments(1946))
+            .await
+            .unwrap();
+        assert_eq!(accepted.rows.len(), 1);
+        assert_eq!(
+            accepted.outcome,
+            Outcome::WriteCommitted {
+                seq: 3,
+                statements: 1,
+            }
+        );
+        let after = state(cx, &mut observer).await;
+        assert_eq!(after.0.rows[0][2], WireValue::Int(3));
+        writer.release_prepared(cx, handle).await.unwrap();
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.finish(cx, &after).await;
+    });
+}
+
+#[test]
+fn a_late_oversized_return_row_rolls_back_every_write_without_a_result_prefix() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "wire-frame-late-row").await;
+        let mut writer = fixture.client(cx, Rights::ReadWrite, 100).await;
+        let mut observer = fixture.client(cx, Rights::Read, 100).await;
+        let statement = "MATCH (n:Person) SET n.age=n.age+10 \
+                         RETURN n.name AS name, \
+                         CASE WHEN n.name='Ada' THEN [$p] \
+                         ELSE [$p,$p,NULL,NULL] END AS payload ORDER BY name";
+        let before = state(cx, &mut observer).await;
+        let handle = writer
+            .prepare_write_returning(cx, statement, frame_arguments(1))
+            .await
+            .unwrap();
+        for mode in [
+            FramedWrite::Text,
+            FramedWrite::Prepared(handle),
+            FramedWrite::Conditional(1),
+        ] {
+            frame_refusal(cx, &mut writer, mode, statement, frame_arguments(1946)).await;
+            assert_eq!(state(cx, &mut observer).await, before);
+        }
+        let accepted = writer
+            .execute(cx, ExecuteMode::Write, statement, frame_arguments(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            accepted.rows,
+            vec![
+                vec![
+                    WireValue::Text("Ada".into()),
+                    WireValue::List(vec![WireValue::Text("x".into())]),
+                ],
+                vec![
+                    WireValue::Text("Bob".into()),
+                    WireValue::List(vec![
+                        WireValue::Text("x".into()),
+                        WireValue::Text("x".into()),
+                        WireValue::Null,
+                        WireValue::Null,
+                    ]),
+                ],
+            ]
+        );
+        assert_eq!(
+            accepted.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1,
+            }
+        );
+        let after = state(cx, &mut observer).await;
+        assert_eq!(after.0.rows[0][2], WireValue::Int(11));
+        assert_eq!(after.0.rows[1][2], WireValue::Int(12));
+        writer.release_prepared(cx, handle).await.unwrap();
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.finish(cx, &after).await;
+    });
+}

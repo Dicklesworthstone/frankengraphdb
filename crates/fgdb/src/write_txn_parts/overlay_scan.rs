@@ -4,10 +4,11 @@
 use super::{Database, EdgeRecord, PendingRow, VertexRow, Vfs, WriteTxn, WriteTxnError};
 use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::{DeltaRow, ElementId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::{GlaOutput, GlaPlan, VertexScanDomain};
+use fgdb_gql::algebra::{EdgeRelation, GlaDirection, GlaOutput, GlaPlan, VertexScanDomain};
 use fgdb_strata::AdjacencyEntry;
-use fgdb_types::{CanonicalPropertyValue, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use fgdb_warden::PlannerPredicates;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 /// Private statement-lifetime owner. Neither the transaction nor database can
@@ -21,6 +22,9 @@ pub(crate) struct OverlayRows<'a, V: Vfs + Clone> {
     database: &'a Database<V>,
     vertices: BTreeMap<VId, Option<VertexRow>>,
     edges: Option<BTreeMap<EId, Option<EdgeRecord>>>,
+    // Discardable incidence coordinates over canonical staged edges. Lazily
+    // built only for seeded traversal; no borrowed payload lives in this index.
+    seeded_incidence: RefCell<Option<BTreeSet<(VId, bool, EId)>>>,
 }
 
 /// Native candidate identities and the exact root-membership attempts which
@@ -49,6 +53,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
             database,
             vertices: BTreeMap::new(),
             edges: read_edges.then(BTreeMap::new),
+            seeded_incidence: RefCell::new(None),
         };
         // Preserve negative dependencies erased by normalization, including
         // unused ensure aliases. Pending rows supply witnesses ONLY; their
@@ -222,6 +227,234 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
         }
         self.transaction
             .seeded_overlay_candidates(&self.database.snapshot, plan, seeds, control)
+    }
+
+    /// Retain the seeded source's negative domains before its first physical
+    /// probe. Property seeds use the existing attempted/completed membership
+    /// witness; identities retain absence as an ordinary element dependency.
+    /// Relation insertions remain conservatively observed even when the visible
+    /// closure is empty. Every charged reservation depends only on query input.
+    pub(crate) fn begin_seeded_observation<E, Row: GlaOutput>(
+        &self,
+        plan: &GlaPlan<Row>,
+        seeds: fgdb_gql::GraphSeeds<'_>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<usize>, E> {
+        if plan.reads_edges() {
+            match plan.edge_relations() {
+                Some(relations) => {
+                    for relation in relations {
+                        control(SourceEvent::ScratchEntry)?;
+                        self.transaction
+                            .scanned_edge_relations
+                            .borrow_mut()
+                            .insert(relation);
+                    }
+                }
+                None => self.transaction.scanned_edges.set(true),
+            }
+        }
+        match seeds {
+            fgdb_gql::GraphSeeds::Identities(ids) => {
+                for &vid in ids {
+                    control(SourceEvent::Work)?;
+                    control(SourceEvent::ScratchEntry)?;
+                    self.transaction
+                        .read_set
+                        .borrow_mut()
+                        .insert(ElementId::Vertex(vid));
+                }
+                Ok(None)
+            }
+            fgdb_gql::GraphSeeds::Property { key, values } => {
+                let mut retained = Vec::new();
+                for value in values {
+                    control(SourceEvent::Work)?;
+                    control(SourceEvent::ScratchEntry)?;
+                    retained.push(value.clone());
+                }
+                control(SourceEvent::ScratchEntry)?;
+                Ok(Some(
+                    self.transaction
+                        .point_reads
+                        .borrow_mut()
+                        .begin_property_seed_scan(key, retained),
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn accept_seeded_observation(&self, observation: Option<usize>) {
+        if let Some(observation) = observation {
+            self.transaction
+                .point_reads
+                .borrow_mut()
+                .complete_vertex_scan(observation);
+        }
+    }
+
+    /// Borrow the canonical replacement or its pinned winner, including the
+    /// negative point witness. A hidden or deleted winner never falls back to
+    /// an older visible image. Physical lookup and witness storage only poll:
+    /// the caller admits labels before charging or retaining any visible row.
+    pub(crate) fn seeded_vertex<E>(
+        &self,
+        vid: VId,
+        scan: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<&VertexRow>, E> {
+        self.transaction
+            .read_set
+            .borrow_mut()
+            .insert(ElementId::Vertex(vid));
+        let row = match self.vertices.get(&vid) {
+            Some(replacement) => replacement.as_ref(),
+            None => source::find_vertex(
+                &self.database.snapshot,
+                vid,
+                self.transaction.basis,
+                &mut |_| Ok::<(), E>(()),
+            )?,
+        };
+        scan(SourceEvent::Work)?;
+        Ok(row)
+    }
+
+    /// Historical postings plus changed identities form a candidate superset.
+    /// The caller checks the current winner and allowed property after its
+    /// label mask. Changed rows are offered without inspecting their fields,
+    /// so no hidden value controls a charged event or an intermediate error.
+    pub(crate) fn visit_seeded_property_candidates<E, C>(
+        &self,
+        key: PropertyKeyId,
+        values: &[CanonicalScalar],
+        scan: &mut C,
+        mut visit: impl FnMut(VId, &CanonicalScalar, &mut C) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        C: FnMut(SourceEvent) -> Result<(), E>,
+    {
+        source::visit_property_seed_candidates(
+            &self.database.snapshot,
+            key,
+            values,
+            scan,
+            &mut visit,
+        )?;
+        for value in values {
+            for &vid in self.vertices.keys() {
+                scan(SourceEvent::Work)?;
+                visit(vid, value, scan)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Incidence from the same canonical overlay: every replacement shadows
+    /// its basis entry, then each live staged entry is offered once. Only the
+    /// selected relation is observed; masking both endpoints remains the
+    /// shared authorized closure's responsibility before any expansion.
+    ///
+    /// The private source indexes staged incidence once, instead of rescanning
+    /// every staged edge for each reached vertex. This host-owned sparse index
+    /// carries no authority or charged visible-work cache. The native relation
+    /// phantom and observed edge/endpoint dependencies survive an empty result,
+    /// cancellation, a late quota error or savepoint rollback.
+    pub(crate) fn visit_seeded_incidence<'s, E, C>(
+        &'s self,
+        near: VId,
+        relation: &EdgeRelation,
+        direction: GlaDirection,
+        scan: &mut C,
+        mut visit: impl FnMut(
+            (EId, VId, RelationId, VId),
+            &'s [(PropertyKeyId, CanonicalPropertyValue)],
+            &mut C,
+        ) -> Result<(), E>,
+    ) -> Option<Result<(), E>>
+    where
+        C: FnMut(SourceEvent) -> Result<(), E>,
+    {
+        let replacements = self.edges.as_ref()?;
+        Some((|| {
+            let observe = |entry: &AdjacencyEntry| {
+                let mut reads = self.transaction.read_set.borrow_mut();
+                reads.insert(ElementId::Edge(entry.eid));
+                reads.insert(ElementId::Vertex(entry.src));
+                reads.insert(ElementId::Vertex(entry.dst));
+                self.transaction
+                    .match_expansions
+                    .borrow_mut()
+                    .insert((entry.src, entry.relation));
+            };
+            let snapshot = &self.database.snapshot;
+            snapshot.adjacency_index().visit(
+                &snapshot.blocks,
+                near,
+                direction,
+                self.transaction.basis,
+                scan,
+                |entry, block, row, scan| {
+                    if replacements.contains_key(&entry.eid) || !relation.matches(entry.relation) {
+                        return Ok(());
+                    }
+                    observe(entry);
+                    visit(
+                        (entry.eid, entry.src, entry.relation, entry.dst),
+                        source::edge_properties_at(&snapshot.block_props, block, row),
+                        scan,
+                    )
+                },
+            )?;
+            let needs_index = self.seeded_incidence.borrow().is_none();
+            if needs_index {
+                let mut index = BTreeSet::new();
+                for row in replacements.values() {
+                    scan(SourceEvent::Work)?;
+                    if let Some(row) = row {
+                        for coordinate in [
+                            (row.entry.src, false, row.entry.eid),
+                            (row.entry.dst, true, row.entry.eid),
+                        ] {
+                            scan(SourceEvent::ScratchEntry)?;
+                            index.insert(coordinate);
+                        }
+                    }
+                }
+                *self.seeded_incidence.borrow_mut() = Some(index);
+            }
+            let index = self.seeded_incidence.borrow();
+            let index = index.as_ref().expect("complete staged incidence index");
+            let directions: &[bool] = match direction {
+                GlaDirection::Forward => &[false],
+                GlaDirection::Reverse => &[true],
+                GlaDirection::Undirected => &[false, true],
+            };
+            for &incoming in directions {
+                for &(_, _, eid) in index.range(
+                    (near, incoming, EId(0))..=(near, incoming, EId(u128::MAX)),
+                ) {
+                    scan(SourceEvent::Work)?;
+                    let row = replacements[&eid]
+                        .as_ref()
+                        .expect("only live canonical replacements are indexed");
+                    let edge = &row.entry;
+                    // Undirected self-loops occur in both coordinate families
+                    // but are one logical incidence for this near vertex.
+                    if (direction == GlaDirection::Undirected && incoming && edge.src == near)
+                        || !relation.matches(edge.relation)
+                    {
+                        continue;
+                    }
+                    observe(edge);
+                    visit(
+                        (edge.eid, edge.src, edge.relation, edge.dst),
+                        &row.props,
+                        scan,
+                    )?;
+                }
+            }
+            Ok(())
+        })())
     }
 
     pub(crate) fn accept_bound_observations(&self, bound: &BoundOverlayCandidates) {

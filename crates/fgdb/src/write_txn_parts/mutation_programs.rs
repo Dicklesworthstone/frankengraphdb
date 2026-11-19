@@ -11,6 +11,7 @@ struct MutationProgramWorkspace<'txn> {
     prepared_source_ordered: bool,
     independent_creates: Option<IndependentCreateWrites>,
     program_multi_relation: bool,
+    call_arguments: Option<std::sync::Arc<fgdb_gql::algebra::GraphValueRow>>,
     owns_chain_retirements: bool,
     chain_retirements_len: Option<usize>,
     accepted: bool,
@@ -24,6 +25,7 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         let prepared = txn.prepared.clone();
         let prepared_source_ordered = txn.prepared_source_ordered;
         let program_multi_relation = txn.program_multi_relation;
+        let call_arguments = txn.call_arguments.clone();
         let chain_retirements_len = txn
             .chain_retirements
             .as_ref()
@@ -35,6 +37,7 @@ impl<'txn> MutationProgramWorkspace<'txn> {
             prepared_source_ordered,
             independent_creates: None,
             program_multi_relation,
+            call_arguments,
             owns_chain_retirements: false,
             chain_retirements_len,
             accepted: false,
@@ -60,6 +63,7 @@ impl Drop for MutationProgramWorkspace<'_> {
     fn drop(&mut self) {
         // Scope permission never escapes, including accepted or nested workspaces.
         self.txn.program_multi_relation = self.program_multi_relation;
+        self.txn.call_arguments = self.call_arguments.take();
         if self.owns_chain_retirements {
             self.txn.chain_retirements = None;
         } else if !self.accepted

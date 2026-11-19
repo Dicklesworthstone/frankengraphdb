@@ -587,7 +587,8 @@ pub(super) fn finish_output<V: Vfs + Clone, Clock: FnMut() -> u64>(
                         control,
                     )
                 },
-            ),
+            )
+            .with_call_arguments(transaction.call_arguments.clone()),
             || {
                 query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                 controls.borrow_mut().checkpoint()

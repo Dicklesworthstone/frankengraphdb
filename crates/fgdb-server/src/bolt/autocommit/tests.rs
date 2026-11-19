@@ -37,8 +37,219 @@ fn extra() -> Map {
     vec![("db".into(), Value::string("test"))]
 }
 
+#[test]
+fn write_metadata_admission_checks_exact_frames_capacity_and_signed_work() {
+    fn metadata() -> Map {
+        let mut name = String::with_capacity(128);
+        name.push_str("output");
+        let mut fields = Vec::with_capacity(4);
+        fields.push(Value::String(name));
+        let mut key = String::with_capacity(64);
+        key.push_str("fields");
+        let mut map = Vec::with_capacity(8);
+        map.push((key, Value::List(fields)));
+        map
+    }
+    let mut encoded = Vec::new();
+    fgdb_bolt::packstream::encode(
+        &Value::Struct {
+            tag: 0x70,
+            fields: vec![Value::Map(metadata())],
+        },
+        &mut encoded,
+    );
+    let mut used = 0;
+    let mut calls = 0;
+    let (admitted, capacity) = admit_write_metadata(metadata(), encoded.len(), &mut |units| {
+        used += units;
+        calls += 1;
+        Ok(())
+    })
+    .unwrap_or_else(|error| panic!("{}", error.message));
+    assert_eq!(admitted, metadata());
+    assert_eq!(
+        capacity,
+        8 * std::mem::size_of::<(String, Value)>() + 64 + 4 * std::mem::size_of::<Value>() + 128,
+    );
+    assert!(used > 1 && calls > 1);
+    let error = admit_write_metadata(metadata(), encoded.len() - 1, &mut |_| Ok(()))
+        .err()
+        .expect("the SUCCESS structure header is part of the limit");
+    assert_eq!(error.code, ErrorCode::Budget);
+    for fail_at in 1..=calls {
+        let mut call = 0;
+        let error = admit_write_metadata(metadata(), encoded.len(), &mut |_| {
+            call += 1;
+            if call == fail_at {
+                Err(fgdb::WriteTxnError::Authorization(
+                    fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Work),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .err()
+        .expect("no partial metadata escapes a meter refusal");
+        assert_eq!(error.code, ErrorCode::Budget);
+        assert_eq!(call, fail_at);
+    }
+
+    let keys = fgdb::DatabaseKeys::new(
+        [1; 32],
+        fgdb_types::DatabaseSecurityNamespaceId([2; 32]),
+        [3; 32],
+    );
+    for late_stop in [false, true] {
+        let authority = crate::issuer(
+            asupersync::security::key::AuthKey::from_seed(0xb017_e00c),
+            &keys,
+            1,
+        )
+        .unwrap();
+        let token = authority
+            .issue_at(
+                &Grant {
+                    branch: crate::TRUNK.into(),
+                    labels: Scope::All,
+                    relations: Scope::All,
+                    properties: Scope::All,
+                    rights: Rights::Write,
+                    limits: QueryLimits {
+                        max_nodes: 0,
+                        max_rows: 0,
+                        max_work: 2 * used - 1,
+                    },
+                    expires_at_ms: 100,
+                },
+                1,
+            )
+            .unwrap();
+        let mut permit = authority
+            .verify_at(&token, crate::TRUNK, 1)
+            .unwrap()
+            .into_write_at(crate::TRUNK, 1)
+            .unwrap();
+        admit_write_metadata(metadata(), encoded.len(), &mut |units| {
+            permit
+                .charge_work_at(1, units)
+                .map_err(fgdb::WriteTxnError::Authorization)
+        })
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let mut call = 0;
+        let error = admit_write_metadata(metadata(), encoded.len(), &mut |units| {
+            call += 1;
+            if late_stop && call == 2 {
+                authority.retire();
+            }
+            permit
+                .charge_work_at(1, units)
+                .map_err(fgdb::WriteTxnError::Authorization)
+        })
+        .err()
+        .expect("the original signed allowance and live authority still govern metadata");
+        assert_eq!(
+            error.code,
+            if late_stop {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::Budget
+            },
+        );
+        assert!(permit.checkpoint_at(1).is_err());
+    }
+}
+
 async fn frontier(cx: &Cx, db: &Served) -> CommitSeq {
     db.db.read(cx).await.unwrap().frontier().unwrap()
+}
+
+#[test]
+fn deferred_writes_pin_durable_names_and_reject_catalog_drift_before_publication() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+
+    let ((), report) = run_async_under_lab(0x7a8c_b017, |root| async move {
+        let (server, token, _) = served(&root, "bolt-deferred-catalog").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut catalog = SymbolCatalog::default();
+        catalog
+            .bind_all([
+                ("Person", CatalogSymbol::Label(LabelId(7))),
+                ("score", CatalogSymbol::Property(PropertyKeyId(11))),
+            ])
+            .unwrap();
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .register_symbols(&contexts.commit(), &catalog)
+            .await
+            .unwrap();
+        let mut client = connection(&server, token.clone());
+        let text = "CREATE (n:Person {score:5}) RETURN n";
+        client.run(&root, text, &vec![], &extra()).await.unwrap();
+        assert_eq!(frontier(&root, db).await, CommitSeq(1));
+        catalog
+            .bind("future", CatalogSymbol::Property(PropertyKeyId(12)))
+            .unwrap();
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .register_symbols(&contexts.commit(), &catalog)
+            .await
+            .unwrap();
+        let refusal = client
+            .finish_autocommit_write(&root)
+            .await
+            .expect_err("RUN's retained catalog must still agree at PULL");
+        assert!(refusal.message.contains("symbol catalog changed"));
+        assert!(
+            client.pending.is_none(),
+            "a refused write cannot be replayed"
+        );
+        assert_eq!(frontier(&root, db).await, CommitSeq(2));
+        assert!(
+            db.db
+                .read(&root)
+                .await
+                .unwrap()
+                .vertices()
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut client = connection(&server, token);
+        client.run(&root, text, &vec![], &extra()).await.unwrap();
+        client.finish_autocommit_write(&root).await.unwrap();
+        let pending = client.pending.as_ref().unwrap();
+        assert_eq!(pending.seq, Some(CommitSeq(3)));
+        assert_eq!(pending.rows.len(), 1);
+        let Value::Struct { fields, .. } = &pending.rows[0][0] else {
+            panic!("RETURN must hydrate the native graph value");
+        };
+        assert_eq!(fields[1], Value::List(vec![Value::string("Person")]));
+        assert_eq!(
+            fields[2],
+            Value::Map(vec![("score".to_owned(), Value::Int(5))])
+        );
+        let expected = pending.rows.clone();
+        let mut wire = io();
+        let complete = client.pull(&root, &mut wire, -1, false).await.unwrap();
+        assert_eq!(
+            get(&complete, "bookmark").and_then(Value::as_str),
+            Some("fgdb:test:3")
+        );
+        client
+            .run(&root, "MATCH (n:Person) RETURN n", &vec![], &extra())
+            .await
+            .unwrap();
+        assert_eq!(client.pending.as_ref().unwrap().rows, expected);
+        client.pull(&root, &mut wire, -1, false).await.unwrap();
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -113,7 +324,12 @@ fn statement_time_bolt_defers_effects_keeps_bound_return_and_hydrates_the_select
             panic!("expected the node's property map");
         };
         assert_eq!(get(properties, "stamp"), Some(&timestamp(0)));
-        client.pull(&root, &mut wire, -1, false).await.unwrap();
+        assert_eq!(client.pending.as_ref().unwrap().seq, Some(CommitSeq(1)));
+        let done = client.pull(&root, &mut wire, -1, false).await.unwrap();
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:test:1")
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
         server.join_database_workers(&root).await;
     });

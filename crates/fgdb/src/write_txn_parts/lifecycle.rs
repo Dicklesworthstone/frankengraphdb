@@ -18,6 +18,7 @@ impl WriteTxn {
             chain_retirements: None,
             savepoints: Vec::new(),
             program_multi_relation: false,
+            call_arguments: None,
             read_set: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             point_reads: std::cell::RefCell::new(PointReads::default()),
             count_reads: std::cell::RefCell::new(CountReads::default()),
@@ -55,6 +56,41 @@ impl WriteTxn {
         if !std::sync::Arc::ptr_eq(&self.handle_owner, &database.handle_owner) {
             return Err(WriteTxnError::WrongDatabase);
         }
+        Ok(())
+    }
+
+    /// Retain a successfully executed, compiler-classified write even when
+    /// its source produced no intents. Classification is independent of net
+    /// effects: only a transaction containing exclusively reads may read-close.
+    /// This private carrier uses the ordinary canonical empty delta, without
+    /// inventing an element, coordinate or raw intent. Public empty WriteBatch
+    /// admission remains unchanged, and all original read witnesses remain on
+    /// this transaction for the ordinary completion validator.
+    fn retain_write_classification<V: Vfs>(
+        &mut self,
+        database: &Database<V>,
+    ) -> Result<(), WriteTxnError> {
+        self.ensure_database(database)?;
+        if self.prepared.is_some() {
+            return Ok(());
+        }
+        debug_assert!(self.staged.is_empty());
+        let template = crate::LogicalDeltaTemplate::build(
+            crate::intent_semantics_oid(),
+            [0_u8; 32],
+            Vec::new(),
+        )
+        .map_err(WriteError::Canonical)?;
+        self.prepared = Some(std::sync::Arc::new(crate::PreparedWrite {
+            template,
+            basis: self.basis,
+            handle_owner: std::sync::Arc::clone(&self.handle_owner),
+            dependencies: crate::prepared_write::PreparedDependencies::default(),
+            replay_row_allowance: None,
+            raw_input: None,
+            raw_ordered: None,
+            authorization_decision_digest: None,
+        }));
         Ok(())
     }
 

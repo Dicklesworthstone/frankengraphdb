@@ -94,16 +94,77 @@ impl<S: super::VertexScanSource, F> super::VertexScanCursor<S, F, GraphValueRow>
     where
         F: FnMut() -> Result<(), C>,
     {
-        use super::VertexScanState;
-        if self.state != VertexScanState::Open {
+        if self.state != super::VertexScanState::Open {
             return None;
         }
-        // A failed projection ends this pull immediately, so the error mapper
-        // is consumed at most once even when many private rows are evaluated.
         let mut arithmetic = Some(arithmetic);
-        let result: Result<Option<GraphValueRow>, E> = (|| loop {
-            let Some(row) = self.advance_inner::<false, C>().map_err(&mut scan)? else {
-                return Ok(None);
+        loop {
+            let mut remaining = usize::MAX;
+            let result = match self.advance_projected_bounded(
+                pull,
+                &mut remaining,
+                &mut scan,
+                &mut arithmetic,
+            ) {
+                Ok(core::task::Poll::Pending) => continue,
+                Ok(core::task::Poll::Ready(value)) => Ok(value),
+                Err(error) => Err(error),
+            };
+            return self.finish(result);
+        }
+    }
+
+    /// The same projection and complete suffix validation as next_projected,
+    /// yielding after 64 source examinations without resetting the source
+    /// ordinal, selection window, or cumulative meters. Pending emits no row.
+    pub fn poll_next_projected<C, E>(
+        &mut self,
+        context: &mut core::task::Context<'_>,
+        pull: &crate::GraphSetRowPull,
+        mut scan: impl FnMut(crate::GqlQueryError<super::VertexScanError<S::Error>, C>) -> E,
+        arithmetic: impl FnOnce(u64, usize, crate::GraphIntegerError) -> E,
+    ) -> core::task::Poll<Option<Result<GraphValueRow, E>>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != super::VertexScanState::Open {
+            return core::task::Poll::Ready(None);
+        }
+        let mut remaining = 64;
+        let result = match self.advance_projected_bounded(
+            pull,
+            &mut remaining,
+            &mut scan,
+            &mut Some(arithmetic),
+        ) {
+            Ok(core::task::Poll::Pending) => {
+                context.waker().wake_by_ref();
+                return core::task::Poll::Pending;
+            }
+            Ok(core::task::Poll::Ready(value)) => Ok(value),
+            Err(error) => Err(error),
+        };
+        core::task::Poll::Ready(self.finish(result))
+    }
+
+    fn advance_projected_bounded<C, E>(
+        &mut self,
+        pull: &crate::GraphSetRowPull,
+        remaining: &mut usize,
+        scan: &mut impl FnMut(crate::GqlQueryError<super::VertexScanError<S::Error>, C>) -> E,
+        arithmetic: &mut Option<impl FnOnce(u64, usize, crate::GraphIntegerError) -> E>,
+    ) -> Result<core::task::Poll<Option<GraphValueRow>>, E>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        loop {
+            let row = match self
+                .advance_bounded_inner::<false, C>(remaining)
+                .map_err(&mut *scan)?
+            {
+                core::task::Poll::Pending => return Ok(core::task::Poll::Pending),
+                core::task::Poll::Ready(None) => return Ok(core::task::Poll::Ready(None)),
+                core::task::Poll::Ready(Some(row)) => row,
             };
             let ordinal = self.projected_rows;
             let next_ordinal = ordinal.checked_add(1).ok_or_else(|| {
@@ -113,14 +174,14 @@ impl<S: super::VertexScanSource, F> super::VertexScanCursor<S, F, GraphValueRow>
             })?;
             let selected = pull.selects_row(ordinal);
             if selected {
-                self.meter.next_result_count().map_err(&mut scan)?;
+                self.meter.next_result_count().map_err(&mut *scan)?;
             }
             let projected = {
                 let source = self.source.as_ref().expect("open cursor owns its source");
                 // Projection checkpoints and dynamic property reads execute
                 // serially against the same admitted source and live meter.
                 let meter = std::cell::RefCell::new(&mut self.meter);
-                let mapping = std::cell::RefCell::new(&mut scan);
+                let mapping = std::cell::RefCell::new(&mut *scan);
                 pull.project_with_properties(
                     &row,
                     ordinal,
@@ -156,27 +217,8 @@ impl<S: super::VertexScanSource, F> super::VertexScanCursor<S, F, GraphValueRow>
             if !selected {
                 continue;
             }
-            self.meter.emit().map_err(&mut scan)?;
-            return Ok(Some(projected));
-        })();
-        match result {
-            Ok(Some(row)) => {
-                if self.plan.count == Some(self.meter.rows.result_rows) {
-                    self.state = VertexScanState::Exhausted;
-                    self.source = None;
-                }
-                Some(Ok(row))
-            }
-            Ok(None) => {
-                self.state = VertexScanState::Exhausted;
-                self.source = None;
-                None
-            }
-            Err(error) => {
-                self.state = VertexScanState::Failed;
-                self.source = None;
-                Some(Err(error))
-            }
+            self.meter.emit().map_err(&mut *scan)?;
+            return Ok(core::task::Poll::Ready(Some(projected)));
         }
     }
 }

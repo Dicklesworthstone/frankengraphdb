@@ -2,6 +2,9 @@
 #[path = "batch_wire_tests.rs"]
 mod batch_tests;
 
+#[path = "transaction_wire_tests.rs"]
+mod transaction_tests;
+
 #[path = "prepared_write_tests.rs"]
 mod prepared_write_tests;
 

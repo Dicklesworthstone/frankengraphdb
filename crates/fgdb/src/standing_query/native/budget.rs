@@ -44,12 +44,13 @@ fn aggregate_width(definition: &fgdb_gql::PreparedGraphAggregate) -> u64 {
 fn aggregate_footprint(
     cx: &QueryCx,
     definition: &fgdb_gql::PreparedGraphAggregate,
+    scoped: bool,
 ) -> Result<Footprint, StandingQueryError> {
     if let Some(input) = definition.input_relation() {
-        return circuit(cx, input)?.append(1);
+        return circuit(cx, input, scoped)?.append(1);
     }
     if let Some(definition) = definition.incremental_group_relation() {
-        return circuit(cx, definition.input())?.append(1);
+        return circuit(cx, definition.input(), scoped)?.append(1);
     }
     Ok(Footprint {
         nodes: 1,
@@ -66,7 +67,11 @@ fn pattern_width(
     )
 }
 
-fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, StandingQueryError> {
+fn circuit(
+    cx: &QueryCx,
+    query: &PreparedGraphSet,
+    scoped: bool,
+) -> Result<Footprint, StandingQueryError> {
     cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
     // Match Staging::compile's dispatch order. A complete source-free subtree
     // is folded into one immutable node, even if its syntax contains joins.
@@ -77,13 +82,13 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
         });
     }
     if let Some((input, _, _, _)) = query.incremental_ordered_window() {
-        return circuit(cx, &input)?.append(1);
+        return circuit(cx, &input, scoped)?.append(1);
     }
     if let Some((input, _)) = query
         .incremental_window()
         .map_err(StandingQueryError::WindowSchema)?
     {
-        return circuit(cx, &input)?.append(1);
+        return circuit(cx, &input, scoped)?.append(1);
     }
     if let Some(pattern) = query.incremental_pattern() {
         return Ok(Footprint {
@@ -91,18 +96,18 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             source_width: pattern_width(pattern),
         });
     }
-    if let Some((source, _)) = set::analytic_procedure(query)? {
+    if let Some((source, _)) = set::analytic_procedure(query, scoped)? {
         if let set::AnalyticSource::SelectedComponents { input, .. }
         | set::AnalyticSource::SelectedCoreNumbers { input }
         | set::AnalyticSource::SelectedTriangleCounts { input, .. } = source
         {
             let topology = match input {
-                set::AnalyticTopology::Pattern(input) => circuit(cx, &input)?,
+                set::AnalyticTopology::Pattern(input) => circuit(cx, &input, scoped)?,
                 set::AnalyticTopology::Union { vertices, edges } => {
                     // The vertex subtree is shared by both endpoint Semi
                     // joins and the isolate projection, never compiled three
                     // times. Count both subtrees and all four private owners.
-                    circuit(cx, &vertices)?.combine(circuit(cx, &edges)?, 4)?
+                    circuit(cx, &vertices, scoped)?.combine(circuit(cx, &edges, scoped)?, 4)?
                 }
             };
             return topology.append(2);
@@ -118,7 +123,7 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
     if let Some(definition) = query.incremental_group() {
         // The exact reducer and checked row sink share ONE registry node and
         // its meter. Count the complete child, not only its first graph leaf.
-        return circuit(cx, definition.input())?.append(1);
+        return circuit(cx, definition.input(), scoped)?.append(1);
     }
     if let Some(plan) = query.incremental_apply_count_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
@@ -130,7 +135,7 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             .ok()
             .and_then(|count| count.checked_add(3))
             .ok_or(StandingQueryError::Unsupported)?;
-        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
+        return circuit(cx, plan.left, scoped)?.combine(circuit(cx, plan.right, scoped)?, stages);
     }
     if let Some(plan) = query.incremental_collected_count_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
@@ -139,7 +144,7 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             .ok()
             .and_then(|count| count.checked_add(3))
             .ok_or(StandingQueryError::Unsupported)?;
-        return circuit(cx, &plan.left)?.combine(circuit(cx, &plan.right)?, stages);
+        return circuit(cx, &plan.left, scoped)?.combine(circuit(cx, &plan.right, scoped)?, stages);
     }
     if let Some(plan) = query.incremental_apply_distinct_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
@@ -154,14 +159,14 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             .and_then(|count| count.checked_add(4))
             .and_then(|count| u64::try_from(count).ok())
             .ok_or(StandingQueryError::Unsupported)?;
-        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
+        return circuit(cx, plan.left, scoped)?.combine(circuit(cx, plan.right, scoped)?, stages);
     }
     if let Some(plan) = query.incremental_apply_exists_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
     })? {
         // Shared children, complementary Semi/Anti joins, two witness
         // projections, UNION ALL, and one public-schema restoration.
-        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, 6);
+        return circuit(cx, plan.left, scoped)?.combine(circuit(cx, plan.right, scoped)?, 6);
     }
     if let Some(plan) = query.incremental_apply_join_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
@@ -174,34 +179,34 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             .and_then(|count| count.checked_add(1))
             .and_then(|count| count.checked_add(u64::from(plan.right_projection.is_some())))
             .ok_or(StandingQueryError::Unsupported)?;
-        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
+        return circuit(cx, plan.left, scoped)?.combine(circuit(cx, plan.right, scoped)?, stages);
     }
     if let Some(input) = query.incremental_scope() {
-        return circuit(cx, input);
+        return circuit(cx, input, scoped);
     }
     if let Some((input, _, _)) = query.incremental_projection() {
-        return circuit(cx, input)?.append(1);
+        return circuit(cx, input, scoped)?.append(1);
     }
     if let Some((left, right, _, _)) = query.incremental_selected_join_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
     })? {
         // A selected join restores its public schema with a second node.
-        return circuit(cx, left)?.combine(circuit(cx, right)?, 2);
+        return circuit(cx, left, scoped)?.combine(circuit(cx, right, scoped)?, 2);
     }
     if let Some((input, _)) = query.incremental_filter() {
-        return circuit(cx, input)?.append(1);
+        return circuit(cx, input, scoped)?.append(1);
     }
     if let Some((input, _, _)) = query.incremental_unwind() {
-        return circuit(cx, input)?.append(1);
+        return circuit(cx, input, scoped)?.append(1);
     }
     if let Some((left, right, _)) = query.incremental_join() {
-        return circuit(cx, left)?.combine(circuit(cx, right)?, 1);
+        return circuit(cx, left, scoped)?.combine(circuit(cx, right, scoped)?, 1);
     }
     if let Some((left, right)) = query.incremental_cross_join() {
-        return circuit(cx, left)?.combine(circuit(cx, right)?, 1);
+        return circuit(cx, left, scoped)?.combine(circuit(cx, right, scoped)?, 1);
     }
     if let Some((_, _, left, right)) = query.incremental_binary() {
-        return circuit(cx, left)?.combine(circuit(cx, right)?, 1);
+        return circuit(cx, left, scoped)?.combine(circuit(cx, right, scoped)?, 1);
     }
     Err(StandingQueryError::Unsupported)
 }
@@ -220,6 +225,29 @@ impl PreparedNativeRead {
         cx: &QueryCx,
         params: &GqlParameters,
     ) -> Result<(u64, u64), StandingQueryError> {
+        self.subscription_footprint_inner(cx, params, false)
+    }
+
+    /// The same pre-admission footprint for a capability-projected circuit.
+    /// Restricted scopes own one extra projection node. Analytics use its
+    /// ordinary masked vertex/edge sources and selected-topology maintainers,
+    /// so every private source, semijoin and YIELD node is included before
+    /// registration. No graph access or capability authority is granted here.
+    pub fn subscription_footprint_authorized(
+        &self,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        scope: &fgdb_warden::PlannerPredicates,
+    ) -> Result<(u64, u64), StandingQueryError> {
+        self.subscription_footprint_inner(cx, params, !scope.is_unrestricted_graph())
+    }
+
+    fn subscription_footprint_inner(
+        &self,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        scoped: bool,
+    ) -> Result<(u64, u64), StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         let footprint = match self {
             Self::Set(prepared) => {
@@ -232,7 +260,7 @@ impl PreparedNativeRead {
                 {
                     return Err(StandingQueryError::Unsupported);
                 }
-                let footprint = circuit(cx, &bound)?;
+                let footprint = circuit(cx, &bound, scoped)?;
                 // compile_root may append a final window after the recursive
                 // compiler. Reserving it even when unnecessary cannot exceed
                 // the caller's total grant.
@@ -255,7 +283,7 @@ impl PreparedNativeRead {
                 let bound = prepared
                     .bind_parameters(params)
                     .map_err(|error| prepare_error(QueryError::PatternText(error)))?;
-                aggregate_footprint(cx, &bound)?
+                aggregate_footprint(cx, &bound, scoped)?
             }
             Self::PipelineAggregate(prepared) => {
                 if prepared.requires_relational_input() {
@@ -265,12 +293,12 @@ impl PreparedNativeRead {
                     let definition = prepared
                         .bind_relation_parameters(params)
                         .map_err(|error| prepare_error(QueryError::PipelineText(error)))?;
-                    circuit(cx, definition.input())?.append(1)?
+                    circuit(cx, definition.input(), scoped)?.append(1)?
                 } else {
                     let bound = prepared
                         .bind_parameters(params)
                         .map_err(|error| prepare_error(QueryError::PipelineText(error)))?;
-                    aggregate_footprint(cx, &bound)?
+                    aggregate_footprint(cx, &bound, scoped)?
                 }
             }
             _ => {
@@ -279,6 +307,7 @@ impl PreparedNativeRead {
                 });
             }
         };
+        let footprint = footprint.append(u64::from(scoped))?;
         Ok((footprint.nodes, footprint.source_width))
     }
 }

@@ -1057,3 +1057,178 @@ fn returned_identity_metadata_masks_hidden_fields_and_keeps_authority_before_eff
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+
+#[test]
+fn scoped_write_call_imports_survive_projection_grouping_and_nested_bodies() {
+    let ((), report) = run_async_under_lab(0xca11_1031, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        for (text, columns, mut expected, properties) in [
+            (
+                "WITH 7 AS x CALL (x) { WITH 1 AS delta \
+                 CREATE (:Visible {p:x+delta}) WITH 2 AS next \
+                 CREATE (:Visible {p:x+next}) RETURN x+next AS value } RETURN value",
+                vec!["value"],
+                vec![vec![int(9)]],
+                vec![8, 9],
+            ),
+            (
+                "WITH 7 AS x CALL (x) { UNWIND [] AS ignored CREATE (:Visible) \
+                 WITH count(*) AS c CREATE (:Visible {p:x+c}) \
+                 RETURN x+c AS value } RETURN value",
+                vec!["value"],
+                vec![vec![int(7)]],
+                vec![7],
+            ),
+            (
+                "UNWIND [2,2,NULL] AS x CALL (x) { WITH 1 AS one \
+                 CREATE (:Visible {p:coalesce(x,0)+one}) WITH 2 AS other \
+                 RETURN x AS value } RETURN x,value",
+                vec!["x", "value"],
+                vec![vec![int(2), int(2)], vec![int(2), int(2)], vec![null.clone(), null]],
+                vec![1, 3, 3],
+            ),
+            (
+                "WITH 7 AS x CALL (x) { WITH 1 AS ignored \
+                 CALL () { WITH 100 AS x CREATE (:Visible {p:x}) } \
+                 WITH 2 AS next CREATE (:Visible {p:x+next}) \
+                 RETURN x AS value } RETURN value",
+                vec!["value"],
+                vec![vec![int(7)]],
+                vec![9, 100],
+            ),
+            (
+                "WITH 7 AS x CALL (x) { WITH 1 AS ignored \
+                 FOREACH (item IN [1,2] | CREATE (:Visible {p:x+item})) \
+                 WITH 0 AS after RETURN x AS value } RETURN value",
+                vec!["value"],
+                vec![vec![int(7)]],
+                vec![8, 9],
+            ),
+            (
+                "WITH 7 AS x CALL (x) { WITH 1 AS ignored \
+                 CREATE (:Visible {p:x}) WITH 2 AS tail RETURN x+tail AS value \
+                 UNION ALL WITH 3 AS other RETURN x+other AS value } \
+                 RETURN value ORDER BY value",
+                vec!["value"],
+                vec![vec![int(9)], vec![int(10)]],
+                vec![7],
+            ),
+            (
+                "WITH 7 AS x CALL (x) { UNWIND [1,1,2] AS y \
+                 WITH DISTINCT y ORDER BY x+y CREATE (:Visible {p:x+y}) \
+                 WITH count(*) AS c RETURN x+c AS value } RETURN value",
+                vec!["value"],
+                vec![vec![int(9)]],
+                vec![8, 9],
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let pinned = db.read_session().unwrap();
+            let mut allocated = 0_u128;
+            let result = db
+                .query_write(
+                    &txn,
+                    &query,
+                    &commit,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(expected.len() as u64),
+                    |request| {
+                        assert!(matches!(request.request, GraphInsertRequest::Vertex { .. }));
+                        allocated += 1;
+                        Ok::<_, Infallible>(ElementId::Vertex(VId(100 + allocated)))
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            let mut actual = values(result, &columns);
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "{text}");
+            let mut stored = Vec::new();
+            for vertex in db.vertices().unwrap() {
+                assert_eq!(vertex.labels, vec![VISIBLE], "{text}");
+                assert_eq!(vertex.props.len(), 1, "{text}");
+                assert_eq!(vertex.props[0].0, P, "{text}");
+                let fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) =
+                    &vertex.props[0].1
+                else {
+                    panic!("expected a scalar integer property: {:?}", vertex.props);
+                };
+                stored.push(*value);
+            }
+            stored.sort_unstable();
+            assert_eq!(stored, properties, "{text}");
+            assert_eq!(allocated as usize, properties.len(), "{text}");
+            assert!(db.edges().unwrap().is_empty(), "{text}");
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1, "{text}");
+            assert_eq!(db.delta_since(basis).unwrap().count(), 1, "{text}");
+            assert!(pinned.vertices().unwrap().is_empty(), "{text}");
+            assert_eq!(txn.outstanding_obligations(), 0, "{text}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn restored_write_call_identities_read_staged_properties_and_export_writable_types() {
+    let ((), report) = run_async_under_lab(0xca11_1032, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let result = db
+            .query_write(
+                &txn,
+                &query,
+                &commit,
+                "CREATE (n:Visible {p:3}) WITH n,n.p AS saved \
+                 CALL (n,saved) { WITH 0 AS ignored SET n.p=n.p+1 \
+                 WITH 0 AS after RETURN n AS changed,saved AS frozen } \
+                 SET changed.q=frozen+changed.p \
+                 RETURN saved,frozen,changed.p AS current,changed.q AS derived",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(1),
+                |request| {
+                    assert!(matches!(request.request, GraphInsertRequest::Vertex { .. }));
+                    Ok::<_, Infallible>(ElementId::Vertex(VId(100)))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            values(result, &["saved", "frozen", "current", "derived"]),
+            vec![vec![int(3), int(3), int(4), int(7)]]
+        );
+        let expected = db.vertices().unwrap();
+        assert_eq!(expected.len(), 1);
+        assert_eq!(
+            expected[0].props,
+            vec![
+                (P, CanonicalScalar::Int(4).into()),
+                (Q, CanonicalScalar::Int(7).into()),
+            ]
+        );
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert!(pinned.vertices().unwrap().is_empty());
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        assert_eq!(reopened.vertices().unwrap(), expected);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

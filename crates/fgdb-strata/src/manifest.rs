@@ -37,12 +37,16 @@ pub const MANIFEST_FORMAT_V1: u16 = 1;
 /// to the marker-chain commitment at its publication (fgdb-90hw).
 pub const MANIFEST_FORMAT_V2: u16 = 2;
 /// The V2 layout, written by a store whose objects may live in commit packs
-/// (fgdb-79kyi): a reader must look in packs, not only at loose paths. Every
-/// manifest is written as V3; V2 manifests, all of whose objects are loose,
+/// (fgdb-79kyi): a reader must look in packs, not only at loose paths. A
+/// catalog-free manifest is written as V3; V2 manifests, whose objects are loose,
 /// stay readable. A pre-pack reader refuses V3 by its version when it resolves
 /// the manifest, before it reads any partition object, so it can never
 /// mistake a packed object for a missing or damaged one.
 pub const MANIFEST_FORMAT_V3: u16 = 3;
+/// V3 records plus the exact immutable schema-name generation. The encoder
+/// preserves V3 bytes when no coordinate carries a catalog; old readers refuse
+/// V4 before observing data under missing names.
+pub const MANIFEST_FORMAT_V4: u16 = 4;
 /// Durable object kind for the §5.1 logical-identity header — distinct from
 /// blocks (0x04d4), vertex patches (0x057f), and edge property patches
 /// (0x0580) for the reason each of those is distinct: equal payload bytes
@@ -56,6 +60,9 @@ pub const MAX_MANIFEST_RECORDS: u32 = 1 << 20;
 const HEADER_LEN: usize = 4 + 2 + 4;
 /// graph(16) + branch(16) + partition(8) + root(32) + published_chain_hash(32).
 const RECORD_LEN: usize = 16 + 16 + 8 + 32 + 32;
+const CATALOG_RECORD_LEN: usize = RECORD_LEN + 1 + 32 + 8;
+/// Complete V4 upper bound, shared with storage admission.
+pub const MAX_ENCODED_MANIFEST_BYTES: usize = HEADER_LEN + MAX_MANIFEST_RECORDS as usize * CATALOG_RECORD_LEN;
 
 /// One live partition: its coordinate and the identity of its published root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +83,9 @@ pub struct ManifestRecord {
     /// to WHICH history published; the root's own digest commits to WHAT was
     /// published.
     pub published_chain_hash: fgdb_crypto::Digest,
+    /// The immutable catalog selected by the same Chronicle publication.
+    /// None is the legacy, unnamed schema generation at epoch zero.
+    pub schema: Option<crate::catalog::CatalogRef>,
 }
 
 /// The content identity of one immutable manifest version.
@@ -111,6 +121,10 @@ pub enum ManifestError {
     ZeroRoot {
         at: usize,
     },
+    InvalidCatalog {
+        at: usize,
+    },
+    NonCanonicalFormat,
     ImplausibleRecordCount {
         declared: u32,
     },
@@ -137,6 +151,8 @@ impl core::fmt::Display for ManifestError {
                 "record {at} does not strictly follow its predecessor's coordinate"
             ),
             Self::ZeroRoot { at } => write!(f, "record {at} names the zero identity"),
+            Self::InvalidCatalog { at } => write!(f, "record {at} has an invalid catalog reference"),
+            Self::NonCanonicalFormat => f.write_str("catalog-free manifest must use the legacy layout"),
             Self::ImplausibleRecordCount { declared } => {
                 write!(
                     f,
@@ -164,9 +180,12 @@ pub fn encode_manifest(records: &[ManifestRecord]) -> Result<Vec<u8>, ManifestEr
         return Err(ManifestError::ImplausibleRecordCount { declared: count });
     }
     validate_records(records)?;
-    let mut out = Vec::with_capacity(HEADER_LEN + records.len() * RECORD_LEN);
+    let has_catalog = records.iter().any(|record| record.schema.is_some());
+    let record_len = if has_catalog { CATALOG_RECORD_LEN } else { RECORD_LEN };
+    let format = if has_catalog { MANIFEST_FORMAT_V4 } else { MANIFEST_FORMAT_V3 };
+    let mut out = Vec::with_capacity(HEADER_LEN + records.len() * record_len);
     out.extend_from_slice(&MANIFEST_MAGIC);
-    out.extend_from_slice(&MANIFEST_FORMAT_V3.to_be_bytes());
+    out.extend_from_slice(&format.to_be_bytes());
     out.extend_from_slice(&count.to_be_bytes());
     for record in records {
         out.extend_from_slice(&record.graph.0.to_be_bytes());
@@ -174,6 +193,16 @@ pub fn encode_manifest(records: &[ManifestRecord]) -> Result<Vec<u8>, ManifestEr
         out.extend_from_slice(&record.partition.to_be_bytes());
         out.extend_from_slice(&record.root.0.0);
         out.extend_from_slice(&record.published_chain_hash.0);
+        if has_catalog {
+            match record.schema {
+                Some(schema) => {
+                    out.push(1);
+                    out.extend_from_slice(&schema.root.0.0);
+                    out.extend_from_slice(&schema.epoch.0.to_be_bytes());
+                }
+                None => out.extend_from_slice(&[0; 41]),
+            }
+        }
     }
     Ok(out)
 }
@@ -184,14 +213,15 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestRecord>, ManifestErro
         return Err(ManifestError::NotAManifest);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != MANIFEST_FORMAT_V2 && format != MANIFEST_FORMAT_V3 {
+    if !matches!(format, MANIFEST_FORMAT_V2 | MANIFEST_FORMAT_V3 | MANIFEST_FORMAT_V4) {
         return Err(ManifestError::UnsupportedFormat { format });
     }
     let count = u32::from_be_bytes(bytes[6..10].try_into().expect("fixed header"));
     if count > MAX_MANIFEST_RECORDS {
         return Err(ManifestError::ImplausibleRecordCount { declared: count });
     }
-    let expected = HEADER_LEN + count as usize * RECORD_LEN;
+    let record_len = if format == MANIFEST_FORMAT_V4 { CATALOG_RECORD_LEN } else { RECORD_LEN };
+    let expected = HEADER_LEN + count as usize * record_len;
     if bytes.len() < expected {
         return Err(ManifestError::Truncated {
             expected,
@@ -217,14 +247,34 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestRecord>, ManifestErro
         let root: [u8; 32] = bytes[at + 40..at + 72].try_into().expect("bounded record");
         let published_chain_hash: [u8; 32] =
             bytes[at + 72..at + 104].try_into().expect("bounded record");
+        let schema = if format == MANIFEST_FORMAT_V4 {
+            match bytes[at + RECORD_LEN] {
+                0 if bytes[at + RECORD_LEN + 1..at + record_len].iter().all(|byte| *byte == 0) => None,
+                1 => Some(crate::catalog::CatalogRef {
+                    root: crate::catalog::CatalogVersion(ObjectId(
+                        bytes[at + RECORD_LEN + 1..at + RECORD_LEN + 33].try_into().expect("bounded catalog reference"),
+                    )),
+                    epoch: fgdb_delta_types::SchemaEpoch(u64::from_be_bytes(
+                        bytes[at + RECORD_LEN + 33..at + record_len].try_into().expect("bounded catalog epoch"),
+                    )),
+                }),
+                _ => return Err(ManifestError::InvalidCatalog { at: records.len() }),
+            }
+        } else {
+            None
+        };
         records.push(ManifestRecord {
             graph,
             branch,
             partition,
             root: crate::PartitionRootVersion(ObjectId(root)),
             published_chain_hash: fgdb_crypto::Digest(published_chain_hash),
+            schema,
         });
-        at += RECORD_LEN;
+        at += record_len;
+    }
+    if format == MANIFEST_FORMAT_V4 && records.iter().all(|record| record.schema.is_none()) {
+        return Err(ManifestError::NonCanonicalFormat);
     }
     validate_records(&records)?;
     Ok(records)
@@ -235,8 +285,16 @@ fn validate_records(records: &[ManifestRecord]) -> Result<(), ManifestError> {
         if record.root.0.0 == [0u8; 32] {
             return Err(ManifestError::ZeroRoot { at });
         }
+        if record.schema.is_some_and(|schema| schema.validate().is_err()) {
+            return Err(ManifestError::InvalidCatalog { at });
+        }
         if at > 0 {
             let previous = &records[at - 1];
+            if (previous.graph, previous.branch) == (record.graph, record.branch)
+                && previous.schema != record.schema
+            {
+                return Err(ManifestError::InvalidCatalog { at });
+            }
             if (previous.graph, previous.branch, previous.partition)
                 >= (record.graph, record.branch, record.partition)
             {
@@ -301,6 +359,7 @@ pub fn records_of(
             partition: root.partition,
             root: *id,
             published_chain_hash: *published_chain_hash,
+            schema: None,
         })
         .collect();
     records.sort_by_key(|record| (record.graph, record.branch, record.partition));

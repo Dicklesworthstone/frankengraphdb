@@ -17,7 +17,7 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;
 use fgdb_strata::manifest::{
-    MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3, ManifestError, ManifestRecord, ManifestVersion,
+    MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3, MANIFEST_FORMAT_V4, ManifestError, ManifestRecord, ManifestVersion,
     decode_manifest, encode_manifest, manifest_id, read_manifest,
 };
 use fgdb_strata::root::{BlockRef, PartitionRoot};
@@ -64,6 +64,7 @@ fn distinct_records() -> Vec<ManifestRecord> {
             partition: 7,
             root: PartitionRootVersion(ObjectId([0x11; 32])),
             published_chain_hash: fgdb_crypto::Digest([0xa1; 32]),
+            schema: None,
         },
         ManifestRecord {
             graph: GraphId(3),
@@ -71,6 +72,7 @@ fn distinct_records() -> Vec<ManifestRecord> {
             partition: 9,
             root: PartitionRootVersion(ObjectId([0x22; 32])),
             published_chain_hash: fgdb_crypto::Digest([0xa2; 32]),
+            schema: None,
         },
         ManifestRecord {
             graph: GraphId(4),
@@ -78,6 +80,7 @@ fn distinct_records() -> Vec<ManifestRecord> {
             partition: 1,
             root: PartitionRootVersion(ObjectId([0x33; 32])),
             published_chain_hash: fgdb_crypto::Digest([0xa3; 32]),
+            schema: None,
         },
     ]
 }
@@ -130,7 +133,7 @@ fn manifests_are_written_as_v3_and_v2_stays_readable() {
     previous[4..6].copy_from_slice(&MANIFEST_FORMAT_V2.to_be_bytes());
     assert_eq!(decode_manifest(&previous).expect("a V2 manifest"), records);
     assert_eq!(decode_manifest(&bytes).expect("a V3 manifest"), records);
-    for format in [0, 1, MANIFEST_FORMAT_V3 + 1, u16::MAX] {
+    for format in [0, 1, MANIFEST_FORMAT_V4 + 1, u16::MAX] {
         let mut other = bytes.clone();
         other[4..6].copy_from_slice(&format.to_be_bytes());
         assert_eq!(
@@ -153,11 +156,11 @@ fn foreign_bytes_future_formats_and_identity_are_distinct_refusals() {
     );
 
     let mut future = bytes.clone();
-    future[4..6].copy_from_slice(&(MANIFEST_FORMAT_V3 + 1).to_be_bytes());
+    future[4..6].copy_from_slice(&(MANIFEST_FORMAT_V4 + 1).to_be_bytes());
     assert_eq!(
         decode_manifest(&future),
         Err(ManifestError::UnsupportedFormat {
-            format: MANIFEST_FORMAT_V3 + 1
+            format: MANIFEST_FORMAT_V4 + 1
         })
     );
 
@@ -285,6 +288,7 @@ fn a_reopened_store_resolves_every_partition_the_manifest_names() {
                     partition: 0,
                     root: first,
                     published_chain_hash: fgdb_crypto::Digest([0xb1; 32]),
+                    schema: None,
                 },
                 ManifestRecord {
                     graph: GraphId(1),
@@ -292,6 +296,7 @@ fn a_reopened_store_resolves_every_partition_the_manifest_names() {
                     partition: 1,
                     root: second,
                     published_chain_hash: fgdb_crypto::Digest([0xb2; 32]),
+                    schema: None,
                 },
             ];
             store
@@ -349,6 +354,7 @@ fn a_pre_pack_v2_manifest_left_on_disk_still_resolves() {
                 partition: 0,
                 root,
                 published_chain_hash: fgdb_crypto::Digest([0xc3; 32]),
+                schema: None,
             }];
             let mut v2 = encode_manifest(&records).expect("encodes");
             v2[4..6].copy_from_slice(&MANIFEST_FORMAT_V2.to_be_bytes());
@@ -396,6 +402,7 @@ fn a_manifest_naming_an_absent_root_fails_closed_with_the_identity() {
                 partition: 0,
                 root: real,
                 published_chain_hash: fgdb_crypto::Digest([0xc1; 32]),
+                schema: None,
             },
             ManifestRecord {
                 graph: GraphId(1),
@@ -403,6 +410,7 @@ fn a_manifest_naming_an_absent_root_fails_closed_with_the_identity() {
                 partition: 1,
                 root: ghost,
                 published_chain_hash: fgdb_crypto::Digest([0xc2; 32]),
+                schema: None,
             },
         ];
         let id = store
@@ -419,5 +427,96 @@ fn a_manifest_naming_an_absent_root_fails_closed_with_the_identity() {
             Some((1, ghost.0)),
             "an absent root must refuse resolution, naming the gap"
         );
+    });
+}
+
+#[test]
+fn catalog_manifests_preserve_legacy_bytes_and_admit_exact_optional_references() {
+    use fgdb_delta_types::SchemaEpoch;
+    use fgdb_strata::catalog::{CatalogRef, CatalogVersion};
+    let legacy = distinct_records();
+    let legacy_bytes = encode_manifest(&legacy).unwrap();
+    assert_eq!(&legacy_bytes[4..6], &MANIFEST_FORMAT_V3.to_be_bytes());
+    let mut records = legacy.clone();
+    records[1].schema = Some(CatalogRef {
+        root: CatalogVersion(ObjectId([0x64; 32])),
+        epoch: SchemaEpoch(7),
+    });
+    records[0].schema = records[1].schema;
+    let bytes = encode_manifest(&records).unwrap();
+    assert_eq!(&bytes[4..6], &MANIFEST_FORMAT_V4.to_be_bytes());
+    assert_eq!(bytes.len(), 10 + records.len() * 145);
+    assert_eq!(decode_manifest(&bytes).unwrap(), records);
+    for cut in 0..bytes.len() {
+        assert!(decode_manifest(&bytes[..cut]).is_err(), "catalog prefix {cut}");
+    }
+    let mut malformed = bytes.clone();
+    malformed[10 + 2 * 145 + 104 + 1] = 1;
+    assert_eq!(decode_manifest(&malformed), Err(ManifestError::InvalidCatalog { at: 2 }));
+    malformed = bytes.clone();
+    malformed[10 + 145 + 104] = 2;
+    assert_eq!(decode_manifest(&malformed), Err(ManifestError::InvalidCatalog { at: 1 }));
+    malformed = bytes;
+    malformed[10 + 104..10 + 145].fill(0);
+    malformed[10 + 145 + 104..10 + 2 * 145].fill(0);
+    assert_eq!(decode_manifest(&malformed), Err(ManifestError::NonCanonicalFormat));
+    records[1].schema.as_mut().unwrap().epoch = SchemaEpoch(8);
+    assert_eq!(encode_manifest(&records), Err(ManifestError::InvalidCatalog { at: 1 }));
+    records[1].schema.as_mut().unwrap().epoch = SchemaEpoch(0);
+    assert_eq!(encode_manifest(&records), Err(ManifestError::InvalidCatalog { at: 1 }));
+    assert_eq!(encode_manifest(&legacy).unwrap(), legacy_bytes);
+}
+
+#[test]
+fn catalog_objects_reopen_through_manifest_and_corruption_cannot_supply_names() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, CatalogSymbolKind, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, SchemaEpoch};
+    use fgdb_strata::catalog::{CatalogRef, SchemaCatalog, SchemaTransition};
+    use fgdb_types::MarkerRef;
+
+    let dir = scratch_dir("catalog-reopen");
+    let (manifest, transition_id) = under_lab(67, {
+        let dir = dir.clone();
+        move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE).await.unwrap();
+            let mut symbols = SymbolCatalog::default();
+            symbols.bind("Person", CatalogSymbol::Label(LabelId(73))).unwrap();
+            let catalog = SchemaCatalog::empty(GraphId(1), BranchId(1))
+                .successor(CommitSeq(1), &symbols).unwrap().unwrap();
+            let catalog_id = store.put_catalog(&cx, &catalog).await.unwrap();
+            let schema = CatalogRef { root: catalog_id, epoch: SchemaEpoch(1) };
+            let transition = SchemaTransition {
+                graph: GraphId(1), branch: BranchId(1),
+                apply_basis: Some(MarkerRef { marker_oid: ObjectId([0x90; 32]), commit_seq: CommitSeq(1) }),
+                before: None, after: schema,
+            };
+            let transition_id = store.put_schema_transition(&cx, &transition).await.unwrap();
+            assert_eq!(store.get_schema_transition(&cx, transition_id).await.unwrap(), transition);
+            let root = publish_partition(&cx, &store, 0, 1).await;
+            let manifest = store.put_manifest(&cx, &[ManifestRecord {
+                graph: GraphId(1), branch: BranchId(1), partition: 0, root,
+                published_chain_hash: fgdb_crypto::Digest([0xd1; 32]), schema: Some(schema),
+            }]).await.unwrap();
+            (manifest, transition_id)
+        }
+    });
+    under_lab(68, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE).await.unwrap();
+        let resolved = store.resolve_manifest(&cx, manifest).await.unwrap();
+        let schema = resolved[0].0.schema.unwrap();
+        let catalog = store.get_catalog(&cx, schema.root).await.unwrap();
+        assert_eq!(catalog.epoch(), schema.epoch);
+        assert_eq!(catalog.symbols_at(CommitSeq(1)).unwrap().resolve(CatalogSymbolKind::Label, "Person"), None);
+        assert_eq!(catalog.symbols_at(CommitSeq(2)).unwrap().resolve(CatalogSymbolKind::Label, "Person"),
+            Some(CatalogSymbol::Label(LabelId(73))));
+        let transition = store.get_schema_transition(&cx, transition_id).await.unwrap();
+        assert_eq!(transition.after, schema);
+        let path = store.path(schema.root.0);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(store.get_catalog(&cx, schema.root).await,
+            Err(StoreError::IdentityMismatch { .. })));
     });
 }

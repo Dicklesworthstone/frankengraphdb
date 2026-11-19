@@ -2,8 +2,8 @@
 
 `fgdb-cli` owns the one `fgdb` binary (`src/main.rs`). Every command opens the
 real `fgdb::Database` directory through the production Asupersync runtime and
-purpose-narrowed contexts. There is no alternate engine, no network client and
-no daemon. Use one process at a time per database directory: the embedded owner
+purpose-narrowed contexts. The remote commands connect to `fgdbd` through its
+FGP client. Use one process at a time per embedded database directory: the embedded owner
 does not add cross-process coordination. Anyone holding the key file has full
 access to the data. The CLI is not a sandbox.
 
@@ -15,6 +15,7 @@ machine-readable contract that the tests freeze.
 | Command | What it does |
 |---|---|
 | `create` | Create a new database directory (refuses an existing one). |
+| `schema` | Inspect durable label, relation and property names, or register declarations atomically. `--as-of <seq>` inspects historical metadata. |
 | `adopt --db <dir>` | Sync a copied database before its first write. Needs no keys; does not change data or advance the frontier. |
 | `write <gql>` | Run one native write program in one transaction. |
 | `query <gql>` | Native read, including `EXPLAIN`. A write statement is refused (exit 3), never retried as a write. `--stream` flushes one row at a time on the streamable profiles; `--certify-to <file>` saves a replayable result certificate. |
@@ -58,18 +59,51 @@ group or other permission bits (`chmod 600`). Anything else is refused with
 exit 4 before the database is opened or created. The check reads the opened
 handle, not the path, and the file may be at most 64 KiB.
 
-### Bindings: no implicit catalog
+### Durable label, relationship and property names
 
-Label, relation and property IDs are explicit on every invocation:
-`--label Person=1 --relation KNOWS=1 --property name=1`. Supply the same
-bindings when you reopen. The CLI never guesses or hashes names, and `labels()`
-/ `type()` reflection answers from the supplied bindings.
+Register names once with `create --persist-bindings`, or use `schema` to extend
+the catalog of an existing database. The latter can also adopt names for numeric
+IDs already used by graph data. Both use an ordinary atomic schema transaction:
+
+```bash
+fgdb schema --db graph --key-file keys \
+  --label Person --relation KNOWS --property name
+fgdb write --db graph --key-file keys "CREATE (:Person {name:'Ada'})"
+fgdb query --db graph --key-file keys 'MATCH (n:Person) RETURN n.name'
+```
+
+Bare names on `schema` and `create --persist-bindings` allocate IDs in canonical
+namespace/name order. Explicit `name=u64` declarations can adopt existing numeric
+IDs, and reserve their IDs before automatic allocation. Allocation checks
+authenticated retained history, including deleted graph data, so an old numeric
+ID cannot silently acquire a new
+meaning. This costs a history traversal when new automatic names are requested;
+unavailable origin history refuses allocation. Exact repeats need no traversal.
+
+Each later invocation discovers the names at its selected snapshot, including
+historical reads. An exact redeclaration is a no-op; conflicting names or IDs
+refuse the complete registration. `schema --if-current <seq>` also refuses when
+another commit has advanced the frontier. With no declarations, `schema` lists
+the catalog; `schema --as-of <seq>` selects historical metadata and cannot combine
+with declarations or `--if-current`. The command takes no GQL.
+
+Both inspection and successful registration return the complete selected catalog
+as `kind`, `name` and `id` columns. Robot output completes with `kind=rows`, the
+selected `seq`, and `count` of all returned bindings, including existing names.
+IDs use decimal-string `int` cells through `i64::MAX` and `wideint` above it, so
+the full unsigned 64-bit range remains exact. A missing successful terminal must
+not be treated as a confirmed registration.
+
+Explicit `--label`, `--relation` and `--property` flags on reads and writes still
+extend only that invocation. The CLI never guesses or hashes names. Creating a
+database without `--persist-bindings` retains the empty sequence-zero catalog.
 
 `--bindings-file <file>` reads the same mapping once from a file, one binding
 per line (`label Person=1`, `relation KNOWS=1`, `property name=1`; `#` comments
 and blank lines are ignored; at most 1 MiB). File and flags combine, and must
 not repeat a name or an ID within a kind. `fgdbd serve` accepts the same file
-per database. It is an explicit mapping you keep, not a catalog in the database.
+per database. Pass it to `schema` to persist all its declarations together;
+passing it to a query does not change the database.
 
 ### Loading edges between vertices that are already in the database
 
@@ -308,6 +342,110 @@ fgdb --robot search --db ./graph --key-file ./graph.keys \
   --text 'graph memory' --text-property title \
   --vector 0.1,0.9 --vector-property x --vector-property y --k 5
 ```
+
+## Consistent prepared reads from a server
+
+`remote query --prepared-batch --rows-file` prepares one read template and
+executes every argument set in one pinned server session. Ordinary reads share
+the execution snapshot and one cumulative signed allowance. An explicit
+temporal selector can choose a different retained cut for each argument set;
+the corresponding columns record reports that exact sequence.
+
+Use a JSON array of objects whose values use the typed `--param` spellings:
+
+```json
+[
+  {"name": "text:Ada"},
+  {"name": "text:Grace"}
+]
+```
+
+```sh
+fgdb --robot remote --addr 127.0.0.1:7688 --token-file ./token.hex \
+  --database social --rows-file ./names.json --prepared-batch \
+  query 'MATCH (n:Person {name:$name}) RETURN n.name AS name'
+```
+
+CSV input uses the same `--csv-types` declarations as ordinary remote argument
+files. The first argument set supplies the prepared template's structural
+operand types; all sets supply fresh values when the batch executes. The
+complete file and both request envelopes are checked before credential access.
+The batch accepts 1–32 sets and buffered read mode. It cannot combine with
+`--consistent-batch`, which keeps its existing raw-text binding behavior.
+
+Execution and wire admission finish before delivery begins. Robot columns and
+rows carry a one-based `statement`; columns also carry the exact `seq`.
+Only the single terminal `result kind=read_batch` confirms complete delivery.
+An output error cancels and drains the request, and no refusal retries,
+reprepares, or falls back to independent reads. Use the ordinary TLS options
+when connecting through an encrypted endpoint.
+
+## Mixed read/write transactions on a server
+
+`remote transaction --statements-file` runs a finite script through one explicit
+FGP transaction. Each step supplies its own statement and typed parameters;
+reads and writes observe the preceding steps' staged effects. All steps share
+the server's original capability and cumulative execution limits.
+
+For example, save the following as `steps.json`, with `Person`, `name` and
+`age` bound by the server:
+
+```json
+[
+  {
+    "mode": "write",
+    "statement": "CREATE (:Person {name: $name, age: $age})",
+    "parameters": {"name": "text:Ada", "age": "int:37"}
+  },
+  {
+    "mode": "read",
+    "statement": "MATCH (p:Person) WHERE p.name = $name RETURN p.age AS age",
+    "parameters": {"name": "text:Ada"}
+  },
+  {
+    "mode": "write",
+    "statement": "MATCH (p:Person) WHERE p.name = $name SET p.age = $age RETURN p.age AS age",
+    "parameters": {"name": "text:Ada", "age": "int:38"}
+  }
+]
+```
+
+```sh
+fgdb --robot remote --addr 127.0.0.1:7688 --token-file ./token.hex \
+  --database social transaction --statements-file ./steps.json
+```
+
+The regular UTF-8 input file must contain 1–32 objects, at most 1 MiB in total.
+Each object requires `mode` (`read` or `write`) and a nonempty `statement`;
+`parameters` is optional and uses the existing typed argument grammar. Unknown
+fields, malformed later records and client-sized request overflows refuse
+before credentials or connection creation. After negotiation, the SDK checks
+**every** transaction envelope against the peer's frame limit before BEGIN.
+GQL syntax, symbols, permissions and execution limits are still checked by the
+server. A late refusal discards the unpublished prefix.
+
+Columns and rows stream as they arrive. In robot mode every such record carries
+a one-based `statement` and `provisional:true`; columns also carry
+`basis_seq`, the original transaction snapshot. These records do not assert
+that any effect committed. The single final `result` has
+`kind:"transaction"`, `outcome:"write_committed"` or
+`outcome:"read_closed"`, the completed `seq`, `basis_seq`,
+`statements` and total row `count`.
+
+Every provisional output flush must succeed before COMMIT is attempted.
+A rejected output callback stops the script and cancels or rolls back its
+unpublished owner. If the commit response is lost, the outcome can be unknown:
+there is no successful terminal, rollback claim or automatic retry. If writing
+the final output fails **after** confirmed completion, the diagnostic retains
+the known sequence; repeating the script could duplicate effects.
+
+The server requires Write or ReadWrite authority to begin, and reads also need
+Read authority. TLS flags work as for other remote commands. This command does
+not accept positional GQL, `--param`, `--rows-file`, prepared-input flags,
+read modes or `--if-current`. Savepoints, reattachment, historical writer reads
+and durable outcome lookup remain outside this connection-scoped profile.
+The CLI streams delivery without collecting the full script's results; each
+server statement still uses the existing buffered execution owner.
 
 ## Robot mode
 

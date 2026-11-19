@@ -3096,14 +3096,22 @@ impl<'a> Parser<'a> {
         row: &'r [(Name<'a>, GraphSetColumnType)],
     ) -> Result<ParsedVertexRowsReturn<'r, 'a>, GraphVertexMergeTextError> {
         let at = self.current.at;
-        self.word(keyword)?;
-        let quantifier = if self.take_word("DISTINCT")? {
+        // A scoped WITH belongs to the common native row pipeline, which
+        // restores globals outside DISTINCT and grouping. This head only
+        // carries final identities into that pipeline and consumes no token.
+        let scoped_head = keyword == "WITH" && self.call_scope.is_some();
+        if !scoped_head {
+            self.word(keyword)?;
+        }
+        let quantifier = if !scoped_head && self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
-            self.take_all_quantifier()?;
+            if !scoped_head {
+                self.take_all_quantifier()?;
+            }
             GraphSetQuantifier::All
         };
-        let star = self.is_punct(b'*').then_some(self.current.at);
+        let star = (scoped_head || self.is_punct(b'*')).then_some(self.current.at);
         let mut returning = ParsedVertexRowsReturn {
             variable,
             row,
@@ -3123,14 +3131,24 @@ impl<'a> Parser<'a> {
             // row carries, then the merged vertex when it is named. RETURN *
             // orders its columns by name; WITH * keeps the row's order
             // (fgdb-7jja3).
-            self.advance()?;
+            if !scoped_head {
+                self.advance()?;
+            }
             let visible = self.visible_width(row);
+            let merged = variable.or_else(|| {
+                scoped_head.then_some(Name {
+                    text: Self::anonymous_name(visible),
+                    at,
+                })
+            });
             let mut items: Vec<_> = row[..visible]
                 .iter()
                 .enumerate()
                 .map(|(index, &(name, kind))| (RowsBinding::Input(index), name, kind))
-                .chain(variable.map(|name| (RowsBinding::Vertex, name, GraphSetColumnType::Vertex)))
-                .filter(|(_, name, _)| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
+                .chain(merged.map(|name| (RowsBinding::Vertex, name, GraphSetColumnType::Vertex)))
+                .filter(|(_, name, _)| {
+                    scoped_head || !name.text.starts_with(Self::ANONYMOUS_PREFIX)
+                })
                 .collect();
             if items.is_empty() {
                 return Err(error(
@@ -3149,6 +3167,9 @@ impl<'a> Parser<'a> {
                     value: ReadValueTemplate::Column(column),
                 });
                 returning.output.push((name, kind));
+            }
+            if scoped_head {
+                return Ok(returning);
             }
             let page = self.row_page_sourced(&returning.output, &[], keyword == "RETURN")?;
             returning.order = page.order;
@@ -3254,7 +3275,9 @@ impl PreparedGraphVertexMergeRowsText {
         let (mut parser, row, owned, leading) = match from {
             Some(from) => {
                 let (columns, types) = from.owned_columns();
-                let mut parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
+                let mut parser = parser
+                    .with_call_scope(from.call_scope)
+                    .resume_after(from.boundary, &from.parameters, from.at)?;
                 if multipart {
                     // OPTIONAL, inline CALL and multiple MATCH clauses read
                     // one complete relation over the preceding write's rows.
@@ -3409,6 +3432,7 @@ impl PreparedGraphVertexMergeRowsText {
                 row: carried,
                 boundary,
                 parameters: parser.syntax.parameters.clone(),
+                call_scope: parser.call_scope.clone(),
             })
         } else {
             // RETURN and WITH metadata read final identities through the
@@ -3425,6 +3449,7 @@ impl PreparedGraphVertexMergeRowsText {
                         row: head.output.clone(),
                         boundary,
                         parameters: parser.syntax.parameters.clone(),
+                        call_scope: parser.call_scope.clone(),
                     })
                 } else {
                     // WHERE, UNWIND and further WITH stages read the complete

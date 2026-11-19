@@ -906,6 +906,7 @@ pub struct VertexScanCursor<S, F, Row = VId> {
     skip: u64,
     projected_rows: u64,
     state: VertexScanState,
+    advancing: bool,
 }
 impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> {
     /// Pure construction: no source scan or checkpoint occurs until a pull.
@@ -933,6 +934,7 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             last: None,
             projected_rows: 0,
             state: VertexScanState::Open,
+            advancing: false,
         }
     }
     #[must_use]
@@ -958,6 +960,57 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             self.state = VertexScanState::Closed;
         }
         self.source = None;
+        self.advancing = false;
+    }
+
+    /// Examine at most 64 root candidates before yielding. Invisible and
+    /// predicate-rejected histories count toward the cooperative quantum,
+    /// while their ordinary logical admission remains unchanged. Source
+    /// callbacks and one row's probes/projection remain governed synchronous
+    /// operations; this is not a wall-clock bound.
+    pub fn poll_next<C>(
+        &mut self,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Option<ScanResult<Row, S::Error, C>>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != VertexScanState::Open {
+            return core::task::Poll::Ready(None);
+        }
+        let mut remaining = 64;
+        let result = match self.advance_bounded_inner::<true, C>(&mut remaining) {
+            Ok(core::task::Poll::Pending) => {
+                context.waker().wake_by_ref();
+                return core::task::Poll::Pending;
+            }
+            Ok(core::task::Poll::Ready(value)) => Ok(value),
+            Err(error) => Err(error),
+        };
+        core::task::Poll::Ready(self.finish(result))
+    }
+
+    fn finish<E>(&mut self, result: Result<Option<Row>, E>) -> Option<Result<Row, E>> {
+        let item = match result {
+            Ok(Some(row)) => {
+                if self.plan.count == Some(self.meter.rows.result_rows) {
+                    self.state = VertexScanState::Exhausted;
+                }
+                Some(Ok(row))
+            }
+            Ok(None) => {
+                self.state = VertexScanState::Exhausted;
+                None
+            }
+            Err(error) => {
+                self.state = VertexScanState::Failed;
+                Some(Err(error))
+            }
+        };
+        if self.state != VertexScanState::Open {
+            self.close();
+        }
+        item
     }
 
     fn advance<C>(&mut self) -> ScanResult<Option<Row>, S::Error, C>
@@ -973,19 +1026,61 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
     where
         F: FnMut() -> Result<(), C>,
     {
+        loop {
+            let mut remaining = usize::MAX;
+            if let core::task::Poll::Ready(row) =
+                self.advance_bounded_inner::<EMIT, C>(&mut remaining)?
+            {
+                return Ok(row);
+            }
+        }
+    }
+
+    fn advance_bounded_inner<const EMIT: bool, C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> ScanResult<core::task::Poll<Option<Row>>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        let result = self.advance_batch::<EMIT, C>(remaining);
+        if !matches!(result, Ok(core::task::Poll::Pending)) {
+            self.advancing = false;
+        }
+        result
+    }
+
+    fn advance_batch<const EMIT: bool, C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> ScanResult<core::task::Poll<Option<Row>>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         let meter = &mut self.meter;
         if self.plan.empty || self.plan.count == Some(0) {
             // An empty page drives no source/evaluator work, but a pending
             // cancellation still wins before successful exhaustion.
             (meter.checkpoint)().map_err(GqlQueryError::Interrupted)?;
-            return Ok(None);
+            return Ok(core::task::Poll::Ready(None));
         }
-        meter.event(VertexScanEvent::Work)?;
+        if !self.advancing {
+            meter.event(VertexScanEvent::Work)?;
+            self.advancing = true;
+        }
         let source = self.source.as_mut().expect("open cursor owns its source");
         loop {
-            let next = flatten(source.next_vertex(&mut |event| meter.event(event)))?;
-            let Some(vid) = next else {
-                return Ok(None);
+            if *remaining == 0 {
+                return Ok(core::task::Poll::Pending);
+            }
+            *remaining -= 1;
+            let next = flatten(source.next_vertex_step(&mut |event| meter.event(event)))?;
+            let vid = match next {
+                crate::scan_stream::SourceStep::Item(vid) => vid,
+                crate::scan_stream::SourceStep::Skipped(_) => continue,
+                crate::scan_stream::SourceStep::Exhausted => {
+                    return Ok(core::task::Poll::Ready(None));
+                }
             };
             meter.event(VertexScanEvent::Work)?;
             if self.last.is_some_and(|last| vid <= last) {
@@ -1007,7 +1102,7 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
                 meter,
                 (|_| Ok(()), |_| Ok(())),
             )? {
-                return Ok(Some(value));
+                return Ok(core::task::Poll::Ready(Some(value)));
             }
         }
     }
@@ -1033,25 +1128,8 @@ where
         if self.state != VertexScanState::Open {
             return None;
         }
-        match self.advance() {
-            Ok(Some(vid)) => {
-                if self.plan.count == Some(self.meter.rows.result_rows) {
-                    self.state = VertexScanState::Exhausted;
-                    self.source = None;
-                }
-                Some(Ok(vid))
-            }
-            Ok(None) => {
-                self.state = VertexScanState::Exhausted;
-                self.source = None;
-                None
-            }
-            Err(error) => {
-                self.state = VertexScanState::Failed;
-                self.source = None;
-                Some(Err(error))
-            }
-        }
+        let result = self.advance();
+        self.finish(result)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         // An open cursor may emit an error, so LIMIT is not an item upper bound.

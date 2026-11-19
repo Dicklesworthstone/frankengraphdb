@@ -633,6 +633,78 @@ fn a_read_session_runs_the_call_at_its_own_snapshot_not_the_writer_head() {
 }
 
 #[test]
+fn optional_calls_read_staged_topology_and_replay_the_original_snapshot() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit).await;
+        let old = db.read_session().unwrap();
+        let params = GqlParameters::new();
+        let text = "MATCH (n {p:60}) OPTIONAL CALL (n) { \
+                    MATCH (n)-[:R]->(m) RETURN m } RETURN n,m,m.p AS p";
+        let (before, certificate) = db
+            .execute_certified(cx, text, &params, symbols, policy())
+            .unwrap();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        assert_eq!(
+            rows(before.clone()),
+            (
+                ["n", "m", "p"].map(str::to_owned).to_vec(),
+                vec![vec![GraphValue::Vertex(VId(6)), null.clone(), null]],
+            )
+        );
+        let named = db
+            .query(
+                cx,
+                "OPTIONAL CALL fnx.bridges(direction => 'undirected') YIELD node,neighbor \
+                 RETURN node.p AS source,neighbor.p AS target ORDER BY source,target",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        assert_eq!(
+            rows(named).1,
+            [[30, 40], [40, 50]].map(|values| values
+                .map(|v| GraphValue::Scalar(CanonicalScalar::Int(v)))
+                .to_vec())
+        );
+        let mut txn = db.begin(txcx).unwrap();
+        let mut change = WriteBatch::new(R);
+        change.add_edge(EId(6), VId(6), VId(1), vec![]);
+        txn.write(&mut db, change).unwrap();
+        let staged = txn
+            .query(&db, cx, text, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(
+            rows(staged.clone()).1,
+            vec![vec![
+                GraphValue::Vertex(VId(6)),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(10)),
+            ]]
+        );
+        assert_eq!(
+            db.query(cx, text, &params, symbols, policy()).unwrap(),
+            before
+        );
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            db.query(cx, text, &params, symbols, policy()).unwrap(),
+            staged
+        );
+        assert_eq!(
+            old.query(cx, text, &params, symbols, policy()).unwrap(),
+            before
+        );
+        assert_eq!(
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn load_centrality_composes_against_the_pinned_read_snapshot() {
     run(async |commit, cx| {
         let mut db = open(commit).await;

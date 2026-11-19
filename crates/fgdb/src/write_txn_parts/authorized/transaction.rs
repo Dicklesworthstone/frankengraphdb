@@ -357,6 +357,11 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
                 |_, rows, work, output| admit(rows, work, output),
             )?;
             Self::finish_statement(&mut state, query_cx).map_err(chain::source)?;
+            state
+                .workspace
+                .transaction()
+                .retain_write_classification(database)
+                .map_err(chain::source)?;
             Ok::<_, chain::Fault>((state, result))
         })?;
         self.delivered_rows = self.delivered_rows.saturating_add(result.rows.result_rows);
@@ -450,6 +455,9 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
     }
 
     /// Publish once through the canonical native completion owner.
+    /// A successful write statement takes the write terminal path even if it
+    /// matched no rows or produced no effects. Only an exclusively read-only
+    /// transaction returns ReadClosed.
     /// Live authority and cancellation are checked by the native completion
     /// checkpoints before publication. Semantic conflict/unknown outcomes keep
     /// their native meaning; this method never retries or replays statements.

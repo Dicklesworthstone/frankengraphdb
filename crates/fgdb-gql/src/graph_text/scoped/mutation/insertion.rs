@@ -1802,6 +1802,7 @@ impl PreparedGraphInsertText {
         let current_fields = multipart || from.boundary.is_none();
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones())
+            .with_call_scope(from.call_scope)
             .resume_after(from.boundary, &from.parameters, from.at)?;
         parser.chain_write = true;
         if current_fields {

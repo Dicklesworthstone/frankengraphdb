@@ -549,6 +549,98 @@ async fn assert_committed_vertices(cx: &Cx, db: &crate::Served, seq: u64, count:
 }
 
 #[test]
+fn explicit_read_host_limit_and_structured_selectors_abandon_all_result_owners() {
+    let ((), report) = run_async_under_lab(0xb017_c008, |root| async move {
+        for case in 0..3 {
+            let (mut server, token) =
+                explicit_fixture(&root, &format!("bolt-read-owner-selector-{case}")).await;
+            if case == 0 {
+                std::sync::Arc::get_mut(server.databases.get_mut("test").unwrap())
+                    .unwrap()
+                    .max_statements = 1;
+            }
+            let db = &server.databases["test"];
+            let mut writer = connection(&server, token);
+            writer
+                .run(&root, "CREATE (:Visible {p:1})", &vec![], &extra())
+                .await
+                .unwrap();
+            writer.pull(&root, &mut io(), -1, true).await.unwrap();
+            let read = explicit_token(db, Rights::Read, 10, Scope::All);
+            let mut client = connection(&server, read);
+            let mut wire = io();
+            client.begin(&root, &read_extra()).await.unwrap();
+            let prefix = stage_explicit(
+                &root,
+                &mut client,
+                &mut wire,
+                "RETURN 7 AS marker",
+                vec![],
+            )
+            .await;
+            assert_eq!(prefix, 0);
+            let query = match case {
+                0 => "RETURN 8 AS marker",
+                1 => "MATCH (n:Visible) FOR SYSTEM_TIME AS OF SEQ 0 RETURN n.p AS p",
+                _ => "AT BRANCH other MATCH (n:Visible) RETURN n.p AS p",
+            };
+            let refused = send(
+                &root,
+                &mut client,
+                &mut wire,
+                Request::Run {
+                    query: query.into(),
+                    parameters: vec![],
+                    extra: vec![],
+                },
+            )
+            .await;
+            assert_eq!(
+                get(summary(&refused, 0x7f), "code").and_then(Value::as_str),
+                Some(match case {
+                    0 => "Neo.ClientError.Statement.ExecutionFailed",
+                    1 => "Neo.ClientError.Statement.SyntaxError",
+                    _ => "Neo.ClientError.Security.Forbidden",
+                })
+            );
+            assert!(client.transaction.is_none());
+            assert!(client.pending.is_none());
+            let ignored = send(
+                &root,
+                &mut client,
+                &mut wire,
+                Request::Pull { n: -1, qid: prefix },
+            )
+            .await;
+            assert!(matches!(ignored.as_slice(), [Value::Struct { tag: 0x7e, .. }]));
+            assert_committed_vertices(&root, db, 1, 1).await;
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn explicit_read_commit_checks_live_authority_even_without_a_run() {
+    let ((), report) = run_async_under_lab(0xb017_c009, |root| async move {
+        let (server, _) = explicit_fixture(&root, "bolt-read-owner-close").await;
+        let db = &server.databases["test"];
+        let token = explicit_token(db, Rights::Read, 1, Scope::All);
+        let mut client = connection(&server, token);
+        client.begin(&root, &read_extra()).await.unwrap();
+        db.authority.retire();
+        let refused = client.commit_transaction(&root).await.unwrap_err();
+        assert_eq!(refused.code, "Neo.ClientError.Security.Forbidden");
+        assert!(refused.message.contains("authority retired"));
+        assert!(client.transaction.is_none());
+        assert!(client.pending.is_none());
+        assert_committed_vertices(&root, db, 0, 0).await;
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn explicit_write_transactions_stage_own_reads_and_publish_once_on_commit() {
     let ((), report) = run_async_under_lab(0xb017_e001, |root| async move {
         let (server, token) = explicit_fixture(&root, "bolt-explicit-own-writes").await;
@@ -1138,13 +1230,131 @@ fn explicit_transaction_cumulative_limits_and_late_output_failure_abort_prefix()
                 assert!(
                     get(failure, "message")
                         .and_then(Value::as_str)
-                        .is_some_and(|message| message.contains("Bolt write RETURN exceeds"))
+                        .is_some_and(|message| message.contains("Bolt result exceeds"))
                 );
             }
             assert!(records(&refused).is_empty());
             assert!(client.failed);
             assert!(client.transaction.is_none());
             assert_committed_vertices(&root, db, 0, 0).await;
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn explicit_write_run_metadata_frame_admission_is_atomic() {
+    let ((), report) = run_async_under_lab(0xb017_e00c, |root| async move {
+        let names: Vec<String> = (0..3)
+            .map(|index| format!("field_{index}_{}", "x".repeat(120)))
+            .collect();
+        let query = format!(
+            "CREATE (n:Visible {{p:2}}) RETURN 1 AS {}, 2 AS {}, 3 AS {}",
+            names[0], names[1], names[2],
+        );
+        let expected = vec![
+            (
+                "fields".to_owned(),
+                Value::List(names.iter().cloned().map(Value::String).collect()),
+            ),
+            ("t_first".to_owned(), Value::Int(0)),
+            ("qid".to_owned(), Value::Int(1)),
+        ];
+        let mut encoded = Vec::new();
+        fgdb_bolt::packstream::encode(
+            &Value::Struct {
+                tag: 0x70,
+                fields: vec![Value::Map(expected.clone())],
+            },
+            &mut encoded,
+        );
+        // Exercise the native adapter directly, as the other tight-frame
+        // tests do. Its output bound applies even when Request construction
+        // bypasses the socket decoder's independent input-message bound.
+        for fits in [true, false] {
+            let (mut server, token) =
+                explicit_fixture(&root, &format!("bolt-write-metadata-frame-{fits}")).await;
+            server.limits.max_frame_len =
+                u32::try_from(encoded.len() - usize::from(!fits)).unwrap();
+            let db = &server.databases["test"];
+            let mut client = connection(&server, token);
+            let mut wire = io();
+            client.begin(&root, &extra()).await.unwrap();
+            let prefix = stage_explicit(
+                &root,
+                &mut client,
+                &mut wire,
+                "CREATE (:Visible {p:1})",
+                vec![],
+            )
+            .await;
+            assert_eq!(prefix, 0);
+            let result = send(
+                &root,
+                &mut client,
+                &mut wire,
+                Request::Run {
+                    query: query.clone(),
+                    parameters: vec![],
+                    extra: vec![],
+                },
+            )
+            .await;
+            assert!(records(&result).is_empty());
+            if fits {
+                assert_eq!(summary(&result, 0x70), &expected);
+                let cursors = &client.transaction.as_ref().unwrap().cursors;
+                let (pending, reserved) = &cursors.results[&1];
+                // Final counters cannot increase the capacity measured under
+                // the signed callback; removing zero counters keeps its charge.
+                assert!(*reserved >= retained_bytes(&root, pending).unwrap());
+                let pulled = send(
+                    &root,
+                    &mut client,
+                    &mut wire,
+                    Request::Pull { n: -1, qid: 1 },
+                )
+                .await;
+                assert_eq!(
+                    records(&pulled),
+                    vec![vec![Value::Int(1), Value::Int(2), Value::Int(3)]]
+                );
+                let Value::Map(stats) = get(summary(&pulled, 0x70), "stats").unwrap() else {
+                    panic!("a write completion has statistics");
+                };
+                assert_eq!(get(stats, "nodes-created"), Some(&Value::Int(1)));
+                assert_eq!(get(stats, "contains-updates"), Some(&Value::Bool(true)));
+                assert!(get(stats, "relationships-created").is_none());
+                let discarded = send(
+                    &root,
+                    &mut client,
+                    &mut wire,
+                    Request::Discard { n: -1, qid: prefix },
+                )
+                .await;
+                summary(&discarded, 0x70);
+                let committed = send(&root, &mut client, &mut wire, Request::Commit).await;
+                summary(&committed, 0x70);
+                assert_committed_vertices(&root, db, 1, 2).await;
+            } else {
+                let failure = summary(&result, 0x7f);
+                assert_eq!(
+                    get(failure, "code").and_then(Value::as_str),
+                    Some("Neo.ClientError.Statement.ExecutionFailed")
+                );
+                assert!(
+                    get(failure, "message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("Bolt result exceeds"))
+                );
+                assert!(get(failure, "fields").is_none());
+                assert!(get(failure, "qid").is_none());
+                assert!(client.failed);
+                assert!(client.transaction.is_none());
+                assert!(client.pending.is_none());
+                assert_committed_vertices(&root, db, 0, 0).await;
+            }
             server.join_database_workers(&root).await;
         }
     });

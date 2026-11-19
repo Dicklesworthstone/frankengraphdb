@@ -659,7 +659,7 @@ impl<V: Vfs + Clone> Database<V> {
             let parent = sets::input_at(
                 &self.standing_queries,
                 definition.input,
-                self.snapshot.frontier,
+                self.registration_frontier(),
             )
             .map_err(StandingQueryError::Maintenance)?;
             if !definition.matches_schema(parent) {
@@ -679,8 +679,14 @@ impl<V: Vfs + Clone> Database<V> {
                     StandingQueryFailure::SnapshotBudget,
                 ));
             }
-            State::from_selected(rows, definition, output, self.snapshot.frontier, &mut meter)
-                .map_err(StandingQueryError::Maintenance)
+            State::from_selected(
+                rows,
+                definition,
+                output,
+                self.registration_frontier(),
+                &mut meter,
+            )
+            .map_err(StandingQueryError::Maintenance)
         })
     }
 

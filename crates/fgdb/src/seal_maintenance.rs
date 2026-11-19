@@ -130,6 +130,7 @@ impl<V: Vfs + Clone> Database<V> {
                 &run,
                 sealing,
                 published_chain_hash,
+                self.snapshot.schema.reference,
             )
             .await?;
         // Fully stage the replacement before the externally visible swap. The
