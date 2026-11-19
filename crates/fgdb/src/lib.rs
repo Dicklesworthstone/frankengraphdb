@@ -294,6 +294,8 @@ pub use fgdb_strata::store::BlockStoreCrashPoint;
 pub fn runtime_builder() -> asupersync::runtime::RuntimeBuilder {
     asupersync::runtime::RuntimeBuilder::new()
         .blocking_threads(0, fgdb_strata::store::BATCH_SYNCS_IN_FLIGHT)
+        .with_env_overrides()
+        .expect("MEASUREMENT ONLY: env overrides")
 }
 
 /// Object kind for a committed effect capsule.
