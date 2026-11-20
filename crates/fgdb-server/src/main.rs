@@ -80,17 +80,21 @@ resolve from the durable catalog and explicit flags or --bindings-file.
 Coordinate properties keep the stated order and round to f32; packed vectors
 contain exactly <dimensions> little-endian f32 values in one bytes property.
 The default metric is l2. Each database admits at most 64 named definitions,
-and vector dimensions must be 1..=65536. Names are operator diagnostics, not
-GQL catalog names: matching CALL hybrid.search requests select the index.
+and vector dimensions must be 1..=65536. Names identify operator diagnostics
+and derived checkpoints, not GQL catalog names: matching CALL hybrid.search
+requests select the index.
 
-Definitions are rebuilt before serving at startup and after authoritative
-recovery. Initial construction and each committed maintenance tick use the
-database's source/work/scratch ceilings. A later refused maintenance tick
-fences that index without changing the committed write. Matching fully visible
-exact reads reuse healthy generations; masked, historical and approximate
-requests keep their existing admitted execution paths. These are resident,
-operator-configured indexes, not a durable index catalog or approximate-index
-reuse. The original signed query limits still apply to every client search.
+Startup and authoritative recovery restore authenticated checkpoints and catch
+up committed deltas before serving. Missing, corrupt or incompatible checkpoints
+are rebuilt. Refreshed checkpoints are saved at that boundary; intact current
+checkpoints are reused without rewriting. A cache-save failure remains an
+operator diagnostic and does not fence a healthy database. Initial construction
+and each committed maintenance tick use the database's source/work/scratch
+ceilings. A later refused maintenance tick fences that index without changing
+the committed write. Matching fully visible exact reads reuse healthy generations;
+masked, historical and approximate requests keep their existing admitted paths.
+These remain resident operator-configured indexes, not a durable index catalog
+or approximate-index reuse. Signed query limits still apply to every search.
 
 --subscription-coalesce-ticks selects the maximum number of consecutive
 retained commits combined into one FGP subscription delta for that database.

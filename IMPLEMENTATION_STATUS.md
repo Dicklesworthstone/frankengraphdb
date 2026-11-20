@@ -12,6 +12,38 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Served Beacon indexes restore durable checkpoints — qualification pending
+
+Operator-configured `--beacon-index` definitions now restore their authenticated,
+Chronicle-watermarked checkpoints at server startup and authoritative recovery.
+The native owner verifies the saved definition and marker-chain commitment,
+replays the committed delta suffix, and installs the resulting exact-cut index
+before the served generation becomes readable. Missing, corrupt, incompatible
+or unavailable checkpoints use the existing authoritative rebuild path. This
+connects the existing durable Beacon engine to the server; ordinary database
+opening and the rest of its graph admission retain their current costs.
+
+Rebuilt, advanced or repaired checkpoints are saved at that admission boundary.
+An intact checkpoint already at the current head is reused without another
+encoding or fsync. Graph commits retain the existing in-memory maintenance path,
+with no new per-write checkpoint I/O. Optional save failures keep a healthy
+database available and are reported only through trusted-host index status,
+alongside the restore/catch-up outcome and acknowledged checkpoint sequence.
+Typed cancellation remains terminal, including during save and final admission.
+Query selection, full-visibility checks, signed budgets and exact-only automatic
+reuse remain in their existing owners; the name is not a durable schema catalog
+or a new client capability.
+
+Regression sources exercise real server restart with a two-vertex, one-commit
+suffix while a full corpus build is forbidden; parity with an independently
+rebuilt query and a one-record warm-query allowance; authoritative recovery;
+corruption and cache-save I/O failures; unchanged-checkpoint reuse without a save;
+and every one-shot query interruption during checkpoint saving and final
+admission. Scoped Rustfmt and whitespace checks pass. Compiler, runtime and
+exact-tree qualification are pending. The broader durable-watermark and index
+lifecycle work remains open under `fgdb-rc1111-durable-watermarks-c1g98` and
+`fgdb-t38fv`.
+
 ### Automatic symbol allocation and local schema administration — qualification pending
 
 Native commit `057bb8b3682391301ab49849dcd63cb8e91a06e9` adds

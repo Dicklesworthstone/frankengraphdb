@@ -48,7 +48,7 @@ struct State {
     published: Option<WeakEmbeddedReadView>,
     retired: Option<Box<subscriptions::Retirement>>,
     released_subscriptions: u64,
-    beacon_indexes: Vec<(String, fgdb::MaintainedBeaconIndex)>,
+    beacon_indexes: Vec<crate::beacon::ConfiguredIndex>,
 }
 
 struct Gate {
@@ -318,12 +318,15 @@ impl DatabaseSlot {
         state
             .beacon_indexes
             .iter()
-            .map(|(name, handle)| {
+            .map(|index| {
                 database
-                    .beacon_index_status(&contexts.query(), handle)
+                    .beacon_index_status(&contexts.query(), &index.handle)
                     .map(|status| crate::BeaconIndexStatus {
-                        name: name.clone(),
+                        name: index.name.clone(),
                         status,
+                        restoration: index.restoration,
+                        checkpoint_sequence: index.checkpoint_sequence,
+                        checkpoint_error: index.checkpoint_error.clone(),
                     })
                     .map_err(|_| Unavailable::Fenced)
             })
@@ -675,10 +678,13 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
         };
         let beacon_indexes = if rebuild_indexes {
             match crate::beacon::register(
+                &contexts.commit(),
                 &contexts.query(),
                 &mut recovered,
                 &shared.beacon_definitions,
-            ) {
+            )
+            .await
+            {
                 Ok(handles) => handles,
                 Err(error) => {
                     shared.failed(error.to_string());

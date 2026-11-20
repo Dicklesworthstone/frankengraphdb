@@ -27,3 +27,6 @@ fgdb-resource = { path = "../fgdb-resource" }
 fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }
 fgdb-warden = { path = "../fgdb-warden" }
+
+[dev-dependencies]
+fgdb-types = { path = "../fgdb-types", features = ["simulation-checkpoints"] }

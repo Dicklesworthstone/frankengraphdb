@@ -243,9 +243,11 @@ pub struct DatabaseConfig {
     /// Retained read-acceleration budgets for this served database. Other
     /// databases have independent owners; recovery preserves this policy.
     pub read_cache_limits: fgdb::ReadCacheLimits,
-    /// Operator-declared, commit-maintained text/vector indexes. Definitions
-    /// are rebuilt before startup and authoritative recovery admit readers;
-    /// they are bounded process configuration, not a durable schema catalog.
+    /// Operator-declared, commit-maintained text/vector indexes. Startup and
+    /// authoritative recovery restore authenticated checkpoints and catch up
+    /// deltas, rebuilding when unavailable or incompatible, before admitting
+    /// readers. Definitions remain bounded process configuration, not a durable
+    /// schema catalog.
     pub beacon_indexes: Vec<BeaconIndexConfig>,
     pub write_policy: GraphWriteProgramPolicy,
     /// Host ceiling on expanded statements per write program and on sequential
@@ -362,7 +364,7 @@ pub enum ServerError {
     },
     BeaconIndex {
         name: String,
-        source: fgdb::MaintainedBeaconError,
+        source: fgdb::DerivedCheckpointError,
     },
     Issuer(fgdb_warden::Error),
     OrderedScratch(std::io::Error),
@@ -390,7 +392,7 @@ impl core::fmt::Display for ServerError {
                 write!(f, "invalid Beacon index {name:?}: {reason}")
             }
             Self::BeaconIndex { name, source } => {
-                write!(f, "cannot build Beacon index {name:?}: {source}")
+                write!(f, "cannot restore or build Beacon index {name:?}: {source}")
             }
             Self::Issuer(error) => write!(f, "invalid issuer: {error}"),
             Self::OrderedScratch(error) => write!(f, "cannot configure ordered scratch: {error}"),
@@ -600,7 +602,13 @@ impl Server {
         db.set_read_cache_limits(&contexts.query(), config.read_cache_limits)
             .map_err(ServerError::ReadCache)?;
         let beacon = beacon::ConfiguredIndexes {
-            handles: beacon::register(&contexts.query(), &mut db, &config.beacon_indexes)?,
+            handles: beacon::register(
+                &contexts.commit(),
+                &contexts.query(),
+                &mut db,
+                &config.beacon_indexes,
+            )
+            .await?,
             definitions: config.beacon_indexes,
         };
         let mut incarnation_input = b"fgdb-server:incarnation:v1".to_vec();
@@ -661,8 +669,9 @@ impl Server {
             .map(|database| database.db.status())
     }
 
-    /// Inspect configured retrieval-index freshness and maintenance failures
-    /// without reading their corpus. This is a trusted-host diagnostic. An
+    /// Inspect configured retrieval-index freshness, checkpoint admission and
+    /// maintenance/save failures without reading their corpus. This is a
+    /// trusted-host diagnostic. An
     /// unavailable database, unknown name or cancelled admission returns None.
     pub async fn database_beacon_status(
         &self,
