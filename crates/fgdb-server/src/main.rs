@@ -37,6 +37,7 @@ USAGE:
                   [--max-snapshot-records <n>] [--max-result-rows <n>]
                   [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
                   [--compact-interval-seconds <n>] [--scrub-interval-seconds <n>]
+                  [--beacon-checkpoint-interval-seconds <n>]
                   [--subscription-coalesce-ticks <n>]
                   [--label <name>=<u64>]... [--relation <name>=<u64>]... [--property <name>=<u64>]...
                   [--beacon-index <name> [--beacon-text <property>]
@@ -87,12 +88,16 @@ requests select the index.
 Startup and authoritative recovery restore authenticated checkpoints and catch
 up committed deltas before serving. Missing, corrupt or incompatible checkpoints
 are rebuilt. Refreshed checkpoints are saved at that boundary; intact current
-checkpoints are reused without rewriting. A cache-save failure remains an
-operator diagnostic and does not fence a healthy database. Initial construction
-and each committed maintenance tick use the database's source/work/scratch
-ceilings. A later refused maintenance tick fences that index without changing
-the committed write. Matching fully visible exact reads reuse healthy generations;
-masked, historical and approximate requests keep their existing admitted paths.
+checkpoints are reused without rewriting. Graceful shutdown saves changed healthy
+configured indexes; --beacon-checkpoint-interval-seconds also saves them at a fixed
+positive interval. Automatic saves skip healthy indexes already checkpointed at
+the current sequence when their previous save has no error.
+Checkpoint work runs outside ordinary graph commits and a save failure leaves
+the database and healthy resident indexes available. Initial construction and
+each committed maintenance tick use the database's source/work/scratch ceilings.
+A later refused maintenance tick fences that index without changing the committed
+write. Matching fully visible exact reads reuse healthy generations; masked,
+historical and approximate requests keep their existing admitted execution paths.
 These remain resident operator-configured indexes, not a durable index catalog
 or approximate-index reuse. Signed query limits still apply to every search.
 
@@ -255,8 +260,8 @@ struct DatabaseOptions {
     /// `--max-snapshot-records`, `--max-result-rows`, `--max-work-units` and
     /// `--max-scratch-entries`, in [`fgdb_gql::GqlQueryPolicy::new`] order.
     query_limits: [Option<u64>; 4],
-    /// Fixed compaction and scrub delays, in that order; absent disables one.
-    maintenance_intervals: [Option<Duration>; 2],
+    /// Fixed compaction, scrub and Beacon-checkpoint delays; absent disables one.
+    maintenance_intervals: [Option<Duration>; 3],
     subscription_coalesce_ticks: Option<NonZeroUsize>,
     symbols: Symbols,
     /// `--bindings-file`: more bindings, merged in before the database opens.
@@ -543,7 +548,7 @@ impl ServeOptions {
                         policy_epoch: 1,
                         write_relation: 1,
                         query_limits: [None; 4],
-                        maintenance_intervals: [None; 2],
+                        maintenance_intervals: [None; 3],
                         subscription_coalesce_ticks: None,
                         symbols: Symbols::new(),
                         bindings_file: None,
@@ -620,8 +625,14 @@ impl ServeOptions {
                             db.query_limits[slot] =
                                 Some(number(value(args, &mut at, flag)?, flag)?);
                         }
-                        "--compact-interval-seconds" | "--scrub-interval-seconds" => {
-                            let slot = usize::from(flag == "--scrub-interval-seconds");
+                        "--compact-interval-seconds"
+                        | "--scrub-interval-seconds"
+                        | "--beacon-checkpoint-interval-seconds" => {
+                            let slot = match flag {
+                                "--compact-interval-seconds" => 0,
+                                "--scrub-interval-seconds" => 1,
+                                _ => 2,
+                            };
                             if db.maintenance_intervals[slot].is_some() {
                                 return Err(Failure::usage(format!("duplicate flag {flag}")));
                             }
@@ -667,6 +678,7 @@ impl ServeOptions {
                 index.validate()?;
             }
             MaintenanceSchedule::new(db.maintenance_intervals[0], db.maintenance_intervals[1])
+                .and_then(|schedule| schedule.with_beacon_checkpoints(db.maintenance_intervals[2]))
                 .map_err(Failure::usage)?;
             if db.key_file.is_none() || db.issuer_key_file.is_none() {
                 return Err(Failure::usage(format!(
@@ -748,6 +760,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
     for db in &options.databases {
         let schedule =
             MaintenanceSchedule::new(db.maintenance_intervals[0], db.maintenance_intervals[1])
+                .and_then(|schedule| schedule.with_beacon_checkpoints(db.maintenance_intervals[2]))
                 .map_err(Failure::usage)?;
         schedule.validate(cx).map_err(Failure::usage)?;
         if schedule.is_enabled() {
@@ -971,6 +984,23 @@ fn report_maintenance(name: &str, event: MaintenanceEvent) {
         }
         MaintenanceEvent::Scrub(Err(error)) => {
             eprintln!("fgdbd: database {name:?}: scrub failed: {error}");
+        }
+        MaintenanceEvent::BeaconCheckpoint(Err(error)) => {
+            eprintln!("fgdbd: database {name:?}: Beacon checkpoint failed: {error}");
+        }
+        MaintenanceEvent::BeaconCheckpoint(Ok(reports)) => {
+            for report in reports {
+                match report.result {
+                    Ok(sequence) => eprintln!(
+                        "fgdbd: database {name:?}: Beacon index {:?} checkpoint current at {}",
+                        report.name, sequence.0,
+                    ),
+                    Err(error) => eprintln!(
+                        "fgdbd: database {name:?}: Beacon index {:?} checkpoint failed: {error}",
+                        report.name,
+                    ),
+                }
+            }
         }
         MaintenanceEvent::Scrub(Ok(summary)) => {
             if summary.block_repaired.is_empty() && summary.metadata_repaired.is_empty() {
@@ -2094,12 +2124,14 @@ mod tests {
             ServeOptions::parse(&args)
         };
         let defaults = parse(&[]).unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(defaults.databases[0].maintenance_intervals, [None; 2]);
+        assert_eq!(defaults.databases[0].maintenance_intervals, [None; 3]);
         let configured = parse(&[
             "--compact-interval-seconds",
             "300",
             "--scrub-interval-seconds",
             "3600",
+            "--beacon-checkpoint-interval-seconds",
+            "60",
             "--database",
             "second=second-db",
             "--key-file",
@@ -2114,14 +2146,19 @@ mod tests {
             configured.databases[0].maintenance_intervals,
             [
                 Some(Duration::from_secs(300)),
-                Some(Duration::from_secs(3600))
+                Some(Duration::from_secs(3600)),
+                Some(Duration::from_secs(60)),
             ]
         );
         assert_eq!(
             configured.databases[1].maintenance_intervals,
-            [None, Some(Duration::from_secs(90))]
+            [None, Some(Duration::from_secs(90)), None]
         );
-        for flag in ["--compact-interval-seconds", "--scrub-interval-seconds"] {
+        for flag in [
+            "--compact-interval-seconds",
+            "--scrub-interval-seconds",
+            "--beacon-checkpoint-interval-seconds",
+        ] {
             assert!(parse(&[flag]).is_err());
             for invalid in [
                 "0",

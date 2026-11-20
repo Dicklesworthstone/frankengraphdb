@@ -1,7 +1,9 @@
 //! Fixed scheduling and real engine maintenance through the served owner.
 
 use super::*;
-use crate::recovery::tests::{WakeCounter, served, vertex};
+use crate::recovery::tests::{
+    WakeCounter, beacon_document, configure_beacon, served, served_with_config, vertex,
+};
 use crate::{DatabaseStatus, ServerLimits};
 use asupersync::Budget;
 use asupersync::lab::{
@@ -389,8 +391,48 @@ fn intervals_and_absolute_deadlines_refuse_zero_and_overflow() {
     assert!(MaintenanceSchedule::new(Some(Duration::ZERO), None).is_err());
     assert!(MaintenanceSchedule::new(None, Some(Duration::ZERO)).is_err());
     assert!(MaintenanceSchedule::new(Some(Duration::from_secs(u64::MAX)), None).is_err());
+    assert!(
+        MaintenanceSchedule::default()
+            .with_beacon_checkpoints(Some(Duration::ZERO))
+            .is_err()
+    );
+    assert!(
+        MaintenanceSchedule::default()
+            .with_beacon_checkpoints(Some(Duration::from_secs(u64::MAX)))
+            .is_err()
+    );
     let schedule = MaintenanceSchedule::new(Some(Duration::from_nanos(u64::MAX)), None).unwrap();
     assert!(ScheduleState::new(schedule, Time::from_nanos(1)).is_err());
+}
+
+#[test]
+fn beacon_checkpoint_interval_has_its_own_completion_clock() {
+    let schedule =
+        MaintenanceSchedule::new(Some(Duration::from_secs(10)), Some(Duration::from_secs(10)))
+            .unwrap()
+            .with_beacon_checkpoints(Some(Duration::from_secs(10)))
+            .unwrap();
+    assert!(schedule.is_enabled());
+    let mut state = ScheduleState::new(schedule, Time::from_secs(7)).unwrap();
+    for (offset, operation) in [
+        Operation::Compact,
+        Operation::Scrub,
+        Operation::BeaconCheckpoint,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(state.next(), Some((operation, Time::from_secs(17))));
+        state
+            .completed(operation, Time::from_secs(20 + offset as u64))
+            .unwrap();
+    }
+    assert_eq!(
+        state.deadlines[Operation::BeaconCheckpoint.index()],
+        Some(Time::from_secs(32))
+    );
+    let disabled = schedule.with_beacon_checkpoints(None).unwrap();
+    assert_eq!(disabled.intervals[2], None);
 }
 
 #[test]
@@ -468,6 +510,60 @@ fn idle_wait_is_woken_by_drain_or_direct_context_cancellation() {
             "shutdown never waits for its interval"
         );
     }
+}
+
+#[test]
+fn configured_driver_checkpoints_beacon_before_shutdown_without_a_graph_commit() {
+    let report = run_timed_under_lab(0x79a0_be06, |root| async move {
+        let (server, _, path) =
+            served_with_config(&root, "periodic-beacon-checkpoint", configure_beacon).await;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (checkpoint_path, initial_checkpoint) = {
+            let mut writer = server.databases["test"].db.write(&root).await.unwrap();
+            let checkpoint = path.join(writer.beacon_checkpoint_relative_path("documents"));
+            let initial = std::fs::read(&checkpoint).unwrap();
+            writer
+                .write(&contexts.commit(), beacon_document(1, "needle"))
+                .await
+                .unwrap();
+            (checkpoint, initial)
+        };
+        let publication = std::fs::read(path.join("manifest.root")).unwrap();
+        assert_eq!(std::fs::read(&checkpoint_path).unwrap(), initial_checkpoint);
+        let schedule = MaintenanceSchedule::default()
+            .with_beacon_checkpoints(Some(Duration::from_secs(2)))
+            .unwrap();
+        let shutdown = server.shutdown();
+        let started = root.now();
+        let clock = root.clone();
+        let mut delivered = false;
+        server
+            .run_maintenance(&root, "test", schedule, |event| {
+                let MaintenanceEvent::BeaconCheckpoint(Ok(reports)) = event else {
+                    panic!("expected the configured Beacon checkpoint: {event:?}");
+                };
+                assert_eq!(reports.len(), 1);
+                assert_eq!(reports[0].name, "documents");
+                assert_eq!(*reports[0].result.as_ref().unwrap(), CommitSeq(1));
+                assert!(clock.now() >= started.saturating_add_nanos(2_000_000_000));
+                delivered = true;
+                shutdown.trigger();
+            })
+            .await
+            .unwrap();
+        assert!(delivered);
+        assert_ne!(
+            std::fs::read(&checkpoint_path).unwrap(),
+            initial_checkpoint,
+            "the scheduled save already replaced the startup checkpoint"
+        );
+        assert_eq!(
+            std::fs::read(path.join("manifest.root")).unwrap(),
+            publication
+        );
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

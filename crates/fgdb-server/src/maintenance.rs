@@ -13,13 +13,13 @@ use std::time::Duration;
 
 /// Fixed delays between completed operations on one served database.
 ///
-/// Both operations are disabled by default. The first operation waits its
+/// All operations are disabled by default. The first operation waits its
 /// full configured interval; each subsequent interval starts at completion,
 /// including a failed attempt. This is explicit operator configuration, not
 /// the plan's adaptive foreground-latency pacing policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaintenanceSchedule {
-    intervals: [Option<u64>; 2],
+    intervals: [Option<u64>; 3],
 }
 
 /// Invalid maintenance configuration or an unavailable runtime timer.
@@ -41,7 +41,7 @@ impl MaintenanceSchedule {
         compact_interval: Option<Duration>,
         scrub_interval: Option<Duration>,
     ) -> Result<Self, MaintenanceScheduleError> {
-        let mut intervals = [None; 2];
+        let mut intervals = [None; 3];
         for (slot, interval) in intervals.iter_mut().zip([compact_interval, scrub_interval]) {
             if let Some(interval) = interval {
                 if interval.is_zero() {
@@ -55,6 +55,27 @@ impl MaintenanceSchedule {
             }
         }
         Ok(Self { intervals })
+    }
+
+    /// Add an independent fixed interval for configured Beacon checkpoints.
+    /// Ordinary commits keep maintaining their resident indexes without
+    /// paying checkpoint encoding or filesystem synchronization costs.
+    pub fn with_beacon_checkpoints(
+        mut self,
+        interval: Option<Duration>,
+    ) -> Result<Self, MaintenanceScheduleError> {
+        self.intervals[2] = match interval {
+            Some(interval) if interval.is_zero() => {
+                return Err(MaintenanceScheduleError(
+                    "maintenance intervals must be positive",
+                ));
+            }
+            Some(interval) => Some(u64::try_from(interval.as_nanos()).map_err(|_| {
+                MaintenanceScheduleError("maintenance interval exceeds the runtime clock")
+            })?),
+            None => None,
+        };
+        Ok(self)
     }
 
     #[must_use]
@@ -81,12 +102,14 @@ impl MaintenanceSchedule {
 pub enum MaintenanceEvent {
     Compaction(Result<(), MaintenanceError>),
     Scrub(Result<fgdb::ScrubSummary, MaintenanceError>),
+    BeaconCheckpoint(Result<Vec<crate::BeaconCheckpointReport>, MaintenanceError>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Operation {
     Compact,
     Scrub,
+    BeaconCheckpoint,
 }
 
 impl Operation {
@@ -94,22 +117,27 @@ impl Operation {
         match self {
             Self::Compact => 0,
             Self::Scrub => 1,
+            Self::BeaconCheckpoint => 2,
         }
     }
 }
 
 struct ScheduleState {
-    intervals: [Option<u64>; 2],
-    deadlines: [Option<Time>; 2],
+    intervals: [Option<u64>; 3],
+    deadlines: [Option<Time>; 3],
 }
 
 impl ScheduleState {
     fn new(schedule: MaintenanceSchedule, now: Time) -> Result<Self, MaintenanceScheduleError> {
         let mut state = Self {
             intervals: schedule.intervals,
-            deadlines: [None; 2],
+            deadlines: [None; 3],
         };
-        for operation in [Operation::Compact, Operation::Scrub] {
+        for operation in [
+            Operation::Compact,
+            Operation::Scrub,
+            Operation::BeaconCheckpoint,
+        ] {
             state.completed(operation, now)?;
         }
         Ok(state)
@@ -135,14 +163,18 @@ impl ScheduleState {
     }
 
     fn next(&self) -> Option<(Operation, Time)> {
-        [Operation::Compact, Operation::Scrub]
-            .into_iter()
-            .filter_map(|operation| {
-                self.deadlines[operation.index()].map(|deadline| (operation, deadline))
-            })
-            // Compaction wins a simultaneous deadline. Its next tick is
-            // moved forward before selecting the already-due scrub.
-            .min_by_key(|(operation, deadline)| (*deadline, operation.index()))
+        [
+            Operation::Compact,
+            Operation::Scrub,
+            Operation::BeaconCheckpoint,
+        ]
+        .into_iter()
+        .filter_map(|operation| {
+            self.deadlines[operation.index()].map(|deadline| (operation, deadline))
+        })
+        // Equal deadlines run compaction, scrub, then index checkpoint.
+        // Each completion moves only its own next tick forward.
+        .min_by_key(|(operation, deadline)| (*deadline, operation.index()))
     }
 }
 
@@ -185,6 +217,9 @@ impl Server {
                     MaintenanceEvent::Compaction(self.compact_database(cx, name).await)
                 }
                 Operation::Scrub => MaintenanceEvent::Scrub(self.scrub_database(cx, name).await),
+                Operation::BeaconCheckpoint => MaintenanceEvent::BeaconCheckpoint(
+                    self.save_beacon_indexes(cx, name, false).await,
+                ),
             };
             let completed_at = cx.now();
             report(event);

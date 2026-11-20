@@ -1,8 +1,9 @@
 //! Operator-declared, commit-maintained retrieval indexes for served databases.
 //!
 //! These definitions are process configuration, not a durable catalog. Startup
-//! and authoritative recovery restore their Chronicle-bound checkpoints, catch
-//! up committed deltas, or rebuild before publishing a readable handle.
+//! and authoritative recovery restore authenticated Chronicle-watermarked
+//! checkpoints, replay their retained delta tails, or rebuild before publishing
+//! a readable handle. Checkpointing is separate from ordinary graph commits.
 //! Queries still select only exact-cut, compatible, fully visible generations
 //! through the engine's existing Beacon admission path.
 
@@ -54,14 +55,20 @@ pub struct BeaconIndexStatus {
     /// How this served generation obtained its initial index. Later commits
     /// advance `status`; they do not rewrite this admission receipt.
     pub restoration: DerivedCheckpointOutcome,
-    /// The valid checkpoint retained or published at startup or authoritative
-    /// recovery. Ordinary commits maintain the live index without synchronous
-    /// checkpoint writes.
+    /// The last checkpoint known to have been durably saved or authenticated
+    /// on this generation. It may lag a healthy commit-maintained index.
     pub checkpoint_sequence: Option<CommitSeq>,
-    /// An optional checkpoint save failed. The live index remains usable and
-    /// Chronicle remains authoritative; the next reopen may need more catch-up
-    /// or a rebuild. This diagnostic is never returned to capability holders.
+    /// The last checkpoint save failure, if any. It does not fence the index
+    /// or database; a later successful checkpoint clears the diagnostic.
     pub checkpoint_error: Option<String>,
+}
+
+/// One trusted-host checkpoint attempt. Each configured index reports its own
+/// outcome, so a failed sibling never masquerades as a complete save.
+#[derive(Debug)]
+pub struct BeaconCheckpointReport {
+    pub name: String,
+    pub result: Result<CommitSeq, DerivedCheckpointError>,
 }
 
 #[derive(Clone)]
@@ -210,6 +217,55 @@ fn checkpoint_interrupted(error: &DerivedCheckpointError) -> bool {
     )
 }
 
+/// The caller serializes this operation with other checkpoints and writers.
+/// Saving derived data never changes a committed graph outcome or retries a
+/// failed graph operation. Automatic maintenance can retain an already-current
+/// healthy checkpoint; an explicit host request forces a fresh save. Every
+/// sibling keeps an explicit result, including a retained checkpoint's cut.
+pub(crate) async fn checkpoint<V: Vfs + Clone>(
+    commit: &CommitCx,
+    query: &QueryCx,
+    database: &mut Database<V>,
+    indexes: &mut [ConfiguredIndex],
+    force: bool,
+) -> Vec<BeaconCheckpointReport> {
+    let mut reports = Vec::with_capacity(indexes.len());
+    for index in indexes {
+        let result = async {
+            commit
+                .checkpoint()
+                .map_err(DerivedCheckpointError::Interrupted)?;
+            if !force && index.checkpoint_error.is_none() {
+                let status = database
+                    .beacon_index_status(query, &index.handle)
+                    .map_err(DerivedCheckpointError::Beacon)?;
+                if status.failure.is_none()
+                    && status.source_sequence == status.database_sequence
+                    && index.checkpoint_sequence == Some(status.source_sequence)
+                {
+                    return Ok(status.source_sequence);
+                }
+            }
+            database
+                .save_beacon_checkpoint(commit, query, &index.handle, &index.name)
+                .await
+        }
+        .await;
+        match &result {
+            Ok(sequence) => {
+                index.checkpoint_sequence = Some(*sequence);
+                index.checkpoint_error = None;
+            }
+            Err(error) => index.checkpoint_error = Some(error.to_string()),
+        }
+        reports.push(BeaconCheckpointReport {
+            name: index.name.clone(),
+            result,
+        });
+    }
+    reports
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +388,54 @@ mod tests {
                 assert_eq!(probe.calls(), stop);
                 assert_eq!(database.frontier().unwrap(), CommitSeq(0));
             }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn automatic_checkpoint_preserves_one_shot_status_interruption() {
+        use asupersync::lab::run_async_under_lab;
+        use fgdb::{DatabaseKeys, MemVfs};
+        use fgdb_types::context::SimulationCheckpointProbe;
+        use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+        use std::sync::Arc;
+
+        let ((), report) = run_async_under_lab(0xbeac_d002, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query = contexts.query();
+            let keys = DatabaseKeys::new(
+                [0x61; 32],
+                DatabaseSecurityNamespaceId([0x62; 32]),
+                [0x63; 32],
+            );
+            let vfs = MemVfs::new().unwrap();
+            let mut database =
+                Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys)
+                    .await
+                    .unwrap();
+            let mut indexes = register(&commit, &query, &mut database, &[text()])
+                .await
+                .unwrap();
+            assert_eq!(indexes[0].checkpoint_sequence, Some(CommitSeq(0)));
+
+            // Only the status probe interrupts; a later save would succeed if
+            // that error were discarded while deciding whether to skip it.
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(1)));
+            let interrupted = query.with_checkpoint_probe(Arc::clone(&probe));
+            let reports =
+                checkpoint(&commit, &interrupted, &mut database, &mut indexes, false).await;
+            assert_eq!(reports.len(), 1);
+            assert!(
+                reports[0]
+                    .result
+                    .as_ref()
+                    .is_err_and(checkpoint_interrupted)
+            );
+            assert_eq!(probe.calls(), 1);
+            assert!(indexes[0].checkpoint_error.is_some());
+            assert_eq!(indexes[0].checkpoint_sequence, Some(CommitSeq(0)));
+            assert_eq!(database.frontier().unwrap(), CommitSeq(0));
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

@@ -198,7 +198,7 @@ async fn served_catalog(
     (server, token, path)
 }
 
-async fn served_with_config(
+pub(crate) async fn served_with_config(
     cx: &Cx,
     name: &str,
     configure: impl FnOnce(&mut DatabaseConfig),
@@ -1821,7 +1821,7 @@ fn cancelled_shutdown_waits_for_worker_handoff_and_drains_the_worker() {
     }
 }
 
-fn configure_beacon(config: &mut DatabaseConfig) {
+pub(crate) fn configure_beacon(config: &mut DatabaseConfig) {
     use fgdb_beacon::read::ReadOptions;
     use fgdb_beacon::{DistanceMetric, HnswConfig};
     use fgdb_delta_types::{LabelId, PropertyKeyId};
@@ -1843,7 +1843,7 @@ fn configure_beacon(config: &mut DatabaseConfig) {
         .push(crate::BeaconIndexConfig::new("documents", options));
 }
 
-fn beacon_document(id: u128, text: &str) -> WriteBatch {
+pub(crate) fn beacon_document(id: u128, text: &str) -> WriteBatch {
     use fgdb_delta_types::PropertyKeyId;
     use fgdb_types::CanonicalScalar;
 
@@ -1860,24 +1860,6 @@ fn beacon_document(id: u128, text: &str) -> WriteBatch {
         ],
     );
     batch
-}
-
-async fn reopen_beacon(
-    cx: &Cx,
-    path: &std::path::Path,
-    configure: impl FnOnce(&mut DatabaseConfig),
-) -> Server {
-    let keys = DatabaseKeys::new(
-        [0x91; 32],
-        DatabaseSecurityNamespaceId([0x92; 32]),
-        [0x93; 32],
-    );
-    let mut config = DatabaseConfig::new("test", keys, AuthKey::from_seed(791));
-    configure_beacon(&mut config);
-    configure(&mut config);
-    let mut server = Server::new(cx, ServerLimits::default()).unwrap();
-    server.open_database(cx, path, config).await.unwrap();
-    server
 }
 
 #[test]
@@ -1917,24 +1899,12 @@ fn configured_beacon_restart_restores_and_tails_without_rebuilding_the_corpus() 
         );
         assert_eq!(initial[0].checkpoint_sequence, Some(CommitSeq(16)));
         assert!(initial[0].checkpoint_error.is_none());
-        {
-            let mut writer = first.databases["test"].db.write(&root).await.unwrap();
-            let mut changes = beacon_document(17, "needle");
-            changes.set_vertex_property(
-                VId(1),
-                fgdb_delta_types::PropertyKeyId(1),
-                Some(fgdb_types::CanonicalScalar::ucs_basic_text("background").unwrap()),
-            );
-            assert_eq!(
-                writer.write(&contexts.commit(), changes).await.unwrap(),
-                CommitSeq(17)
-            );
-        }
         first.finish_shutdown(&root).await;
         drop(first);
 
-        // An independently opened, unregistered query supplies the answer and
-        // demonstrates that the one-record allowance forbids a fresh build.
+        // Advance the graph independently after the server's graceful save.
+        // This unregistered owner also supplies the reference answer and shows
+        // that the one-record allowance forbids rebuilding the full corpus.
         let statement = "CALL hybrid.search(text => 'needle', text_property => 'body', \
             candidates => 1, k => 1) YIELD node RETURN node.x AS x";
         let parameters = fgdb_gql::GqlParameters::new();
@@ -1945,9 +1915,22 @@ fn configured_beacon_restart_restores_and_tails_without_rebuilding_the_corpus() 
             DatabaseSecurityNamespaceId([0x92; 32]),
             [0x93; 32],
         );
-        let unregistered = Database::open(&contexts.commit(), &path, keys)
+        let mut unregistered = Database::open(&contexts.commit(), &path, keys)
             .await
             .unwrap();
+        let mut changes = beacon_document(17, "needle");
+        changes.set_vertex_property(
+            VId(1),
+            fgdb_delta_types::PropertyKeyId(1),
+            Some(fgdb_types::CanonicalScalar::ucs_basic_text("background").unwrap()),
+        );
+        assert_eq!(
+            unregistered
+                .write(&contexts.commit(), changes)
+                .await
+                .unwrap(),
+            CommitSeq(17)
+        );
         let expected = unregistered
             .query(
                 &contexts.query(),
@@ -2283,6 +2266,344 @@ fn configured_beacon_reuses_published_pins_and_catches_up_before_recovery_admiss
         assert!(advanced[0].status.failure.is_none());
         server.finish_shutdown(&root).await;
         cold_server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+async fn reopen_beacon(
+    cx: &Cx,
+    path: &std::path::Path,
+    configure: impl FnOnce(&mut DatabaseConfig),
+) -> Server {
+    let mut server = Server::new(cx, ServerLimits::default()).unwrap();
+    let keys = DatabaseKeys::new(
+        [0x91; 32],
+        DatabaseSecurityNamespaceId([0x92; 32]),
+        [0x93; 32],
+    );
+    let mut config = DatabaseConfig::new("test", keys, AuthKey::from_seed(791));
+    configure_beacon(&mut config);
+    configure(&mut config);
+    server.open_database(cx, path, config).await.unwrap();
+    server
+}
+
+#[test]
+fn configured_beacon_shutdown_checkpoint_and_restart_catch_up_without_a_corpus_rebuild() {
+    use fgdb_protocol::body::WireValue;
+
+    let ((), report) = run_async_under_lab(0x79a0_be07, |root| async move {
+        let (server, token, path) =
+            served_with_config(&root, "beacon-shutdown-restart", configure_beacon).await;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (checkpoint_path, initial_checkpoint) = {
+            let mut writer = server.databases["test"].db.write(&root).await.unwrap();
+            let checkpoint = path.join(writer.beacon_checkpoint_relative_path("documents"));
+            let initial = std::fs::read(&checkpoint).unwrap();
+            for id in 1..=8 {
+                writer
+                    .write(
+                        &contexts.commit(),
+                        beacon_document(id, if id == 1 { "needle" } else { "background" }),
+                    )
+                    .await
+                    .unwrap();
+            }
+            (checkpoint, initial)
+        };
+        assert_eq!(
+            std::fs::read(&checkpoint_path).unwrap(),
+            initial_checkpoint,
+            "ordinary writes leave the startup checkpoint unchanged"
+        );
+        let publication = std::fs::read(path.join("manifest.root")).unwrap();
+        server.finish_shutdown(&root).await;
+        assert!(
+            checkpoint_path.exists(),
+            "the owned drain child saved the index"
+        );
+        assert_eq!(
+            std::fs::read(path.join("manifest.root")).unwrap(),
+            publication
+        );
+        let stopped = server.database_beacon_status(&root, "test").await.unwrap();
+        assert_eq!(stopped[0].checkpoint_sequence, Some(CommitSeq(8)));
+        assert!(stopped[0].checkpoint_error.is_none());
+        drop(server);
+
+        // An independent native writer advances the authoritative graph after
+        // the served checkpoint. Reopening the server must replay this suffix.
+        let keys = DatabaseKeys::new(
+            [0x91; 32],
+            DatabaseSecurityNamespaceId([0x92; 32]),
+            [0x93; 32],
+        );
+        let mut database = Database::open(&contexts.commit(), &path, keys)
+            .await
+            .unwrap();
+        database
+            .write(&contexts.commit(), beacon_document(9, "needle"))
+            .await
+            .unwrap();
+        drop(database);
+
+        let reopened = reopen_beacon(&root, &path, |config| {
+            // A full build would have to admit nine source rows and refuses.
+            // Restoring the exact definition does not need that source scan;
+            // the maintenance budget admits only its one touched vertex.
+            let index = &mut config.beacon_indexes[0];
+            index.options.policy.max_staging_rows = 0;
+            index.maintenance.max_staging_rows = 1;
+        })
+        .await;
+        let status = reopened
+            .database_beacon_status(&root, "test")
+            .await
+            .unwrap();
+        assert!(matches!(
+            status[0].restoration,
+            fgdb::DerivedCheckpointOutcome::CatchUp {
+                watermark_seq: CommitSeq(8),
+                head_seq: CommitSeq(9),
+                commits_replayed: 1,
+                touched_vertices: 1,
+                ..
+            }
+        ));
+        assert_eq!(status[0].checkpoint_sequence, Some(CommitSeq(9)));
+        assert!(status[0].checkpoint_error.is_none());
+        let answer = catalog_accept(
+            crate::execute::read(
+                &root,
+                &reopened.databases["test"],
+                &token,
+                &catalog_request(
+                    ExecuteMode::Read,
+                    "CALL hybrid.search(text => 'needle', text_property => 'body', \
+                     candidates => 2, k => 2) YIELD node RETURN node.x AS x ORDER BY x",
+                ),
+            )
+            .await,
+        );
+        assert_eq!(
+            answer.rows,
+            [vec![WireValue::Int(1)], vec![WireValue::Int(9)]]
+        );
+        let saved = reopened
+            .checkpoint_beacon_indexes(&root, "test")
+            .await
+            .unwrap();
+        assert_eq!(*saved[0].result.as_ref().unwrap(), CommitSeq(9));
+        let status = reopened
+            .database_beacon_status(&root, "test")
+            .await
+            .unwrap();
+        assert_eq!(status[0].checkpoint_sequence, Some(CommitSeq(9)));
+        reopened.finish_shutdown(&root).await;
+        drop(reopened);
+
+        let current = reopen_beacon(&root, &path, |config| {
+            config.beacon_indexes[0].options.policy.max_staging_rows = 0;
+            config.beacon_indexes[0].maintenance.max_staging_rows = 0;
+        })
+        .await;
+        let status = current.database_beacon_status(&root, "test").await.unwrap();
+        assert!(matches!(
+            status[0].restoration,
+            fgdb::DerivedCheckpointOutcome::CatchUp {
+                watermark_seq: CommitSeq(9),
+                head_seq: CommitSeq(9),
+                commits_replayed: 0,
+                touched_vertices: 0,
+                ..
+            }
+        ));
+        current.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn configured_beacon_corruption_and_definition_changes_rebuild_from_the_graph() {
+    let ((), report) = run_async_under_lab(0x79a0_be08, |root| async move {
+        let (server, token, path) =
+            served_with_config(&root, "beacon-checkpoint-rebuild", configure_beacon).await;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let checkpoint_path = {
+            let mut writer = server.databases["test"].db.write(&root).await.unwrap();
+            writer
+                .write(&contexts.commit(), beacon_document(1, "needle"))
+                .await
+                .unwrap();
+            path.join(writer.beacon_checkpoint_relative_path("documents"))
+        };
+        server.finish_shutdown(&root).await;
+        drop(server);
+        let mut bytes = std::fs::read(&checkpoint_path).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&checkpoint_path, bytes).unwrap();
+        let rebuilt = reopen_beacon(&root, &path, |_| {}).await;
+        let status = rebuilt.database_beacon_status(&root, "test").await.unwrap();
+        assert_eq!(
+            status[0].restoration,
+            fgdb::DerivedCheckpointOutcome::RebuiltFromChronicle {
+                reason: fgdb::DerivedRebuildReason::CorruptOrIncompatible,
+            }
+        );
+        let request = catalog_request(
+            ExecuteMode::Read,
+            "CALL hybrid.search(text => 'needle', text_property => 'body', \
+             candidates => 1, k => 1) YIELD node RETURN node.x AS x",
+        );
+        let result = catalog_accept(
+            crate::execute::read(&root, &rebuilt.databases["test"], &token, &request).await,
+        );
+        assert_eq!(result.rows, [vec![fgdb_protocol::body::WireValue::Int(1)]]);
+        rebuilt.finish_shutdown(&root).await;
+        drop(rebuilt);
+
+        let changed = reopen_beacon(&root, &path, |config| {
+            config.beacon_indexes[0].options.vertex_label = Some(fgdb_delta_types::LabelId(7));
+            config
+                .symbols
+                .bind(fgdb_gql::GraphSymbolKind::Label, "Selected", 7)
+                .unwrap();
+        })
+        .await;
+        let status = changed.database_beacon_status(&root, "test").await.unwrap();
+        assert_eq!(
+            status[0].restoration,
+            fgdb::DerivedCheckpointOutcome::RebuiltFromChronicle {
+                reason: fgdb::DerivedRebuildReason::CorruptOrIncompatible,
+            }
+        );
+        let request = catalog_request(
+            ExecuteMode::Read,
+            "CALL hybrid.search(text => 'needle', text_property => 'body', label => 'Selected', \
+             candidates => 1, k => 1) YIELD node RETURN node.x AS x",
+        );
+        let result = catalog_accept(
+            crate::execute::read(&root, &changed.databases["test"], &token, &request).await,
+        );
+        assert!(
+            result.rows.is_empty(),
+            "the old unfiltered checkpoint is incompatible"
+        );
+        changed.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn configured_beacon_checkpoint_failure_preserves_base_state_and_saves_healthy_siblings() {
+    let ((), report) = run_async_under_lab(0x79a0_be09, |root| async move {
+        let (server, token, path) =
+            served_with_config(&root, "beacon-checkpoint-failure", |config| {
+                configure_beacon(config);
+                let mut sibling = config.beacon_indexes[0].clone();
+                sibling.name = "sibling".to_owned();
+                config.beacon_indexes.push(sibling);
+            })
+            .await;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let blocked = {
+            let mut writer = server.databases["test"].db.write(&root).await.unwrap();
+            writer
+                .write(&contexts.commit(), beacon_document(1, "needle"))
+                .await
+                .unwrap();
+            path.join(writer.beacon_checkpoint_relative_path("documents"))
+                .with_extension("staging")
+        };
+        // A staging-path directory exercises a real derived publication error
+        // without changing authoritative graph files or the startup checkpoint.
+        std::fs::create_dir_all(&blocked).unwrap();
+        let before = std::fs::read(path.join("manifest.root")).unwrap();
+        let saved = server
+            .checkpoint_beacon_indexes(&root, "test")
+            .await
+            .unwrap();
+        assert_eq!(saved.len(), 2);
+        assert!(saved[0].result.is_err());
+        assert_eq!(*saved[1].result.as_ref().unwrap(), CommitSeq(1));
+        assert_eq!(std::fs::read(path.join("manifest.root")).unwrap(), before);
+        assert_eq!(
+            server.database_status(&root, "test"),
+            Some(DatabaseStatus::Ready { generation: 1 })
+        );
+        let status = server.database_beacon_status(&root, "test").await.unwrap();
+        assert!(status[0].checkpoint_error.is_some());
+        assert_eq!(status[0].checkpoint_sequence, Some(CommitSeq(0)));
+        assert!(status[0].status.failure.is_none());
+        assert_eq!(status[1].checkpoint_sequence, Some(CommitSeq(1)));
+        let result = catalog_accept(
+            crate::execute::read(
+                &root,
+                &server.databases["test"],
+                &token,
+                &catalog_request(ExecuteMode::Read, "MATCH (n) RETURN n"),
+            )
+            .await,
+        );
+        assert_eq!(result.rows.len(), 1);
+        server.finish_shutdown(&root).await;
+        let stopped = server.database_beacon_status(&root, "test").await.unwrap();
+        assert!(stopped[0].checkpoint_error.is_some());
+        assert_eq!(stopped[1].checkpoint_sequence, Some(CommitSeq(1)));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn configured_beacon_automatic_checkpoint_skips_unchanged_and_retries_failures() {
+    let ((), report) = run_async_under_lab(0x79a0_be0a, |root| async move {
+        let (server, _, path) =
+            served_with_config(&root, "beacon-checkpoint-idle", configure_beacon).await;
+        let staging = {
+            let reader = server.databases["test"].db.read(&root).await.unwrap();
+            path.join(reader.beacon_checkpoint_relative_path("documents"))
+                .with_extension("staging")
+        };
+        std::fs::create_dir(&staging).unwrap();
+        let saved = server
+            .save_beacon_indexes(&root, "test", false)
+            .await
+            .unwrap();
+        assert_eq!(*saved[0].result.as_ref().unwrap(), CommitSeq(0));
+        let status = server.database_beacon_status(&root, "test").await.unwrap();
+        assert!(status[0].checkpoint_error.is_none());
+
+        // An explicit request forces publication even at the known saved cut.
+        // Once that fails, automatic maintenance must retry instead of using
+        // its remembered sequence to hide the outstanding save error.
+        let forced = server
+            .checkpoint_beacon_indexes(&root, "test")
+            .await
+            .unwrap();
+        assert!(forced[0].result.is_err());
+        let retried = server
+            .save_beacon_indexes(&root, "test", false)
+            .await
+            .unwrap();
+        assert!(retried[0].result.is_err());
+
+        // Move the test obstruction aside without deleting checkpoint data.
+        std::fs::rename(&staging, path.join("blocked-checkpoint-staging")).unwrap();
+        let saved = server
+            .save_beacon_indexes(&root, "test", false)
+            .await
+            .unwrap();
+        assert_eq!(*saved[0].result.as_ref().unwrap(), CommitSeq(0));
+        let status = server.database_beacon_status(&root, "test").await.unwrap();
+        assert!(status[0].checkpoint_error.is_none());
+
+        // Graceful shutdown shares automatic maintenance's unchanged skip.
+        // This collision would fail if it needlessly tried another save.
+        std::fs::create_dir(&staging).unwrap();
+        server.finish_shutdown(&root).await;
+        let stopped = server.database_beacon_status(&root, "test").await.unwrap();
+        assert_eq!(stopped[0].checkpoint_sequence, Some(CommitSeq(0)));
+        assert!(stopped[0].checkpoint_error.is_none());
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

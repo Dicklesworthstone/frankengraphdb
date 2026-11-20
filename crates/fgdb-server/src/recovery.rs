@@ -177,6 +177,44 @@ struct Shared {
 }
 
 impl Shared {
+    /// The database borrow is held under the writer lock. Clone only the
+    /// bounded handle/diagnostic registry and never retain the lifecycle lock
+    /// across encoding or I/O. A failed derived save cannot fence base state.
+    async fn checkpoint_beacon_indexes(
+        &self,
+        cx: &Cx,
+        database: &mut Database,
+        generation: u64,
+        force: bool,
+    ) -> Result<Vec<crate::BeaconCheckpointReport>, Unavailable> {
+        let mut indexes = {
+            let state = self
+                .gate
+                .state
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            current(&state, generation)?;
+            state.beacon_indexes.clone()
+        };
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let reports = crate::beacon::checkpoint(
+            &contexts.commit(),
+            &contexts.query(),
+            database,
+            &mut indexes,
+            force,
+        )
+        .await;
+        let mut state = self
+            .gate
+            .state
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        current(&state, generation)?;
+        state.beacon_indexes = indexes;
+        Ok(reports)
+    }
+
     fn fence(&self) {
         let (changed, previous) = {
             let mut state = self
@@ -299,7 +337,7 @@ impl DatabaseSlot {
         &self,
         cx: &Cx,
     ) -> Result<Vec<crate::BeaconIndexStatus>, Unavailable> {
-        let operation = self.enter()?;
+        cx.checkpoint().map_err(|_| Unavailable::Stopping)?;
         let database = self
             .shared
             .database
@@ -312,7 +350,11 @@ impl DatabaseSlot {
             .state
             .read()
             .unwrap_or_else(PoisonError::into_inner);
-        current(&state, operation.generation.value)?;
+        // Trusted diagnostics may inspect a fully stopped healthy owner,
+        // including its final checkpoint failures. The database read lock
+        // pins the registry and graph together; no source operation or client
+        // admission is created and recovery cannot replace either underneath.
+        current(&state, state.generation)?;
         let database = database.as_ref().ok_or(Unavailable::Fenced)?;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         state
@@ -331,6 +373,21 @@ impl DatabaseSlot {
                     .map_err(|_| Unavailable::Fenced)
             })
             .collect()
+    }
+
+    /// The trusted host's maintenance admission retains the operation guard.
+    /// The writer lock serializes the checkpoint staging filename with every
+    /// other save and pins each index together with its Chronicle frontier.
+    pub(crate) async fn checkpoint_beacon_indexes(
+        &self,
+        cx: &Cx,
+        force: bool,
+    ) -> Result<Vec<crate::BeaconCheckpointReport>, Unavailable> {
+        let mut database = self.write(cx).await?;
+        let generation = database.generation.value;
+        self.shared
+            .checkpoint_beacon_indexes(cx, &mut database, generation, force)
+            .await
     }
 
     pub(crate) fn enter(&self) -> Result<Operation, Unavailable> {
@@ -627,6 +684,31 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
         })
         .await;
         if matches!(needed, Maintenance::Stop) {
+            // Graceful drain has stopped admission and waited for every
+            // admitted source operation. Persist healthy derived indexes on
+            // this already-owned worker, independently of graph commit
+            // outcomes. Cancellation or a fenced generation does not start
+            // checkpoint work, and a save failure never changes base state.
+            if cx.checkpoint().is_ok() {
+                let generation = {
+                    let state = shared
+                        .gate
+                        .state
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    (state.stopping && state.phase == Phase::Ready && state.active == 0)
+                        .then_some(state.generation)
+                };
+                if let Some(generation) = generation
+                    && let Ok(mut guard) = shared.database.write(cx).await
+                    && let Some(database) = guard.as_mut()
+                    && matches!(database.state(), DatabaseState::Healthy { .. })
+                {
+                    let _ = shared
+                        .checkpoint_beacon_indexes(cx, database, generation, false)
+                        .await;
+                }
+            }
             exit.finished = cx.checkpoint().is_ok();
             return;
         }

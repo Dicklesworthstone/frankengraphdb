@@ -104,7 +104,7 @@ mod symbols;
 mod tls;
 
 pub use aegis::{AegisReplicaCoordinator, SingleMemberPublisher};
-pub use beacon::{BeaconIndexConfig, BeaconIndexStatus};
+pub use beacon::{BeaconCheckpointReport, BeaconIndexConfig, BeaconIndexStatus};
 pub use fgdb_resource::{
     Admitted as AdmittedResources, ResourceAxis, ResourceCeiling, ResourceError, ResourceVector,
 };
@@ -243,11 +243,10 @@ pub struct DatabaseConfig {
     /// Retained read-acceleration budgets for this served database. Other
     /// databases have independent owners; recovery preserves this policy.
     pub read_cache_limits: fgdb::ReadCacheLimits,
-    /// Operator-declared, commit-maintained text/vector indexes. Startup and
-    /// authoritative recovery restore authenticated checkpoints and catch up
-    /// deltas, rebuilding when unavailable or incompatible, before admitting
-    /// readers. Definitions remain bounded process configuration, not a durable
-    /// schema catalog.
+    /// Operator-declared, commit-maintained text/vector indexes. Definitions
+    /// are restored from authenticated checkpoints with bounded delta catch-up,
+    /// or rebuilt before startup and authoritative recovery admit readers.
+    /// They are bounded process configuration, not a durable schema catalog.
     pub beacon_indexes: Vec<BeaconIndexConfig>,
     pub write_policy: GraphWriteProgramPolicy,
     /// Host ceiling on expanded statements per write program and on sequential
@@ -392,7 +391,10 @@ impl core::fmt::Display for ServerError {
                 write!(f, "invalid Beacon index {name:?}: {reason}")
             }
             Self::BeaconIndex { name, source } => {
-                write!(f, "cannot restore or build Beacon index {name:?}: {source}")
+                write!(
+                    f,
+                    "cannot restore or rebuild Beacon index {name:?}: {source}"
+                )
             }
             Self::Issuer(error) => write!(f, "invalid issuer: {error}"),
             Self::OrderedScratch(error) => write!(f, "cannot configure ordered scratch: {error}"),
@@ -673,12 +675,49 @@ impl Server {
     /// maintenance/save failures without reading their corpus. This is a
     /// trusted-host diagnostic. An
     /// unavailable database, unknown name or cancelled admission returns None.
+    /// A healthy stopped owner remains inspectable after graceful shutdown,
+    /// including its final checkpoint sequence and any save failure.
     pub async fn database_beacon_status(
         &self,
         cx: &Cx,
         name: &str,
     ) -> Option<Vec<BeaconIndexStatus>> {
         self.databases.get(name)?.db.beacon_status(cx).await.ok()
+    }
+
+    /// Persist each configured retrieval index at the current committed cut.
+    /// Startup and authoritative recovery authenticate these checkpoints and
+    /// catch up their complete retained Chronicle suffix, or rebuild when a
+    /// checkpoint is absent, incompatible or corrupt.
+    ///
+    /// This trusted-host operation shares maintenance admission and the writer
+    /// lease. It creates no graph commit and is never part of an ordinary
+    /// write's completion. Each index reports a separate outcome; save failure
+    /// leaves the database and healthy resident indexes available. A later
+    /// attempt may safely replace the derived checkpoint. The maintenance
+    /// scheduler and graceful shutdown use this same checkpoint owner, skipping
+    /// healthy indexes already saved at the current cut. This explicit call
+    /// forces a save even when a current checkpoint is already known.
+    pub async fn checkpoint_beacon_indexes(
+        &self,
+        cx: &Cx,
+        name: &str,
+    ) -> Result<Vec<BeaconCheckpointReport>, MaintenanceError> {
+        self.save_beacon_indexes(cx, name, true).await
+    }
+
+    async fn save_beacon_indexes(
+        &self,
+        cx: &Cx,
+        name: &str,
+        force: bool,
+    ) -> Result<Vec<BeaconCheckpointReport>, MaintenanceError> {
+        let (served, _operation) = self.maintenance_admission(cx, name)?;
+        served
+            .db
+            .checkpoint_beacon_indexes(cx, force)
+            .await
+            .map_err(|_| MaintenanceError::unavailable(cx, served))
     }
 
     /// Inspect retained read-cache bytes and limits beside lifecycle status.

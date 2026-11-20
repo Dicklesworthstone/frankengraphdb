@@ -78,12 +78,27 @@ Query selection, full-visibility checks, signed budgets and exact-only automatic
 reuse remain in their existing owners; the name is not a durable schema catalog
 or a new client capability.
 
+Trusted hosts can also force a fresh save with
+`Server::checkpoint_beacon_indexes`. An opt-in
+`--beacon-checkpoint-interval-seconds` schedule has its own completion-based
+interval; periodic saving is disabled by default. The existing owned recovery
+worker checkpoints healthy configured indexes after graceful drain. Scheduled
+and shutdown saves reuse a healthy current checkpoint when its acknowledged
+sequence already matches and no previous save error needs retrying. Explicit
+saves still perform the I/O, including when repairing a removed cache at an
+unchanged graph cut. Saves hold the existing database writer lease; individual
+failures do not fence the graph or prevent healthy siblings from saving.
+Trusted-host diagnostics remain available after healthy shutdown, including
+the last checkpoint sequence and any final save error.
+
 Regression sources exercise real server restart with a two-vertex, one-commit
 suffix while a full corpus build is forbidden; parity with an independently
 rebuilt query and a one-record warm-query allowance; authoritative recovery;
 corruption and cache-save I/O failures; unchanged-checkpoint reuse without a save;
-and every one-shot query interruption during checkpoint saving and final
-admission. Scoped Rustfmt and whitespace checks pass. Compiler, runtime and
+every one-shot query interruption during checkpoint saving and final admission;
+periodic saves without a graph commit; graceful restart; idle-save avoidance;
+explicit refresh and per-index save/retry isolation. Scoped Rustfmt and
+whitespace checks pass. Compiler, runtime and
 exact-tree qualification are pending. The broader durable-watermark and index
 lifecycle work remains open under `fgdb-rc1111-durable-watermarks-c1g98` and
 `fgdb-t38fv`.
