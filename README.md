@@ -608,6 +608,14 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys \
 fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property x=2 \
   --text "graph memory" --text-property title --vector 0.5 --vector-property x --k 5
 
+# Reuse a durable text/vector index across processes and catch up committed changes
+fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property x=2 \
+  --text "graph memory" --text-property title --vector 0.5 --vector-property x \
+  --index-checkpoint documents --k 5
+# Explicitly takes the writer lease, but does not append a graph commit.
+# Missing, corrupt or incompatible caches rebuild; current healthy caches are
+# reused without rewriting. Cannot combine with --as-of or graph expansion.
+
 # Restrict result endpoints before candidate limits (use IDs from your database)
 fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property x=2 \
   --text "graph memory" --text-property title --vector 0.5 --vector-property x \

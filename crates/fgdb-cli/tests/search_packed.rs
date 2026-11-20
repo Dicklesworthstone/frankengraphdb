@@ -252,6 +252,171 @@ fn packed_cli_preserves_eligibility_and_historical_generation_after_a_write() {
 }
 
 #[test]
+fn checkpointed_search_reopens_catches_up_and_matches_fresh_retrieval() {
+    let db = Fixture::new();
+    let original = db.seed();
+    let before = std::fs::read(db.root.join("db/manifest.root")).unwrap();
+    let modes: &[(&str, &[&str])] = &[
+        ("vectors", &["--k", "3"]),
+        // This three-vertex corpus and full search width also exercise the
+        // restored ANN path without relying on general ANN/exact parity.
+        ("vectors-ann", &["--ann", "32", "--k", "3"]),
+        (
+            "hybrid",
+            &[
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--k",
+                "3",
+                "--candidates",
+                "3",
+            ],
+        ),
+    ];
+    for &(name, extra) in modes {
+        let expected = db.search(true, extra);
+        let mut cached = extra.to_vec();
+        cached.extend_from_slice(&["--index-checkpoint", name]);
+        assert_eq!(db.search(true, &cached), expected, "first build: {name}");
+        assert_eq!(
+            db.search(true, &cached),
+            expected,
+            "fresh-process restore: {name}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(db.root.join("db/manifest.root")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_dir(db.root.join("db/derived/beacon"))
+            .unwrap()
+            .count(),
+        3,
+        "each explicit definition has one durable checkpoint"
+    );
+
+    db.okay(
+        "write",
+        &[
+            "MATCH (n:Document {name:'far'}) SET n.embedding=$new, n.bio='graph promoted'",
+            "--param",
+            "new=vector:1,0",
+        ],
+    );
+    let current_root = std::fs::read(db.root.join("db/manifest.root")).unwrap();
+    for &(name, extra) in modes {
+        let expected = db.search(true, extra);
+        assert!(terminal_number(&expected, "seq") > original);
+        let mut cached = extra.to_vec();
+        cached.extend_from_slice(&["--index-checkpoint", name]);
+        assert_eq!(db.search(true, &cached), expected, "delta catch-up: {name}");
+        assert_eq!(
+            db.search(true, &cached),
+            expected,
+            "refreshed restore: {name}"
+        );
+        let selected = first_vertex(&expected);
+        cached.extend_from_slice(&["--eligible", selected]);
+        let mut fresh = extra.to_vec();
+        fresh.extend_from_slice(&["--eligible", selected]);
+        assert_eq!(db.search(true, &cached), db.search(true, &fresh));
+    }
+    assert_eq!(
+        std::fs::read(db.root.join("db/manifest.root")).unwrap(),
+        current_root
+    );
+
+    // The same name may be reused for a different explicit projection. Its
+    // incompatible cache cannot determine the answer or hide a required build.
+    let coordinate = db.search(false, &["--k", "3"]);
+    assert_eq!(
+        db.search(false, &["--k", "3", "--index-checkpoint", "vectors"]),
+        coordinate,
+    );
+}
+
+#[test]
+fn checkpointed_search_recovers_corruption_and_does_not_rewrite_a_current_cache() {
+    let db = Fixture::new();
+    db.seed();
+    let cached = ["--k", "3", "--index-checkpoint", "vectors"];
+    let expected = db.search(true, &["--k", "3"]);
+    assert_eq!(db.search(true, &cached), expected);
+    let path = std::fs::read_dir(db.root.join("db/derived/beacon"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(&path, b"damaged derived bytes").unwrap();
+    assert_eq!(db.search(true, &cached), expected);
+    assert!(std::fs::read(&path).unwrap().starts_with(b"FGDC"));
+
+    // A directory at the private staging pathname makes any save fail. A
+    // healthy, current restore must still work: it has nothing to persist.
+    std::fs::create_dir(path.with_extension("staging")).unwrap();
+    assert_eq!(db.search(true, &cached), expected);
+
+    db.okay(
+        "write",
+        &[
+            "MATCH (n:Document {name:'near'}) SET n.embedding=$new",
+            "--param",
+            "new=vector:8,0",
+        ],
+    );
+    let result = db.command(
+        "search",
+        &[
+            "--vector",
+            "1,0",
+            "--vector-property",
+            "embedding",
+            "--vector-encoding",
+            "packed",
+            "--index-checkpoint",
+            "vectors",
+        ],
+    );
+    assert_eq!(result.status.code(), Some(5));
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    assert!(stdout.contains("\"event\":\"error\""), "{stdout}");
+    assert!(!stdout.contains("\"event\":\"columns\""), "{stdout}");
+    assert!(!stdout.contains("\"kind\":\"searched\""), "{stdout}");
+    // Persistence failure changes neither authoritative contents nor the
+    // availability of the ordinary read-only search path.
+    assert_ne!(db.search(true, &["--k", "3"]), expected);
+}
+
+#[test]
+fn checkpointed_search_rejects_incompatible_modes_before_opening_graph_storage() {
+    for extra in [
+        vec!["--index-checkpoint", ""],
+        vec!["--index-checkpoint", "../outside"],
+        vec!["--index-checkpoint", "cache", "--index-checkpoint", "other"],
+        vec!["--index-checkpoint", "cache", "--as-of", "0"],
+        vec![
+            "--index-checkpoint",
+            "cache",
+            "--expand-from",
+            "1",
+            "--max-hops",
+            "1",
+        ],
+    ] {
+        let db = Fixture::new();
+        let mut args = vec!["--text", "graph", "--text-property", "bio"];
+        args.extend(extra);
+        let result = db.command("search", &args);
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(!db.root.join("db").exists());
+    }
+}
+
+#[test]
 fn packed_cli_searches_high_dimensional_parameter_bytes_and_matches_native_gql() {
     let db = Fixture::new();
     db.okay("create", &[]);

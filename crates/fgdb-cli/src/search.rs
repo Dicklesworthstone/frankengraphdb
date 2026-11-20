@@ -1,6 +1,6 @@
 //! `search`: Beacon text, vector and exact-RRF hybrid retrieval over one
-//! committed generation, through the embedded `EmbeddedReadView::beacon_search`
-//! on a read-only open.
+//! committed generation, using a read-only embedded view by default or an
+//! explicitly requested writer-owned persistent index checkpoint.
 //!
 //! The corpus is an EXPLICIT projection chosen by flags, never inferred:
 //! - `--text <query>` with `--text-property <property>` runs BM25 over that
@@ -50,11 +50,15 @@
 //!   Omission is unrestricted; an empty string selects no results. Corpus
 //!   statistics and graph/ANN transit still use the whole selected corpus.
 //!
-//! Requested text/vector indexes are built for this one call. Graph-only
+//! Requested text/vector indexes are built for this one call unless
+//! `--index-checkpoint <name>` explicitly opens a writer to restore/catch up
+//! and persist a named current-generation index. This option does not advance
+//! the graph sequence and does not support historical or graph-fused searches.
+//! Ordinary searches retain their read-only open. Graph-only
 //! retrieval uses topology at the same cut; every result describes the reported
 //! `seq`. All modes retain native work, staging and output limits.
 use super::{Failure, Options, float_text, render_rows};
-use fgdb::EmbeddedReadView;
+use fgdb::{Database, DerivedCheckpointError, DerivedCheckpointOutcome, EmbeddedReadView};
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search, VectorEncoding};
 use fgdb_beacon::{
@@ -62,7 +66,7 @@ use fgdb_beacon::{
     GraphHybridQuery, HnswConfig, IndexConfig, TextMatch, VectorSearch,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CommitSeq, QueryCx, VId};
+use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -95,6 +99,7 @@ pub(super) struct SearchFlags {
     include_seeds: Option<bool>,
     graph_candidates: Option<u32>,
     graph_weight: Option<u16>,
+    index_checkpoint: Option<String>,
 }
 
 /// Vocabulary terms a fuzzy text match may expand to unless
@@ -106,7 +111,7 @@ const DEFAULT_MAX_EXPANSIONS: usize = 64;
 const MAX_ELIGIBLE_IDS: usize = 100_000;
 
 impl SearchFlags {
-    pub(super) const FLAGS: [&str; 25] = [
+    pub(super) const FLAGS: [&str; 26] = [
         "--text",
         "--text-required",
         "--text-optional",
@@ -132,6 +137,7 @@ impl SearchFlags {
         "--include-seeds",
         "--graph-candidates",
         "--graph-weight",
+        "--index-checkpoint",
     ];
 
     pub(super) const fn as_of(&self) -> Option<CommitSeq> {
@@ -153,6 +159,19 @@ impl SearchFlags {
             }
         }
         match flag {
+            "--index-checkpoint" => {
+                if value.is_empty()
+                    || value.len() > 128
+                    || !value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
+                    })
+                {
+                    return Err(Failure::usage(
+                        "--index-checkpoint must be 1..=128 bytes of [A-Za-z0-9_.-]",
+                    ));
+                }
+                once(&mut self.index_checkpoint, value.to_owned(), flag)
+            }
             "--text" => once(&mut self.text, value.to_owned(), flag),
             "--text-required" => once(&mut self.text_required, value.to_owned(), flag),
             "--text-optional" => once(&mut self.text_optional, value.to_owned(), flag),
@@ -372,6 +391,7 @@ pub(super) struct Prepared {
     candidates: u32,
     graph: Option<GraphLane>,
     eligible: Option<Vec<VId>>,
+    index_checkpoint: Option<String>,
 }
 
 fn property(name: &str, bindings: &BTreeMap<String, u64>) -> Result<PropertyKeyId, Failure> {
@@ -383,6 +403,11 @@ fn property(name: &str, bindings: &BTreeMap<String, u64>) -> Result<PropertyKeyI
 
 pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     let flags = &options.search;
+    if flags.index_checkpoint.is_some() && (flags.as_of.is_some() || flags.expand_from.is_some()) {
+        return Err(Failure::usage(
+            "--index-checkpoint requires current text/vector retrieval without --as-of or graph expansion",
+        ));
+    }
     let k = flags.k.unwrap_or(10);
     let encoding = flags.vector_encoding.unwrap_or_default();
     let boolean = flags.text_required.is_some()
@@ -561,7 +586,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
             .map_or(VectorSearch::Exact, |ef_search| VectorSearch::Approximate {
                 ef_search,
             });
-    let index = IndexConfig {
+    let mut index = IndexConfig {
         vector: vector.as_ref().map(|(coordinates, _)| {
             let config = HnswConfig::new(
                 coordinates.len(),
@@ -577,6 +602,12 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         }),
         ..IndexConfig::default()
     };
+    if flags.index_checkpoint.is_some() && !boolean && text.is_none() {
+        // A persisted definition freezes every enabled lane, unlike the
+        // ordinary adapter's per-query pruning. Vector-only caches therefore
+        // must not inherit IndexConfig's default text lane.
+        index.text = None;
+    }
     let read = ReadOptions {
         as_of: flags.as_of,
         vertex_label,
@@ -630,10 +661,15 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         candidates,
         graph,
         eligible: flags.eligible.clone(),
+        index_checkpoint: flags.index_checkpoint.clone(),
     })
 }
 
 impl Prepared {
+    pub(super) fn uses_checkpoint(&self) -> bool {
+        self.index_checkpoint.is_some()
+    }
+
     /// Only index-backed lanes can become a Search. Never manufacture an
     /// empty text/vector query to make topology-only input fit that interface.
     fn search(&self) -> Result<Search<'_>, Failure> {
@@ -807,6 +843,72 @@ pub(super) fn run(
     let rows = view
         .beacon_search_filtered(cx, &read, prepared.search()?, eligible)
         .map_err(Failure::query)?;
+    render_search_rows(rows, seq, robot, out)
+}
+
+/// Explicit local-owner index maintenance. One writer pins the source,
+/// restoration and output sequence; a healthy current checkpoint is not
+/// rewritten. Persistence finishes before any successful result is emitted.
+pub(super) async fn run_checkpointed(
+    database: &mut Database,
+    commit: &CommitCx,
+    query: &QueryCx,
+    prepared: &Prepared,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let name = prepared
+        .index_checkpoint
+        .as_deref()
+        .ok_or_else(|| Failure::usage("checkpointed search needs --index-checkpoint"))?;
+    let search = prepared.search()?;
+    let (handle, outcome) = database
+        .load_or_rebuild_beacon_checkpoint(
+            commit,
+            query,
+            name,
+            &prepared.read,
+            prepared.read.policy,
+        )
+        .await
+        .map_err(Failure::query)?;
+    let rows = database
+        .search_beacon_index_filtered(query, &handle, search, prepared.read.policy, |id| {
+            prepared
+                .eligible
+                .as_ref()
+                .is_none_or(|ids| ids.binary_search(&id).is_ok())
+        })
+        .map_err(Failure::query)?;
+    if !matches!(
+        outcome,
+        DerivedCheckpointOutcome::CatchUp {
+            watermark_seq,
+            head_seq,
+            healed_by_raptorq: false,
+            ..
+        } if watermark_seq == head_seq
+    ) {
+        database
+            .save_beacon_checkpoint(commit, query, &handle, name)
+            .await
+            .map_err(|error| match error {
+                DerivedCheckpointError::Io(error) => Failure::io(error),
+                error => Failure::query(error),
+            })?;
+    }
+    commit.checkpoint().map_err(Failure::query)?;
+    query.checkpoint().map_err(Failure::query)?;
+    let seq = database.frontier().map_err(Failure::query)?;
+    render_search_rows(rows, seq, robot, out)
+}
+
+fn render_search_rows(
+    rows: Rows,
+    seq: CommitSeq,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
     let (columns, cells): (&[&str], Vec<Vec<String>>) = match &rows {
         Rows::Text(hits) => (
             &["vertex", "score"],

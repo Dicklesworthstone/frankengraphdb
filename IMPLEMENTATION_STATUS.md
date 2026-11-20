@@ -28,6 +28,34 @@ source review and changed-file pinned Rustfmt/whitespace checks pass.
 Compiler/runtime and complete exact-tree qualification remain pending under
 `fgdb-rc1111-durable-watermarks-c1g98`.
 
+### CLI search reuses named durable indexes — qualification pending
+
+`fgdb search --index-checkpoint <name>` opts into the native writer-owned
+checkpoint lifecycle for current text, vector and hybrid retrieval. It restores
+a matching saved index, catches up committed deltas, executes the search and
+persists refreshed state before emitting rows. The reported graph sequence does
+not advance. Current healthy checkpoints skip encoding and fsync; missing,
+corrupt or incompatible checkpoints rebuild from authoritative data. Normal
+search retains its read-only one-call index. Historical cuts and graph expansion
+refuse the checkpoint option before opening storage. Names are bounded to
+1..=128 ASCII letters, digits, underscores, dots and hyphens.
+
+Both coordinate and packed vector projections use their existing admission
+rules. Eligibility filters run before candidate limits, and explicit ANN uses
+the restored handle's maintained HNSW topology. Exact-search parity is covered
+against a fresh index; ANN remains approximate and its history-dependent
+topology need not match a newly rebuilt index. Save failures emit no successful
+rows or result, and preserve the distinction between storage I/O and native
+execution refusal. Help, robot schema and README describe the opt-in writer
+lease and persistence behavior.
+
+Process regression sources cover cold/warm reuse, committed text/vector changes,
+eligibility, changed projection definitions, corruption, unchanged-cache reuse,
+save failure before output and invalid mode/name refusal before storage access.
+Compiler, runtime and exact-tree qualification are pending; the broader durable
+index lifecycle remains open under `fgdb-rc1111-durable-watermarks-c1g98` and
+`fgdb-t38fv`.
+
 ### Served Beacon indexes restore durable checkpoints — qualification pending
 
 Operator-configured `--beacon-index` definitions now restore their authenticated,
