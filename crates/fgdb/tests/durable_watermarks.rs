@@ -2,7 +2,15 @@
 //! Chronicle-watermarked Beacon indexes and Ripple standing-query Z-set
 //! arrangements (`fgdb-rc1111-durable-watermarks-c1g98`, `FG-INV-18`).
 
-use asupersync::fs::Vfs;
+use std::io::{self, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+
+use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs, VfsFile};
+use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     Database, DatabaseKeys, DerivedCheckpointOutcome, DerivedRebuildReason, MemVfs, WriteBatch,
@@ -99,6 +107,304 @@ async fn seed_base_graph(cx: &CommitCx, db: &mut Database<MemVfs>) -> CommitSeq 
     batch.add_edge(EId(104), VId(3), VId(4), vec![]);
     batch.add_edge(EId(105), VId(4), VId(5), vec![]);
     db.write(cx, batch).await.unwrap()
+}
+
+/// Report the size of a sparse file for derived checkpoints while preserving
+/// every byte of the real database. Reads are counted separately so the test
+/// detects rejection after an unbounded read as well as missing rejection.
+#[derive(Clone, Debug)]
+struct OversizedCheckpointVfs {
+    inner: MemVfs,
+    metadata: Metadata,
+    checkpoint_reads: Arc<AtomicUsize>,
+    checkpoint_metadata: Arc<AtomicUsize>,
+}
+
+#[derive(Debug)]
+struct OversizedCheckpointFile {
+    inner: <MemVfs as Vfs>::File,
+    oversized: Option<Metadata>,
+    checkpoint_reads: Arc<AtomicUsize>,
+    checkpoint_metadata: Arc<AtomicUsize>,
+}
+
+impl AsyncRead for OversizedCheckpointFile {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.oversized.is_some() {
+            this.checkpoint_reads.fetch_add(1, Ordering::SeqCst);
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for OversizedCheckpointFile {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+impl AsyncSeek for OversizedCheckpointFile {
+    fn poll_seek(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        Pin::new(&mut self.get_mut().inner).poll_seek(cx, pos)
+    }
+}
+
+impl VfsFile for OversizedCheckpointFile {
+    async fn metadata(&self) -> io::Result<Metadata> {
+        if let Some(metadata) = &self.oversized {
+            self.checkpoint_metadata.fetch_add(1, Ordering::SeqCst);
+            Ok(metadata.clone())
+        } else {
+            self.inner.metadata().await
+        }
+    }
+
+    async fn sync_all(&self) -> io::Result<()> {
+        self.inner.sync_all().await
+    }
+
+    async fn sync_data(&self) -> io::Result<()> {
+        self.inner.sync_data().await
+    }
+
+    async fn set_len(&self, size: u64) -> io::Result<()> {
+        self.inner.set_len(size).await
+    }
+
+    async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
+        self.inner.set_permissions(perm).await
+    }
+}
+
+impl Vfs for OversizedCheckpointVfs {
+    type File = OversizedCheckpointFile;
+
+    async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<Self::File> {
+        let is_checkpoint = path.starts_with(self.inner.database_dir().join("derived"))
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "fgec");
+        Ok(OversizedCheckpointFile {
+            inner: self.inner.open(path, options).await?,
+            oversized: is_checkpoint.then(|| self.metadata.clone()),
+            checkpoint_reads: Arc::clone(&self.checkpoint_reads),
+            checkpoint_metadata: Arc::clone(&self.checkpoint_metadata),
+        })
+    }
+
+    async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
+        self.inner.metadata(path).await
+    }
+
+    async fn symlink_metadata(&self, path: &Path) -> io::Result<Metadata> {
+        self.inner.symlink_metadata(path).await
+    }
+
+    async fn set_permissions(&self, path: &Path, perm: Permissions) -> io::Result<()> {
+        self.inner.set_permissions(path, perm).await
+    }
+
+    async fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir(path).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_dir(path).await
+    }
+
+    async fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_file(path).await
+    }
+
+    async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
+        self.inner.read_dir(path).await
+    }
+
+    async fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_dir_all(path).await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.inner.rename(from, to).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn hard_link(&self, original: &Path, link: &Path) -> io::Result<()> {
+        self.inner.hard_link(original, link).await
+    }
+
+    async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.inner.canonicalize(path).await
+    }
+
+    async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        self.inner.read_link(path).await
+    }
+
+    async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.inner.read(path).await
+    }
+
+    async fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        self.inner.read_to_string(path).await
+    }
+
+    async fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write(path, bytes).await
+    }
+}
+
+#[test]
+fn oversized_checkpoint_metadata_rebuilds_without_reading_payload_and_keeps_views_live() {
+    let ((), report) = run_async_under_lab(0xc198_0003, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let memory = MemVfs::new().unwrap();
+        let path = memory.database_dir();
+        let mut db = Database::create_with_vfs(&commit, memory.clone(), &path, keys())
+            .await
+            .unwrap();
+        seed_base_graph(&commit, &mut db).await;
+        let beacon = db
+            .register_beacon_index(&query, &beacon_options(), ReadPolicy::default())
+            .unwrap();
+        let reach = db
+            .register_standing_reachability(&query, LINKS, rebuild_policy())
+            .unwrap();
+        db.save_beacon_checkpoint(&commit, &query, &beacon, "oversized_beacon")
+            .await
+            .unwrap();
+        db.save_standing_reachability_checkpoint(&commit, &query, &reach, "oversized_reach")
+            .await
+            .unwrap();
+        drop(db);
+
+        // Metadata wraps a native stat result. A sparse file supplies a 1 TiB
+        // logical length without allocating or reading a checkpoint-sized buffer.
+        let sparse = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path.parent().unwrap().join("oversized-checkpoint-metadata"))
+            .await
+            .unwrap();
+        sparse.set_len(1_u64 << 40).await.unwrap();
+        let metadata = sparse.metadata().await.unwrap();
+        drop(sparse);
+        let vfs = OversizedCheckpointVfs {
+            inner: memory,
+            metadata,
+            checkpoint_reads: Arc::new(AtomicUsize::new(0)),
+            checkpoint_metadata: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut restored = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let expected = DerivedCheckpointOutcome::RebuiltFromChronicle {
+            reason: DerivedRebuildReason::CorruptOrIncompatible,
+        };
+        let (beacon, outcome) = restored
+            .load_or_rebuild_beacon_checkpoint(
+                &commit,
+                &query,
+                "oversized_beacon",
+                &beacon_options(),
+                ReadPolicy::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, expected);
+        let (reach, outcome) = restored
+            .load_or_rebuild_standing_reachability_checkpoint(
+                &commit,
+                &query,
+                "oversized_reach",
+                LINKS,
+                rebuild_policy(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, expected);
+        assert_eq!(vfs.checkpoint_metadata.load(Ordering::SeqCst), 2);
+        assert_eq!(vfs.checkpoint_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(restored.frontier().unwrap(), CommitSeq(1));
+        let search = Search::Text {
+            query: "graph",
+            k: 64,
+            mode: TextMatch::Any,
+        };
+        assert_eq!(
+            restored
+                .search_beacon_index(&query, &beacon, search, ReadPolicy::default())
+                .unwrap()
+                .len(),
+            12,
+        );
+        assert!(
+            restored
+                .standing_reachability(&query, &reach)
+                .unwrap()
+                .rows()
+                .weight(&(VId(1), VId(5)))
+                .is_some(),
+        );
+
+        let mut change = WriteBatch::new(LINKS);
+        change.create_vertex(
+            VId(65),
+            vec![DOC],
+            vec![
+                (BODY, text("graph recovered")),
+                (X, CanonicalScalar::Int(65)),
+            ],
+        );
+        change.add_edge(EId(106), VId(5), VId(65), vec![]);
+        assert_eq!(restored.write(&commit, change).await.unwrap(), CommitSeq(2));
+        assert_eq!(
+            restored
+                .search_beacon_index(&query, &beacon, search, ReadPolicy::default())
+                .unwrap()
+                .len(),
+            13,
+        );
+        assert!(
+            restored
+                .standing_reachability(&query, &reach)
+                .unwrap()
+                .rows()
+                .weight(&(VId(1), VId(65)))
+                .is_some(),
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

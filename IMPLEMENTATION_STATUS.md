@@ -12,6 +12,22 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Exclusive derived-checkpoint publication and oversized recovery — qualification pending
+
+Both native checkpoint-save APIs now require exclusive database access. This
+serializes their staging-file publication with other saves and graph writes,
+preventing two same-name saves from truncating a shared staging file. This
+changes no durable format or graph-commit protocol.
+
+The bounded loader and cancellation regressions from native commit
+`74db47bc47fa1f4740233b3966e7212af8eb17a3` remain intact. An added integration
+regression presents real sparse 1 TiB file metadata for both Beacon and Ripple
+checkpoints and asserts zero payload reads, authoritative rebuild, and
+continued search/reachability updates after another graph commit. Independent
+source review and changed-file pinned Rustfmt/whitespace checks pass.
+Compiler/runtime and complete exact-tree qualification remain pending under
+`fgdb-rc1111-durable-watermarks-c1g98`.
+
 ### Served Beacon indexes restore durable checkpoints — qualification pending
 
 Operator-configured `--beacon-index` definitions now restore their authenticated,

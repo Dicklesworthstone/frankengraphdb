@@ -477,8 +477,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// Persist a healthy `MaintainedBeaconIndex` as a Chronicle-watermarked,
     /// `FGEC` v1 (XChaCha20-Poly1305 + RaptorQ) derived checkpoint under
     /// `<db_dir>/derived/beacon/`.
+    ///
+    /// Exclusive writer ownership serializes the staging-file publication
+    /// with other checkpoints and graph writes on this database handle.
     pub async fn save_beacon_checkpoint(
-        &self,
+        &mut self,
         cx: &CommitCx,
         query_cx: &QueryCx,
         handle: &MaintainedBeaconIndex,
@@ -683,8 +686,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// Persist a healthy Ripple standing-reachability Z-set arrangement as a
     /// Chronicle-watermarked, `FGEC` v1 (XChaCha20-Poly1305 + RaptorQ) derived
     /// checkpoint under `<db_dir>/derived/ripple/`.
+    ///
+    /// Exclusive writer ownership prevents concurrent saves from truncating
+    /// or publishing the same staging file while another save is using it.
     pub async fn save_standing_reachability_checkpoint(
-        &self,
+        &mut self,
         cx: &CommitCx,
         query_cx: &QueryCx,
         handle: &StandingQueryHandle,
