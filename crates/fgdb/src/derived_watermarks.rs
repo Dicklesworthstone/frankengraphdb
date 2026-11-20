@@ -21,13 +21,14 @@
 use std::path::{Path, PathBuf};
 
 use asupersync::fs::{OpenOptions, Vfs, VfsFile};
-use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use fgdb_crypto::zeroize::SharedSecret;
 use fgdb_crypto::{Digest, derive_key, keyed_hash, logical_object_id};
 use fgdb_delta_types::RelationId;
 use fgdb_gql::GqlQueryPolicy;
 use fgdb_strata::store::ecs_extent::{
     ExtentError, ExtentObjectKind, StrataEcsConfig, decode_extent, encode_extent,
+    max_encoded_bytes_for_limit,
 };
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
@@ -200,6 +201,14 @@ fn encode_checkpoint_container(
     watermark_chain_hash: Digest,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, DerivedCheckpointError> {
+    if plaintext.len() as u64 > MAX_DERIVED_CHECKPOINT_PLAIN_BYTES {
+        return Err(DerivedCheckpointError::Extent(
+            ExtentError::PlaintextTooLarge {
+                limit: MAX_DERIVED_CHECKPOINT_PLAIN_BYTES,
+                observed: plaintext.len() as u64,
+            },
+        ));
+    }
     let mut logical_hdr = [0u8; 48];
     logical_hdr[..4].copy_from_slice(&HEADER_MAGIC);
     logical_hdr[4..6].copy_from_slice(&HEADER_VERSION_V1.to_le_bytes());
@@ -380,26 +389,88 @@ async fn read_checkpoint_optional<V: Vfs>(
     cx: &CommitCx,
     vfs: &V,
     final_path: &Path,
+    max_bytes: u64,
 ) -> Result<ReadOutcome, DerivedCheckpointError> {
     cx.checkpoint()
         .map_err(DerivedCheckpointError::Interrupted)?;
-    let file = match cx
+    let opened = cx
         .with_restriction_async(vfs.open(final_path, &OpenOptions::new().read(true)))
-        .await
-    {
+        .await;
+    cx.checkpoint()
+        .map_err(DerivedCheckpointError::Interrupted)?;
+    let mut file = match opened {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(ReadOutcome::Missing),
         Err(_) => return Ok(ReadOutcome::Unreadable),
     };
-    let mut buf = Vec::new();
-    let mut reader = file;
-    match cx
-        .with_restriction_async(async { reader.read_to_end(&mut buf).await })
-        .await
-    {
-        Ok(_) => Ok(ReadOutcome::Present(buf)),
-        Err(_) => Ok(ReadOutcome::Unreadable),
+    // Inspect the opened inode before allocating or reading its payload. A
+    // derived file is optional and untrusted until authenticated; the decoded
+    // plaintext bound alone cannot bound read_to_end on hostile physical bytes.
+    let metadata = cx.with_restriction_async(file.metadata()).await;
+    cx.checkpoint()
+        .map_err(DerivedCheckpointError::Interrupted)?;
+    if !matches!(metadata, Ok(metadata) if metadata.len() <= max_bytes) {
+        return Ok(ReadOutcome::Unreadable);
     }
+    let Ok(max_bytes) = usize::try_from(max_bytes) else {
+        return Ok(ReadOutcome::Unreadable);
+    };
+    read_checkpoint_bytes(cx, &mut file, max_bytes).await
+}
+
+/// Keep the streaming bound even if the file grows after the metadata check.
+/// One lookahead byte distinguishes an exactly-full file from an oversized one;
+/// that byte is never retained. Cancellation is terminal, not a rebuild reason.
+async fn read_checkpoint_bytes<R: AsyncRead + Unpin>(
+    cx: &CommitCx,
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<ReadOutcome, DerivedCheckpointError> {
+    const CHUNK_BYTES: usize = 16 * 1024;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; CHUNK_BYTES];
+    loop {
+        cx.checkpoint()
+            .map_err(DerivedCheckpointError::Interrupted)?;
+        let remaining = max_bytes - buf.len();
+        let requested = remaining.saturating_add(1).min(chunk.len());
+        let read = cx
+            .with_restriction_async(reader.read(&mut chunk[..requested]))
+            .await;
+        cx.checkpoint()
+            .map_err(DerivedCheckpointError::Interrupted)?;
+        let count = match read {
+            Ok(count) if count <= remaining => count,
+            _ => return Ok(ReadOutcome::Unreadable),
+        };
+        if count == 0 {
+            return Ok(ReadOutcome::Present(buf));
+        }
+        if count > buf.capacity() - buf.len() {
+            // Geometric growth stays within the encoded bound, rather than
+            // reserving the whole maximum for every tiny checkpoint.
+            let capacity = buf
+                .capacity()
+                .max(CHUNK_BYTES)
+                .saturating_mul(2)
+                .max(buf.len() + count)
+                .min(max_bytes);
+            buf.try_reserve_exact(capacity - buf.len()).map_err(|_| {
+                DerivedCheckpointError::Io(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "derived checkpoint allocation failed",
+                ))
+            })?;
+        }
+        buf.extend_from_slice(&chunk[..count]);
+    }
+}
+
+fn checkpoint_encoded_limit(keys: &DatabaseKeys) -> u64 {
+    (HEADER_BYTES as u64).saturating_add(max_encoded_bytes_for_limit(
+        MAX_DERIVED_CHECKPOINT_PLAIN_BYTES,
+        &derived_ecs_config(keys),
+    ))
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -476,8 +547,13 @@ impl<V: Vfs + Clone> Database<V> {
         let db_dir = self.coordinator.database_dir().to_path_buf();
         let paths = checkpoint_paths(&db_dir, &self.keys, CheckpointKind::Beacon, name);
 
-        let discard_reason = match read_checkpoint_optional(cx, &self.vfs, &paths.final_path)
-            .await?
+        let discard_reason = match read_checkpoint_optional(
+            cx,
+            &self.vfs,
+            &paths.final_path,
+            checkpoint_encoded_limit(&self.keys),
+        )
+        .await?
         {
             ReadOutcome::Missing => DerivedRebuildReason::Missing,
             ReadOutcome::Unreadable => DerivedRebuildReason::CorruptOrIncompatible,
@@ -673,69 +749,75 @@ impl<V: Vfs + Clone> Database<V> {
             name,
         );
 
-        let discard_reason =
-            match read_checkpoint_optional(cx, &self.vfs, &paths.final_path).await? {
-                ReadOutcome::Missing => DerivedRebuildReason::Missing,
-                ReadOutcome::Unreadable => DerivedRebuildReason::CorruptOrIncompatible,
-                ReadOutcome::Present(raw) => match verify_and_decode_container(
-                    &self.keys,
-                    CheckpointKind::RippleReachability,
-                    head_seq,
-                    self.coordinator.chain(),
-                    &raw,
-                ) {
-                    LoadedContainer::Discard(reason) => reason,
-                    LoadedContainer::Valid {
-                        watermark_seq,
-                        plaintext,
-                        healed_by_raptorq,
-                    } => {
-                        if let Err(err) = self.ensure_delta_window(cx, watermark_seq).await {
-                            match err {
-                                RebuildError::Interrupted(cancel) => {
-                                    return Err(DerivedCheckpointError::Interrupted(cancel));
-                                }
-                                _ => {
-                                    let rebuilt = self
-                                        .register_standing_reachability(query_cx, relation, policy)
-                                        .map_err(DerivedCheckpointError::Standing)?;
-                                    return Ok((
-                                        rebuilt,
-                                        DerivedCheckpointOutcome::RebuiltFromChronicle {
-                                            reason: DerivedRebuildReason::DeltaWindowUnavailable {
-                                                watermark_seq,
-                                            },
-                                        },
-                                    ));
-                                }
+        let discard_reason = match read_checkpoint_optional(
+            cx,
+            &self.vfs,
+            &paths.final_path,
+            checkpoint_encoded_limit(&self.keys),
+        )
+        .await?
+        {
+            ReadOutcome::Missing => DerivedRebuildReason::Missing,
+            ReadOutcome::Unreadable => DerivedRebuildReason::CorruptOrIncompatible,
+            ReadOutcome::Present(raw) => match verify_and_decode_container(
+                &self.keys,
+                CheckpointKind::RippleReachability,
+                head_seq,
+                self.coordinator.chain(),
+                &raw,
+            ) {
+                LoadedContainer::Discard(reason) => reason,
+                LoadedContainer::Valid {
+                    watermark_seq,
+                    plaintext,
+                    healed_by_raptorq,
+                } => {
+                    if let Err(err) = self.ensure_delta_window(cx, watermark_seq).await {
+                        match err {
+                            RebuildError::Interrupted(cancel) => {
+                                return Err(DerivedCheckpointError::Interrupted(cancel));
                             }
-                        }
-                        match self.catch_up_or_none_standing_reachability(
-                            query_cx,
-                            &plaintext,
-                            watermark_seq,
-                            relation,
-                            policy,
-                        ) {
-                            Err(err) => return Err(DerivedCheckpointError::Standing(err)),
-                            Ok(None) => DerivedRebuildReason::CorruptOrIncompatible,
-                            Ok(Some((state, commits_replayed))) => {
-                                let handle = self.install_restored_standing_reachability(state);
+                            _ => {
+                                let rebuilt = self
+                                    .register_standing_reachability(query_cx, relation, policy)
+                                    .map_err(DerivedCheckpointError::Standing)?;
                                 return Ok((
-                                    handle,
-                                    DerivedCheckpointOutcome::CatchUp {
-                                        watermark_seq,
-                                        head_seq,
-                                        commits_replayed,
-                                        touched_vertices: 0,
-                                        healed_by_raptorq,
+                                    rebuilt,
+                                    DerivedCheckpointOutcome::RebuiltFromChronicle {
+                                        reason: DerivedRebuildReason::DeltaWindowUnavailable {
+                                            watermark_seq,
+                                        },
                                     },
                                 ));
                             }
                         }
                     }
-                },
-            };
+                    match self.catch_up_or_none_standing_reachability(
+                        query_cx,
+                        &plaintext,
+                        watermark_seq,
+                        relation,
+                        policy,
+                    ) {
+                        Err(err) => return Err(DerivedCheckpointError::Standing(err)),
+                        Ok(None) => DerivedRebuildReason::CorruptOrIncompatible,
+                        Ok(Some((state, commits_replayed))) => {
+                            let handle = self.install_restored_standing_reachability(state);
+                            return Ok((
+                                handle,
+                                DerivedCheckpointOutcome::CatchUp {
+                                    watermark_seq,
+                                    head_seq,
+                                    commits_replayed,
+                                    touched_vertices: 0,
+                                    healed_by_raptorq,
+                                },
+                            ));
+                        }
+                    }
+                }
+            },
+        };
 
         let rebuilt = self
             .register_standing_reachability(query_cx, relation, policy)
@@ -767,5 +849,137 @@ impl<V: Vfs + Clone> Database<V> {
             name,
         )
         .final_path
+    }
+}
+
+#[cfg(test)]
+mod bounded_read_tests {
+    use super::*;
+    use asupersync::io::ReadBuf;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::PurposeContexts;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct Reader<F> {
+        remaining: usize,
+        read: usize,
+        poll: F,
+    }
+
+    impl<F: FnMut() -> std::io::Result<()> + Unpin> AsyncRead for Reader<F> {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            out: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            if let Err(error) = (this.poll)() {
+                return Poll::Ready(Err(error));
+            }
+            let count = out.remaining().min(this.remaining);
+            for _ in 0..count {
+                out.put_slice(&[0x5a]);
+            }
+            this.remaining -= count;
+            this.read += count;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn exact_encoded_limit_and_one_byte_growth_have_distinct_outcomes() {
+        let ((), report) = run_async_under_lab(0xc198_0003, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            for limit in [0, 1, 7, 16_384, 16_385, 32_771] {
+                for excess in [0, 1, 65_536] {
+                    let mut reader = Reader {
+                        remaining: limit + excess,
+                        read: 0,
+                        poll: || Ok(()),
+                    };
+                    let outcome = read_checkpoint_bytes(&contexts.commit(), &mut reader, limit)
+                        .await
+                        .unwrap();
+                    if excess == 0 {
+                        let ReadOutcome::Present(bytes) = outcome else {
+                            panic!("an exact-bound checkpoint was discarded")
+                        };
+                        assert_eq!(bytes, vec![0x5a; limit]);
+                        assert!(bytes.capacity() <= limit);
+                        assert_eq!(reader.read, limit);
+                    } else {
+                        assert!(matches!(outcome, ReadOutcome::Unreadable));
+                        assert_eq!(reader.read, limit + 1);
+                    }
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn cancellation_during_read_never_becomes_a_cache_miss_or_rebuild() {
+        let ((), report) = run_async_under_lab(0xc198_0004, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            for failed_read in [false, true] {
+                let cancel = root.clone();
+                let mut reader = Reader {
+                    remaining: 8,
+                    read: 0,
+                    poll: move || {
+                        cancel.set_cancel_requested(true);
+                        if failed_read {
+                            Err(std::io::Error::other("interrupted cache read"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                };
+                assert!(matches!(
+                    read_checkpoint_bytes(&contexts.commit(), &mut reader, 8).await,
+                    Err(DerivedCheckpointError::Interrupted(_))
+                ));
+                root.set_cancel_requested(false);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn opened_file_size_is_checked_before_loading_optional_bytes() {
+        let ((), report) = run_async_under_lab(0xc198_0005, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let vfs = crate::MemVfs::new().unwrap();
+            let path = vfs.database_dir().join("bounded-checkpoint");
+            vfs.create_dir_all(&vfs.database_dir()).await.unwrap();
+            let mut file = vfs
+                .open(&path, &OpenOptions::new().write(true).create_new(true))
+                .await
+                .unwrap();
+            file.write_all(b"12345678").await.unwrap();
+            drop(file);
+            assert!(matches!(
+                read_checkpoint_optional(&commit, &vfs, &path, 7)
+                    .await
+                    .unwrap(),
+                ReadOutcome::Unreadable
+            ));
+            let ReadOutcome::Present(bytes) = read_checkpoint_optional(&commit, &vfs, &path, 8)
+                .await
+                .unwrap()
+            else {
+                panic!("exact-bound file was discarded")
+            };
+            assert_eq!(bytes, b"12345678");
+            assert!(matches!(
+                read_checkpoint_optional(&commit, &vfs, &path.with_extension("missing"), 8)
+                    .await
+                    .unwrap(),
+                ReadOutcome::Missing
+            ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
