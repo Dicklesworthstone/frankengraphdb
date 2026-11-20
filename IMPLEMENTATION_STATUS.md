@@ -12,6 +12,36 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Lazy conditional COLLECT subqueries — qualification pending
+
+Searched and simple `CASE`, and `coalesce`, containing `COLLECT { ... }` now
+lower through native argument-scoped Apply and Collect operators. Only selected
+conditions, result arms and fallbacks execute their graph reads and scalar
+expressions. A simple CASE retains its selector once per input occurrence;
+selected NULL values, correlation, duplicate occurrences and collection order
+are preserved. Unknown names and writes still refuse during preparation, even
+inside an unselected arm. No interpreter or execution opcode is added.
+
+This also guards EXISTS and COUNT sources within those conditional bodies.
+Expressions containing only EXISTS/COUNT retain their existing eager contract.
+Postfix access, arithmetic/comparison suffixes, nested conditionals, ordinary
+list/map wrappers and keyword variable/property names keep the complete CASE
+boundary. Literal wrappers remain transparent while list comprehensions retain
+their local scope. Lookahead stacks use the existing 64-level nesting bound
+before allocation.
+
+New `multipart_reads::collect_subqueries` regression sources assert skipped
+source callbacks and division errors, one-time selector reads, parameter
+rebinding, correlation and NULL results, exact cumulative budget boundaries,
+cancellation, LIMIT-zero error visibility and typed nesting refusals before
+catalog access. Changed-file pinned Rustfmt and whitespace checks pass. Targeted
+runtime builds and a metadata-only compiler check stopped when rustc compiling
+pinned asupersync received SIGKILL; fgdb-gql compiler diagnostics and runtime
+assertions were not reached.
+Compiler/runtime and full exact-tree qualification remain **UNRUN**. This is an
+increment under open `fgdb-w5-parsers-nje`, not a language-conformance or bead
+closure claim.
+
 ### Exclusive derived-checkpoint publication and oversized recovery — qualification pending
 
 Both native checkpoint-save APIs now require exclusive database access. This

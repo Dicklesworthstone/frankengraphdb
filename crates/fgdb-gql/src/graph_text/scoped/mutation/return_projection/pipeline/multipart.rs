@@ -898,13 +898,14 @@ fn row_pattern_expressions_from<'a>(
     mut hoisted: impl FnMut(usize) -> bool,
     source: bool,
 ) -> Result<Vec<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
-    refuse_lazy_collect(token, lexer)?;
     let mut expressions = Vec::new();
     let mut previous = None;
     let mut depth = 0_usize;
+    let mut groups = Vec::new();
     let mut locals = ReadLocals::default();
     loop {
-        let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
+        let key = matches!(previous, Some(TokenKind::Punct(b'.')))
+            || (matches!(previous, Some(TokenKind::Punct(b':'))) && groups.last() != Some(&b'{'))
             || matches!(previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
         let group_by = depth == 0
             && !key
@@ -923,6 +924,19 @@ fn row_pattern_expressions_from<'a>(
                 if depth == 0 && !key && Parser::ends_where(word, previous))
         {
             return Ok(expressions);
+        }
+        if !key
+            && locals.scopes.is_empty()
+            && !hoisted(token.at)
+            && let Some((after, ahead)) = lazy_collection_expression(token, lexer)?
+        {
+            // The complete conditional owns its graph sources. Gathering its
+            // children here would run an unselected arm before CASE/COALESCE.
+            expressions.push((token, lexer.clone()));
+            *lexer = ahead;
+            token = after;
+            previous = Some(TokenKind::Punct(b')'));
+            continue;
         }
         // Gather the complete quantifier, retaining its local scope and UNKNOWNs.
         if !key
@@ -951,9 +965,13 @@ fn row_pattern_expressions_from<'a>(
             if locals.scopes.is_empty() && !hoisted(token.at) && graph {
                 expressions.push((token, lexer.clone()));
             }
-            // A source may wrap its graph value in an ordinary list literal.
-            // Traverse that container; complete graph/list scopes stay private.
-            if !source || graph || list_comprehension_follows(token.kind, lexer)? {
+            // A source or conditional value may be wrapped in an ordinary
+            // literal. Complete graph/list comprehensions keep their owner
+            // and local bindings; the literal itself introduces no scope.
+            if graph
+                || list_comprehension_follows(token.kind, lexer)?
+                || (!source && !literal_list_has_lazy_collection(lexer)?)
+            {
                 let Some(after) = after_balanced(lexer, b'[')? else {
                     return Ok(expressions);
                 };
@@ -997,8 +1015,14 @@ fn row_pattern_expressions_from<'a>(
         }
         locals.observe(token, previous, lexer, depth)?;
         match token.kind {
-            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
-            TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            TokenKind::Punct(opening @ (b'(' | b'[' | b'{')) => {
+                lazy_push_nesting(&mut groups, opening, token.at)?;
+                depth += 1;
+            }
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                groups.pop();
+                depth = depth.saturating_sub(1);
+            }
             _ => {}
         }
         previous = Some(token.kind);
@@ -1006,21 +1030,103 @@ fn row_pattern_expressions_from<'a>(
     }
 }
 
-/// The current Apply owner gathers graph expressions before evaluating the
-/// containing scalar expression. Until a lazy correlated Apply is available,
-/// a COLLECT body inside CASE or COALESCE must refuse at preparation, including
-/// when it is wrapped in a list expression. A WITH-produced collection is an
-/// ordinary value and remains usable in either lazy scalar form.
-fn refuse_lazy_collect<'a>(
+/// Probe a scope-free literal with the existing source gatherer. `source=true`
+/// traverses ordinary containers but still gathers comprehensions as complete
+/// owners, so this bounded probe never exposes a comprehension-local binding.
+fn literal_list_has_lazy_collection(lexer: &Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+    let mut lexer = lexer.clone();
+    let first = lexer.next()?;
+    for (token, ahead) in row_pattern_expressions_from(first, &mut lexer, |_| false, true)? {
+        if lazy_collection_expression(token, &ahead)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// A CASE separator follows a completed operand. Track operand position as
+/// well as native-token provenance: `THEN then`, `n.then` and `AND end` finish
+/// operands, whereas a separator or operator starts its next operand. The
+/// ordinary value parser still owns all validation and precedence.
+fn lazy_operand_after(
+    token: TokenKind<'_>,
+    previous: Option<TokenKind<'_>>,
+    key: bool,
+    complete: bool,
+) -> bool {
+    match token {
+        TokenKind::Word(word)
+            if !key
+                && (word.eq_ignore_ascii_case("CASE")
+                    || word.eq_ignore_ascii_case("NOT")
+                    || word.eq_ignore_ascii_case("AS")
+                    || (word.eq_ignore_ascii_case("WHEN")
+                        && matches!(previous, Some(TokenKind::Word(word))
+                            if word.eq_ignore_ascii_case("CASE")))
+                    || (word.eq_ignore_ascii_case("WITH")
+                        && matches!(previous, Some(TokenKind::Word(word))
+                            if word.eq_ignore_ascii_case("STARTS") || word.eq_ignore_ascii_case("ENDS")))
+                    || (complete
+                        && [
+                            "WHEN", "THEN", "ELSE", "AND", "OR", "XOR", "IS", "IN", "STARTS",
+                            "ENDS", "CONTAINS", "BETWEEN",
+                        ]
+                        .iter()
+                        .any(|operator| word.eq_ignore_ascii_case(operator)))) =>
+        {
+            false
+        }
+        TokenKind::Word(_)
+        | TokenKind::DelimitedKeyword(_)
+        | TokenKind::Digits(_)
+        | TokenKind::Parameter(_)
+        | TokenKind::Quoted(_)
+        | TokenKind::Punct(b')' | b']' | b'}') => true,
+        _ => false,
+    }
+}
+
+fn lazy_push_nesting<T>(
+    stack: &mut Vec<T>,
+    value: T,
+    at: usize,
+) -> Result<(), GraphPatternTextError> {
+    if stack.len() == MAX_FILTER_NESTING {
+        return Err(error(
+            at,
+            GraphPatternTextErrorKind::BooleanNesting {
+                limit: MAX_FILTER_NESTING,
+            },
+        ));
+    }
+    stack.push(value);
+    Ok(())
+}
+
+/// Find a complete conditional containing a COLLECT body. Other graph
+/// expressions retain their established eager contract. A conditional is
+/// lowered as one argument-scoped relation, so the arm boundary is structural.
+fn lazy_collection_expression<'a>(
     mut token: Token<'a>,
     lexer: &Lexer<'a>,
-) -> Result<(), GraphPatternTextError> {
+) -> Result<Option<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
+    let TokenKind::Word(word) = token.kind else {
+        return Ok(None);
+    };
+    let case = word.eq_ignore_ascii_case("CASE");
+    if !case
+        && !(word.eq_ignore_ascii_case("COALESCE")
+            && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+    {
+        return Ok(None);
+    }
     let mut lexer = lexer.clone();
     let mut depth = 0_usize;
     let mut groups = Vec::new();
     let mut cases = Vec::new();
-    let mut coalesce = Vec::new();
     let mut previous = None;
+    let mut complete = false;
+    let mut collection = false;
     loop {
         let key = matches!(previous, Some(TokenKind::Punct(b'.')))
             || (matches!(previous, Some(TokenKind::Punct(b':'))) && groups.last() != Some(&b'{'))
@@ -1028,7 +1134,7 @@ fn refuse_lazy_collect<'a>(
         if matches!(token.kind, TokenKind::End)
             || (depth == 0 && matches!(token.kind, TokenKind::Punct(b')' | b']' | b'}' | b'|')))
         {
-            return Ok(());
+            return Ok(None);
         }
         if let TokenKind::Word(word) = token.kind
             && !key
@@ -1037,47 +1143,152 @@ fn refuse_lazy_collect<'a>(
             // A map key such as {case: value} is not a scalar CASE.
             if !matches!(next, TokenKind::Punct(b':')) {
                 if word.eq_ignore_ascii_case("CASE") {
-                    cases.push(depth);
+                    lazy_push_nesting(&mut cases, depth, token.at)?;
                 } else if word.eq_ignore_ascii_case("END")
                     && cases.last() == Some(&depth)
-                    && (matches!(
-                        next,
-                        TokenKind::End | TokenKind::Punct(b')' | b']' | b'}' | b',')
-                    ) || matches!(next, TokenKind::Word(word)
-                            if ["AS", "END", "WITH", "RETURN", "WHERE", "ORDER", "SKIP", "LIMIT"]
-                                .iter().any(|name| word.eq_ignore_ascii_case(name))))
+                    && complete
                 {
                     cases.pop();
-                } else if word.eq_ignore_ascii_case("COALESCE")
-                    && matches!(next, TokenKind::Punct(b'('))
-                {
-                    coalesce.push(depth + 1);
-                } else if collect_subquery_follows(token.kind, &lexer)?
-                    && (!cases.is_empty() || !coalesce.is_empty())
-                {
-                    return Err(error(
-                        token.at,
-                        GraphPatternTextErrorKind::Expected(
-                            "COLLECT subqueries outside CASE/COALESCE; bind the list in WITH first",
-                        ),
-                    ));
+                    if case && cases.is_empty() {
+                        let after = lexer.next()?;
+                        return Ok(collection.then_some((after, lexer)));
+                    }
+                } else if collect_subquery_follows(token.kind, &lexer)? {
+                    collection = true;
                 }
             }
         }
         match token.kind {
             TokenKind::Punct(opening @ (b'(' | b'[' | b'{')) => {
-                groups.push(opening);
+                lazy_push_nesting(&mut groups, opening, token.at)?;
                 depth += 1;
             }
             TokenKind::Punct(b')' | b']' | b'}') => {
                 groups.pop();
                 depth = depth.saturating_sub(1);
-                coalesce.retain(|&scope| scope <= depth);
+                if !case && depth == 0 {
+                    let after = lexer.next()?;
+                    return Ok(collection.then_some((after, lexer)));
+                }
             }
             _ => {}
         }
+        complete = lazy_operand_after(token.kind, previous, key, complete);
         previous = Some(token.kind);
         token = lexer.next()?;
+    }
+}
+
+/// Bound one scalar arm using the native tokens. The ordinary value parser
+/// still consumes and validates that arm; this boundary only prevents the
+/// source-gathering lookahead from entering its following siblings.
+fn lazy_argument_end<'a>(
+    mut token: Token<'a>,
+    lexer: &Lexer<'a>,
+) -> Result<usize, GraphPatternTextError> {
+    let start = token.at;
+    let mut lexer = lexer.clone();
+    let mut depth = 0_usize;
+    let mut groups = Vec::new();
+    let mut cases = Vec::new();
+    let mut previous = None;
+    let mut complete = false;
+    loop {
+        let key = matches!(previous, Some(TokenKind::Punct(b'.')))
+            || (matches!(previous, Some(TokenKind::Punct(b':'))) && groups.last() != Some(&b'{'))
+            || matches!(previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
+        if matches!(token.kind, TokenKind::End)
+            || (depth == 0 && matches!(token.kind, TokenKind::Punct(b',' | b')' | b']' | b'}')))
+        {
+            return Ok(token.at);
+        }
+        if let TokenKind::Word(word) = token.kind
+            && !key
+            && !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b':'))
+        {
+            if word.eq_ignore_ascii_case("CASE") {
+                lazy_push_nesting(&mut cases, depth, token.at)?;
+            } else if cases.is_empty()
+                && depth == 0
+                && token.at != start
+                && complete
+                && ["WHEN", "THEN", "ELSE", "END"]
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name))
+            {
+                return Ok(token.at);
+            } else if word.eq_ignore_ascii_case("END") && cases.last() == Some(&depth) && complete {
+                cases.pop();
+            }
+        }
+        match token.kind {
+            TokenKind::Punct(opening @ (b'(' | b'[' | b'{')) => {
+                lazy_push_nesting(&mut groups, opening, token.at)?;
+                depth += 1;
+            }
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                groups.pop();
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        complete = lazy_operand_after(token.kind, previous, key, complete);
+        previous = Some(token.kind);
+        token = lexer.next()?;
+    }
+}
+
+fn lazy_literal(value: CanonicalScalar) -> ReadValueTemplate {
+    ReadValueTemplate::Literal(GqlScalarParameter::new(value).expect("bounded conditional scalar"))
+}
+
+fn lazy_null() -> ReadValueTemplate {
+    lazy_literal(CanonicalScalar::Null)
+}
+
+fn lazy_bool(value: bool) -> ReadValueTemplate {
+    lazy_literal(CanonicalScalar::Bool(value))
+}
+
+fn lazy_choose(
+    condition: ReadValueTemplate,
+    value: ReadValueTemplate,
+    otherwise: ReadValueTemplate,
+) -> ReadValueTemplate {
+    ReadValueTemplate::Case {
+        arms: vec![(condition, value)],
+        otherwise: Some(Box::new(otherwise)),
+    }
+}
+
+fn lazy_seed(condition: ReadValueTemplate) -> ReadValueTemplate {
+    lazy_choose(condition, ReadValueTemplate::List(Vec::new()), lazy_null())
+}
+
+fn lazy_private_name<'a>(schema: &RowSchema<'a>, at: usize) -> Result<Name<'a>, GraphSetTextError> {
+    BOUNDARY_READ_NAMES
+        .iter()
+        .find(|name| schema.iter().all(|(binding, _)| binding.text != **name))
+        .map(|&text| Name { text, at })
+        .ok_or_else(|| expected(at, "bounded private conditional columns"))
+}
+
+fn lazy_projection(schema: &RowSchema<'_>) -> Vec<ReadProjectionTemplate> {
+    schema
+        .iter()
+        .enumerate()
+        .map(|(column, (name, _))| ReadProjectionTemplate {
+            name: name.text.to_owned(),
+            value: ReadValueTemplate::Column(column),
+        })
+        .collect()
+}
+
+fn lazy_project_stage(at: usize, projection: Vec<ReadProjectionTemplate>) -> ReadStageTemplate {
+    ReadStageTemplate::Project {
+        at,
+        projection,
+        quantifier: GraphSetQuantifier::All,
     }
 }
 
@@ -1325,7 +1536,9 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         for (token, lexer) in row_pattern_expressions(&mut self.lexer.clone(), |_| false)? {
-            if list_graph_expression_follows(token.kind, &lexer)? {
+            if list_graph_expression_follows(token.kind, &lexer)?
+                || lazy_collection_expression(token, &lexer)?.is_some()
+            {
                 return Ok(true);
             }
         }
@@ -1348,6 +1561,7 @@ impl<'a> Parser<'a> {
             for (token, lexer) in expressions {
                 if relational_subquery_body(token.kind, &lexer)?
                     || row_list_graph_expression_follows(token.kind, &lexer, hoisted)?
+                    || lazy_collection_expression(token, &lexer)?.is_some()
                 {
                     return Ok(true);
                 }
@@ -1362,7 +1576,9 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         for (token, lexer) in row_pattern_expressions(&mut self.lexer.clone(), |_| false)? {
-            if relational_subquery_body(token.kind, &lexer)? {
+            if relational_subquery_body(token.kind, &lexer)?
+                || lazy_collection_expression(token, &lexer)?.is_some()
+            {
                 return Ok(true);
             }
         }
@@ -1664,10 +1880,19 @@ impl<'a> Parser<'a> {
             let count = self.is_word("COUNT");
             let collection = self.is_word("COLLECT");
             let quantifier = self.list_quantifier()?;
+            let lazy = lazy_collection_expression(self.current, &self.lexer)?.is_some();
             let list =
                 row_list_graph_expression_follows(self.current.kind, &self.lexer, |_| false)?;
-            let collected = collection || list || self.starts_pattern_comprehension()?;
-            let (operation, mapped, leading) = if list {
+            let collected = lazy || collection || list || self.starts_pattern_comprehension()?;
+            let (operation, mapped, leading) = if lazy {
+                let operation =
+                    self.multipart_lazy_operation(statement, &schema, visible, call_depth)?;
+                (
+                    operation,
+                    Some(ReadValueTemplate::Column(schema.len())),
+                    Vec::new(),
+                )
+            } else if list {
                 let (operation, leading) = self.multipart_list_comprehension(
                     statement,
                     &mut schema,
@@ -1773,7 +1998,9 @@ impl<'a> Parser<'a> {
                     text: name,
                     at: token.at,
                 },
-                if collected && quantifier.is_none() {
+                if lazy {
+                    GraphSetColumnType::Any
+                } else if collected && quantifier.is_none() {
                     GraphSetColumnType::List
                 } else {
                     GraphSetColumnType::Scalar
@@ -2265,6 +2492,363 @@ impl<'a> Parser<'a> {
             body: Box::new(body),
             imports: (0..captures).collect(),
             result,
+        })
+    }
+
+    /// Evaluate one conditional argument only when its saved seed is non-NULL.
+    /// The body projects exactly one cell; Collect preserves a selected NULL
+    /// as `[NULL]`, whereas an unselected body returns NULL without invocation.
+    #[allow(clippy::too_many_arguments)]
+    fn append_lazy_argument(
+        &mut self,
+        statement: &'a str,
+        owner: &mut UnresolvedReadInput<'a>,
+        schema: &mut RowSchema<'a>,
+        captures: usize,
+        seed: ReadValueTemplate,
+        call_depth: usize,
+    ) -> Result<usize, GraphSetTextError> {
+        let at = self.current.at;
+        let end = lazy_argument_end(self.current, &self.lexer)?;
+        if end == at {
+            return Err(expected(at, "a nonempty conditional argument"));
+        }
+        let name = lazy_private_name(schema, at)?;
+        let width = schema.len();
+        self.capacity(
+            width + 1,
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        let arguments = schema[..captures].to_vec();
+        let boundary = self.boundary_reads.take();
+        let existence = self.existence_reads.take();
+        let comprehensions = self.comprehension_reads.take();
+        let grouped = self.grouped_comprehensions.take();
+        let projected = self.projected_sources.take();
+        let parsed = (|| -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+            let mut body = UnresolvedReadInput::from_first(UnresolvedGraphText {
+                statement,
+                syntax: self.take_part_syntax()?,
+                projection: None,
+                pipeline: vec![ReadStageTemplate::Arguments {
+                    columns: arguments
+                        .iter()
+                        .map(|(name, _)| name.text.to_owned())
+                        .collect(),
+                    types: arguments.iter().map(|(_, kind)| *kind).collect(),
+                }],
+                singleton: true,
+                leading: Vec::new(),
+                leading_types: Vec::new(),
+                correlations: Vec::new(),
+                row_fields: Vec::new(),
+            });
+            let saved = (self.lexer.clone(), self.current);
+            let mut bounded = self.lexer.clone();
+            bounded.text = &statement[..end];
+            let expressions =
+                row_pattern_expressions_from(self.current, &mut bounded, |_| false, true)?;
+            let (parts, expanded, spans, counts) = self.gather_row_expression_sources(
+                statement,
+                &arguments,
+                captures,
+                call_depth + 1,
+                expressions,
+            )?;
+            body.continuations.extend(parts);
+            self.boundary_reads = Some(BoundaryReads {
+                visible: captures,
+                width: expanded.len(),
+                reads: Vec::new(),
+                functions: Vec::new(),
+                grouped: Vec::new(),
+                scoped: Vec::new(),
+            });
+            self.existence_reads = Some((expanded.len(), spans));
+            self.comprehension_reads = Some((expanded.len(), counts));
+            (self.lexer, self.current) = saved;
+            let value = self.read_row_value(&expanded, 0)?;
+            if self.current.at != end {
+                return Err(expected(
+                    self.current.at,
+                    "the end of a conditional argument",
+                ));
+            }
+            body.append_stages(vec![lazy_project_stage(
+                at,
+                vec![ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value,
+                }],
+            )]);
+            body.append_element_keys(&mut self.syntax.element_keys);
+            Ok(body)
+        })();
+        self.boundary_reads = boundary;
+        self.existence_reads = existence;
+        self.comprehension_reads = comprehensions;
+        self.grouped_comprehensions = grouped;
+        self.projected_sources = projected;
+        let body = parsed?;
+        let mut leading = lazy_projection(schema);
+        leading.push(ReadProjectionTemplate {
+            name: name.text.to_owned(),
+            value: seed,
+        });
+        let mut projection = lazy_projection(schema);
+        projection.push(ReadProjectionTemplate {
+            name: name.text.to_owned(),
+            value: ReadValueTemplate::Index {
+                list: Box::new(ReadValueTemplate::Column(width + 1)),
+                index: Box::new(lazy_literal(CanonicalScalar::Int(0))),
+            },
+        });
+        owner.continuations.push(UnresolvedContinuation {
+            input: UnresolvedGraphText {
+                statement,
+                syntax: self.take_part_syntax()?,
+                projection: Some(projection),
+                pipeline: Vec::new(),
+                singleton: true,
+                leading: vec![lazy_project_stage(at, leading)],
+                leading_types: schema
+                    .iter()
+                    .map(|(_, kind)| *kind)
+                    .chain([GraphSetColumnType::List, GraphSetColumnType::List])
+                    .collect(),
+                correlations: Vec::new(),
+                row_fields: Vec::new(),
+            },
+            operation: UnresolvedContinuationOperation::List {
+                body: Box::new(body),
+                imports: (0..captures).collect(),
+                list_column: width,
+            },
+        });
+        schema.push((name, GraphSetColumnType::Any));
+        Ok(width)
+    }
+
+    /// CASE and COALESCE containing COLLECT are native scalar Apply bodies.
+    /// Two private cells retain pending/result state; each completed arm drops
+    /// its temporary cells. All arguments are prepared, but only selected
+    /// arguments execute, including their graph reads and scalar failures.
+    fn multipart_lazy_operation(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        captures: usize,
+        call_depth: usize,
+    ) -> Result<UnresolvedContinuationOperation<'a>, GraphSetTextError> {
+        let at = self.current.at;
+        if call_depth >= 8 {
+            return Err(expected(at, "at most eight nested conditional/read bodies"));
+        }
+        let case = self.is_word("CASE");
+        let outer_syntax = self.take_part_syntax()?;
+        let boundary = self.boundary_reads.take();
+        let projected = self.projected_sources.take();
+        let existence = self.existence_reads.take();
+        let comprehensions = self.comprehension_reads.take();
+        let grouped = self.grouped_comprehensions.take();
+        let row_bindings = core::mem::take(&mut self.read_row_bindings);
+        let correlations = core::mem::take(&mut self.read_correlations);
+        let row_fields = core::mem::take(&mut self.read_row_fields);
+        let comparisons = self.read_comparisons.take();
+        let element_reads = core::mem::replace(&mut self.call_element_reads, true);
+        let optional_body = core::mem::take(&mut self.optional_body);
+        let parsed = (|| -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+            let mut schema = incoming[..captures].to_vec();
+            let mut initial = lazy_projection(&schema);
+            let pending = schema.len();
+            let pending_name = lazy_private_name(&schema, at)?;
+            schema.push((pending_name, GraphSetColumnType::Scalar));
+            initial.push(ReadProjectionTemplate {
+                name: pending_name.text.to_owned(),
+                value: lazy_bool(true),
+            });
+            let result = schema.len();
+            let result_name = lazy_private_name(&schema, at)?;
+            schema.push((result_name, GraphSetColumnType::Any));
+            initial.push(ReadProjectionTemplate {
+                name: result_name.text.to_owned(),
+                value: lazy_null(),
+            });
+            let mut body = UnresolvedReadInput::from_first(UnresolvedGraphText {
+                statement,
+                syntax: self.take_part_syntax()?,
+                projection: None,
+                pipeline: vec![
+                    ReadStageTemplate::Arguments {
+                        columns: incoming[..captures]
+                            .iter()
+                            .map(|(name, _)| name.text.to_owned())
+                            .collect(),
+                        types: incoming[..captures].iter().map(|(_, kind)| *kind).collect(),
+                    },
+                    lazy_project_stage(at, initial),
+                ],
+                singleton: true,
+                leading: Vec::new(),
+                leading_types: Vec::new(),
+                correlations: Vec::new(),
+                row_fields: Vec::new(),
+            });
+            self.advance()?;
+            if case {
+                let subject = if self.is_word("WHEN") {
+                    None
+                } else {
+                    Some(self.append_lazy_argument(
+                        statement,
+                        &mut body,
+                        &mut schema,
+                        captures,
+                        ReadValueTemplate::List(Vec::new()),
+                        call_depth,
+                    )?)
+                };
+                let retained = schema.len();
+                let mut arms = 0;
+                while self.take_word("WHEN")? {
+                    let condition = self.append_lazy_argument(
+                        statement,
+                        &mut body,
+                        &mut schema,
+                        captures,
+                        lazy_seed(ReadValueTemplate::Column(pending)),
+                        call_depth,
+                    )?;
+                    self.word("THEN")?;
+                    let mut projection = lazy_projection(&schema);
+                    let test = subject.map_or_else(
+                        || ReadValueTemplate::Column(condition),
+                        |subject| ReadValueTemplate::Equal {
+                            left: Box::new(ReadValueTemplate::Column(subject)),
+                            right: Box::new(ReadValueTemplate::Column(condition)),
+                        },
+                    );
+                    projection[condition].value = lazy_choose(
+                        ReadValueTemplate::Column(pending),
+                        lazy_choose(test, lazy_bool(true), lazy_bool(false)),
+                        lazy_bool(false),
+                    );
+                    body.append_stages(vec![lazy_project_stage(at, projection)]);
+                    schema[condition].1 = GraphSetColumnType::Scalar;
+                    let value = self.append_lazy_argument(
+                        statement,
+                        &mut body,
+                        &mut schema,
+                        captures,
+                        lazy_seed(ReadValueTemplate::Column(condition)),
+                        call_depth,
+                    )?;
+                    schema.truncate(retained);
+                    let mut projection = lazy_projection(&schema);
+                    projection[pending].value = lazy_choose(
+                        ReadValueTemplate::Column(condition),
+                        lazy_bool(false),
+                        ReadValueTemplate::Column(pending),
+                    );
+                    projection[result].value = lazy_choose(
+                        ReadValueTemplate::Column(condition),
+                        ReadValueTemplate::Column(value),
+                        ReadValueTemplate::Column(result),
+                    );
+                    body.append_stages(vec![lazy_project_stage(at, projection)]);
+                    arms += 1;
+                }
+                if arms == 0 {
+                    return Err(expected(self.current.at, "WHEN in a CASE expression"));
+                }
+                if self.take_word("ELSE")? {
+                    let value = self.append_lazy_argument(
+                        statement,
+                        &mut body,
+                        &mut schema,
+                        captures,
+                        lazy_seed(ReadValueTemplate::Column(pending)),
+                        call_depth,
+                    )?;
+                    schema.truncate(retained);
+                    let mut projection = lazy_projection(&schema);
+                    projection[result].value = lazy_choose(
+                        ReadValueTemplate::Column(pending),
+                        ReadValueTemplate::Column(value),
+                        ReadValueTemplate::Column(result),
+                    );
+                    body.append_stages(vec![lazy_project_stage(at, projection)]);
+                }
+                self.word("END")?;
+            } else {
+                self.punct(b'(', "( after COALESCE")?;
+                let retained = schema.len();
+                loop {
+                    let value = self.append_lazy_argument(
+                        statement,
+                        &mut body,
+                        &mut schema,
+                        captures,
+                        lazy_seed(ReadValueTemplate::Column(pending)),
+                        call_depth,
+                    )?;
+                    schema.truncate(retained);
+                    let mut projection = lazy_projection(&schema);
+                    projection[result].value = lazy_choose(
+                        ReadValueTemplate::Column(pending),
+                        ReadValueTemplate::Column(value),
+                        ReadValueTemplate::Column(result),
+                    );
+                    let absent = ReadValueTemplate::Integer {
+                        at,
+                        program: vec![
+                            crate::mutation_text::MutationIntegerTemplateOp::Bound(
+                                crate::GraphIntegerOp::PresenceColumn(value),
+                            ),
+                            crate::mutation_text::MutationIntegerTemplateOp::Bound(
+                                crate::GraphIntegerOp::IsNull(true),
+                            ),
+                        ],
+                    };
+                    projection[pending].value =
+                        lazy_choose(ReadValueTemplate::Column(pending), absent, lazy_bool(false));
+                    body.append_stages(vec![lazy_project_stage(at, projection)]);
+                    if !self.take(b',')? {
+                        break;
+                    }
+                }
+                self.punct(b')', ") after COALESCE")?;
+            }
+            body.append_stages(vec![lazy_project_stage(
+                at,
+                vec![ReadProjectionTemplate {
+                    name: result_name.text.to_owned(),
+                    value: ReadValueTemplate::Column(result),
+                }],
+            )]);
+            body.append_element_keys(&mut self.syntax.element_keys);
+            Ok(body)
+        })();
+        let remainder = self.take_part_syntax()?;
+        self.syntax = outer_syntax;
+        self.syntax.parameters = remainder.parameters;
+        self.syntax.parameter_offsets = remainder.parameter_offsets;
+        self.boundary_reads = boundary;
+        self.projected_sources = projected;
+        self.existence_reads = existence;
+        self.comprehension_reads = comprehensions;
+        self.grouped_comprehensions = grouped;
+        self.read_row_bindings = row_bindings;
+        self.read_correlations = correlations;
+        self.read_row_fields = row_fields;
+        self.read_comparisons = comparisons;
+        self.call_element_reads = element_reads;
+        self.optional_body = optional_body;
+        Ok(UnresolvedContinuationOperation::Apply {
+            body: Box::new(parsed?),
+            imports: (0..captures).collect(),
+            optional: false,
         })
     }
 
@@ -2948,10 +3532,15 @@ impl<'a> Parser<'a> {
         // local frame order can differ from the enclosing CALL's frame.
         let scope = self.call_scope.clone();
         if !owned && let Some(active) = &mut self.call_scope {
-            active.imports.retain(|name| incoming.iter().any(|(binding, _)| binding.text == name.text));
+            active.imports.retain(|name| {
+                incoming
+                    .iter()
+                    .any(|(binding, _)| binding.text == name.text)
+            });
             active.arguments.clone_from(&incoming);
         }
-        let parsed = self.multipart_parts_in_frame(statement, aggregate, incoming, call_depth, owned);
+        let parsed =
+            self.multipart_parts_in_frame(statement, aggregate, incoming, call_depth, owned);
         self.call_scope = scope;
         parsed
     }
@@ -3287,10 +3876,13 @@ impl<'a> Parser<'a> {
         let previous_reads = core::mem::replace(&mut self.call_element_reads, true);
         let previous_body = core::mem::replace(&mut self.call_body, true);
         let previous_existence = core::mem::take(&mut self.existence_body);
-        let previous_scope = core::mem::replace(&mut self.call_scope, scoped.then(|| CallScope {
-            arguments: schema.clone(),
-            imports: schema.iter().map(|(name, _)| *name).collect(),
-        }));
+        let previous_scope = core::mem::replace(
+            &mut self.call_scope,
+            scoped.then(|| CallScope {
+                arguments: schema.clone(),
+                imports: schema.iter().map(|(name, _)| *name).collect(),
+            }),
+        );
         let body = self.multipart_call_body(
             statement,
             incoming,

@@ -535,9 +535,7 @@ fn scoped_call_imports_survive_with_and_nested_scope_boundaries() {
     // Legacy importing WITH retains its ordinary lexical lifetime and may
     // be shadowed by a subsequent WITH; empty scope admits no outer names.
     assert_eq!(
-        execute(
-            "WITH 3 AS x CALL { WITH x WITH 9 AS x RETURN x AS value } RETURN value"
-        ),
+        execute("WITH 3 AS x CALL { WITH x WITH 9 AS x RETURN x AS value } RETURN value"),
         vec![row(&[Some(9)])]
     );
     for text in [
@@ -724,10 +722,8 @@ fn scoped_call_import_redeclarations_fail_before_catalog_even_without_rows() {
 
 #[test]
 fn restored_call_imports_share_wildcard_identity_and_execution_budgets() {
-    let explicit =
-        "WITH 2 AS x CALL (x) { WITH 3 AS y RETURN x+y AS value } RETURN value";
-    let wildcard =
-        "WITH 2 AS x CALL (*) { WITH 3 AS y RETURN x+y AS value } RETURN value";
+    let explicit = "WITH 2 AS x CALL (x) { WITH 3 AS y RETURN x+y AS value } RETURN value";
+    let wildcard = "WITH 2 AS x CALL (*) { WITH 3 AS y RETURN x+y AS value } RETURN value";
     let explicit = PreparedGraphSetText::prepare(explicit, symbols).unwrap();
     let wildcard = PreparedGraphSetText::prepare(wildcard, symbols).unwrap();
     assert_eq!(
@@ -7780,7 +7776,7 @@ mod graph_reading_list_sources {
 
 mod collect_subqueries {
     use super::*;
-    use fgdb_gql::GraphIntegerErrorKind;
+    use fgdb_gql::{GraphIntegerErrorKind, GraphPatternTextErrorKind, GraphSetTextErrorKind};
 
     fn int(value: i64) -> GraphValue {
         GraphValue::Scalar(CanonicalScalar::Int(value))
@@ -8495,19 +8491,17 @@ mod collect_subqueries {
     }
 
     #[test]
-    fn collect_subquery_shape_scope_writes_and_lazy_arms_refuse_before_catalog_access() {
+    fn collect_subquery_shape_scope_and_writes_refuse_before_catalog_access() {
         for statement in [
             "RETURN COLLECT { MATCH (n) } AS values",
             "RETURN COLLECT { RETURN 1 AS a,2 AS b } AS values",
             "MATCH (n) RETURN COLLECT { CREATE (m) RETURN m } AS values",
             "MATCH (n) RETURN COLLECT { MATCH (n)-[:R]->(private) RETURN private } AS values,private",
-            "RETURN CASE WHEN true THEN [] ELSE COLLECT { MATCH (n) RETURN 1/0 AS bad } END AS values",
-            "RETURN coalesce([],COLLECT { MATCH (n) RETURN 1/0 AS bad }) AS values",
-            "RETURN CASE WHEN true THEN [] ELSE [x IN [1] | COLLECT { MATCH (n) RETURN n }] END AS values",
-            "RETURN COLLECT { RETURN CASE WHEN true THEN [] ELSE COLLECT { RETURN 1/0 AS bad } END AS value } AS values",
-            "WITH true AS end RETURN CASE WHEN end THEN COLLECT { RETURN 1 AS value } ELSE [] END AS values",
-            "WITH true AS end RETURN CASE WHEN (end) THEN COLLECT { RETURN 1 AS value } ELSE [] END AS values",
-            "RETURN {value:CASE WHEN true THEN [] ELSE COLLECT { RETURN 1/0 AS bad } END} AS values",
+            "RETURN CASE WHEN true THEN [] ELSE COLLECT { RETURN missing AS bad } END AS values",
+            "RETURN coalesce([],COLLECT { CREATE (n) RETURN n }) AS values",
+            "RETURN coalesce(,COLLECT { RETURN 1 AS value }) AS values",
+            "RETURN coalesce(NULL,,COLLECT { RETURN 1 AS value }) AS values",
+            "RETURN coalesce(COLLECT { RETURN 1 AS value },) AS values",
         ] {
             let mut catalog_reads = 0;
             let result = PreparedGraphSetText::prepare(statement, |kind, name| {
@@ -8517,6 +8511,312 @@ mod collect_subqueries {
             assert!(result.is_err(), "{statement}");
             assert_eq!(catalog_reads, 0, "{statement}");
         }
+    }
+
+    #[test]
+    fn lazy_collect_lookahead_refuses_excessive_nesting_before_catalog_access() {
+        for statement in [
+            format!(
+                "RETURN {}COLLECT {{ MATCH (n) RETURN n }}{} AS values",
+                "CASE WHEN true THEN ".repeat(65),
+                " ELSE [] END".repeat(65),
+            ),
+            format!(
+                "RETURN CASE WHEN true THEN {}COLLECT {{ MATCH (n) RETURN n }}{} ELSE [] END AS values",
+                "[".repeat(65),
+                "]".repeat(65),
+            ),
+        ] {
+            let mut catalog_reads = 0;
+            let error = PreparedGraphSetText::prepare(&statement, |kind, name| {
+                catalog_reads += 1;
+                symbols(kind, name)
+            })
+            .unwrap_err();
+            assert!(matches!(
+                error.kind,
+                GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::BooleanNesting {
+                    limit: 64
+                })
+            ));
+            assert_eq!(catalog_reads, 0);
+        }
+    }
+
+    #[test]
+    fn collect_subqueries_in_lazy_arms_skip_unselected_sources_and_errors() {
+        for (statement, expected) in [
+            (
+                "RETURN CASE WHEN true THEN [] ELSE COLLECT { MATCH (n) RETURN 1/0 AS bad } END AS values",
+                list([]),
+            ),
+            (
+                "RETURN coalesce([],COLLECT { MATCH (n) RETURN 1/0 AS bad }) AS values",
+                list([]),
+            ),
+            (
+                "RETURN [CASE WHEN true THEN [] ELSE COLLECT { MATCH (n) RETURN 1/0 AS bad } END] AS values",
+                list([list([])]),
+            ),
+            (
+                "RETURN [coalesce([],COLLECT { MATCH (n) RETURN 1/0 AS bad })] AS values",
+                list([list([])]),
+            ),
+            (
+                "RETURN [[{value:CASE WHEN false THEN COLLECT { MATCH (n) RETURN 1/0 AS bad } ELSE [7] END}]] AS values",
+                list([list([GraphValue::map(vec![(
+                    "value".into(),
+                    list([int(7)]),
+                )])
+                .unwrap()])]),
+            ),
+            (
+                "WITH 99 AS x RETURN [CASE WHEN true THEN [x IN [1,2] | COLLECT { RETURN x AS value }] ELSE [] END,x] AS values",
+                list([list([list([int(1)]), list([int(2)])]), int(99)]),
+            ),
+            (
+                "RETURN CASE WHEN true THEN [] ELSE [x IN [1] | COLLECT { MATCH (n) RETURN n }] END AS values",
+                list([]),
+            ),
+            (
+                "RETURN COLLECT { RETURN CASE WHEN true THEN [] ELSE COLLECT { RETURN 1/0 AS bad } END AS value } AS values",
+                list([list([])]),
+            ),
+            (
+                "WITH true AS end RETURN CASE WHEN end THEN COLLECT { RETURN 1 AS value } ELSE [] END AS values",
+                list([int(1)]),
+            ),
+            (
+                "WITH true AS end RETURN CASE WHEN (end) THEN COLLECT { RETURN 1 AS value } ELSE [] END AS values",
+                list([int(1)]),
+            ),
+            (
+                "WITH true AS end RETURN CASE WHEN true AND end THEN COLLECT { RETURN 1 AS value } ELSE [] END AS values",
+                list([int(1)]),
+            ),
+            (
+                "WITH 1 AS end RETURN CASE 1 + end WHEN 2 THEN COLLECT { RETURN 1 AS value } ELSE [] END AS values",
+                list([int(1)]),
+            ),
+            (
+                "WITH true AS when RETURN CASE WHEN when THEN COLLECT { RETURN 1 AS value } ELSE [] END AS values",
+                list([int(1)]),
+            ),
+            (
+                "WITH 7 AS then RETURN CASE WHEN true THEN then ELSE COLLECT { MATCH (n) RETURN 1/0 AS bad } END AS values",
+                int(7),
+            ),
+            (
+                "WITH {then:7} AS value RETURN CASE WHEN true THEN value.then ELSE COLLECT { MATCH (n) RETURN 1/0 AS bad } END AS values",
+                int(7),
+            ),
+            (
+                "RETURN CASE WHEN false THEN COLLECT { RETURN 1 / 0 AS x } ELSE [7] END[0] AS x",
+                int(7),
+            ),
+            (
+                "RETURN CASE WHEN false THEN COLLECT { RETURN 1 / 0 AS x } ELSE [] END = [] AS x",
+                GraphValue::Scalar(CanonicalScalar::Bool(true)),
+            ),
+            (
+                "RETURN CASE WHEN false THEN size(COLLECT { MATCH (n) RETURN 1/0 AS bad }) ELSE 7 END + 1 AS values",
+                int(8),
+            ),
+            (
+                "RETURN CASE WHEN CASE WHEN true THEN true ELSE false END THEN [] ELSE COLLECT { MATCH (n) RETURN 1/0 AS bad } END AS values",
+                list([]),
+            ),
+            (
+                "RETURN CASE WHEN true THEN CASE WHEN false THEN COLLECT { MATCH (n) RETURN 1/0 AS bad } ELSE [7] END ELSE [] END AS values",
+                list([int(7)]),
+            ),
+            (
+                "RETURN coalesce([],CASE WHEN EXISTS { MATCH (n) } THEN COLLECT { RETURN 1/0 AS bad } ELSE [] END) AS values",
+                list([]),
+            ),
+            (
+                "RETURN {value:CASE WHEN true THEN [] ELSE COLLECT { RETURN 1/0 AS bad } END} AS values",
+                GraphValue::map(vec![("value".into(), list([]))]).unwrap(),
+            ),
+            (
+                "RETURN CASE WHEN true THEN {case:1} ELSE COLLECT { MATCH (n) RETURN 1/0 AS bad } END AS values",
+                GraphValue::map(vec![("case".into(), int(1))]).unwrap(),
+            ),
+            (
+                "RETURN CASE WHEN true THEN NULL ELSE COLLECT { MATCH (n) RETURN n } END AS values",
+                null(),
+            ),
+            (
+                "RETURN CASE WHEN false THEN COLLECT { MATCH (n) RETURN n } END AS values",
+                null(),
+            ),
+            (
+                "RETURN coalesce(NULL, [NULL], COLLECT { MATCH (n) RETURN 1/0 AS bad }) AS values",
+                list([null()]),
+            ),
+        ] {
+            let query = prepare(statement);
+            let calls = std::cell::Cell::new(0);
+            let result = query
+                .execute_governed(
+                    wide(),
+                    |_, _| {
+                        calls.set(calls.get() + 1);
+                        Err::<GqlQueryExecution<GraphValueRow>, _>(GqlQueryError::Source(
+                            "unselected source",
+                        ))
+                    },
+                    || Ok::<_, usize>(()),
+                )
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            assert_eq!(calls.get(), 0, "{statement}");
+            assert_eq!(result.rows.snapshot_records, 0, "{statement}");
+            assert_eq!(result.value, vec![row([expected])], "{statement}");
+        }
+    }
+
+    #[test]
+    fn lazy_simple_case_evaluates_its_selector_once() {
+        let selector = "size(COLLECT { MATCH (n) RETURN n })";
+        let once = run(
+            &prepare(&format!("RETURN {selector} AS count")),
+            wide(),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let selected = run(
+            &prepare(&format!(
+                "RETURN CASE {selector} WHEN 0 THEN [] WHEN 4 THEN [7] \
+                 WHEN 1/0 THEN COLLECT {{ MATCH (n) RETURN 1/0 AS bad }} ELSE [] END AS values"
+            )),
+            wide(),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(selected.value, vec![row([list([int(7)])])]);
+        assert!(once.rows.snapshot_records > 0);
+        assert_eq!(selected.rows.snapshot_records, once.rows.snapshot_records);
+    }
+
+    #[test]
+    fn lazy_collect_parameters_rebind_without_freezing_arm_selection() {
+        let template = PreparedGraphSetText::prepare(
+            "RETURN CASE WHEN $choice=1 THEN COLLECT { RETURN $value AS value } ELSE [] END AS values",
+            symbols,
+        )
+        .unwrap();
+        let definition = template.canonical_template_bytes();
+        for (choice, value) in [(0, 3), (1, 7), (1, 9), (0, 11)] {
+            let query = template
+                .bind_parameters(
+                    &GqlParameters::new()
+                        .with_int64("choice", choice)
+                        .unwrap()
+                        .with_int64("value", value)
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                run(&query, wide(), &mut || Ok(())).unwrap().value,
+                vec![row([if choice == 1 {
+                    list([int(value)])
+                } else {
+                    list([])
+                }])]
+            );
+        }
+        assert_eq!(template.canonical_template_bytes(), definition);
+    }
+
+    #[test]
+    fn lazy_collect_arms_keep_correlation_occurrences_and_selected_nulls() {
+        let expected = vec![
+            row([int(1), list([vertex(2), vertex(2), vertex(3)])]),
+            row([int(4), null()]),
+            row([int(1), list([vertex(2), vertex(2), vertex(3)])]),
+        ];
+        for expression in [
+            "CASE WHEN id(n)=1 THEN COLLECT { MATCH (n)-[:R]->(m) RETURN m ORDER BY m } WHEN true THEN NULL ELSE [99] END",
+            "CASE id(n) WHEN 1 THEN COLLECT { MATCH (n)-[:R]->(m) RETURN m ORDER BY m } WHEN 4 THEN NULL ELSE [99] END",
+        ] {
+            let statement = format!(
+                "UNWIND [1,4,1] AS wanted MATCH (n) WHERE id(n)=wanted \
+                 RETURN wanted,{expression} AS values"
+            );
+            assert_eq!(execute(&statement), expected, "{statement}");
+        }
+        assert_eq!(
+            execute(
+                "RETURN coalesce(NULL,COLLECT { UNWIND [3,NULL,3] AS x RETURN x },1/0) AS values"
+            ),
+            vec![row([list([int(3), null(), int(3)])])]
+        );
+        assert_eq!(
+            execute(
+                "RETURN CASE WHEN NULL THEN COLLECT { RETURN 1/0 AS bad } WHEN true \
+                     THEN COLLECT { RETURN CASE WHEN false THEN COLLECT { RETURN 1/0 AS bad } \
+                     ELSE [7] END AS value } ELSE 1/0 END AS values"
+            ),
+            vec![row([list([list([int(7)])])])]
+        );
+    }
+
+    #[test]
+    fn lazy_collect_selected_failures_and_cumulative_limits_remain_terminal() {
+        for statement in [
+            "RETURN CASE WHEN false THEN [] ELSE COLLECT { RETURN 1/0 AS bad } END AS values",
+            "RETURN coalesce(NULL,COLLECT { RETURN 1/0 AS bad }) AS values",
+            "RETURN CASE WHEN 1/0=0 THEN [] ELSE COLLECT { RETURN 7 AS value } END AS values",
+            "RETURN CASE WHEN true THEN 1/0 ELSE COLLECT { RETURN 7 AS value } END AS values",
+        ] {
+            for suffix in ["", " LIMIT 0"] {
+                let query = prepare(&format!("{statement}{suffix}"));
+                assert!(
+                    matches!(run(&query, wide(), &mut || Ok(())),
+                    Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                    if error.kind == GraphIntegerErrorKind::DivisionByZero),
+                    "{statement}{suffix}"
+                );
+            }
+        }
+        let query = prepare(
+            "MATCH (n) RETURN n,CASE WHEN id(n)=1 THEN COLLECT { MATCH (n)-[:R]->(m) \
+             RETURN m ORDER BY m } ELSE [] END AS values ORDER BY n",
+        );
+        let measured = run(&query, wide(), &mut || Ok(())).unwrap();
+        let caps = [
+            measured.rows.snapshot_records,
+            measured.rows.result_rows,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        ];
+        assert_eq!(
+            run(
+                &query,
+                GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                &mut || Ok(())
+            )
+            .unwrap(),
+            measured
+        );
+        for dimension in 0..4 {
+            assert!(caps[dimension] > 0);
+            let mut limited = caps;
+            limited[dimension] -= 1;
+            assert!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                    &mut || Ok(())
+                )
+                .is_err()
+            );
+        }
+        assert!(matches!(
+            run(&query, wide(), &mut || Err(47)),
+            Err(GqlQueryError::Interrupted(47))
+        ));
+        assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap(), measured);
     }
 
     #[test]
