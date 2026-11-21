@@ -18,7 +18,7 @@ mod scan_access;
 
 pub(crate) use scan_access::native_runs::NativeRunSuffix;
 
-use super::{BlockStore, RootReadEvent, RootWalk, StoreError};
+use super::{BlockStore, ExtentError, RootReadEvent, RootWalk, StoreError};
 use crate::edge_props::{BlockProps, EdgePropertyRow};
 use crate::root::PartitionRoot;
 use crate::root::descriptor::{BlockDescriptor, BlockSummary, PatchDescriptor};
@@ -170,7 +170,10 @@ pub enum BufferedReadError {
 
 impl From<StoreError> for BufferedReadError {
     fn from(error: StoreError) -> Self {
-        Self::Store(Box::new(error))
+        match error {
+            StoreError::Extent(ExtentError::Memory(error)) => Self::Memory(error),
+            other => Self::Store(Box::new(other)),
+        }
     }
 }
 impl From<BufferError> for BufferedReadError {
@@ -913,8 +916,12 @@ impl<V: Vfs> BufferedPartition<V> {
     /// historical candidate domain. The incidence ceiling covers base versions
     /// plus raw suffix statements before suffix payload loading. Pruned, untyped
     /// and selected-root scans keep their ordinary root source; typed incidents
-    /// may still select an eligible run. Encoded extents retain ordinary sources too;
-    /// this profile does not yet account the erasure decoder's workspace.
+    /// may still select an eligible run. Encoded extents admit frame scratch and
+    /// authenticated-header-derived erasure decoder capacity through this same
+    /// source pool, including when the selected object lives inside a pack.
+    /// Repair tries indexed packs and loose copies; newly published repair
+    /// packs require reopening, since their retained index metadata is not
+    /// owned by this query's temporary extent reservation.
     /// A selected run or suffix corruption, cancellation or quota failure is
     /// terminal.
     pub fn set_native_run_limits(
@@ -929,6 +936,7 @@ impl<V: Vfs> BufferedPartition<V> {
         // A verification reader may already require direct physical reads.
         // Disabling this query profile must not weaken that reader policy.
         self.store.direct_pack_reads |= limits.is_some();
+        self.store.extent_read_pool = limits.map(|_| self.pool().clone());
         self.native_run_limits = limits;
         Ok(())
     }

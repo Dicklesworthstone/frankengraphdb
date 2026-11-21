@@ -992,6 +992,155 @@ fn selected_native_runs_supply_match_rows_and_corruption_never_falls_back() {
 }
 
 #[test]
+fn ecs_native_runs_serve_history_and_suffix_repair_damage_and_never_fall_back() {
+    let ((), report) = run_async_under_lab(0x6275_ec51, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let coded_keys = keys().with_default_strata_ecs();
+        let vfs = MemVfs::new().unwrap();
+        let mut db =
+            Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), coded_keys.clone())
+                .await
+                .unwrap();
+        let mut first = WriteBatch::new(RELATION);
+        for vid in 1..=3 {
+            first.create_vertex(
+                VId(vid),
+                vec![],
+                vec![(PROPERTY, CanonicalScalar::Int(vid as i64))],
+            );
+        }
+        first.add_edge(
+            EId(101),
+            VId(1),
+            VId(2),
+            vec![(PROPERTY, CanonicalScalar::Int(7))],
+        );
+        first.add_edge(
+            EId(104),
+            VId(2),
+            VId(3),
+            vec![(PROPERTY, CanonicalScalar::Int(10))],
+        );
+        assert_eq!(db.write(&commit, first).await.unwrap(), CommitSeq(1));
+        let run = db
+            .seal_relation(
+                &commit,
+                &cx,
+                RELATION,
+                CommitSeq(0),
+                native_run_limits(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let mut suffix = WriteBatch::new(RELATION);
+        suffix.set_edge_property(EId(101), PROPERTY, Some(CanonicalScalar::Int(17)));
+        suffix.delete_edge(EId(104));
+        suffix.add_edge(
+            EId(105),
+            VId(1),
+            VId(3),
+            vec![(PROPERTY, CanonicalScalar::Int(20))],
+        );
+        assert_eq!(db.write(&commit, suffix).await.unwrap(), CommitSeq(2));
+        let store = BlockStore::open_existing_for_read_with_vfs_and_ecs(
+            &commit,
+            vfs.clone(),
+            vfs.database_dir(),
+            [0xb1; 32],
+            DatabaseSecurityNamespaceId([0xb2; 32]),
+            coded_keys.strata_ecs().cloned(),
+        )
+        .await
+        .unwrap();
+        let selected = store
+            .get_root(&commit, db.partition_root().unwrap())
+            .await
+            .unwrap();
+        let covered = selected
+            .blocks
+            .iter()
+            .find(|block| block.last_seq == CommitSeq(1))
+            .unwrap();
+        let covered_path = store.path(covered.block_id);
+        let covered_bytes = vfs.read(&covered_path).await.unwrap();
+        let run_path = store.path(run.0);
+        let run_bytes = vfs.read(&run_path).await.unwrap();
+        let memory = MemoryPool::new(64 * 1024 * 1024, 0).unwrap();
+        let mut source_limits = limits();
+        source_limits.max_source_bytes = 16 * 1024 * 1024;
+        source_limits.max_work = 1_000_000;
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs.clone(),
+            vfs.database_dir(),
+            coded_keys,
+            memory.clone(),
+            source_limits,
+        )
+        .await
+        .unwrap();
+        view.set_native_run_limits(&cx, Some(native_run_limits()))
+            .unwrap();
+        let plan = native_run_query(0, ":R", "");
+        let row = |eid, src, dst, property| {
+            vec![
+                GraphValue::Edge(EId(eid)),
+                GraphValue::Vertex(VId(src)),
+                GraphValue::Vertex(VId(dst)),
+                GraphValue::Scalar(CanonicalScalar::Int(property)),
+                GraphValue::Scalar(CanonicalScalar::Int(src as i64)),
+                GraphValue::Scalar(CanonicalScalar::Int(dst as i64)),
+            ]
+        };
+        let before = vec![row(101, 1, 2, 7), row(104, 2, 3, 10)];
+        let after = vec![row(101, 1, 2, 17), row(105, 1, 3, 20)];
+
+        // Owner admission already authenticated Tier D. Destroy a covered
+        // block afterwards: only the selected run plus its suffix can answer.
+        vfs.write(&covered_path, b"covered Tier D must not be read")
+            .await
+            .unwrap();
+        assert_eq!(native_run_rows(&mut view, &cx, &plan, 1, 3).await, before);
+        assert_eq!(native_run_rows(&mut view, &cx, &plan, 2, 3).await, after);
+
+        // Damage the final frame's AEAD tag before the 128-byte mirror header.
+        // The bounded reader must admit and use the same authenticated RaptorQ
+        // recovery as the ordinary store, while retaining the complete suffix.
+        let mut damaged = run_bytes.clone();
+        let tag_byte = damaged.len() - 128 - 1;
+        damaged[tag_byte] ^= 0xff;
+        vfs.write(&run_path, &damaged).await.unwrap();
+        assert_eq!(native_run_rows(&mut view, &cx, &plan, 1, 3).await, before);
+        assert_eq!(native_run_rows(&mut view, &cx, &plan, 2, 3).await, after);
+
+        vfs.write(&covered_path, &covered_bytes).await.unwrap();
+        vfs.write(&run_path, b"unrepairable selected ECS run")
+            .await
+            .unwrap();
+        let mut cursor = view
+            .stream_graph_edges_governed(&cx, &plan, native_run_policy(3))
+            .unwrap();
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Source(_)))
+        ));
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+        // Ordinary sources remain viable; selection cannot silently retry them.
+        view.set_native_run_limits(&cx, None).unwrap();
+        assert_eq!(native_run_rows(&mut view, &cx, &plan, 2, 3).await, after);
+        vfs.write(&run_path, &run_bytes).await.unwrap();
+        drop(view);
+        assert_eq!(memory.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn ineligible_native_runs_preserve_the_complete_existing_candidate_domain() {
     let ((), report) = run_async_under_lab(0x6275_e012, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

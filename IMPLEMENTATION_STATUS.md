@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-16 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-20 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,80 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Directed dependency ordering and cycle detection — qualification pending
+
+Source review 2026-11-20: registry version 36 exposes 32 procedures, including
+`fnx.topological_sort` and `fnx.is_directed_acyclic_graph`. The sort emits
+dependency-ordered vertices and exact zero-based ranks using the pinned FNX
+deterministic DFS reverse-postorder convention. The predicate emits one typed
+Boolean, including `true` for an empty graph. Directed and reversed projections
+are supported; undirected input refuses. A retained self-loop is a cycle.
+
+Decoded, compressed and cooperative execution use one iterative state machine
+with admitted vertex arrays and bounded cursor stacks. Compressed traversal
+does not copy adjacency. Full traversal precedes publication, so discovering a
+cycle cannot hide a later source error or cancellation. Sorts refuse a cycle
+without partial results. Query hosts preserve dependency order through ordinary
+composition, pagination and collection, and avoid the canonical-vertex cursor
+shortcut. Explicit query ordering retains its normal presentation semantics.
+
+Native composition includes capability masking, transaction overlays, retained
+history and certified replay. Boolean cells have their own result-digest tag
+and native/CLI conversions. Standing-query maintenance explicitly refuses these
+procedures. New regression sources compare all three-node directed graphs with
+pinned FNX, exercise a 32,768-vertex chain, full-width identities, projection
+laws, exact budgets, cancellation, late source errors, empty predicates, staged
+cycles, hidden cycles and real compressed storage. Independent source review
+passes; compiler/runtime and complete exact-tree qualification remain pending.
+This is a bounded catalog increment under open `fgdb-nu3mt`.
+
+### ECS-coded durable runs in bounded native reads — qualification pending
+
+Source review 2026-11-20: opt-in native typed-edge scans, join children and
+correlated probes may now select eligible durable relation runs in ECS-coded
+storage. They retain the existing run-plus-authenticated-suffix history and
+selected-source failure semantics. There is no new durable format or dependency.
+
+The reader's private store clone charges frame scratch and repair workspace to
+the same source pool as the admitted run image and suffix. Loose extents stream
+one frame at a time and verify the complete Merkle commitment, including empty
+objects; packed members read their required authenticated frame ranges. Repair
+capacity is reserved before allocation using authenticated coding geometry and
+RFC 6330 padding. Healthy reads do not reserve the full decoder allowance.
+Insufficient capacity returns the typed memory refusal, terminal across copy
+retries. Temporary reservations follow the read future's lifetime.
+
+Bounded readers try known indexed packs and loose copies, but do not refresh
+the pack directory through uncharged metadata decoding. Newly published repair
+packs require reopening the bounded reader; ordinary readers retain discovery.
+Initial source admission remains separate. Synchronous FEC decoding retains its
+existing CPU cancellation granularity, and multiple damaged frames may repeat
+repair of the same stripe. No overall-RSS or bounded CPU-latency claim is made.
+
+Regression sources cover authenticated geometry differing from writer settings,
+healthy selective reads, repair admission/refunds, wrong keys, byte ceilings,
+Merkle failures, pending-I/O future-drop refunds in query and ancestor pools,
+pack discovery, historical and suffix parity, and damaged
+selected-run refusal without falling back to Tier-D. Independent review caught
+and closed an uncharged pack-refresh path and redundant future allocation.
+Compiler/runtime and complete exact-tree qualification remain pending under
+open `fgdb-rc1111-persistent-tier-r-7hsan`.
+
+### Typed complete-map reads after relationship MERGE — qualification pending
+
+Source review 2026-11-20: complete-map boundary reads now remain structurally
+distinct from named-property reads through relationship `MERGE`, hidden tail
+projections, `WITH`, grouping and computed ordering. A property literally named
+`*` cannot alias the complete-map request. Complete maps use final transaction
+state and capability masking; missing named fields remain NULL.
+
+Native commit `a84d0d7d9e0956781e2f5d05e8097def214ce14e` contains the correction
+and regressions for plain, unique and plural relationship merges, both read
+orders, repeated occurrences, hidden fields and late-error rollback beneath an
+empty page. Scoped pinned Rustfmt and whitespace checks pass. Compiler/runtime
+and complete exact-tree qualification remain pending under
+`fgdb-merge-tail-maps-q2fhs`; this is not a closure claim.
 
 ### Lazy conditional COLLECT subqueries — qualification pending
 

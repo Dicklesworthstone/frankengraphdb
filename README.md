@@ -461,7 +461,7 @@ Honest framing. `frankengraphdb` is the only one of these that composes durabili
 | Deterministic simulation testing | ✓ lab runtime + DPOR | ✗ | ✗ | ✗ | ✗ |
 | Status of the project | Active, self-owned ecosystem asset | Commercial | **Archived 2025 (acquired by Apple)** | Commercial | Commercial |
 
-> **Target state.** The `frankengraphdb` column is the design target. Where today differs (re-checked 2026-11-11): **branches** exist only as read selectors: `AT BRANCH name` reads a pinned snapshot that the host maps the name to (`Database::query_with_branch_resolver`, `crates/fgdb/src/query_branch.rs`). There is no branch catalog, fork, merge or branch write (`BranchManifest` is deliberately absent from `fgdb-chronicle`). **In-DB analytics** exposes 30 registered `fnx.*` procedures (plus `CALL hybrid.search` and three `CALL db.*` catalog procedures) over decoded and sealed cursors today; bridging the broader 550+ `franken_networkx` catalog remains open. **Vector search** is snapshot-consistent and honours `AS OF`. Searches can build an index for one call, read an explicitly refreshed resident index, or use an opened-database registration maintained after every successful commit (`crates/fgdb/src/query_beacon/resident/maintained.rs`, re-checked 2026-10-12). Registered searches require the current generation and refuse after failed maintenance; registrations are not a durable index catalog and have no branch scope. **Replayable results** cover the native read subset (`Database::replay` over native result certificates), not every statement. **Deterministic simulation** runs the lab runtime and DPOR over bounded, declared scenarios (`crates/fgdb-sim`: generated transaction schedules, crash-point differentials), not yet the whole database including server and replication.
+> **Target state.** The `frankengraphdb` column is the design target. Where today differs (re-checked 2026-11-11): **branches** exist only as read selectors: `AT BRANCH name` reads a pinned snapshot that the host maps the name to (`Database::query_with_branch_resolver`, `crates/fgdb/src/query_branch.rs`). There is no branch catalog, fork, merge or branch write (`BranchManifest` is deliberately absent from `fgdb-chronicle`). **In-DB analytics** exposes 32 registered `fnx.*` procedures (plus `CALL hybrid.search` and three `CALL db.*` catalog procedures) over decoded and sealed cursors today; the two DAG additions are source-reviewed on 2026-11-20 with runtime qualification pending. Bridging the broader 550+ `franken_networkx` catalog remains open. **Vector search** is snapshot-consistent and honours `AS OF`. Searches can build an index for one call, read an explicitly refreshed resident index, or use an opened-database registration maintained after every successful commit (`crates/fgdb/src/query_beacon/resident/maintained.rs`, re-checked 2026-10-12). Registered searches require the current generation and refuse after failed maintenance; registrations are not a durable index catalog and have no branch scope. **Replayable results** cover the native read subset (`Database::replay` over native result certificates), not every statement. **Deterministic simulation** runs the lab runtime and DPOR over bounded, declared scenarios (`crates/fgdb-sim`: generated transaction schedules, crash-point differentials), not yet the whole database including server and replication.
 
 ## The `fgdb` CLI
 
@@ -815,9 +815,39 @@ The projection is undirected and simple after any requested parallel-edge reduct
 
 Decoded, compressed and cooperative execution share one cancellable kernel. Compressed input is consumed once into an explicitly admitted `O(V+E)` working graph for coarsening; this procedure has no external-memory analytics claim. Native calls retain capability masking, transaction overlays, historical reads and certified replay. Standing-query maintenance is not included. Runtime-qualified on 2026-11-11 via [authorized_prism.rs](crates/fgdb/tests/authorized_prism.rs) and [buffered_sealed_prism.rs](crates/fgdb/tests/buffered_sealed_prism.rs); full workspace gate status is tracked in [implementation status](IMPLEMENTATION_STATUS.md).
 
+**Directed dependency analysis.** Two more registered procedures expose DAG
+validation and dependency ordering through the same projection and query hosts:
+
+```cypher
+CALL fnx.topological_sort() YIELD node, rank
+RETURN node, rank
+
+CALL fnx.is_directed_acyclic_graph() YIELD acyclic
+RETURN acyclic
+```
+
+Topological rows retain deterministic dependency order through ordinary query
+composition, pagination and collection, with exact zero-based ranks. The order
+matches the pinned FNX depth-first reverse-postorder convention; explicit
+`ORDER BY` can select a different presentation. A directed cycle refuses the
+whole sort, including beneath `LIMIT 0`. The predicate returns one Boolean row,
+including `true` for an empty graph. Both accept directed or reversed
+projections and reject undirected ones; retained self-loops are cycles.
+Capability-hidden edges do not participate. Decoded, compressed and cooperative
+execution share an iterative traversal with admitted vertex state and no copied
+adjacency. Standing-query maintenance is not included. Compiler/runtime and
+full exact-tree qualification are tracked in [implementation status](IMPLEMENTATION_STATUS.md).
+
 **Computed ordering of write results.** A terminal write `RETURN` accepts expressions over returned aliases, projected source spellings such as `n.p`, and returned graph identities. For example, `MATCH (n:Person) SET n.score=n.score+1 RETURN n.score AS score ORDER BY -score LIMIT 10` ranks the post-write scores while updating every matched vertex. `CREATE`, matched mutations, vertex `MERGE` and relationship `MERGE` share this result path, including grouped outputs. Private sort keys are removed from the result schema; `DISTINCT` still identifies only the returned values, and only the final selected rows consume the result-row allowance. A sort-expression failure, cancellation or resource refusal rolls back the statement even beneath `LIMIT 0`. Unreturned bindings remain unavailable to these write sort expressions. Write `WITH` heads also accept computed ordering through the native row pipeline, after establishing their complete projected or grouped rows and carried identities' frozen post-write fields. Their selected page feeds the following clause, including another write, while every earlier effect remains applied. Without its own `ORDER BY`, the final `RETURN` emits rows in canonical order.
 
 **Relationship maps after MERGE.** Relationship `MERGE` results support `r{.*}`, selective maps such as `r{.score}`, and explicit overrides such as `r{.*,score:r.score+1}`. Plain relationship merges also project endpoint maps and graph identities carried through `WITH`. Complete maps use the selected relationship's final transaction state after `ON CREATE`, `ON MATCH` and trailing `SET`; repeated input occurrences remain repeated results, including in grouped output. Projection overrides affect the returned map. They do not write properties. NULL optional bindings yield NULL maps, and catalog or expression failures roll back the statement even under `LIMIT 0`. Authorized execution masks fields before naming or inspecting their payloads. Runtime-qualified on 2026-11-11 via [computed_edge_merge_text.rs](crates/fgdb/tests/computed_edge_merge_text.rs); see [implementation status](IMPLEMENTATION_STATUS.md).
+
+Complete-map reads now retain their typed identity through relationship `MERGE`
+tails, including `WITH`, grouped results and computed ordering. A literal
+property named `*` remains a distinct property lookup; it cannot replace or
+alias the complete map. Added regressions cover both read orders, hidden fields,
+missing-property NULLs and rollback after a late result error. Qualification of
+this correction is recorded separately in implementation status.
 
 `SealedReadView::execute_prepared` accepts all seven native read classes at the owner's selected sequence. Pattern and property reads retain the resident snapshot; composed FnX calls use its authenticated compressed relation. Temporal selectors must match that sequence, even for an empty result. For composed `fgdb query --sealed` calls, a bound `FOR SYSTEM_TIME AS OF SEQ` also selects the source before storage opens; a conflicting `--as-of` is refused. This owner API does not provide an external-memory query engine or capability-scoped session.
 
@@ -832,7 +862,7 @@ This first durable profile covers one forward relation in one admitted lineage. 
 **Native queries over durable runs.** Local `query --buffered` can opt into the durable-run source by supplying all four of `--native-run-max-rows`, `--native-run-max-incidences`, `--native-run-image-bytes` and `--native-run-property-bytes`. There are no implicit native-run limits; each is a decimal platform-size integer, including zero, accepted once. Partial profiles and profiles without `--buffered` refuse before opening storage. The profile also reaches supported native sources beneath `--spill-dir`; it does not expand either executor's supported query shapes. Analytics `CALL fnx` and `--sealed` keep their separate profiles and reject these flags.
 
 Typed edge roots, join children and correlated probes may select an attached
-floor-zero run in plain, non-ECS storage. The source combines the unchanged run
+floor-zero run in plain or ECS-coded storage. The source combines the unchanged run
 with its authenticated post-seal statements, preserving historical identities,
 exact properties, retirements and canonical EId order.
 `--native-run-max-incidences` also caps base versions plus raw suffix statements
@@ -848,6 +878,18 @@ memory remain; this is not a page-selective or overall-RSS bound. The Rust API
 exposes the same choice through `BufferedReadView::set_native_run_limits`, with
 allocation-free configuration validation available as
 `BufferedReadLimits::validate_native_run_limits` before opening a view.
+
+ECS reads reserve frame scratch and, when repair is needed, decoder workspace
+from that same pool before allocating it. Repair bounds use the authenticated
+extent's coding geometry, including padding, rather than the current writer's
+configuration. Loose objects stream frame by frame and verify the complete
+Merkle commitment; packed members read the required authenticated frame ranges.
+An insufficient repair allowance returns a typed memory refusal. Bounded readers
+try their indexed packs and loose repair copies; discovering a newly published
+repair pack requires reopening the view. Initial source admission still has its
+existing costs, and the synchronous erasure decoder does not promise bounded
+CPU cancellation latency. Runtime and exact-tree qualification are recorded in
+implementation status.
 
 Commit-pack publication also reuses members already stored in other packs after fresh identity/plaintext checks, inode sync and durable readback. It groups those proofs by physical pack and waits for the namespace barriers before issuing receipts. Regrouped rebuild batches therefore need to write only their new members. Existing canonical-file damage still refuses ordinary publication; explicit derived-data repair retains its separate authority.
 

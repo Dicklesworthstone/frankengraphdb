@@ -736,11 +736,12 @@ impl PackIndex {
         vfs: &V,
         location: Location,
         limit: u64,
+        pool: Option<&crate::tiered::memory::MemoryPool>,
     ) -> Result<Vec<u8>, StoreError> {
         super::ensure_size_within_limit(location.len(), limit)?;
         let pack =
             Arc::clone(&self.table.read().expect("pack table").packs[location.pack as usize]);
-        self.read_direct(cx, vfs, &pack, location).await
+        self.read_direct(cx, vfs, &pack, location, pool).await
     }
 
     /// The ordinary cached object reader. Callers still prove object identity;
@@ -756,7 +757,7 @@ impl PackIndex {
         let pack =
             Arc::clone(&self.table.read().expect("pack table").packs[location.pack as usize]);
         if !self.cache_reads {
-            return self.read_direct(cx, vfs, &pack, location).await;
+            return self.read_direct(cx, vfs, &pack, location, None).await;
         }
         let start = usize::try_from(location.offset).expect("pack offsets fit memory");
         let end = start + location.len as usize;
@@ -785,7 +786,7 @@ impl PackIndex {
         if !loading {
             // Another read is loading this pack, a walk already drained it,
             // or the resident budget is spent: read just this object.
-            let object = self.read_direct(cx, vfs, &pack, location).await?;
+            let object = self.read_direct(cx, vfs, &pack, location, None).await?;
             self.served(&pack, location.entry);
             return Ok(object);
         }
@@ -810,6 +811,7 @@ impl PackIndex {
         vfs: &V,
         pack: &PackFile,
         location: Location,
+        pool: Option<&crate::tiered::memory::MemoryPool>,
     ) -> Result<Vec<u8>, StoreError> {
         if let Some((cfg, ns)) = &self.ecs {
             let pack_id = pack_id_from_path(&pack.path).ok_or_else(|| {
@@ -819,6 +821,24 @@ impl PackIndex {
                 ))
             })?;
             let file = cx.with_restriction_async(vfs.open_read(&pack.path)).await?;
+            if let Some(pool) = pool {
+                return super::ecs_extent::read_admitted_range(
+                    cx,
+                    file,
+                    cfg,
+                    *ns,
+                    super::ecs_extent::ExtentObjectKind::Pack,
+                    pack_id,
+                    location.offset,
+                    location.len as usize,
+                    pool,
+                )
+                .await
+                .map_err(|err| match err {
+                    Ok(ext_err) => StoreError::Extent(ext_err),
+                    Err(io_err) => StoreError::Io(io_err),
+                });
+            }
             return super::ecs_extent::read_extent_range_from_file(
                 cx,
                 file,
@@ -1626,7 +1646,7 @@ mod cancellation_tests {
 
         assert_eq!(
             runtime
-                .block_on(index.read_uncached(&cx, &vfs, locations[0], 100))
+                .block_on(index.read_uncached(&cx, &vfs, locations[0], 100, None))
                 .unwrap(),
             b"abc"
         );
@@ -1649,7 +1669,7 @@ mod cancellation_tests {
         // A healthy member must still reach the VFS even when its entire pack
         // is already cached. Parking open distinguishes this from a cache hit.
         vfs.phase.store(1, SeqCst);
-        let mut pending_read = Box::pin(index.read_uncached(&cx, &vfs, locations[0], 100));
+        let mut pending_read = Box::pin(index.read_uncached(&cx, &vfs, locations[0], 100, None));
         runtime.block_on(poll_fn(|cx| {
             assert!(pending_read.as_mut().poll(cx).is_pending());
             assert!(vfs.entered.load(SeqCst));
@@ -1658,7 +1678,7 @@ mod cancellation_tests {
         drop(pending_read);
         assert_eq!(
             runtime
-                .block_on(index.read_uncached(&cx, &vfs, locations[0], 100))
+                .block_on(index.read_uncached(&cx, &vfs, locations[0], 100, None))
                 .unwrap(),
             b"abc"
         );
@@ -1677,7 +1697,7 @@ mod cancellation_tests {
             b"defg"
         );
         assert!(matches!(
-            runtime.block_on(index.read_uncached(&cx, &vfs, locations[1], 100)),
+            runtime.block_on(index.read_uncached(&cx, &vfs, locations[1], 100, None)),
             Err(StoreError::Io(ref error)) if error.kind() == io::ErrorKind::UnexpectedEof
         ));
         assert_eq!(index.whole_reads(), 1);
@@ -1687,7 +1707,7 @@ mod cancellation_tests {
         std::fs::write(&pack.path, &bytes).unwrap();
         assert_eq!(
             runtime
-                .block_on(index.read_uncached(&cx, &vfs, locations[1], 100))
+                .block_on(index.read_uncached(&cx, &vfs, locations[1], 100, None))
                 .unwrap(),
             b"defg"
         );

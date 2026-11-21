@@ -42,6 +42,9 @@ use fgdb_crypto::{
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, GraphId, StorageReadCx};
 
+mod admitted;
+pub(super) use admitted::{read_admitted_object, read_admitted_range};
+
 /// Magic prefix of an encoded Strata authenticated extent envelope (`FGEC`).
 pub const EXTENT_MAGIC: [u8; 4] = *b"FGEC";
 const EXTENT_VERSION_V1: u16 = 1;
@@ -188,18 +191,29 @@ impl StrataEcsConfig {
 /// Errors produced when encoding, authenticating, or healing an `FGEC` extent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtentError {
+    /// A bounded reader refused extent scratch before allocating it.
+    Memory(crate::tiered::memory::MemoryError),
     InvalidParameters(&'static str),
-    PlaintextTooLarge { limit: u64, observed: u64 },
+    PlaintextTooLarge {
+        limit: u64,
+        observed: u64,
+    },
     MalformedHeader,
     AuthenticationFailed,
-    InsufficientSymbols { stripe: u32 },
-    FrameOutOfBounds { requested: u32, frame_count: u32 },
+    InsufficientSymbols {
+        stripe: u32,
+    },
+    FrameOutOfBounds {
+        requested: u32,
+        frame_count: u32,
+    },
     MerkleMismatch,
 }
 
 impl core::fmt::Display for ExtentError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Memory(error) => error.fmt(f),
             Self::InvalidParameters(msg) => write!(f, "invalid FGEC parameters: {msg}"),
             Self::PlaintextTooLarge { limit, observed } => write!(
                 f,
@@ -1511,13 +1525,18 @@ mod tests {
         let config = StrataEcsConfig::new([0x25; 32]);
         let namespace = DatabaseSecurityNamespaceId([0x17; 32]);
         let id = ObjectId([0x42; 32]);
-        for kind in [ExtentObjectKind::SchemaCatalog, ExtentObjectKind::SchemaTransition] {
+        for kind in [
+            ExtentObjectKind::SchemaCatalog,
+            ExtentObjectKind::SchemaTransition,
+        ] {
             assert_eq!(ExtentObjectKind::from_code(kind.code()), Some(kind));
             let encoded = encode_extent(&config, namespace, kind, id, b"catalog object").unwrap();
             let plain = decode_extent(&config, namespace, kind, id, 1024, &encoded, false).unwrap();
             assert_eq!(plain.plaintext, b"catalog object");
             for wrong in [ExtentObjectKind::Manifest, ExtentObjectKind::Pack] {
-                assert!(decode_extent(&config, namespace, wrong, id, 1024, &encoded, false).is_err());
+                assert!(
+                    decode_extent(&config, namespace, wrong, id, 1024, &encoded, false).is_err()
+                );
             }
             let other = if kind == ExtentObjectKind::SchemaCatalog {
                 ExtentObjectKind::SchemaTransition

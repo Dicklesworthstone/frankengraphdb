@@ -86,8 +86,8 @@ fn normalized(mut limits: SealedLimits) -> SealedLimits {
 /// frame, codec columns/temporary integer vectors, origins, validation sets,
 /// incoming index, and nested property decoding coexist during admission.
 /// Keep this conservative allowance until the image is dropped, including
-/// its incoming index. Encoded extents are deliberately ineligible: their
-/// erasure decoder has an independent workspace that this bound does not own.
+/// its incoming index. Encoded frame and erasure decoder scratch is admitted
+/// separately by the extent reader.
 pub(crate) fn decode_capacity(limits: SealedLimits) -> Result<usize, BufferedReadError> {
     let limits = normalized(limits);
     // Each encoded property byte can conservatively account for a value,
@@ -128,9 +128,6 @@ impl<V: Vfs> BufferedPartition<V> {
         let Some(limits) = self.native_run_limits else {
             return Ok(None);
         };
-        if self.store.ecs_coding.is_some() {
-            return Ok(None);
-        }
         work.step(cx, observe)?;
         let known_legacy = self
             .store

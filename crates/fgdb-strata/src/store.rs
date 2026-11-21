@@ -150,8 +150,7 @@ pub(crate) const MAX_STORED_OBJECT_BYTES: u64 = (crate::MAX_BLOCK_ENTRIES as u64
 
 /// The largest manifest this store will materialize: header plus the record
 /// ceiling, derived beside the format exactly as the root ceiling is.
-const MANIFEST_HEADER_AND_RECORDS_CEILING: u64 =
-    crate::manifest::MAX_ENCODED_MANIFEST_BYTES as u64;
+const MANIFEST_HEADER_AND_RECORDS_CEILING: u64 = crate::manifest::MAX_ENCODED_MANIFEST_BYTES as u64;
 
 /// Creation-only crash instants that distinguish inode durability from
 /// namespace durability.
@@ -833,6 +832,9 @@ impl From<std::io::Error> for StoreError {
 
 fn read_interrupted(error: &StoreError) -> bool {
     match error {
+        // Admission refusal is terminal too: looking for another physical copy
+        // cannot grant the query any additional resident capacity.
+        StoreError::Extent(ExtentError::Memory(_)) => true,
         StoreError::Io(error) => error.kind() == std::io::ErrorKind::Interrupted,
         StoreError::MalformedAdjRun(error) => matches!(
             error.as_ref(),
@@ -943,6 +945,9 @@ pub struct BlockStore<V: Vfs = UnixVfs> {
     /// Per-reader policy: bounded source profiles read one packed object,
     /// without loading or borrowing a whole-pack payload cache.
     direct_pack_reads: bool,
+    /// Temporary coded-frame and repair allocations belong to this reader's
+    /// source pool, independently of the shared pack index and its caches.
+    extent_read_pool: Option<crate::tiered::memory::MemoryPool>,
     /// Bounded metadata hint for one authenticated immutable root. It avoids a
     /// second read for legacy opens; actual run selection always reauthenticates.
     root_run_presence: Arc<std::sync::Mutex<Option<(PartitionRootVersion, bool)>>>,
@@ -1269,6 +1274,7 @@ impl<V: Vfs> BlockStore<V> {
             ecs_coding,
             packs,
             direct_pack_reads: false,
+            extent_read_pool: None,
             root_run_presence: Arc::default(),
         })
     }
@@ -1332,6 +1338,7 @@ impl<V: Vfs> BlockStore<V> {
             ecs_coding,
             packs,
             direct_pack_reads: false,
+            extent_read_pool: None,
             root_run_presence: Arc::default(),
         })
     }
@@ -1371,6 +1378,7 @@ impl<V: Vfs> BlockStore<V> {
             ecs_coding: self.ecs_coding.clone(),
             packs: Arc::new(packs),
             direct_pack_reads: true,
+            extent_read_pool: self.extent_read_pool.clone(),
             root_run_presence: Arc::default(),
         })
     }
@@ -1946,6 +1954,26 @@ impl<V: Vfs> BlockStore<V> {
         let file = cx
             .with_restriction_async(self.vfs.open_read(&self.path(id)))
             .await?;
+        if let (Some(cfg), Some(pool)) = (&self.ecs_coding, &self.extent_read_pool) {
+            return ecs_extent::read_admitted_object(
+                cx,
+                file,
+                cfg,
+                self.namespace,
+                kind.extent_kind(),
+                id,
+                limit,
+                pool,
+            )
+            .await
+            .map_err(|error| match error {
+                Ok(ExtentError::PlaintextTooLarge { limit, observed }) => {
+                    StoreError::ObjectTooLarge { limit, observed }
+                }
+                Ok(error) => StoreError::Extent(error),
+                Err(error) => StoreError::Io(error),
+            });
+        }
         let raw = read_bounded(cx, file, self.disk_limit_for(limit)).await?;
         if let Some(cfg) = &self.ecs_coding {
             return ecs_extent::decode_extent(
@@ -1978,8 +2006,8 @@ impl<V: Vfs> BlockStore<V> {
     ///
     /// The healthy path performs the original proof exactly once. Failed
     /// candidates keep the original error when no sound copy exists. Every
-    /// retry retains the caller's byte ceiling, and Interrupted is terminal:
-    /// cancellation is never repaired by finding a different physical copy.
+    /// retry retains the caller's byte ceiling. Cancellation and extent memory
+    /// admission failures are terminal across every physical copy.
     async fn read_object_proven<T, Proof, Proven>(
         &self,
         cx: &impl StorageReadCx,
@@ -2023,6 +2051,13 @@ impl<V: Vfs> BlockStore<V> {
         };
         for refreshed in [false, true] {
             if refreshed {
+                // A bounded source owns frame/decoder scratch, not newly
+                // discovered pack tables retained by the shared index. Keep
+                // its original refusal after trying indexed and loose copies;
+                // reopening performs discovery through owner admission.
+                if self.extent_read_pool.is_some() {
+                    break;
+                }
                 match self.packs.refresh(cx, &self.vfs).await {
                     Ok(true) => {}
                     Err(error) if read_interrupted(&error) => return Err(error),
@@ -2090,7 +2125,13 @@ impl<V: Vfs> BlockStore<V> {
     ) -> Result<Vec<u8>, StoreError> {
         if self.direct_pack_reads {
             self.packs
-                .read_uncached(cx, &self.vfs, location, limit)
+                .read_uncached(
+                    cx,
+                    &self.vfs,
+                    location,
+                    limit,
+                    self.extent_read_pool.as_ref(),
+                )
                 .await
         } else {
             self.packs.read(cx, &self.vfs, location, limit).await
@@ -2978,10 +3019,19 @@ impl<V: Vfs> BlockStore<V> {
         cx: &CommitCx,
         catalog: &crate::catalog::SchemaCatalog,
     ) -> Result<crate::catalog::CatalogVersion, StoreError> {
-        let bytes = catalog.canonical_bytes().map_err(StoreError::MalformedCatalog)?;
-        self.put_object_with_steps(StoredObjectKind::SchemaCatalog, cx, &bytes, None, || {}, || {})
-            .await
-            .map(crate::catalog::CatalogVersion)
+        let bytes = catalog
+            .canonical_bytes()
+            .map_err(StoreError::MalformedCatalog)?;
+        self.put_object_with_steps(
+            StoredObjectKind::SchemaCatalog,
+            cx,
+            &bytes,
+            None,
+            || {},
+            || {},
+        )
+        .await
+        .map(crate::catalog::CatalogVersion)
     }
 
     /// Load by the catalog's registered identity, preserving the existing
@@ -2992,15 +3042,23 @@ impl<V: Vfs> BlockStore<V> {
         id: crate::catalog::CatalogVersion,
     ) -> Result<crate::catalog::SchemaCatalog, StoreError> {
         self.read_object_proven(
-            cx, StoredObjectKind::SchemaCatalog, id.0, crate::catalog::MAX_CATALOG_BYTES as u64,
+            cx,
+            StoredObjectKind::SchemaCatalog,
+            id.0,
+            crate::catalog::MAX_CATALOG_BYTES as u64,
             |bytes| async move {
-                let actual = crate::catalog::catalog_id(self.k_oid.expose(), self.namespace, &bytes);
+                let actual =
+                    crate::catalog::catalog_id(self.k_oid.expose(), self.namespace, &bytes);
                 if actual != id.0 {
-                    return Err(StoreError::IdentityMismatch { expected: id.0, actual });
+                    return Err(StoreError::IdentityMismatch {
+                        expected: id.0,
+                        actual,
+                    });
                 }
                 crate::catalog::SchemaCatalog::decode(&bytes).map_err(StoreError::MalformedCatalog)
             },
-        ).await
+        )
+        .await
     }
 
     pub async fn put_schema_transition(
@@ -3008,10 +3066,19 @@ impl<V: Vfs> BlockStore<V> {
         cx: &CommitCx,
         transition: &crate::catalog::SchemaTransition,
     ) -> Result<crate::catalog::SchemaTransitionVersion, StoreError> {
-        let bytes = transition.canonical_bytes().map_err(StoreError::MalformedCatalog)?;
-        self.put_object_with_steps(StoredObjectKind::SchemaTransition, cx, &bytes, None, || {}, || {})
-            .await
-            .map(crate::catalog::SchemaTransitionVersion)
+        let bytes = transition
+            .canonical_bytes()
+            .map_err(StoreError::MalformedCatalog)?;
+        self.put_object_with_steps(
+            StoredObjectKind::SchemaTransition,
+            cx,
+            &bytes,
+            None,
+            || {},
+            || {},
+        )
+        .await
+        .map(crate::catalog::SchemaTransitionVersion)
     }
 
     pub async fn get_schema_transition(
@@ -3020,15 +3087,24 @@ impl<V: Vfs> BlockStore<V> {
         id: crate::catalog::SchemaTransitionVersion,
     ) -> Result<crate::catalog::SchemaTransition, StoreError> {
         self.read_object_proven(
-            cx, StoredObjectKind::SchemaTransition, id.0, crate::catalog::MAX_TRANSITION_BYTES as u64,
+            cx,
+            StoredObjectKind::SchemaTransition,
+            id.0,
+            crate::catalog::MAX_TRANSITION_BYTES as u64,
             |bytes| async move {
-                let actual = crate::catalog::transition_id(self.k_oid.expose(), self.namespace, &bytes);
+                let actual =
+                    crate::catalog::transition_id(self.k_oid.expose(), self.namespace, &bytes);
                 if actual != id.0 {
-                    return Err(StoreError::IdentityMismatch { expected: id.0, actual });
+                    return Err(StoreError::IdentityMismatch {
+                        expected: id.0,
+                        actual,
+                    });
                 }
-                crate::catalog::SchemaTransition::decode(&bytes).map_err(StoreError::MalformedCatalog)
+                crate::catalog::SchemaTransition::decode(&bytes)
+                    .map_err(StoreError::MalformedCatalog)
             },
-        ).await
+        )
+        .await
     }
 
     /// Store a partition manifest's canonical bytes (fgdb-63w2) — the object
@@ -5763,6 +5839,106 @@ mod durability_tests {
             "lab invariant violation: {report:?}"
         );
         output
+    }
+
+    #[test]
+    fn bounded_ecs_reads_do_not_discover_uncharged_repair_pack_tables() {
+        use super::{ExtentError, ExtentObjectKind, StrataEcsConfig, ecs_extent, pack};
+        use crate::tiered::memory::MemoryPool;
+
+        let dir = scratch_dir("bounded-ecs-repair-discovery");
+        under_lab(0xec5_9e01, move |cx| async move {
+            let config = StrataEcsConfig::new([0x77; 32]);
+            let publisher = BlockStore::open_with_vfs_and_ecs(
+                &cx,
+                UnixVfs::new(),
+                &dir,
+                K_OID,
+                NAMESPACE,
+                Some(config.clone()),
+            )
+            .await
+            .unwrap();
+            let plain = b"repairable block bytes";
+            let version = publisher.put(&cx, plain).await.unwrap();
+            let mut bounded = BlockStore::open_existing_for_read_with_vfs_and_ecs(
+                &cx,
+                UnixVfs::new(),
+                &dir,
+                K_OID,
+                NAMESPACE,
+                Some(config.clone()),
+            )
+            .await
+            .unwrap();
+            let ordinary = BlockStore::open_existing_for_read_with_vfs_and_ecs(
+                &cx,
+                UnixVfs::new(),
+                &dir,
+                K_OID,
+                NAMESPACE,
+                Some(config.clone()),
+            )
+            .await
+            .unwrap();
+            let pool = MemoryPool::new(80 * 1024, 0).unwrap();
+            bounded.extent_read_pool = Some(pool.clone());
+            bounded.direct_pack_reads = true;
+
+            // Introduce a new coded repair pack after both readers opened.
+            // Damage its frame tag, so discovering its table would invoke FEC
+            // before the requested member ever reaches admitted range reads.
+            let packed = pack::encode(&[(version.0, plain.as_slice())]);
+            let pack_id = ObjectId(fgdb_crypto::blake3::hash(&packed).0);
+            let mut encoded = ecs_extent::encode_extent(
+                &config,
+                NAMESPACE,
+                ExtentObjectKind::Pack,
+                pack_id,
+                &packed,
+            )
+            .unwrap();
+            let damaged_tag = encoded.len() - 128 - 1;
+            encoded[damaged_tag] ^= 0xff;
+            std::fs::create_dir_all(publisher.packs.dir()).unwrap();
+            std::fs::write(publisher.packs.dir().join(pack::name(&packed)), encoded).unwrap();
+            std::fs::write(publisher.path(version.0), b"damaged loose extent").unwrap();
+
+            assert!(matches!(
+                bounded.get_bytes(&cx, version).await,
+                Err(StoreError::Extent(ExtentError::MalformedHeader)),
+            ));
+            assert!(matches!(
+                bounded.packs.locate(version.0),
+                pack::Located::None
+            ));
+            assert_eq!(pool.used(), 0);
+
+            // Ordinary store recovery retains discovery and repair behavior.
+            assert_eq!(ordinary.get_bytes(&cx, version).await.unwrap(), plain);
+            assert!(matches!(
+                bounded.packs.locate(version.0),
+                pack::Located::None
+            ));
+
+            // Reopening admits the newly published index. Bounded reads can
+            // then recover its member using query-owned decoder capacity.
+            let mut reopened = BlockStore::open_existing_for_read_with_vfs_and_ecs(
+                &cx,
+                UnixVfs::new(),
+                &dir,
+                K_OID,
+                NAMESPACE,
+                Some(config),
+            )
+            .await
+            .unwrap();
+            let larger = MemoryPool::new(2 * 1024 * 1024, 0).unwrap();
+            reopened.extent_read_pool = Some(larger.clone());
+            reopened.direct_pack_reads = true;
+            assert_eq!(reopened.get_bytes(&cx, version).await.unwrap(), plain);
+            assert_eq!(larger.used(), 0);
+        });
     }
 
     #[test]
