@@ -12,6 +12,42 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### 2026-11-20 session qualification receipt
+
+The typed MERGE-map correction, DAG procedures, ECS native-run admission and
+frozen CLI catalog are preserved on `main` in `a84d0d7`, `c4247a0`, `0940911`
+and `3ef7aa1`. The following receipt applies to those source changes; it is
+not an exact-tree green-gate claim.
+
+Passed: pinned Rustfmt checks on all 38 changed Rust files individually;
+whitespace checks; independent DAG, query-host and storage-admission review;
+binary/frozen CLI schema equality and exact 32-procedure inventory checks;
+and the exact-ID Beads export for the three implementation records. All 1,418
+unrelated Beads records and existing comment identities were preserved.
+
+`cargo test --locked --offline -p fgdb-prism --test dag` exited 101 because
+rustc compiling the unchanged pinned asupersync library received `SIGKILL`.
+It did not reach the changed crates' compiler diagnostics or test assertions.
+The build used the pinned nightly, one Cargo job, `-Z threads=1`, disabled
+incremental compilation and zero dev/test debug info.
+
+The required `bash scripts/check.sh` attempt ran on source head `3ef7aa1`
+with the same build settings. Shell lint, Studio Node tests, verdict-contract
+closure and gate-domain closure passed. Repository-wide formatting reported
+44 files, and file-coverage closure reported
+`.beads/fgdb-nbrog-import-source.jsonl`; every one of those paths is unchanged
+from initial main `c4093f9`, and none is among the 38 Rust files changed here.
+The metadata-only `cargo check --all-targets --locked` also exited 101 after
+rustc received `SIGKILL` compiling pinned asupersync. Clippy was still checking
+that dependency when the 600-second session bound interrupted the wrapper
+(exit 124). Workspace Rust tests, UBS and the remaining registered gates are
+**UNRUN**. No new feature's runtime assertions are claimed to have passed.
+
+Compiler/runtime and complete exact-tree qualification therefore remain open.
+The MERGE bug stays in progress; the catalog and persistent Tier-R beads also
+retain their broader unfinished scope. The implementation descriptions below
+state source-reviewed behavior and authored regression coverage.
+
 ### Directed dependency ordering and cycle detection — qualification pending
 
 Source review 2026-11-20: registry version 36 exposes 32 procedures, including

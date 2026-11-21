@@ -826,11 +826,11 @@ CALL fnx.is_directed_acyclic_graph() YIELD acyclic
 RETURN acyclic
 ```
 
-Topological rows retain deterministic dependency order through ordinary query
-composition, pagination and collection, with exact zero-based ranks. The order
-matches the pinned FNX depth-first reverse-postorder convention; explicit
-`ORDER BY` can select a different presentation. A directed cycle refuses the
-whole sort, including beneath `LIMIT 0`. The predicate returns one Boolean row,
+Topological rows retain deterministic dependency order through ordinary `ALL`
+projections, pagination and collection, with exact zero-based ranks. The order
+matches the pinned FNX depth-first reverse-postorder convention. `ORDER BY`,
+`DISTINCT` and set operators retain their own ordering contracts. A directed
+cycle refuses the whole sort, including beneath `LIMIT 0`. The predicate returns one Boolean row,
 including `true` for an empty graph. Both accept directed or reversed
 projections and reject undirected ones; retained self-loops are cycles.
 Capability-hidden edges do not participate. Decoded, compressed and cooperative
