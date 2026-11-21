@@ -12,6 +12,56 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Continuation qualification receipt — source `4bfa197`
+
+The authorized external aggregate core and server integration are on `main`
+in `117db0d` and `b0ab2da`; batch-at-a-time authoritative delta replay is in
+`4bfa197`. The integrated implementation was clean locally and both `main`
+and its required `master` mirror were verified at
+`4bfa19747f3ec1405b4257392a5c569a6e0e2ac6` before the executor outage.
+
+Twenty changed Rust files passed individual pinned Rustfmt checks.
+The remaining changed Rust file, `fgdb/src/lib.rs`, retains the exact same
+formatter-diff text as continuation baseline `10d2f21`; its new exports/module
+declaration are formatted. Whitespace checks and independent implementation
+and regression-source reviews passed. Sixteen new Rust regression tests were
+authored: eight native aggregate, three server/FGP, and five replay tests.
+Their assertions remain **UNRUN**.
+
+The required `scripts/check.sh` attempt ran against integrated source
+`4bfa197` with the pinned nightly, one Cargo job, `-Z threads=1`, no
+incremental compilation, zero dev/test debug info and a temporary build target.
+Observed core results:
+
+- Shell lint, all 49 Studio Node tests, verdict-contract closure and gate-domain
+  closure passed.
+- `cargo check --all-targets --locked` exited 137 during dependency checking.
+- `cargo clippy --all-targets --all-features --locked -- -D warnings` and
+  `cargo test --workspace --all-features --locked --no-fail-fast` each exited
+  101 after rustc compiling pinned asupersync received `SIGKILL`. Neither
+  reached new first-party test assertions or a successful compiler verdict.
+- Repository-wide formatting failed on 43 paths. Forty-two are byte-identical
+  to continuation baseline `10d2f21`; the remaining path is the preserved
+  `lib.rs` formatting described above.
+- File-coverage closure still rejects the pre-existing
+  `.beads/fgdb-nbrog-import-source.jsonl`. UBS is absent. Registered checks
+  also exposed existing assignment-pin/provenance failures and unavailable
+  cargo-audit/Lean prerequisites. These were not weakened or relabeled as
+  passes.
+
+The registered commit-provenance and threat checks passed. The executor then
+became unavailable while the remaining registered checks were in progress;
+the process service reported an exec-server transport disconnect and timed-out
+recovery. No final wrapper exit or complete exact-tree proof bundle was
+acknowledged, so the overall gate remains **interrupted and unqualified**.
+
+Progress comments for `fgdb-w10-snapshotquery-rzh` and
+`fgdb-w6-delta-consumption-iyc` were written to the local Beads database without
+automatic export during the gate. The executor outage prevented the required
+exact-ID tracked export; that export remains pending. Their implementation
+progress and qualification limits are preserved in this document and the
+source commits. Both broader contracts remain open, and no bead was closed.
+
 ### Filtered correlated COUNT maintenance — qualification pending
 
 Native standing queries now admit a single correlated COUNT with row-local
