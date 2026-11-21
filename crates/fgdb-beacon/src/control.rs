@@ -18,6 +18,9 @@ pub enum BeaconError {
         resource: &'static str,
         limit: usize,
     },
+    AllocationFailed {
+        requested: usize,
+    },
     WorkBudgetExceeded,
     Cancelled,
     GenerationExhausted,
@@ -40,6 +43,9 @@ impl core::fmt::Display for BeaconError {
             Self::DuplicateVertex(id) => write!(f, "duplicate index document for vertex {}", id.0),
             Self::ResourceLimit { resource, limit } => {
                 write!(f, "Beacon {resource} limit exceeded ({limit})")
+            }
+            Self::AllocationFailed { requested } => {
+                write!(f, "allocator refused {requested} Beacon checkpoint bytes")
             }
             Self::WorkBudgetExceeded => f.write_str("Beacon work budget exhausted"),
             Self::Cancelled => f.write_str("Beacon operation cancelled"),

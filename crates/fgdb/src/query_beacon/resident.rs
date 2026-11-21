@@ -691,13 +691,43 @@ impl ResidentIndex {
         &self,
         cx: &QueryCx,
         policy: ReadPolicy,
+        max_bytes: usize,
     ) -> Result<(CommitSeq, Vec<u8>), Error> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
             let work = RefCell::new(Meter::new(policy.max_work_units, |_| cx.checkpoint()));
             let result = (|| {
                 work.borrow_mut().charge(1)?;
+                // Include the definition and nested-index length word in the
+                // same limit before reserving even the container prefix.
+                let prefix_bytes = self
+                    .definition
+                    .projection
+                    .vector
+                    .len()
+                    .checked_mul(8)
+                    .and_then(|bytes| {
+                        bytes.checked_add(
+                            4 + 2
+                                + 1
+                                + usize::from(self.definition.vertex_label.is_some()) * 8
+                                + 1
+                                + usize::from(self.definition.projection.text.is_some()) * 8
+                                + 1
+                                + 8
+                                + 8,
+                        )
+                    })
+                    .filter(|&bytes| bytes <= max_bytes)
+                    .ok_or(BeaconError::ResourceLimit {
+                        resource: "checkpoint bytes",
+                        limit: max_bytes,
+                    })?;
                 let mut out = Vec::new();
+                out.try_reserve_exact(prefix_bytes)
+                    .map_err(|_| BeaconError::AllocationFailed {
+                        requested: prefix_bytes,
+                    })?;
                 out.extend_from_slice(&DERIVED_BEACON_MAGIC);
                 out.extend_from_slice(&DERIVED_BEACON_VERSION_V1.to_le_bytes());
                 match self.definition.vertex_label {
@@ -722,9 +752,13 @@ impl ResidentIndex {
                     work.borrow_mut().charge(1)?;
                     out.extend_from_slice(&prop.0.to_le_bytes());
                 }
-                let index_bytes = self.index.encode_checkpoint(&mut SharedWork(&work))?;
-                out.extend_from_slice(&(index_bytes.len() as u64).to_le_bytes());
-                out.extend_from_slice(&index_bytes);
+                let length_at = out.len();
+                out.extend_from_slice(&0_u64.to_le_bytes());
+                debug_assert_eq!(out.len(), prefix_bytes);
+                let index_bytes =
+                    self.index
+                        .append_checkpoint(&mut out, max_bytes, &mut SharedWork(&work))?;
+                out[length_at..length_at + 8].copy_from_slice(&(index_bytes as u64).to_le_bytes());
                 Ok((self.source_sequence, out))
             })();
             complete(work.into_inner(), result)

@@ -480,6 +480,8 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// Exclusive writer ownership serializes the staging-file publication
     /// with other checkpoints and graph writes on this database handle.
+    /// Plaintext encoding is admitted under the checkpoint byte ceiling before
+    /// growing its output; an oversized index leaves any saved cache intact.
     pub async fn save_beacon_checkpoint(
         &mut self,
         cx: &CommitCx,
@@ -487,13 +489,31 @@ impl<V: Vfs + Clone> Database<V> {
         handle: &MaintainedBeaconIndex,
         name: &str,
     ) -> Result<CommitSeq, DerivedCheckpointError> {
+        self.save_beacon_checkpoint_bounded(
+            cx,
+            query_cx,
+            handle,
+            name,
+            MAX_DERIVED_CHECKPOINT_PLAIN_BYTES as usize,
+        )
+        .await
+    }
+
+    async fn save_beacon_checkpoint_bounded(
+        &mut self,
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        handle: &MaintainedBeaconIndex,
+        name: &str,
+        max_bytes: usize,
+    ) -> Result<CommitSeq, DerivedCheckpointError> {
         if name.is_empty() {
             return Err(DerivedCheckpointError::EmptyName);
         }
         cx.checkpoint()
             .map_err(DerivedCheckpointError::Interrupted)?;
         let (watermark_seq, payload) = self
-            .export_beacon_checkpoint_payload(query_cx, handle)
+            .export_beacon_checkpoint_payload(query_cx, handle, max_bytes)
             .map_err(DerivedCheckpointError::Beacon)?;
         let chain_hash =
             chain_commitment_at(self.coordinator.chain(), watermark_seq).ok_or_else(|| {

@@ -116,6 +116,28 @@ Compiler/runtime and full exact-tree qualification remain **UNRUN**. This is an
 increment under open `fgdb-w5-parsers-nje`, not a language-conformance or bead
 closure claim.
 
+### Bounded Beacon checkpoint encoding — qualification pending
+
+Native maintained-index saves now apply the existing 256 MiB plaintext ceiling
+during encoding, before growing the output buffer. The Beacon codec exposes a
+bounded encoder and a transactional append operation: failed byte admission or
+cancellation restores the caller's original prefix. Capacity grows geometrically
+within the admitted ceiling, and allocation failure is a typed error.
+
+The native definition and nested index share one buffer, removing the previous
+full-index intermediate copy. The prefix and index-length field count against
+the same ceiling. The version-one format and decoder remain unchanged; an
+encoding refusal occurs before staging-file publication and leaves a previously
+saved checkpoint intact. This bounds requested output capacity, not total RSS
+or the separately encoded ECS container.
+
+Regression sources cover frozen empty-generation bytes, populated hybrid
+roundtrips, every byte cutoff, exact-bound success, prefix rollback, capacity
+growth and cancellation. Scoped pinned Rustfmt and whitespace checks pass.
+Compiler/runtime and complete exact-tree qualification remain **UNRUN**; the
+targeted Cargo test stopped in dependency resolution. The broader
+`fgdb-rc1111-durable-watermarks-c1g98` remains open.
+
 ### Exclusive derived-checkpoint publication and oversized recovery — qualification pending
 
 Both native checkpoint-save APIs now require exclusive database access. This

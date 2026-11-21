@@ -374,6 +374,7 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         cx: &QueryCx,
         handle: &MaintainedBeaconIndex,
+        max_bytes: usize,
     ) -> Result<(CommitSeq, Vec<u8>), MaintainedBeaconError> {
         cx.with_restriction(|| {
             checkpoint(cx)?;
@@ -394,7 +395,7 @@ impl<V: Vfs + Clone> Database<V> {
             }
             entry
                 .resident
-                .encode_derived_payload(cx, entry.maintenance)
+                .encode_derived_payload(cx, entry.maintenance, max_bytes)
                 .map_err(Into::into)
         })
     }

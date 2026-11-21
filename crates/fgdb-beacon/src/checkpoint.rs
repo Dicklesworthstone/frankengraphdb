@@ -146,13 +146,56 @@ impl<'a> Cursor<'a> {
     }
 }
 
-fn push_u64_usize(out: &mut Vec<u8>, value: usize) {
-    out.extend_from_slice(&(value as u64).to_le_bytes());
+/// All output growth passes this boundary, including nested vectors, postings
+/// and term bytes. Reserve geometrically within the ceiling instead of letting
+/// Vec double beyond admission. The limit bounds requested capacity, not the
+/// allocator's bookkeeping or the source index retained by the caller.
+struct CheckpointWriter<'a> {
+    out: &'a mut Vec<u8>,
+    limit: usize,
 }
 
-fn push_str(out: &mut Vec<u8>, value: &str) {
-    push_u64_usize(out, value.len());
-    out.extend_from_slice(value.as_bytes());
+impl CheckpointWriter<'_> {
+    fn bytes(&mut self, bytes: &[u8]) -> Result<(), BeaconError> {
+        let required = self
+            .out
+            .len()
+            .checked_add(bytes.len())
+            .filter(|&len| len <= self.limit)
+            .ok_or(BeaconError::ResourceLimit {
+                resource: "checkpoint bytes",
+                limit: self.limit,
+            })?;
+        if required > self.out.capacity() {
+            let capacity = required.max(
+                self.out
+                    .capacity()
+                    .max(128)
+                    .saturating_mul(2)
+                    .min(self.limit),
+            );
+            self.out
+                .try_reserve_exact(capacity - self.out.len())
+                .map_err(|_| BeaconError::AllocationFailed {
+                    requested: capacity,
+                })?;
+        }
+        self.out.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn byte(&mut self, byte: u8) -> Result<(), BeaconError> {
+        self.bytes(&[byte])
+    }
+
+    fn count(&mut self, value: usize) -> Result<(), BeaconError> {
+        self.bytes(&(value as u64).to_le_bytes())
+    }
+
+    fn text(&mut self, value: &str) -> Result<(), BeaconError> {
+        self.count(value.len())?;
+        self.bytes(value.as_bytes())
+    }
 }
 
 fn encode_metric(metric: DistanceMetric) -> u8 {
@@ -172,14 +215,14 @@ fn decode_metric(code: u8) -> Result<DistanceMetric, BeaconCheckpointError> {
     }
 }
 
-fn encode_hnsw_config(out: &mut Vec<u8>, cfg: &HnswConfig) {
-    push_u64_usize(out, cfg.dimensions);
-    out.push(encode_metric(cfg.metric));
-    push_u64_usize(out, cfg.m);
-    push_u64_usize(out, cfg.ef_construction);
-    out.extend_from_slice(&cfg.seed.to_le_bytes());
-    push_u64_usize(out, cfg.max_vectors);
-    out.push(u8::from(cfg.links));
+fn encode_hnsw_config(out: &mut CheckpointWriter<'_>, cfg: &HnswConfig) -> Result<(), BeaconError> {
+    out.count(cfg.dimensions)?;
+    out.byte(encode_metric(cfg.metric))?;
+    out.count(cfg.m)?;
+    out.count(cfg.ef_construction)?;
+    out.bytes(&cfg.seed.to_le_bytes())?;
+    out.count(cfg.max_vectors)?;
+    out.byte(u8::from(cfg.links))
 }
 
 fn decode_hnsw_config(cur: &mut Cursor<'_>) -> Result<HnswConfig, BeaconCheckpointError> {
@@ -196,14 +239,14 @@ fn decode_hnsw_config(cur: &mut Cursor<'_>) -> Result<HnswConfig, BeaconCheckpoi
     Ok(cfg)
 }
 
-fn encode_bm25_config(out: &mut Vec<u8>, cfg: &Bm25Config) {
-    out.extend_from_slice(&cfg.k1.to_bits().to_le_bytes());
-    out.extend_from_slice(&cfg.b.to_bits().to_le_bytes());
-    push_u64_usize(out, cfg.max_documents);
-    push_u64_usize(out, cfg.max_document_bytes);
-    push_u64_usize(out, cfg.max_document_terms);
-    push_u64_usize(out, cfg.max_query_bytes);
-    push_u64_usize(out, cfg.max_query_terms);
+fn encode_bm25_config(out: &mut CheckpointWriter<'_>, cfg: &Bm25Config) -> Result<(), BeaconError> {
+    out.bytes(&cfg.k1.to_bits().to_le_bytes())?;
+    out.bytes(&cfg.b.to_bits().to_le_bytes())?;
+    out.count(cfg.max_documents)?;
+    out.count(cfg.max_document_bytes)?;
+    out.count(cfg.max_document_terms)?;
+    out.count(cfg.max_query_bytes)?;
+    out.count(cfg.max_query_terms)
 }
 
 fn decode_bm25_config(cur: &mut Cursor<'_>) -> Result<Bm25Config, BeaconCheckpointError> {
@@ -220,27 +263,30 @@ fn decode_bm25_config(cur: &mut Cursor<'_>) -> Result<Bm25Config, BeaconCheckpoi
     Ok(cfg)
 }
 
-fn encode_index_config(out: &mut Vec<u8>, cfg: &IndexConfig) {
+fn encode_index_config(
+    out: &mut CheckpointWriter<'_>,
+    cfg: &IndexConfig,
+) -> Result<(), BeaconError> {
     match &cfg.vector {
         Some(v) => {
-            out.push(1);
-            encode_hnsw_config(out, v);
+            out.byte(1)?;
+            encode_hnsw_config(out, v)?;
         }
-        None => out.push(0),
+        None => out.byte(0)?,
     }
     match &cfg.text {
         Some(t) => {
-            out.push(1);
-            encode_bm25_config(out, t);
+            out.byte(1)?;
+            encode_bm25_config(out, t)?;
         }
-        None => out.push(0),
+        None => out.byte(0)?,
     }
-    push_u64_usize(out, cfg.max_documents);
-    push_u64_usize(out, cfg.max_batch_operations);
-    push_u64_usize(out, cfg.max_segments);
-    push_u64_usize(out, cfg.max_vector_values);
-    push_u64_usize(out, cfg.max_text_bytes);
-    push_u64_usize(out, cfg.max_document_terms);
+    out.count(cfg.max_documents)?;
+    out.count(cfg.max_batch_operations)?;
+    out.count(cfg.max_segments)?;
+    out.count(cfg.max_vector_values)?;
+    out.count(cfg.max_text_bytes)?;
+    out.count(cfg.max_document_terms)
 }
 
 fn decode_index_config(cur: &mut Cursor<'_>) -> Result<IndexConfig, BeaconCheckpointError> {
@@ -296,14 +342,14 @@ fn same_index_config(left: &IndexConfig, right: &IndexConfig) -> bool {
 }
 
 fn encode_vector_slice(
-    out: &mut Vec<u8>,
+    out: &mut CheckpointWriter<'_>,
     values: &[f32],
     work: &mut dyn WorkControl,
 ) -> Result<(), BeaconError> {
     work.charge(values.len().max(1))?;
-    push_u64_usize(out, values.len());
+    out.count(values.len())?;
     for &v in values {
-        out.extend_from_slice(&v.to_bits().to_le_bytes());
+        out.bytes(&v.to_bits().to_le_bytes())?;
     }
     Ok(())
 }
@@ -331,20 +377,20 @@ fn decode_vector_arc(
 }
 
 fn encode_analyzed_text(
-    out: &mut Vec<u8>,
+    out: &mut CheckpointWriter<'_>,
     text: &AnalyzedText,
     work: &mut dyn WorkControl,
 ) -> Result<(), BeaconError> {
     work.charge(1)?;
-    out.extend_from_slice(&text.length.to_le_bytes());
-    push_u64_usize(out, text.source_bytes);
-    push_u64_usize(out, text.frequencies.len());
+    out.bytes(&text.length.to_le_bytes())?;
+    out.count(text.source_bytes)?;
+    out.count(text.frequencies.len())?;
     for (term, positions) in &text.frequencies {
         work.charge(term.len().saturating_add(positions.len()).max(1))?;
-        push_str(out, term);
-        push_u64_usize(out, positions.len());
+        out.text(term)?;
+        out.count(positions.len())?;
         for &pos in positions.iter() {
-            out.extend_from_slice(&pos.to_le_bytes());
+            out.bytes(&pos.to_le_bytes())?;
         }
     }
     Ok(())
@@ -435,90 +481,144 @@ impl BeaconIndex {
     /// Serialize this materialized `BeaconIndex` generation into canonical
     /// `FGBC` v1 checkpoint bytes under caller work accounting.
     pub fn encode_checkpoint(&self, work: &mut dyn WorkControl) -> Result<Vec<u8>, BeaconError> {
+        self.encode_checkpoint_bounded(usize::MAX, work)
+    }
+
+    /// Serialize under a byte ceiling checked before every output allocation.
+    /// The source index is borrowed; a failed encoding publishes no bytes and
+    /// leaves its generation and search results unchanged.
+    pub fn encode_checkpoint_bounded(
+        &self,
+        max_bytes: usize,
+        work: &mut dyn WorkControl,
+    ) -> Result<Vec<u8>, BeaconError> {
+        let mut out = Vec::new();
+        self.append_checkpoint(&mut out, max_bytes, work)?;
+        Ok(out)
+    }
+
+    /// Append directly to a caller's container, avoiding a second complete
+    /// checkpoint allocation. `max_bytes` includes the existing prefix. On any
+    /// refusal the prefix bytes and length are unchanged; capacity already
+    /// admitted during the failed attempt may remain available to the caller.
+    pub fn append_checkpoint(
+        &self,
+        out: &mut Vec<u8>,
+        max_bytes: usize,
+        work: &mut dyn WorkControl,
+    ) -> Result<usize, BeaconError> {
+        let prefix = out.len();
+        if prefix > max_bytes {
+            return Err(BeaconError::ResourceLimit {
+                resource: "checkpoint bytes",
+                limit: max_bytes,
+            });
+        }
+        let result = self.write_checkpoint(
+            &mut CheckpointWriter {
+                out,
+                limit: max_bytes,
+            },
+            work,
+        );
+        match result {
+            Ok(()) => Ok(out.len() - prefix),
+            Err(error) => {
+                out.truncate(prefix);
+                Err(error)
+            }
+        }
+    }
+
+    fn write_checkpoint(
+        &self,
+        out: &mut CheckpointWriter<'_>,
+        work: &mut dyn WorkControl,
+    ) -> Result<(), BeaconError> {
         let generation = &self.current;
         work.charge(1)?;
-        let mut out = Vec::new();
-        out.extend_from_slice(&MAGIC);
-        out.extend_from_slice(&VERSION_V1.to_le_bytes());
-        encode_index_config(&mut out, &generation.config);
-        out.extend_from_slice(&generation.sequence.to_le_bytes());
+        out.bytes(&MAGIC)?;
+        out.bytes(&VERSION_V1.to_le_bytes())?;
+        encode_index_config(out, &generation.config)?;
+        out.bytes(&generation.sequence.to_le_bytes())?;
 
-        push_u64_usize(&mut out, generation.live.len());
+        out.count(generation.live.len())?;
         for (&vid, live) in &generation.live {
             work.charge(1)?;
-            out.extend_from_slice(&vid.0.to_le_bytes());
-            out.extend_from_slice(&live.generation.to_le_bytes());
+            out.bytes(&vid.0.to_le_bytes())?;
+            out.bytes(&live.generation.to_le_bytes())?;
             match &live.document.vector {
                 Some(vec) => {
-                    out.push(1);
-                    encode_vector_slice(&mut out, vec, work)?;
+                    out.byte(1)?;
+                    encode_vector_slice(out, vec, work)?;
                 }
-                None => out.push(0),
+                None => out.byte(0)?,
             }
             match &live.document.text {
                 Some(text) => {
-                    out.push(1);
-                    encode_analyzed_text(&mut out, text, work)?;
+                    out.byte(1)?;
+                    encode_analyzed_text(out, text, work)?;
                 }
-                None => out.push(0),
+                None => out.byte(0)?,
             }
         }
 
-        push_u64_usize(&mut out, generation.segments.len());
+        out.count(generation.segments.len())?;
         for segment in &generation.segments {
             work.charge(1)?;
-            out.extend_from_slice(&segment.generation.to_le_bytes());
+            out.bytes(&segment.generation.to_le_bytes())?;
             match &segment.vector {
                 Some(hnsw) => {
-                    out.push(1);
+                    out.byte(1)?;
                     match hnsw.entry {
                         Some(entry) => {
-                            out.push(1);
-                            push_u64_usize(&mut out, entry);
+                            out.byte(1)?;
+                            out.count(entry)?;
                         }
-                        None => out.push(0),
+                        None => out.byte(0)?,
                     }
-                    push_u64_usize(&mut out, hnsw.top_level);
-                    push_u64_usize(&mut out, hnsw.nodes.len());
+                    out.count(hnsw.top_level)?;
+                    out.count(hnsw.nodes.len())?;
                     for node in &hnsw.nodes {
                         work.charge(1)?;
-                        out.extend_from_slice(&node.id.0.to_le_bytes());
-                        encode_vector_slice(&mut out, &node.vector, work)?;
-                        push_u64_usize(&mut out, node.links.len());
+                        out.bytes(&node.id.0.to_le_bytes())?;
+                        encode_vector_slice(out, &node.vector, work)?;
+                        out.count(node.links.len())?;
                         for layer_links in &node.links {
                             work.charge(layer_links.len().max(1))?;
-                            push_u64_usize(&mut out, layer_links.len());
+                            out.count(layer_links.len())?;
                             for &slot in layer_links {
-                                push_u64_usize(&mut out, slot);
+                                out.count(slot)?;
                             }
                         }
                     }
                 }
-                None => out.push(0),
+                None => out.byte(0)?,
             }
 
-            push_u64_usize(&mut out, segment.text.lengths.len());
+            out.count(segment.text.lengths.len())?;
             for (&vid, &length) in &segment.text.lengths {
                 work.charge(1)?;
-                out.extend_from_slice(&vid.0.to_le_bytes());
-                out.extend_from_slice(&length.to_le_bytes());
+                out.bytes(&vid.0.to_le_bytes())?;
+                out.bytes(&length.to_le_bytes())?;
             }
-            push_u64_usize(&mut out, segment.text.postings.len());
+            out.count(segment.text.postings.len())?;
             for (term, doc_map) in &segment.text.postings {
                 work.charge(term.len().max(1))?;
-                push_str(&mut out, term);
-                push_u64_usize(&mut out, doc_map.len());
+                out.text(term)?;
+                out.count(doc_map.len())?;
                 for (&vid, positions) in doc_map {
                     work.charge(positions.len().max(1))?;
-                    out.extend_from_slice(&vid.0.to_le_bytes());
-                    push_u64_usize(&mut out, positions.len());
+                    out.bytes(&vid.0.to_le_bytes())?;
+                    out.count(positions.len())?;
                     for &pos in positions.iter() {
-                        out.extend_from_slice(&pos.to_le_bytes());
+                        out.bytes(&pos.to_le_bytes())?;
                     }
                 }
             }
         }
-        Ok(out)
+        work.charge(1)?;
+        Ok(())
     }
 
     /// Rehydrate a `BeaconIndex` from `FGBC` v1 checkpoint bytes, validating
@@ -904,8 +1004,7 @@ mod tests {
     use super::*;
     use crate::{HybridQuery, IndexDocument, IndexMutation, TextMatch, VectorSearch, WorkBudget};
 
-    #[test]
-    fn beacon_checkpoint_roundtrip_preserves_multi_segment_hybrid_hits_and_rejects_tamper() {
+    fn checkpoint_fixture() -> (IndexConfig, BeaconIndex) {
         let cfg = IndexConfig {
             vector: Some(HnswConfig::new(3, DistanceMetric::Cosine)),
             max_segments: 4,
@@ -948,6 +1047,13 @@ mod tests {
             )
             .unwrap();
 
+        (cfg, index)
+    }
+
+    #[test]
+    fn beacon_checkpoint_roundtrip_preserves_multi_segment_hybrid_hits_and_rejects_tamper() {
+        let (cfg, index) = checkpoint_fixture();
+        let mut work = WorkBudget::new(10_000_000);
         let bytes = index.encode_checkpoint(&mut work).unwrap();
         let decoded = BeaconIndex::decode_checkpoint(&bytes, &cfg, &mut work).unwrap();
         assert_eq!(decoded.snapshot().stats(), index.snapshot().stats());
@@ -984,5 +1090,171 @@ mod tests {
             BeaconIndex::decode_checkpoint(&bytes[..bytes.len() - 3], &cfg, &mut work).unwrap_err(),
             BeaconCheckpointError::Malformed(_),
         ));
+    }
+
+    #[test]
+    fn bounded_empty_checkpoint_keeps_the_v1_golden_bytes() {
+        let cfg = IndexConfig {
+            vector: None,
+            text: Some(Bm25Config {
+                k1: 1.0,
+                b: 0.5,
+                max_documents: 1,
+                max_document_bytes: 2,
+                max_document_terms: 3,
+                max_query_bytes: 4,
+                max_query_terms: 5,
+            }),
+            max_documents: 6,
+            max_batch_operations: 7,
+            max_segments: 8,
+            max_vector_values: 9,
+            max_text_bytes: 10,
+            max_document_terms: 11,
+        };
+        let index = BeaconIndex::new(cfg).unwrap();
+        // v1 magic/version, absent vector lane and present text lane; IEEE-754
+        // k1/b, fixed resource fields, generation zero and two empty counts.
+        let mut expected = b"FGBC\x01\x00\x00\x01".to_vec();
+        for word in [
+            0x3ff0_0000_0000_0000_u64,
+            0x3fe0_0000_0000_0000,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            0,
+            0,
+            0,
+        ] {
+            expected.extend_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(expected.len(), 136);
+        assert_eq!(
+            index
+                .encode_checkpoint_bounded(136, &mut WorkBudget::new(10))
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn every_nested_checkpoint_byte_is_bounded_and_failed_append_preserves_prefix() {
+        let (cfg, index) = checkpoint_fixture();
+        let mut work = WorkBudget::new(100_000_000);
+        let bytes = index.encode_checkpoint(&mut work).unwrap();
+        let stats = index.snapshot().stats();
+        let prefix = b"native-container";
+        for bytes_allowed in 0..bytes.len() {
+            let mut out = prefix.to_vec();
+            let limit = prefix.len() + bytes_allowed;
+            assert_eq!(
+                index.append_checkpoint(&mut out, limit, &mut work),
+                Err(BeaconError::ResourceLimit {
+                    resource: "checkpoint bytes",
+                    limit
+                }),
+                "accepted a truncated nested checkpoint at {bytes_allowed}",
+            );
+            assert_eq!(out, prefix);
+            assert!(out.capacity() <= limit);
+        }
+        let exact = index
+            .encode_checkpoint_bounded(bytes.len(), &mut work)
+            .unwrap();
+        assert_eq!(exact, bytes);
+        assert!(exact.capacity() <= bytes.len());
+        let mut prefixed = prefix.to_vec();
+        assert_eq!(
+            index.append_checkpoint(&mut prefixed, prefix.len() + bytes.len(), &mut work),
+            Ok(bytes.len())
+        );
+        assert_eq!(&prefixed[..prefix.len()], prefix);
+        assert_eq!(&prefixed[prefix.len()..], bytes);
+        let decoded =
+            BeaconIndex::decode_checkpoint(&prefixed[prefix.len()..], &cfg, &mut work).unwrap();
+        assert_eq!(decoded.snapshot().stats(), stats);
+        assert_eq!(index.snapshot().stats(), stats);
+        assert_eq!(index.encode_checkpoint(&mut work).unwrap(), bytes);
+    }
+
+    #[test]
+    fn checkpoint_capacity_growth_is_geometric_and_ceiling_checked_before_growth() {
+        let mut out = Vec::new();
+        let limit = 65_537;
+        let mut writer = CheckpointWriter {
+            out: &mut out,
+            limit,
+        };
+        let mut allocations = 0;
+        for _ in 0..limit {
+            let before = writer.out.capacity();
+            writer.byte(0x5a).unwrap();
+            allocations += usize::from(writer.out.capacity() != before);
+            assert!(writer.out.capacity() <= limit);
+        }
+        assert!(
+            allocations <= 11,
+            "per-field exact reservations would be quadratic"
+        );
+        let capacity = writer.out.capacity();
+        assert_eq!(
+            writer.byte(0),
+            Err(BeaconError::ResourceLimit {
+                resource: "checkpoint bytes",
+                limit
+            })
+        );
+        assert_eq!(writer.out.capacity(), capacity);
+        assert_eq!(writer.out.len(), limit);
+        assert!(writer.out.iter().all(|&byte| byte == 0x5a));
+    }
+
+    #[test]
+    fn every_checkpoint_cancellation_restores_prefix_and_leaves_index_usable() {
+        struct Stop {
+            calls: usize,
+            at: usize,
+        }
+        impl WorkControl for Stop {
+            fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
+                self.calls += 1;
+                if self.calls == self.at {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let (_, index) = checkpoint_fixture();
+        let mut count = Stop {
+            calls: 0,
+            at: usize::MAX,
+        };
+        let bytes = index.encode_checkpoint(&mut count).unwrap();
+        assert!(count.calls > 10);
+        for at in 1..=count.calls {
+            let mut out = b"prefix".to_vec();
+            let mut stop = Stop { calls: 0, at };
+            assert_eq!(
+                index.append_checkpoint(&mut out, 6 + bytes.len(), &mut stop),
+                Err(BeaconError::Cancelled)
+            );
+            assert_eq!(out, b"prefix");
+            assert_eq!(stop.calls, at);
+        }
+        assert_eq!(
+            index
+                .encode_checkpoint(&mut WorkBudget::new(10_000_000))
+                .unwrap(),
+            bytes
+        );
     }
 }
