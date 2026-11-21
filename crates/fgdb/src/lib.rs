@@ -181,13 +181,14 @@ pub use gql_cert::{
 pub use gql_exec::source::{SnapshotEdgeSource, SnapshotVertexSource};
 pub use query::AuthorizedAsyncRowCursor;
 pub use query::{
-    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
-    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
-    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
-    AuthorizedReadOutput, AuthorizedReadSession, AuthorizedReadTransaction, AuthorizedRowCursor,
-    AuthorizedSealedReadSession, AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
-    AuthorizedSortLimits, AuthorizedSpoolCursor, ExplainRow, HYBRID_SEARCH_OUTPUTS,
-    HybridCallError, MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
+    AuthorizedAggregateCursor, AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor,
+    AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex, AuthorizedDifferenceCursor,
+    AuthorizedDifferenceExecution, AuthorizedOrderExecution, AuthorizedOrderedReadSession,
+    AuthorizedPreparedFnxCall, AuthorizedPreparedRead, AuthorizedReadOutput, AuthorizedReadSession,
+    AuthorizedReadTransaction, AuthorizedRowCursor, AuthorizedSealedReadSession,
+    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
+    AuthorizedSpoolCursor, ExplainRow, HYBRID_SEARCH_OUTPUTS, HybridCallError,
+    MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
     MaintainedBeaconIndex, MaintainedBeaconStatus, NativeAggregateCursor, NativeAggregateSpool,
     NativeAggregateSpoolCursor, NativeAggregateSpoolDifference, NativeAggregateSpoolError,
     NativeAggregateSpoolRow, NativeExplainCertificate, NativeResultCertificate, NativeResultSpool,

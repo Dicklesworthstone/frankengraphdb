@@ -22,7 +22,9 @@ use fgdb_types::{CommitSeq, QueryCx};
 mod branch;
 #[path = "query_spool.rs"]
 mod spool;
-pub(crate) use spool::{ExternalOrderHost, ExternalOrderLimits, execute_relation};
+pub(crate) use spool::{
+    ExternalOrderHost, ExternalOrderLimits, execute_relation, spool_terminal_aggregate_with_host,
+};
 pub use spool::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor,

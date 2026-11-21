@@ -16,6 +16,7 @@ mod aggregate;
 mod codec;
 #[path = "query_spool/sort.rs"]
 mod sort;
+pub(crate) use aggregate::spool_terminal_aggregate_with_host;
 pub use aggregate::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, PreparedBufferedAggregate,

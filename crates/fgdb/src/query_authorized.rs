@@ -48,12 +48,13 @@ mod relational;
 #[path = "query_authorized/tape.rs"]
 mod tape;
 pub use relational::{
-    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor,
-    AuthorizedBeaconIndex, AuthorizedDifferenceCursor, AuthorizedDifferenceExecution,
-    AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadOutput, AuthorizedReadSession, AuthorizedReadTransaction,
-    AuthorizedRowCursor, AuthorizedSealedReadSession, AuthorizedSendAggregateCursor,
-    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
+    AuthorizedAggregateCursor, AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor,
+    AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor, AuthorizedBeaconIndex,
+    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadOutput, AuthorizedReadSession, AuthorizedReadTransaction, AuthorizedRowCursor,
+    AuthorizedSealedReadSession, AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
+    AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 pub(crate) use admission::{ADMITTED_BYTES, AdmittedCache};

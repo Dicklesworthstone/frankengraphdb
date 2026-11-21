@@ -28,8 +28,9 @@ pub use asynchronous::AuthorizedAsyncRowCursor;
 #[path = "stream/ordered.rs"]
 mod ordered;
 pub use ordered::{
-    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
-    AuthorizedOrderedReadSession, AuthorizedSortLimits, AuthorizedSpoolCursor,
+    AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor, AuthorizedDifferenceCursor,
+    AuthorizedDifferenceExecution, AuthorizedOrderExecution, AuthorizedOrderedReadSession,
+    AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 // Synchronization is local to ONE cursor's sequential callbacks. No guard is

@@ -17,6 +17,8 @@ use std::task::{Context, Waker};
 
 #[path = "tests/imported.rs"]
 mod imported;
+#[path = "tests/terminal_aggregate.rs"]
+mod terminal_aggregate;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x86; 32]);
 type Resolver = fn(GraphSymbolKind, &str) -> Option<GraphSymbol>;

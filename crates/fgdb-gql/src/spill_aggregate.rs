@@ -143,6 +143,25 @@ impl AsyncSpillAggregatePlan {
         Self::compile_sources(aggregate, false)
     }
 
+    /// Compile every input occurrence through the complete relational owner.
+    /// Hosts with scoped relational leaves can reuse their exact source and
+    /// element-read boundary before the ordinary external numeric reducer.
+    /// The result is always `Relation`; it retains native computed-input and
+    /// collection occurrence order rather than extracting a graph-only leaf.
+    /// Completed groups remain exact aggregate cells, not ordinary row values.
+    /// The host must independently admit every source before accessing data.
+    pub fn compile_complete_relation(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        if aggregate.input_relation().is_some() {
+            return Self::compile_sources(aggregate, false);
+        }
+        let relation = aggregate
+            .complete_group_relation()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        Self::compile_relation(&relation)
+    }
+
     /// Compile for the buffered host's additional bounded path source. Walk
     /// occurrences complete through the ordinary external relation before
     /// exact reduction; the physical traversal order never becomes COLLECT's

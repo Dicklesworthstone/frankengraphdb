@@ -10,7 +10,7 @@ use fgdb_gql::spill_aggregate::{
     AsyncEdgeJoinSpillAggregateCursor, AsyncEdgeSpillAggregateCursor, AsyncSpillAggregatePlan,
     AsyncVertexSpillAggregateCursor,
 };
-use fgdb_gql::spill_set::{SpillSetAggregatePlan, SpillSetAggregateRowError};
+use fgdb_gql::spill_set::{AsyncSpillSetPlan, SpillSetAggregatePlan, SpillSetAggregateRowError};
 use fgdb_gql::stream::AsyncVertexScanSource;
 use fgdb_gql::{GlaExecutionEvent, GqlBudgetDimension, GqlExecutionBudget};
 
@@ -237,6 +237,105 @@ fn conversion_error(error: SpillSetAggregateRowError<NativeSpoolError>) -> Nativ
             fgdb_gql::GraphSetExecutionError::Aggregate(Box::new(error)),
         ),
     }
+}
+
+/// Finish a terminal summary over the host's complete authorized relation.
+/// Input and result have separate row allowances but share native counters,
+/// physical work, scratch quotas and the live host control. The reducer writes
+/// its exact aggregate envelope to destination; no conversion to the narrower
+/// ordinary row domain occurs, even for an empty final result window.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn spool_terminal_aggregate_with_host<H, A, B, C>(
+    input: &AsyncSpillSetPlan,
+    definition: &SpillAggregateDefinition,
+    columns: &[String],
+    slots: &[GraphAggregateTextSlot],
+    snapshot: CommitSeq,
+    host: &mut H,
+    cx: &QueryCx,
+    policy: GqlQueryPolicy,
+    scratch: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    auxiliary: &mut SpillFile<C>,
+    limits: ExternalOrderLimits,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+) -> Result<(NativeAggregateSpool, u64)>
+where
+    H: ExternalOrderHost,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+{
+    host.checkpoint()?;
+    host.check_snapshot(snapshot)?;
+    validate_limits(
+        limits.group_capacity,
+        limits.max_partitions,
+        limits.run_rows,
+        limits.max_runs,
+        limits.page_bytes,
+        limits.max_row_bytes,
+    )?;
+    if definition.output_may_read_elements()
+        || !crate::query::aggregate_stream::valid_layout(
+            columns,
+            slots,
+            definition.key_columns(),
+            definition.aggregate_columns(),
+        )
+    {
+        return Err(NativeAggregateSpoolError::Unsupported);
+    }
+    let input_policy = GqlQueryPolicy {
+        rows: match policy.rows.max_snapshot_records() {
+            Some(records) => GqlExecutionBudget::new(records, limits.max_input_rows),
+            None => GqlExecutionBudget::result_rows(limits.max_input_rows),
+        },
+        evaluator: policy.evaluator,
+    };
+    // Complete the relation in auxiliary, so the reducer can alternate its
+    // input with scratch and append its final exact result to destination.
+    // All files remain distinct append-only owners, including nested groups.
+    let (initial, prior_work) = execute_relation(
+        input,
+        None,
+        snapshot,
+        host,
+        cx,
+        input_policy,
+        scratch,
+        auxiliary,
+        destination,
+        limits,
+        resolver,
+    )
+    .await?;
+    let mut control = |event| host.native_event(event);
+    let opened = Opened {
+        input: Box::new(CompletedRelation::new(cx, policy, &initial).with_control(&mut control)),
+        definition: definition.clone(),
+        columns: columns.to_vec(),
+        slots: slots.to_vec(),
+    };
+    execute(
+        opened,
+        Some(initial),
+        prior_work,
+        cx,
+        auxiliary,
+        scratch,
+        destination,
+        limits.group_capacity,
+        limits.max_partitions,
+        limits.run_rows,
+        limits.max_runs,
+        limits.page_bytes,
+        limits.max_row_bytes,
+        limits.max_input_rows,
+        limits.max_sort_work,
+        resolver,
+    )
+    .await
 }
 
 /// Complete an intermediate native grouping before any enclosing row stage.

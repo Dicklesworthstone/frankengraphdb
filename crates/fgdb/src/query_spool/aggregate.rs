@@ -30,6 +30,7 @@ mod output;
 mod partitioning;
 pub use account::NativeAggregateSpoolDifference;
 pub(super) use buffered::spool_group_stage_with_host;
+pub(crate) use buffered::spool_terminal_aggregate_with_host;
 pub use buffered::{PreparedBufferedAggregate, PreparedBufferedSealedAggregate};
 use partitioning::split_partition;
 
@@ -119,6 +120,10 @@ pub struct NativeAggregateSpool {
     aggregates: Arc<[String]>,
 }
 impl NativeAggregateSpool {
+    pub(crate) fn encoded_len(&self) -> usize {
+        self.inner.encoded_len()
+    }
+
     pub fn columns(&self) -> &[String] {
         &self.columns
     }

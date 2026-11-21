@@ -20,6 +20,10 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+#[path = "ordered/terminal_aggregate.rs"]
+mod terminal_aggregate;
+pub use terminal_aggregate::{AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor};
+
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 type PreparedOrderedSession<'a, R, C, A, B, D> = (
     AuthorizedOrderedReadSession<'a, R, C, A, B, D>,
