@@ -4,7 +4,9 @@
 //! this module supplies only historical candidates and same-cut stored rows.
 
 use super::*;
-use crate::tiered::sealed::{AdjRunError, SealedEdgeLocator, SealedError, SealedLimits};
+use crate::tiered::sealed::{
+    AdjRunError, LocatedEdge, SealedEdgeLocator, SealedError, SealedLimits,
+};
 
 pub(super) struct RunCursor {
     locator: SealedEdgeLocator,
@@ -126,14 +128,14 @@ pub(super) async fn load_incident_run<V: Vfs, C: Send>(
 
 /// Admit exactly the next historical identity in the requested incidence,
 /// before resolving its visible version or cloning any selected properties.
-pub(super) fn incident_candidate<V: Vfs, C>(
+pub(super) async fn incident_candidate<V: Vfs, C: Send>(
     partition: &mut BufferedPartition<V>,
     work: &mut EdgeScanWork,
     run: &RunCursor,
     cx: &QueryCx,
     as_of: CommitSeq,
     request: incidence::Incidence,
-    observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+    observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
 ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
     if request.relation != Some(run.relation) {
         return Err(sealed_error(SealedError::ImageMismatch));
@@ -161,6 +163,7 @@ pub(super) fn incident_candidate<V: Vfs, C>(
         EdgePropertyAccess::Read,
         observe,
     )
+    .await
     .map(Some)
 }
 
@@ -243,11 +246,11 @@ impl<V: Vfs> BufferedEdgeScan<'_, V> {
     /// Reuse the same admitted locator for nested reads in its relation. A
     /// different relation or an untyped request requires the driver's own
     /// source selection; it cannot inherit the root's narrower relation scope.
-    pub(super) fn published_incident<C>(
+    pub(super) async fn published_incident<C: Send>(
         &mut self,
         cx: &QueryCx,
         request: incidence::Incidence,
-        observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<Option<BufferedEdgeCandidate>>, BufferedScanError<C>> {
         let Some(run) = self.state.as_ref().and_then(|state| state.run.as_ref()) else {
             return Ok(None);
@@ -264,19 +267,20 @@ impl<V: Vfs> BufferedEdgeScan<'_, V> {
             request,
             observe,
         )
+        .await
         .map(Some)
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn next<V: Vfs, C>(
+pub(super) async fn next<V: Vfs, C: Send>(
     partition: &mut BufferedPartition<V>,
     work: &mut EdgeScanWork,
     run: &mut RunCursor,
     cx: &QueryCx,
     as_of: CommitSeq,
     properties: EdgePropertyAccess,
-    observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+    observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
 ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
     let eid = run.locator.next_root_with(
         cx,
@@ -305,13 +309,14 @@ pub(super) fn next<V: Vfs, C>(
         eid,
         properties,
         observe,
-    )?;
+    )
+    .await?;
     run.after = Some(eid);
     Ok(Some(candidate))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn row<V: Vfs, C>(
+async fn row<V: Vfs, C: Send>(
     partition: &mut BufferedPartition<V>,
     work: &mut EdgeScanWork,
     locator: &SealedEdgeLocator,
@@ -319,11 +324,23 @@ fn row<V: Vfs, C>(
     as_of: CommitSeq,
     eid: EId,
     access: EdgePropertyAccess,
-    observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+    observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
 ) -> Result<BufferedEdgeCandidate, BufferedScanError<C>> {
     let visible =
         locator.edge_with(cx, as_of, eid, &mut || work.step(cx, observe), sealed_error)?;
     let row = if let Some(visible) = visible {
+        let visible = match visible {
+            LocatedEdge::Base(visible) => visible,
+            LocatedEdge::Suffix(source) => {
+                return partition
+                    .native_run_row(cx, source, access, work, observe)
+                    .await
+                    .map(|row| BufferedEdgeCandidate {
+                        eid,
+                        row: Some(row),
+                    });
+            }
+        };
         let selected = match access {
             EdgePropertyAccess::Read => visible.properties,
             EdgePropertyAccess::Property(key) => {

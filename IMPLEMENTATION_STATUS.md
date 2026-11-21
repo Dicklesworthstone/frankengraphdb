@@ -12,6 +12,33 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Lazy post-seal native property reads — qualification pending
+
+Native durable-run readers now retain admitted suffix topology, original root
+ordinals and compact property locators. After resolving exact-cut visibility
+and last-publication precedence, root scans and both incident/probe paths fault
+only the winning row's requested property data through the existing
+authenticated buffered readers. Topology-only and propertyless winners do not
+demand property sidecars. Selected rows retain their own measured memory charge.
+
+The suffix receipt no longer retains every historical property body, and
+selected rows do not re-decode block topology. The regression source includes
+512 distinct 14 KiB property values with a 6 MiB read pool, historical edits,
+nested values, removals, retirements, selected-key reads, post-admission
+corruption, terminal errors, late cancellation and reservation refunds.
+
+This is a suffix-property residency improvement, not descriptor-only opening
+or a claim that the whole query is larger-than-memory. Complete initial source
+admission, the whole sealed base image, suffix topology and the EId directory
+remain required. Durable formats, dependency pins and cold-open validation
+are unchanged.
+
+Independent production and regression-source reviews found no remaining
+source blocker. All eleven changed Rust files were parsed and formatted with
+the pinned Rustfmt; whitespace checks passed. Compilation, runtime assertions
+and full exact-tree proof remain **UNRUN** for this increment. The broader
+`fgdb-rc1111-persistent-tier-r-7hsan` and `fgdb-w3-tier-r-0tj` remain open.
+
 ### Continuation qualification receipt — source `4bfa197`
 
 The authorized external aggregate core and server integration are on `main`

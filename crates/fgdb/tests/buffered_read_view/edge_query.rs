@@ -10,6 +10,9 @@ use fgdb_types::QueryCx;
 use fgdb_types::context::SimulationCheckpointProbe;
 use std::sync::Arc;
 
+#[path = "native_suffix_properties.rs"]
+mod native_suffix_properties;
+
 // Independent finite fixture oracle. This is NOT the buffered point reader,
 // an alternative executor, or expected values obtained from the new scan.
 fn expected(

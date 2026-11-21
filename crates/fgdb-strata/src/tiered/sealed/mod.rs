@@ -38,7 +38,7 @@ pub use incoming::{
     IncomingIndexLimits, IncomingIndexStats, SealedIncomingCursor, SealedIncomingIndex,
 };
 mod locator;
-pub(crate) use locator::SealedEdgeLocator;
+pub(crate) use locator::{LocatedEdge, SealedEdgeLocator};
 mod overlay;
 pub use overlay::{SealedDeltaOverlay, StrataNeighborCursor};
 #[cfg(test)]

@@ -493,7 +493,8 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 self.as_of,
                 properties,
                 observe,
-            );
+            )
+            .await;
         }
         if !state.initialized {
             let mut selected = self

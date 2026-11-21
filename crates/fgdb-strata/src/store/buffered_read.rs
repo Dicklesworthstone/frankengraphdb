@@ -16,7 +16,7 @@ mod block_directory;
 mod patch_directory;
 mod scan_access;
 
-pub(crate) use scan_access::native_runs::NativeRunSuffix;
+pub(crate) use scan_access::native_runs::{NativeRunRow, NativeRunSuffix};
 
 use super::{BlockStore, ExtentError, RootReadEvent, RootWalk, StoreError};
 use crate::edge_props::{BlockProps, EdgePropertyRow};
@@ -914,8 +914,11 @@ impl<V: Vfs> BufferedPartition<V> {
     /// Only floor-zero runs with authenticated coverage through this pinned
     /// generation, directly or with the complete suffix, may replace its
     /// historical candidate domain. The incidence ceiling covers base versions
-    /// plus raw suffix statements before suffix payload loading. Pruned, untyped
-    /// and selected-root scans keep their ordinary root source; typed incidents
+    /// plus raw suffix statements before suffix topology loading. Suffix
+    /// properties stay in immutable storage: only the visible winning row's
+    /// requested values are faulted, under the ordinary cache and output
+    /// reservations. Complete initial root admission is still required.
+    /// Pruned, untyped and selected-root scans keep their ordinary root source; typed incidents
     /// may still select an eligible run. Encoded extents admit frame scratch and
     /// authenticated-header-derived erasure decoder capacity through this same
     /// source pool, including when the selected object lives inside a pack.

@@ -70,6 +70,19 @@ pub(super) fn block<C>(
     Ok(retain(image, bytes)?)
 }
 
+pub(super) fn block_keys<C>(
+    image: BufferedValue<BufferedBlockKeys>,
+    control: &mut impl FnMut() -> Result<(), BufferedScanError<C>>,
+) -> Result<BufferedValue<BufferedBlockKeys>, BufferedScanError<C>> {
+    control()?;
+    let mut bytes = add(size_of::<BufferedBlockKeys>(), vector_bytes(&image.0)?)?;
+    if let Some(locators) = &image.1 {
+        bytes = add(bytes, vector_bytes(locators)?)?;
+    }
+    control()?;
+    Ok(retain(image, bytes)?)
+}
+
 impl BufferedValue<VertexRow> {
     /// Keep only the completed vertex's owned capacity after all historical
     /// replacements and decoder temporaries have finished.

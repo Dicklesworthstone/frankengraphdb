@@ -385,7 +385,7 @@ impl<V: Vfs> Driver<'_, V> {
     ) -> Result<Option<Option<BufferedEdgeCandidate>>, BufferedScanError<C>> {
         if self.root.has_published_relation(request.relation) {
             self.native_incident = None;
-            return self.root.published_incident(cx, request, observe);
+            return self.root.published_incident(cx, request, observe).await;
         }
         let Some(relation) = request.relation else {
             self.native_incident = None;
@@ -421,6 +421,7 @@ impl<V: Vfs> Driver<'_, V> {
             request,
             observe,
         )
+        .await
         .map(Some)
     }
 

@@ -7,13 +7,15 @@ use crate::tiered::sealed::{
     AdjRunSegment, MAX_ADJ_RUN_BYTES, SealedAnchor, SealedError, SealedLimits,
 };
 
-/// Complete post-horizon statements from one admitted pinned root. Only this
+/// Complete post-horizon topology from one admitted pinned root. Only this
 /// loader can mint the receipt; no caller supplies a horizon or block list.
 /// Original root ordinals and every raw history row remain in order, including
 /// versions invisible at the query cut and old births restated by retirement.
+/// Property bodies stay in immutable storage until a visible winner needs one.
 pub(crate) struct NativeRunSuffix {
     blocks: Vec<Vec<AdjacencyEntry>>,
-    properties: Vec<Option<BlockProps>>,
+    property_locators: Vec<Option<Vec<u8>>>,
+    root_ordinals: Vec<usize>,
     anchor: SealedAnchor,
     root: PartitionRootVersion,
     publication: CommitSeq,
@@ -25,13 +27,51 @@ pub(crate) struct NativeRunSuffix {
     _owner_charge: MemoryCharge,
 }
 
+/// An exact historical row borrowed from its admitted suffix receipt. The
+/// private coordinates cannot be supplied independently of their pinned root,
+/// original publication order and already authenticated topology.
+pub(crate) struct NativeRunRow<'a> {
+    suffix: &'a NativeRunSuffix,
+    block: usize,
+    locator: u8,
+    entry: AdjacencyEntry,
+}
+
 impl NativeRunSuffix {
     pub(crate) fn blocks(&self) -> &[Vec<AdjacencyEntry>] {
         &self.blocks
     }
 
-    pub(crate) fn properties(&self) -> &[Option<BlockProps>] {
-        &self.properties
+    pub(crate) fn root_ordinals(&self) -> &[usize] {
+        &self.root_ordinals
+    }
+
+    pub(crate) fn row(
+        &self,
+        block: usize,
+        row: usize,
+        entry: AdjacencyEntry,
+    ) -> Result<NativeRunRow<'_>, SealedError> {
+        if self.blocks.get(block).and_then(|entries| entries.get(row)) != Some(&entry) {
+            return Err(SealedError::NonCanonical);
+        }
+        let locator = match self
+            .property_locators
+            .get(block)
+            .ok_or(SealedError::NonCanonical)?
+        {
+            Some(locators) => *locators.get(row).ok_or(SealedError::NonCanonical)?,
+            None => 0,
+        };
+        Ok(NativeRunRow {
+            suffix: self,
+            block: *self
+                .root_ordinals
+                .get(block)
+                .ok_or(SealedError::NonCanonical)?,
+            locator,
+            entry,
+        })
     }
 
     pub(crate) const fn incidence_count(&self) -> usize {
@@ -292,7 +332,11 @@ impl<V: Vfs> BufferedPartition<V> {
         }
 
         let bytes = count
-            .checked_mul(size_of::<Vec<AdjacencyEntry>>() + size_of::<Option<BlockProps>>())
+            .checked_mul(
+                size_of::<Vec<AdjacencyEntry>>()
+                    + size_of::<Option<Vec<u8>>>()
+                    + size_of::<usize>(),
+            )
             .and_then(|bytes| {
                 count
                     .checked_mul(size_of::<MemoryCharge>())
@@ -304,7 +348,8 @@ impl<V: Vfs> BufferedPartition<V> {
         let charge = self.reserve_scan_bytes(cx, bytes)?;
         let mut suffix = NativeRunSuffix {
             blocks: Vec::new(),
-            properties: Vec::new(),
+            property_locators: Vec::new(),
+            root_ordinals: Vec::new(),
             anchor,
             root: self.root_id,
             publication: self.root.published_at,
@@ -323,7 +368,12 @@ impl<V: Vfs> BufferedPartition<V> {
             .map_err(allocation_error)?;
         work.step(cx, observe)?;
         suffix
-            .properties
+            .property_locators
+            .try_reserve_exact(count)
+            .map_err(allocation_error)?;
+        work.step(cx, observe)?;
+        suffix
+            .root_ordinals
             .try_reserve_exact(count)
             .map_err(allocation_error)?;
         work.step(cx, observe)?;
@@ -337,10 +387,17 @@ impl<V: Vfs> BufferedPartition<V> {
             .checked_mul(size_of::<Vec<AdjacencyEntry>>())
             .and_then(|bytes| {
                 suffix
-                    .properties
+                    .property_locators
                     .capacity()
-                    .checked_mul(size_of::<Option<BlockProps>>())
-                    .and_then(|properties| bytes.checked_add(properties))
+                    .checked_mul(size_of::<Option<Vec<u8>>>())
+                    .and_then(|locators| bytes.checked_add(locators))
+            })
+            .and_then(|bytes| {
+                suffix
+                    .root_ordinals
+                    .capacity()
+                    .checked_mul(size_of::<usize>())
+                    .and_then(|ordinals| bytes.checked_add(ordinals))
             })
             .and_then(|bytes| {
                 suffix
@@ -358,17 +415,92 @@ impl<V: Vfs> BufferedPartition<V> {
             if self.root.blocks[at].last_seq <= verified_through {
                 continue;
             }
+            work.step(cx, observe)?;
+            for _ in 0..self.blocks[at].rows {
+                work.step(cx, observe)?;
+            }
+            let charge = self.reserve_scan_workspace(cx)?;
+            let keys = self.block_keys(cx, at, Admission::ScanBypass).await?;
+            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
             let BufferedValue {
-                value: (entries, properties),
+                value: (entries, locators),
                 _charge,
-            } = self
-                .edge_scan_block(cx, at, EdgePropertyAccess::Read, work, observe)
-                .await?;
+            } = super::retained::block_keys(
+                BufferedValue::from_reserved(keys, charge),
+                &mut || work.step(cx, observe),
+            )?;
             suffix.blocks.push(entries);
-            suffix.properties.push(properties);
+            suffix.property_locators.push(locators);
+            suffix.root_ordinals.push(at);
             suffix._charges.push(_charge);
         }
         work.step(cx, observe)?;
         Ok(suffix)
+    }
+
+    /// Fault only the selected historical row after the locator resolves
+    /// visibility. The token borrows the complete suffix proof and its admitted
+    /// positional locator. Only the selected immutable property body is faulted;
+    /// sequential reads never re-decode the retained block topology. Initial
+    /// root admission still validates every property body.
+    pub(crate) async fn native_run_row<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        source: NativeRunRow<'_>,
+        access: EdgePropertyAccess,
+        work: &mut EdgeScanWork,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<BufferedValue<BufferedEdge>, BufferedScanError<C>> {
+        work.step(cx, observe)?;
+        if source.suffix.root != self.root_id
+            || source.suffix.publication != self.root.published_at
+            || source.entry.relation != source.suffix.relation
+            || source.block >= self.blocks.len()
+        {
+            return Err(invalid_run_source().into());
+        }
+        // Topology-only and propertyless winners already have their complete
+        // requested data. Neither demands a sidecar or a decode workspace.
+        if access == EdgePropertyAccess::Skip || source.locator == 0 {
+            let charge = self.reserve_scan_bytes(cx, size_of::<BufferedEdge>())?;
+            return BufferedValue::from_reserved(
+                BufferedEdge {
+                    entry: source.entry,
+                    props: Vec::new(),
+                },
+                charge,
+            )
+            .retain_scan_edge(&mut || work.step(cx, observe));
+        }
+        let charge = self.reserve_scan_workspace(cx)?;
+        // The hosted property's visit is admitted before its cache pin.
+        work.step(cx, observe)?;
+        let props = match access {
+            EdgePropertyAccess::Read => {
+                self.block_property_row(cx, source.block, source.locator, Admission::ScanBypass)
+                    .await?
+            }
+            EdgePropertyAccess::Property(property) => self
+                .block_property_value(
+                    cx,
+                    source.block,
+                    source.locator,
+                    property,
+                    Admission::ScanBypass,
+                )
+                .await?
+                .map(|value| vec![(property, value)])
+                .unwrap_or_default(),
+            EdgePropertyAccess::Skip => unreachable!("topology-only row returned above"),
+        };
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        BufferedValue::from_reserved(
+            BufferedEdge {
+                entry: source.entry,
+                props,
+            },
+            charge,
+        )
+        .retain_scan_edge(&mut || work.step(cx, observe))
     }
 }

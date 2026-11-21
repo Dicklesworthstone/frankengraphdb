@@ -9,7 +9,7 @@
 
 use super::{Image, RowScan, SealedEdge, SealedError, SealedPartition, check_limit};
 use crate::AdjacencyEntry;
-use crate::store::NativeRunSuffix;
+use crate::store::{NativeRunRow, NativeRunSuffix};
 use crate::tiered::edge_scan::BufferedEdgeDirection;
 use crate::tiered::memory::MemoryCharge;
 use fgdb_delta_types::RelationId;
@@ -21,6 +21,13 @@ struct VersionRef {
     eid: EId,
     created_at: CommitSeq,
     position: u64,
+}
+
+/// A visible winner keeps its original property owner. Base rows borrow the
+/// admitted image; suffix rows borrow an opaque receipt-bound store location.
+pub(crate) enum LocatedEdge<'a> {
+    Base(SealedEdge<'a>),
+    Suffix(NativeRunRow<'a>),
 }
 
 /// A private runtime directory pinned to its original authenticated image.
@@ -117,7 +124,7 @@ impl SealedEdgeLocator {
                 }
             }
             if let Some(suffix) = &suffix {
-                if suffix.blocks().len() != suffix.properties().len() {
+                if suffix.blocks().len() != suffix.root_ordinals().len() {
                     return Err(map_error(SealedError::NonCanonical));
                 }
                 let mut raw = 0usize;
@@ -361,7 +368,8 @@ impl SealedEdgeLocator {
     }
 
     /// Resolve one identity at the authorized cut, borrowing the original
-    /// version's property row. This does not prove either endpoint is visible.
+    /// version's property owner. A suffix location faults only after this
+    /// winner is known. This does not prove either endpoint is visible.
     pub(crate) fn edge_with<E>(
         &self,
         cx: &QueryCx,
@@ -369,7 +377,7 @@ impl SealedEdgeLocator {
         eid: EId,
         control: &mut impl FnMut() -> Result<(), E>,
         map_error: fn(SealedError) -> E,
-    ) -> Result<Option<SealedEdge<'_>>, E> {
+    ) -> Result<Option<LocatedEdge<'_>>, E> {
         let mut checkpoint = || checked(cx, control, map_error);
         checkpoint()?;
         self.authorize(as_of).map_err(map_error)?;
@@ -392,18 +400,20 @@ impl SealedEdgeLocator {
         if !entry.visible_at(as_of) {
             return Ok(None);
         }
-        let properties = if locator == 0 {
-            &[][..]
-        } else if let Some((block, _)) =
+        if let Some((block, row)) =
             suffix_location(self.source.image.incidences, version.position).map_err(map_error)?
         {
-            self.suffix
+            let source = self
+                .suffix
                 .as_ref()
-                .and_then(|suffix| suffix.properties().get(block))
-                .and_then(Option::as_ref)
-                .and_then(|properties| properties.rows.get(locator as usize - 1))
-                .ok_or_else(|| map_error(SealedError::NonCanonical))?
-                .as_slice()
+                .ok_or_else(|| map_error(SealedError::NonCanonical))?;
+            return source
+                .row(block, row, entry)
+                .map(|row| Some(LocatedEdge::Suffix(row)))
+                .map_err(map_error);
+        }
+        let properties = if locator == 0 {
+            &[][..]
         } else {
             self.source
                 .image
@@ -412,7 +422,7 @@ impl SealedEdgeLocator {
                 .ok_or_else(|| map_error(SealedError::NonCanonical))?
                 .as_slice()
         };
-        Ok(Some(SealedEdge { entry, properties }))
+        Ok(Some(LocatedEdge::Base(SealedEdge { entry, properties })))
     }
 }
 
@@ -507,20 +517,9 @@ fn incidence(
             .and_then(|entries| entries.get(row))
             .copied()
             .ok_or(SealedError::NonCanonical)?;
-        let properties = suffix
-            .properties()
-            .get(block)
-            .ok_or(SealedError::NonCanonical)?;
-        let locator = match properties {
-            Some(properties) => u32::from(
-                *properties
-                    .locators
-                    .get(row)
-                    .ok_or(SealedError::NonCanonical)?,
-            ),
-            None => 0,
-        };
-        (entry, locator)
+        // The receipt retains suffix property locators separately. Endpoint
+        // ordering needs only topology; visible resolution mints the row token.
+        (entry, 0)
     } else {
         let row_index = image
             .offsets
@@ -948,6 +947,9 @@ mod tests {
                     .edge_with(cx, CommitSeq(cut), EId(id), &mut || Ok(()), |error| error)
                     .unwrap()
                     .unwrap();
+                let LocatedEdge::Base(edge) = edge else {
+                    panic!("base fixture returned a suffix row");
+                };
                 assert_eq!(edge.entry.eid, EId(id));
                 assert_eq!(edge.entry.created_at, CommitSeq(expected_birth));
                 assert_eq!(
@@ -1004,6 +1006,9 @@ mod tests {
                 .edge_with(cx, CommitSeq(5), EId(295), &mut || Ok(()), |error| error)
                 .unwrap()
                 .unwrap();
+            let LocatedEdge::Base(edge) = edge else {
+                panic!("base fixture returned a suffix row");
+            };
             assert_eq!(edge.entry.dst, VId(105));
             assert_eq!(
                 edge.properties,
