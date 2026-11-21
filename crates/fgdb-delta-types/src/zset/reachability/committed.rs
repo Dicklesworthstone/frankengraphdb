@@ -15,7 +15,7 @@
 
 #[path = "checkpoint.rs"]
 pub mod checkpoint;
-pub use checkpoint::ReachabilityCheckpointError;
+pub use checkpoint::{ReachabilityCheckpointEncodeError, ReachabilityCheckpointError};
 
 use super::{IncrementalReachability, ReachabilityError, ReachabilityUpdate};
 use crate::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeInputUpdate};

@@ -170,9 +170,42 @@ or the separately encoded ECS container.
 Regression sources cover frozen empty-generation bytes, populated hybrid
 roundtrips, every byte cutoff, exact-bound success, prefix rollback, capacity
 growth and cancellation. Scoped pinned Rustfmt and whitespace checks pass.
-Compiler/runtime and complete exact-tree qualification remain **UNRUN**; the
-targeted Cargo test stopped in dependency resolution. The broader
-`fgdb-rc1111-durable-watermarks-c1g98` remains open.
+First-party compilation, runtime assertions and complete exact-tree
+qualification remain **UNRUN**. The locked metadata check downloaded its
+missing registry dependencies, then exited 101 when the pinned asupersync
+compiler received SIGKILL before reaching Beacon or Ripple. The targeted
+runtime test had previously stopped in dependency resolution; neither attempt
+is passing evidence. The broader `fgdb-rc1111-durable-watermarks-c1g98` remains
+open.
+
+### Bounded reachability checkpoint encoding — qualification pending
+
+Reachability checkpoints now count their fixed-width version-one payload with
+checked arithmetic before reserving output. Schema epochs, edge identities and
+every reachable pair contribute to the same 256 MiB native plaintext ceiling.
+The sizing pass borrows the arrangement, stops as soon as oversize is known,
+and remains cancellable; a successful encoding makes one fallible reservation.
+Typed errors distinguish control failure, size overflow, byte refusal and
+allocation failure. An early byte refusal reports a lower bound on required
+space rather than promising the complete size.
+
+Native saves pass this limit through the standing-query owner. Encoding and
+container construction finish before directory creation or staging publication,
+so a refused save preserves both the published cache and the live frontier.
+The public `CommittedReachability::encode_checkpoint` error type is now
+`ReachabilityCheckpointEncodeError<E>`; repository callers are adapted.
+
+Four codec regressions cover frozen origin bytes, exact lengths and every
+smaller limit on a parallel-edge cyclic graph, cancellation throughout sizing
+and serialization, and arithmetic overflow. A native regression exercises
+exact-bound saves and zero/one-byte-short refusal for both Beacon and Ripple,
+checks unchanged saved bytes and source frontiers, and restores both caches.
+Scoped pinned Rustfmt, whitespace checks and independent source review pass.
+The locked metadata command failed with exit 101 when rustc compiling pinned
+asupersync received SIGKILL; it reached no first-party diagnostics or assertions.
+First-party compilation, runtime assertions and complete exact-tree
+qualification remain **UNRUN**. The full mandatory gate has no passing verdict.
+The broader `fgdb-rc1111-durable-watermarks-c1g98` remains open.
 
 ### Exclusive derived-checkpoint publication and oversized recovery — qualification pending
 

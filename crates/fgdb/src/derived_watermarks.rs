@@ -709,6 +709,8 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// Exclusive writer ownership prevents concurrent saves from truncating
     /// or publishing the same staging file while another save is using it.
+    /// The exact plaintext length is checked before allocating the serialized
+    /// closure, which may grow quadratically with graph reachability.
     pub async fn save_standing_reachability_checkpoint(
         &mut self,
         cx: &CommitCx,
@@ -716,14 +718,31 @@ impl<V: Vfs + Clone> Database<V> {
         handle: &StandingQueryHandle,
         name: &str,
     ) -> Result<CommitSeq, DerivedCheckpointError> {
+        self.save_standing_reachability_checkpoint_bounded(
+            cx,
+            query_cx,
+            handle,
+            name,
+            MAX_DERIVED_CHECKPOINT_PLAIN_BYTES as usize,
+        )
+        .await
+    }
+
+    async fn save_standing_reachability_checkpoint_bounded(
+        &mut self,
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        handle: &StandingQueryHandle,
+        name: &str,
+        max_bytes: usize,
+    ) -> Result<CommitSeq, DerivedCheckpointError> {
         if name.is_empty() {
             return Err(DerivedCheckpointError::EmptyName);
         }
         cx.checkpoint()
             .map_err(DerivedCheckpointError::Interrupted)?;
-        let (_relation, watermark_seq, payload) = self
-            .export_standing_reachability_checkpoint(query_cx, handle)
-            .map_err(DerivedCheckpointError::Standing)?;
+        let (_relation, watermark_seq, payload) =
+            self.export_standing_reachability_checkpoint(query_cx, handle, max_bytes)?;
         let chain_hash =
             chain_commitment_at(self.coordinator.chain(), watermark_seq).ok_or_else(|| {
                 DerivedCheckpointError::Io(std::io::Error::new(
@@ -881,9 +900,12 @@ impl<V: Vfs + Clone> Database<V> {
 #[cfg(test)]
 mod bounded_read_tests {
     use super::*;
+    use crate::WriteBatch;
     use asupersync::io::ReadBuf;
     use asupersync::lab::run_async_under_lab;
-    use fgdb_types::PurposeContexts;
+    use fgdb_beacon::{BeaconError, DistanceMetric, HnswConfig};
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
@@ -1005,6 +1027,199 @@ mod bounded_read_tests {
                     .unwrap(),
                 ReadOutcome::Missing
             ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn bounded_checkpoint_save_preserves_published_bytes_and_live_frontiers() {
+        let ((), report) = run_async_under_lab(0xc198_0006, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query = contexts.query();
+            let vfs = crate::MemVfs::new().unwrap();
+            let keys = DatabaseKeys::new(
+                [0xc1; 32],
+                DatabaseSecurityNamespaceId([0xc2; 32]),
+                [0xc3; 32],
+            );
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys)
+                .await
+                .unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 1..=2 {
+                batch.create_vertex(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![
+                        (
+                            PropertyKeyId(1),
+                            CanonicalScalar::ucs_basic_text("graph checkpoint").unwrap(),
+                        ),
+                        (PropertyKeyId(2), CanonicalScalar::Int(id as i64)),
+                    ],
+                );
+            }
+            batch.add_edge(EId(1), VId(1), VId(2), vec![]);
+            batch.add_edge(EId(2), VId(2), VId(1), vec![]);
+            let seq = db.write(&commit, batch).await.unwrap();
+            let mut options = BeaconOptions::text(PropertyKeyId(1));
+            options.vertex_label = Some(LabelId(1));
+            options.projection.vector = vec![PropertyKeyId(2)];
+            options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
+            let beacon = db
+                .register_beacon_index(&query, &options, ReadPolicy::default())
+                .unwrap();
+            let ripple = db
+                .register_standing_reachability(
+                    &query,
+                    RelationId(1),
+                    GqlQueryPolicy::new(100, 100, 1_000_000, 10_000),
+                )
+                .unwrap();
+            let original_beacon = db
+                .export_beacon_checkpoint_payload(&query, &beacon, usize::MAX)
+                .unwrap();
+            let original_ripple = db
+                .export_standing_reachability_checkpoint(&query, &ripple, usize::MAX)
+                .unwrap();
+            let beacon_limit = original_beacon.1.len();
+            let ripple_limit = original_ripple.2.len();
+
+            // Refusal before the first save must not create optional storage.
+            assert!(
+                db.save_beacon_checkpoint_bounded(&commit, &query, &beacon, "bounded", 0)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                db.save_standing_reachability_checkpoint_bounded(
+                    &commit, &query, &ripple, "bounded", 0
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                vfs.metadata(&vfs.database_dir().join("derived"))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                db.save_beacon_checkpoint_bounded(
+                    &commit,
+                    &query,
+                    &beacon,
+                    "bounded",
+                    beacon_limit
+                )
+                .await
+                .unwrap(),
+                seq
+            );
+            assert_eq!(
+                db.save_standing_reachability_checkpoint_bounded(
+                    &commit,
+                    &query,
+                    &ripple,
+                    "bounded",
+                    ripple_limit
+                )
+                .await
+                .unwrap(),
+                seq
+            );
+
+            let mut saved = Vec::new();
+            for relative in [
+                db.beacon_checkpoint_relative_path("bounded"),
+                db.standing_reachability_checkpoint_relative_path("bounded"),
+            ] {
+                let path = vfs.database_dir().join(relative);
+                let ReadOutcome::Present(bytes) = read_checkpoint_optional(
+                    &commit,
+                    &vfs,
+                    &path,
+                    checkpoint_encoded_limit(&db.keys),
+                )
+                .await
+                .unwrap() else {
+                    panic!("exact-bound checkpoint was not published")
+                };
+                saved.push((path, bytes));
+            }
+            for limit in [0, beacon_limit - 1] {
+                assert!(
+                    matches!(db.save_beacon_checkpoint_bounded(&commit, &query, &beacon, "bounded", limit).await,
+                    Err(DerivedCheckpointError::Beacon(MaintainedBeaconError::Resident(crate::ResidentIndexError::Index(BeaconError::ResourceLimit { resource: "checkpoint bytes", limit: found })))) if found == limit)
+                );
+            }
+            for limit in [0, ripple_limit - 1] {
+                assert!(
+                    matches!(db.save_standing_reachability_checkpoint_bounded(&commit, &query, &ripple, "bounded", limit).await,
+                    Err(DerivedCheckpointError::Extent(ExtentError::PlaintextTooLarge { limit: found, observed })) if found == limit as u64 && observed > found)
+                );
+            }
+            for (path, before) in saved {
+                let ReadOutcome::Present(after) = read_checkpoint_optional(
+                    &commit,
+                    &vfs,
+                    &path,
+                    checkpoint_encoded_limit(&db.keys),
+                )
+                .await
+                .unwrap() else {
+                    panic!("refusal removed a published checkpoint")
+                };
+                assert_eq!(after, before);
+            }
+            assert_eq!(
+                db.export_beacon_checkpoint_payload(&query, &beacon, beacon_limit)
+                    .unwrap(),
+                original_beacon
+            );
+            assert_eq!(
+                db.export_standing_reachability_checkpoint(&query, &ripple, ripple_limit)
+                    .unwrap(),
+                original_ripple
+            );
+
+            // The old authenticated files remain restorable with no graph scan.
+            let (restored_beacon, outcome) = db
+                .load_or_rebuild_beacon_checkpoint(
+                    &commit,
+                    &query,
+                    "bounded",
+                    &options,
+                    ReadPolicy::default(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(outcome, DerivedCheckpointOutcome::CatchUp { watermark_seq, head_seq, commits_replayed: 0, .. } if watermark_seq == seq && head_seq == seq)
+            );
+            assert_eq!(
+                db.export_beacon_checkpoint_payload(&query, &restored_beacon, beacon_limit)
+                    .unwrap(),
+                original_beacon
+            );
+            let (restored_ripple, outcome) = db
+                .load_or_rebuild_standing_reachability_checkpoint(
+                    &commit,
+                    &query,
+                    "bounded",
+                    RelationId(1),
+                    GqlQueryPolicy::new(0, 100, 1_000_000, 10_000),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(outcome, DerivedCheckpointOutcome::CatchUp { watermark_seq, head_seq, commits_replayed: 0, .. } if watermark_seq == seq && head_seq == seq)
+            );
+            assert_eq!(
+                db.export_standing_reachability_checkpoint(&query, &restored_ripple, ripple_limit)
+                    .unwrap(),
+                original_ripple
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

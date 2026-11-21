@@ -650,11 +650,17 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         cx: &QueryCx,
         handle: &StandingQueryHandle,
-    ) -> Result<(RelationId, CommitSeq, Vec<u8>), StandingQueryError> {
-        let StandingQuery::Reachability(query) = self.admitted_standing_query(cx, handle)? else {
-            return Err(StandingQueryError::Unsupported);
+        max_bytes: usize,
+    ) -> Result<(RelationId, CommitSeq, Vec<u8>), crate::DerivedCheckpointError> {
+        let StandingQuery::Reachability(query) = self
+            .admitted_standing_query(cx, handle)
+            .map_err(crate::DerivedCheckpointError::Standing)?
+        else {
+            return Err(crate::DerivedCheckpointError::Standing(
+                StandingQueryError::Unsupported,
+            ));
         };
-        query.encode_checkpoint_bytes(cx)
+        query.encode_checkpoint_bytes(cx, max_bytes)
     }
 
     pub(crate) fn catch_up_or_none_standing_reachability(

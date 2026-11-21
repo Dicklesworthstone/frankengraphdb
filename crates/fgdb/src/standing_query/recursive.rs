@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::gql_exec::source::{self, SourceEvent};
+use fgdb_delta_types::LimbLimit;
 use fgdb_delta_types::zset::committed::EdgeInputError;
 use fgdb_delta_types::zset::committed::snapshot::{
     EdgeSnapshot, EdgeSnapshotBuilder, SnapshotInputError,
@@ -12,7 +13,6 @@ use fgdb_delta_types::zset::reachability::ReachabilityError;
 use fgdb_delta_types::zset::reachability::committed::{
     CommittedReachability, CommittedReachabilityError, CommittedReachabilityUpdate,
 };
-use fgdb_delta_types::LimbLimit;
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 type Pair = (VId, VId);
@@ -226,8 +226,12 @@ impl State {
     pub(crate) fn encode_checkpoint_bytes(
         &self,
         cx: &QueryCx,
-    ) -> Result<(RelationId, CommitSeq, Vec<u8>), StandingQueryError> {
-        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        max_bytes: usize,
+    ) -> Result<(RelationId, CommitSeq, Vec<u8>), crate::DerivedCheckpointError> {
+        use crate::DerivedCheckpointError;
+        use fgdb_delta_types::zset::reachability::committed::ReachabilityCheckpointEncodeError;
+        cx.checkpoint()
+            .map_err(DerivedCheckpointError::Interrupted)?;
         cx.with_restriction(|| {
             let mut checkpoint = || {
                 cx.checkpoint()
@@ -240,9 +244,35 @@ impl State {
             };
             let bytes = self
                 .input
-                .encode_checkpoint(&mut |event| meter.charge(event))
-                .map_err(zset_error)
-                .map_err(StandingQueryError::Delivery)?;
+                .encode_checkpoint_bounded(max_bytes, &mut |event| meter.charge(event))
+                .map_err(|error| match error {
+                    ReachabilityCheckpointEncodeError::Control(error) => {
+                        DerivedCheckpointError::Standing(StandingQueryError::Delivery(zset_error(
+                            error,
+                        )))
+                    }
+                    ReachabilityCheckpointEncodeError::ByteLimit { required, limit } => {
+                        DerivedCheckpointError::Extent(
+                            fgdb_strata::store::ecs_extent::ExtentError::PlaintextTooLarge {
+                                limit: limit as u64,
+                                observed: required as u64,
+                            },
+                        )
+                    }
+                    ReachabilityCheckpointEncodeError::SizeOverflow => {
+                        DerivedCheckpointError::Extent(
+                            fgdb_strata::store::ecs_extent::ExtentError::PlaintextTooLarge {
+                                limit: max_bytes as u64,
+                                observed: u64::MAX,
+                            },
+                        )
+                    }
+                    ReachabilityCheckpointEncodeError::AllocationFailed { requested } => {
+                        DerivedCheckpointError::Io(std::io::Error::other(format!(
+                            "allocator refused {requested} reachability checkpoint bytes"
+                        )))
+                    }
+                })?;
             Ok((self.relation(), self.frontier, bytes))
         })
     }
