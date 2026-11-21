@@ -40,6 +40,8 @@ mod cooperative;
 mod core_number;
 #[path = "sealed_cuts.rs"]
 mod cuts;
+#[path = "sealed_dag.rs"]
+mod dag;
 #[path = "sealed_directed_clustering.rs"]
 mod directed_clustering;
 #[path = "sealed_bfs.rs"]
@@ -1106,6 +1108,8 @@ impl FnxCallSpec {
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::MinimumSpanningTree
                 | FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
+                | FnxAlgorithm::TopologicalSort
+                | FnxAlgorithm::IsDirectedAcyclicGraph
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -1269,6 +1273,12 @@ impl FnxCallSpec {
             FnxAlgorithm::ArticulationPoints | FnxAlgorithm::Bridges
         ) {
             return cuts::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::TopologicalSort | FnxAlgorithm::IsDirectedAcyclicGraph
+        ) {
+            return dag::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(
             self.algorithm(),
@@ -1709,6 +1719,12 @@ impl EncodedRows {
                 }
                 values.value::<Infallible>(index, FnxOutput::Weight, vertices)?
             }
+            KernelValues::TopologicalOrder(_) => {
+                values.value::<Infallible>(index, FnxOutput::Rank, vertices)?
+            }
+            KernelValues::Acyclic(_) => {
+                values.value::<Infallible>(index, FnxOutput::Acyclic, vertices)?
+            }
             KernelValues::HubsAndAuthorities { hubs, authorities } => {
                 let hub = *hubs
                     .get(index)
@@ -1818,10 +1834,15 @@ impl EncodedRows {
                     .ok_or(ExecutionError::InvalidUpstreamResult)?,
             ),
         };
-        let FnxValue::Vertex(vertex) =
-            values.value::<Infallible>(index, FnxOutput::Vertex, vertices)?
-        else {
-            return Err(ExecutionError::InvalidUpstreamResult.into());
+        let vertex = if matches!(values, KernelValues::Acyclic(_)) {
+            None
+        } else {
+            let FnxValue::Vertex(vertex) =
+                values.value::<Infallible>(index, FnxOutput::Vertex, vertices)?
+            else {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            };
+            Some(vertex)
         };
         // Refuse an extra row before allocating even its bounded field vector.
         if self.emitted == self.row_count {
@@ -1836,7 +1857,9 @@ impl EncodedRows {
         for column in call.outputs() {
             checkpoint()?;
             let value = match (column.field, value) {
-                (FnxOutput::Vertex, _) => FnxValue::Vertex(vertex),
+                (FnxOutput::Vertex, _) => {
+                    FnxValue::Vertex(vertex.ok_or(ExecutionError::InvalidUpstreamResult)?)
+                }
                 (FnxOutput::Hub | FnxOutput::Authority, _) => {
                     values.value::<Infallible>(index, column.field, vertices)?
                 }
@@ -1851,6 +1874,8 @@ impl EncodedRows {
                 (FnxOutput::Weight, FnxValue::Float(value)) => FnxValue::Float(value),
                 (FnxOutput::Triangles, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 (FnxOutput::Core, FnxValue::Integer(value)) => FnxValue::Integer(value),
+                (FnxOutput::Rank, FnxValue::Integer(value)) => FnxValue::Integer(value),
+                (FnxOutput::Acyclic, FnxValue::Boolean(value)) => FnxValue::Boolean(value),
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
             };
             hash_result_value(result_hash, value);
@@ -2047,6 +2072,8 @@ fn source_digest() -> Digest {
             include_str!("sealed_core.rs"),
             include_str!("cuts.rs"),
             include_str!("sealed_cuts.rs"),
+            include_str!("dag.rs"),
+            include_str!("sealed_dag.rs"),
             include_str!("spanning_tree.rs"),
             include_str!("sealed_spanning_tree.rs"),
             include_str!("bellman_ford.rs"),
@@ -2095,6 +2122,20 @@ mod tests {
             FnxParameters::from([("source".to_owned(), crate::FnxArgument::Vertex(vertices[0]))]);
         let bind = |text| FnxCallSpec::bind(text, &parameters).unwrap();
         let cases = [
+            (
+                bind("CALL fnx.topological_sort() YIELD rank,node AS dependency"),
+                KernelValues::TopologicalOrder(vec![2, 0, 1]),
+                vec![
+                    vec![FnxValue::Integer(0), FnxValue::Vertex(vertices[2])],
+                    vec![FnxValue::Integer(1), FnxValue::Vertex(vertices[0])],
+                    vec![FnxValue::Integer(2), FnxValue::Vertex(vertices[1])],
+                ],
+            ),
+            (
+                bind("CALL fnx.is_directed_acyclic_graph() YIELD acyclic AS valid"),
+                KernelValues::Acyclic(false),
+                vec![vec![FnxValue::Boolean(false)]],
+            ),
             (
                 bind("CALL fnx.articulation_points() YIELD node AS cut"),
                 KernelValues::SelectedVertices(vec![false, true, false]),
@@ -2179,7 +2220,7 @@ mod tests {
                     ResultAdmission::for_delivery(&call, limits(), memory(), delivery).unwrap();
                 let mut encoded = EncodedRows::new(&call, expected.len(), &admission).unwrap();
                 let mut checks = 0;
-                for index in 0..vertices.len() {
+                for index in 0..values.scan_len(vertices.len()) {
                     encoded
                         .push_vertices(&call, &vertices, &values, index, &mut || {
                             checks += 1;
@@ -2216,7 +2257,7 @@ mod tests {
                 for stop in 1..=checks {
                     let mut encoded = EncodedRows::new(&call, expected.len(), &admission).unwrap();
                     let mut calls = 0;
-                    let result = (0..vertices.len()).try_for_each(|index| {
+                    let result = (0..values.scan_len(vertices.len())).try_for_each(|index| {
                         encoded.push_vertices(&call, &vertices, &values, index, &mut || {
                             calls += 1;
                             if calls == stop {

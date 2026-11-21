@@ -29,6 +29,7 @@ mod bellman_ford;
 mod call;
 mod clustering;
 mod cuts;
+mod dag;
 mod directed_clustering;
 mod execute;
 mod foundation;

@@ -653,7 +653,9 @@ impl SealedReadView {
         if canonical
             && (matches!(
                 bound.algorithm(),
-                fgdb_prism::FnxAlgorithm::Bridges | fgdb_prism::FnxAlgorithm::MinimumSpanningTree
+                fgdb_prism::FnxAlgorithm::Bridges
+                    | fgdb_prism::FnxAlgorithm::MinimumSpanningTree
+                    | fgdb_prism::FnxAlgorithm::TopologicalSort
             ) || bound
                 .outputs()
                 .first()

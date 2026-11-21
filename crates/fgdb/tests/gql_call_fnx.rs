@@ -155,6 +155,7 @@ fn value(value: FnxValue) -> GraphValue {
         FnxValue::Score(v) | FnxValue::Float(v) => {
             GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(v)))
         }
+        FnxValue::Boolean(value) => GraphValue::Scalar(CanonicalScalar::Bool(value)),
     }
 }
 
@@ -229,7 +230,8 @@ fn run<T>(test: impl AsyncFnOnce(&fgdb_types::CommitCx, &QueryCx) -> T) -> T {
 
 #[test]
 fn every_registered_procedure_composes_and_equals_the_standalone_call() {
-    // The table is the whole registry: a new row must join this law.
+    // Vertex-valued procedures use this shared cyclic fixture. DAG procedures
+    // have separate sequence/predicate and cycle-refusal fixtures below.
     let registered: Vec<&str> = FnxSignatureRegistry::signatures()
         .iter()
         .map(|signature| signature.name)
@@ -237,6 +239,10 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
     let listed: Vec<String> = CALLS
         .iter()
         .map(|(name, ..)| format!("fnx.{name}"))
+        .chain([
+            "fnx.topological_sort".to_owned(),
+            "fnx.is_directed_acyclic_graph".to_owned(),
+        ])
         .collect();
     assert_eq!(listed, registered);
     run_transaction(async |commit, cx, txcx| {
@@ -3208,6 +3214,164 @@ fn directed_load_projection_composes_and_replays_the_pinned_snapshot() {
                 db.replay(cx, &certificate, &params, symbols, policy())
                     .unwrap(),
                 before
+            );
+        }
+    });
+}
+
+#[test]
+fn dag_calls_preserve_sequence_boolean_domains_and_staged_cycles_in_all_read_hosts() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = Database::<MemVfs>::open_memory(commit, keys())
+            .await
+            .unwrap();
+        let ids = [VId(0), VId(17), VId(u128::MAX)];
+        let mut batch = WriteBatch::new(R);
+        for (index, &id) in ids.iter().enumerate() {
+            batch.create_vertex(
+                id,
+                vec![PERSON],
+                vec![(P, CanonicalScalar::Int(index as i64))],
+            );
+        }
+        batch.add_edge(EId(1), ids[2], ids[1], vec![]);
+        batch.add_edge(EId(2), ids[1], ids[0], vec![]);
+        db.write(commit, batch).await.unwrap();
+        let old = db.read_session().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let params = GqlParameters::new();
+        let int = |v| GraphValue::Scalar(CanonicalScalar::Int(v));
+        let expected: Vec<_> = ids
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(rank, &id)| vec![GraphValue::Vertex(id), int(rank as i64)])
+            .collect();
+        let topological = "CALL fnx.topological_sort() YIELD node,rank RETURN node,rank";
+        let predicate = "CALL fnx.is_directed_acyclic_graph() YIELD acyclic RETURN acyclic";
+        let yes = vec![vec![GraphValue::Scalar(CanonicalScalar::Bool(true))]];
+        let no = vec![vec![GraphValue::Scalar(CanonicalScalar::Bool(false))]];
+        for (text, wanted) in [
+            (topological, expected.clone()),
+            (
+                "CALL fnx.topological_sort() YIELD node,rank WITH node,rank SKIP 1 LIMIT 1 RETURN node,rank",
+                expected[1..2].to_vec(),
+            ),
+            (
+                "CALL fnx.topological_sort() YIELD rank AS position,node AS dependency RETURN position,dependency",
+                expected
+                    .iter()
+                    .map(|row| vec![row[1].clone(), row[0].clone()])
+                    .collect(),
+            ),
+            (
+                "CALL fnx.topological_sort() YIELD node,rank RETURN node,rank ORDER BY node",
+                expected.iter().rev().cloned().collect(),
+            ),
+            (
+                "CALL fnx.topological_sort() YIELD node,rank WHERE rank > 0 RETURN node,rank",
+                expected[1..].to_vec(),
+            ),
+            (predicate, yes.clone()),
+        ] {
+            for result in [
+                db.query(cx, text, &params, symbols, policy()),
+                old.query(cx, text, &params, symbols, policy()),
+                txn.query(&db, cx, text, &params, symbols, policy()),
+            ] {
+                assert_eq!(rows(result.unwrap()).1, wanted, "{text}");
+            }
+        }
+        assert_eq!(only_row(db.query(cx,
+            "CALL fnx.topological_sort() YIELD rank RETURN COUNT(*) AS nodes, MAX(rank) AS last",
+            &params, symbols, policy()).unwrap()),
+            vec![QueryValue::Count(3), QueryValue::Value(int(2))]);
+        let (certified, certificate) = db
+            .execute_certified(cx, topological, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(rows(certified.clone()).1, expected);
+        let mut cycle = WriteBatch::new(R);
+        cycle.add_edge(EId(3), ids[0], ids[2], vec![]);
+        txn.write_ordered(&mut db, vec![cycle]).unwrap();
+        let staged = txn.staged_effect_digest().unwrap();
+        assert_eq!(
+            rows(
+                txn.query(&db, cx, predicate, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            no
+        );
+        for text in [
+            topological,
+            "CALL fnx.topological_sort() YIELD node,rank RETURN node,rank LIMIT 0",
+            "CALL fnx.topological_sort() YIELD node,rank RETURN COUNT(*) AS nodes",
+        ] {
+            let error = procedure_error(
+                txn.query(&db, cx, text, &params, symbols, policy())
+                    .unwrap_err(),
+            )
+            .unwrap();
+            let ProcedureError::Read(error) = error else {
+                panic!("typed cycle refusal: {error:?}")
+            };
+            assert!(matches!(
+                *error,
+                FnxReadError::Execution(FnxExecutionError::DirectedCycle)
+            ));
+        }
+        assert_eq!(txn.staged_effect_digest().unwrap(), staged);
+        assert_eq!(
+            rows(db.query(cx, predicate, &params, symbols, policy()).unwrap()).1,
+            yes
+        );
+        txn.abort();
+        let mut cycle = WriteBatch::new(R);
+        cycle.add_edge(EId(3), ids[0], ids[2], vec![]);
+        db.write(commit, cycle).await.unwrap();
+        assert_eq!(
+            rows(db.query(cx, predicate, &params, symbols, policy()).unwrap()).1,
+            no
+        );
+        assert_eq!(
+            old.query(cx, topological, &params, symbols, policy())
+                .unwrap(),
+            certified
+        );
+        assert_eq!(
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .unwrap(),
+            certified
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn dag_empty_projection_has_one_boolean_row_and_zero_topological_rows() {
+    run(async |commit, cx| {
+        let db = Database::<MemVfs>::open_memory(commit, keys())
+            .await
+            .unwrap();
+        let params = GqlParameters::new();
+        let boolean = "CALL fnx.is_directed_acyclic_graph() YIELD acyclic WHERE acyclic = true RETURN acyclic";
+        assert_eq!(
+            rows(db.query(cx, boolean, &params, symbols, policy()).unwrap()).1,
+            vec![vec![GraphValue::Scalar(CanonicalScalar::Bool(true))]]
+        );
+        for (text, count) in [
+            (
+                "CALL fnx.topological_sort() YIELD node,rank RETURN COUNT(*) AS count",
+                0,
+            ),
+            (
+                "CALL fnx.is_directed_acyclic_graph() YIELD acyclic RETURN COUNT(*) AS count",
+                1,
+            ),
+        ] {
+            assert_eq!(
+                only_row(db.query(cx, text, &params, symbols, policy()).unwrap()),
+                vec![QueryValue::Count(count)]
             );
         }
     });

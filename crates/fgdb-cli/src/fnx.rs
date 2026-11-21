@@ -345,8 +345,7 @@ impl ProjectionFlags {
         };
         // Unset flags keep the canonical whole graph, including its refusal
         // of an implicit multigraph collapse, and its default admission.
-        let mut base =
-            FnxReadOptions::whole_graph(self.as_of.or(bindings.catalog_frontier));
+        let mut base = FnxReadOptions::whole_graph(self.as_of.or(bindings.catalog_frontier));
         if let Some(limit) = self.graph_staging_bytes {
             base.source_limits.max_staging_bytes = limit;
         }
@@ -1101,6 +1100,8 @@ fn cell(value: FnxValue, robot: bool) -> String {
     match (value, robot) {
         (FnxValue::Vertex(v), true) => format!(r#"{{"type":"vertex","value":"{}"}}"#, v.0),
         (FnxValue::Vertex(v), false) => format!("vertex {}", v.0),
+        (FnxValue::Boolean(v), true) => format!(r#"{{"type":"bool","value":{v}}}"#),
+        (FnxValue::Boolean(v), false) => v.to_string(),
         (FnxValue::Integer(v), true) => match i64::try_from(v) {
             Ok(v) => format!(r#"{{"type":"int","value":"{v}"}}"#),
             Err(_) => format!(r#"{{"type":"wideint","value":"{v}"}}"#),

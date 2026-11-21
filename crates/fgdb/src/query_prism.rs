@@ -597,11 +597,14 @@ pub(crate) fn fnx_procedure_rows(
     execute: impl FnOnce(&FnxCallSpec, FnxReadOptions) -> Result<FnxRowCursor, Error>,
 ) -> Result<GraphProcedureExecution<GqlError, Cancel>, GqlQueryError<GqlError, Cancel>> {
     let spec = bind_procedure(call, arguments)?;
-    // This native folding interface promises a unique leading vertex key.
-    // Edge-pair results can share that key and use the ordinary canonical bag path.
+    // This native folding interface promises unique vertices in identity order.
+    // Edge-pair results can share that key, and topological rows use dependency
+    // order. Both retain their semantics through the ordinary collected source.
     if matches!(
         spec.algorithm(),
-        fgdb_prism::FnxAlgorithm::Bridges | fgdb_prism::FnxAlgorithm::MinimumSpanningTree
+        fgdb_prism::FnxAlgorithm::Bridges
+            | fgdb_prism::FnxAlgorithm::MinimumSpanningTree
+            | fgdb_prism::FnxAlgorithm::TopologicalSort
     ) || spec
         .outputs()
         .first()
@@ -681,6 +684,7 @@ impl<C> GraphProcedureRowCursor<GqlError, C> for ProcedureRows {
         for &value in &self.scratch {
             values.push(match value {
                 FnxValue::Vertex(vertex) => GraphValue::Vertex(vertex),
+                FnxValue::Boolean(value) => GraphValue::Scalar(CanonicalScalar::Bool(value)),
                 FnxValue::Integer(count) => GraphValue::Scalar(CanonicalScalar::Int(
                     i64::try_from(count).map_err(|_| refuse(ProcedureError::ResultDomain))?,
                 )),
@@ -869,6 +873,7 @@ impl<C> FnxRowSink<C> for ProcedureRowSink {
         for &value in row {
             values.push(match value {
                 FnxValue::Vertex(vertex) => GraphValue::Vertex(vertex),
+                FnxValue::Boolean(value) => GraphValue::Scalar(CanonicalScalar::Bool(value)),
                 FnxValue::Integer(count) => {
                     let Ok(count) = i64::try_from(count) else {
                         self.result_domain = true;
@@ -893,7 +898,7 @@ mod row_sink_tests {
     #[test]
     fn direct_rows_preserve_gql_canonical_domains_and_defer_unrepresentable_counts() {
         let mut sink = ProcedureRowSink::default();
-        FnxRowSink::<()>::begin(&mut sink, 1, 4).unwrap();
+        FnxRowSink::<()>::begin(&mut sink, 1, 5).unwrap();
         FnxRowSink::<()>::row(
             &mut sink,
             &[
@@ -901,6 +906,7 @@ mod row_sink_tests {
                 FnxValue::Integer(i64::MAX as u64),
                 FnxValue::Score(-0.0),
                 FnxValue::Float(f64::from_bits(0x7ff0_0000_0000_0001)),
+                FnxValue::Boolean(false),
             ],
         )
         .unwrap();
@@ -910,6 +916,7 @@ mod row_sink_tests {
             GraphValue::Scalar(CanonicalScalar::Int(i64::MAX)),
             GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(0.0))),
             GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(f64::NAN))),
+            GraphValue::Scalar(CanonicalScalar::Bool(false)),
         ]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].canonical_bytes(), expected.canonical_bytes());

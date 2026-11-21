@@ -45,6 +45,8 @@ mod connectivity;
 mod construction;
 #[path = "prism_cooperative/core.rs"]
 mod core_numbers;
+#[path = "prism_cooperative/dag.rs"]
+mod dag;
 #[path = "prism_cooperative/dijkstra.rs"]
 mod dijkstra;
 #[path = "prism_cooperative/distance.rs"]

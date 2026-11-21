@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 35;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 36;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -59,6 +59,10 @@ pub enum FnxOutput {
     Neighbor = 8,
     /// Finite signed weight of a selected projected edge.
     Weight = 9,
+    /// Zero-based position in the registered topological ordering.
+    Rank = 10,
+    /// Whether the complete admitted directed graph is acyclic.
+    Acyclic = 11,
 }
 impl FnxOutput {
     pub const fn name(self) -> &'static str {
@@ -73,6 +77,8 @@ impl FnxOutput {
             Self::Authority => "authority",
             Self::Neighbor => "neighbor",
             Self::Weight => "weight",
+            Self::Rank => "rank",
+            Self::Acyclic => "acyclic",
         }
     }
     /// Whether `YIELD <name>` selects this field: its registered name, or
@@ -624,6 +630,32 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: "O(s * (|V| + |E|) + l * |E| log(1+|E|)); O(|V| + |E|) admitted working graph; s bounded by max_iter under independent host admission",
         execution_kernel: "fgdb-prism/louvain-multilevel-stable-edges-v1",
     },
+    FnxSignature {
+        name: "fnx.topological_sort",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Rank],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Directed,
+        numeric_profile: "fnx-topological-dfs-reverse-postorder-v1",
+        rng_policy: "none",
+        graph_laws: "explicit directed simple projection; caller-selected parallel-edge reduction; weights ignored; roots and successors visited in canonical full-width VId order; DFS reverse postorder matches pinned FNX; rank is zero-based; includes isolates; any directed cycle or retained self-loop refuses without a partial ordering",
+        complexity: "O(|V| + |E|) logical traversal plus separately bounded compressed history/lookup work; O(|V|) kernel workspace",
+        execution_kernel: "fgdb-prism/topological-sort-dfs-v1",
+    },
+    FnxSignature {
+        name: "fnx.is_directed_acyclic_graph",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Acyclic],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Directed,
+        numeric_profile: "fgdb-exact-directed-acyclic-predicate-v1",
+        rng_policy: "none",
+        graph_laws: "explicit directed simple projection; caller-selected parallel-edge reduction; weights ignored; one Boolean row, true for the empty graph; any directed cycle or retained self-loop yields false; the entire admitted projection is considered, including disconnected components",
+        complexity: "O(|V| + |E|) logical traversal plus separately bounded compressed history/lookup work; O(|V|) kernel workspace",
+        execution_kernel: "fgdb-prism/directed-acyclic-dfs-v1",
+    },
 ];
 
 const fn directed_degree(name: &'static str, execution_kernel: &'static str) -> FnxSignature {
@@ -1128,6 +1160,10 @@ pub enum FnxAlgorithm {
     SingleSourceBellmanFordPathLength {
         source: VId,
     },
+    /// Canonical DFS reverse postorder; every cycle refuses the whole result.
+    TopologicalSort,
+    /// One Boolean result over the complete admitted directed projection.
+    IsDirectedAcyclicGraph,
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -1157,6 +1193,8 @@ impl FnxAlgorithm {
             Self::MinimumSpanningTree => 27,
             Self::SingleSourceBellmanFordPathLength { .. } => 28,
             Self::LouvainCommunities(_) => 29,
+            Self::TopologicalSort => 30,
+            Self::IsDirectedAcyclicGraph => 31,
         }]
     }
 }
@@ -1292,6 +1330,14 @@ impl FnxCallSpec {
     }
     pub fn minimum_spanning_tree() -> Self {
         Self::new(FnxAlgorithm::MinimumSpanningTree)
+    }
+    /// Pinned FNX DFS reverse postorder with zero-based topological ranks.
+    pub fn topological_sort() -> Self {
+        Self::new(FnxAlgorithm::TopologicalSort)
+    }
+    /// Whether the admitted directed projection is acyclic, including empty graphs.
+    pub fn is_directed_acyclic_graph() -> Self {
+        Self::new(FnxAlgorithm::IsDirectedAcyclicGraph)
     }
     pub fn single_source_bellman_ford_path_length(source: VId) -> Self {
         Self::new(FnxAlgorithm::SingleSourceBellmanFordPathLength { source })
@@ -1776,6 +1822,8 @@ impl FnxCallSpec {
             "fnx.articulation_points" => FnxAlgorithm::ArticulationPoints,
             "fnx.bridges" => FnxAlgorithm::Bridges,
             "fnx.minimum_spanning_tree" => FnxAlgorithm::MinimumSpanningTree,
+            "fnx.topological_sort" => FnxAlgorithm::TopologicalSort,
+            "fnx.is_directed_acyclic_graph" => FnxAlgorithm::IsDirectedAcyclicGraph,
             "fnx.cdlp" => {
                 let max_iter = match arguments[0] {
                     FnxArgument::Integer(value) if value >= 0 => usize::try_from(value).ok(),
@@ -2087,6 +2135,7 @@ impl FnxCallSpec {
             FnxAlgorithm::MinimumSpanningTree => 30,
             FnxAlgorithm::SingleSourceBellmanFordPathLength { .. } => 31,
             FnxAlgorithm::LouvainCommunities(_) => 32,
+            FnxAlgorithm::TopologicalSort | FnxAlgorithm::IsDirectedAcyclicGraph => 36,
             _ => 23,
         };
         hash.update(&binding_version.to_le_bytes());

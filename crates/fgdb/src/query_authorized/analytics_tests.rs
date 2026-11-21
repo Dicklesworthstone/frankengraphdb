@@ -1825,6 +1825,9 @@ fn direct_gql_rows_match_collected_rows_and_every_authorized_refusal_prefix() {
                                                             CanonicalF64::new(value),
                                                         ))
                                                     }
+                                                    FnxValue::Boolean(value) => GraphValue::Scalar(
+                                                        CanonicalScalar::Bool(value),
+                                                    ),
                                                 })
                                                 .collect(),
                                         )

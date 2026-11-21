@@ -128,9 +128,10 @@ impl PreparedGraphSet {
 fn canonical_vertex_call(call: &PreparedProcedureCall) -> bool {
     call.namespace() == "fnx"
         // Edge endpoint pairs are canonical as complete tuples, but their
-        // leading vertex can repeat. That cannot prove secondary expression
-        // order after a projection, nor satisfy the unique-vertex cursor law.
-        && !matches!(call.name(), "bridges" | "minimum_spanning_tree")
+        // leading vertex can repeat. Topological output follows DFS reverse
+        // postorder rather than VId order. Neither proves the ordered unique
+        // vertex cursor law or secondary expression order after projection.
+        && !matches!(call.name(), "bridges" | "minimum_spanning_tree" | "topological_sort")
         && call
             .outputs()
             .first()
@@ -362,15 +363,23 @@ where
                 }
             } else {
                 // Hosts without the cursor capability, and procedures whose
-                // rows lack a unique leading vertex, retain complete tuple
-                // canonicalization. Arguments and the source execute once.
+                // rows lack an ordered unique leading vertex, retain collected
+                // admission. A registered procedure may own its output order.
+                // Arguments and the source execute once.
                 let execution = source
                     .procedure(call, &arguments, meter.remaining())
                     .ok_or(GqlQueryError::Source(
                         GraphSetExecutionError::ProcedureUnavailable { operand: at },
                     ))?
                     .map_err(|error| meter.source_error(error))?;
-                for row in admit_source_rows(query, execution, at, meter)? {
+                let rows = if call.preserves_row_order() {
+                    meter.absorb(&execution, at)?;
+                    check_source_rows(&execution.value, &query.types, at, meter)?;
+                    execution.value
+                } else {
+                    admit_source_rows(query, execution, at, meter)?
+                };
+                for row in rows {
                     window.push(row, source, meter, consume)?;
                 }
             }

@@ -327,6 +327,8 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::Bridges
         | FnxAlgorithm::MinimumSpanningTree
         | FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
+        | FnxAlgorithm::TopologicalSort
+        | FnxAlgorithm::IsDirectedAcyclicGraph
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }

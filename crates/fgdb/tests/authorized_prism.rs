@@ -1628,6 +1628,103 @@ async fn simple_database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
     db
 }
 
+#[test]
+fn dag_procedures_mask_hidden_cycles_before_ordering_or_predicate_evaluation() {
+    let ((), report) = run_async_under_lab(0x5ec0_30da, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let mut db = simple_database(&contexts.commit(), true).await;
+        let oracle = simple_database(&contexts.commit(), false).await;
+        let mut hidden_cycle = WriteBatch::new(RelationId(1));
+        hidden_cycle.add_edge(EId(92), VId(99), VId(1), vec![]);
+        db.write(&contexts.commit(), hidden_cycle).await.unwrap();
+        let issuer = authority(0x30da, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut opt = options(Directedness::Directed);
+        opt.selection.weight = FnxWeightSpec::Unit;
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |_: fgdb_gql::GraphSymbolKind, _: &str| None;
+        for (native, composed) in [
+            (
+                "CALL fnx.topological_sort() YIELD node,rank",
+                "CALL fnx.topological_sort() YIELD node,rank RETURN node,rank",
+            ),
+            (
+                "CALL fnx.is_directed_acyclic_graph() YIELD acyclic",
+                "CALL fnx.is_directed_acyclic_graph() YIELD acyclic RETURN acyclic",
+            ),
+        ] {
+            let expected = oracle
+                .call_fnx(&cx, native, &FnxParameters::new(), opt)
+                .unwrap()
+                .analytics
+                .rows;
+            assert_eq!(read(&db, &cx, &issuer, &token, native, opt), expected);
+            let actual = db
+                .query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    composed,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(
+                actual,
+                oracle
+                    .query(&cx, composed, &params, symbols, policy)
+                    .unwrap()
+            );
+        }
+        let unmasked = db
+            .call_fnx(
+                &cx,
+                "CALL fnx.is_directed_acyclic_graph()",
+                &FnxParameters::new(),
+                opt,
+            )
+            .unwrap();
+        assert_eq!(
+            unmasked.analytics.rows,
+            vec![vec![FnxValue::Boolean(false)]]
+        );
+        assert!(matches!(
+            db.call_fnx(
+                &cx,
+                "CALL fnx.topological_sort()",
+                &FnxParameters::new(),
+                opt
+            ),
+            Err(FnxReadError::Execution(FnxExecutionError::DirectedCycle))
+        ));
+        // The one-row predicate still scans under the signed node allowance.
+        let tight = token.attenuate(Restriction::MaxNodes(2)).unwrap();
+        assert!(matches!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &tight,
+                BRANCH,
+                "CALL fnx.is_directed_acyclic_graph() YIELD acyclic RETURN acyclic",
+                &params,
+                symbols,
+                policy,
+                || 100
+            ),
+            Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Nodes
+            )))
+        ));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-7qznp: `CALL fnx.*` inside a capability-authorized native read runs
 /// over the token's masked projection, the same answer as a database that
 /// physically lacks the hidden topology. The unmasked read of the same

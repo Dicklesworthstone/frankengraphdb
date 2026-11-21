@@ -230,13 +230,14 @@ impl PreparedProcedureCall {
     pub fn vertex_outputs(&self) -> &[usize] {
         &self.vertices
     }
-    /// Whether the procedure's own deterministic ranking order (rather than
-    /// canonical tuple order) is its output contract when no explicit ORDER BY
-    /// overrides it. `hybrid.search` returns top-k hits ordered by fused score
-    /// descending, ties broken by ascending vertex ID.
+    /// Whether the procedure's own deterministic order is its output contract
+    /// when no explicit ORDER BY overrides it. `hybrid.search` returns top-k
+    /// hits ordered by fused score descending, ties broken by ascending vertex
+    /// ID. `fnx.topological_sort` returns dependency order, recorded by `rank`;
+    /// sorting its vertex identities would erase that sequence.
     #[must_use]
     pub fn preserves_row_order(&self) -> bool {
-        self.namespace == "hybrid"
+        self.namespace == "hybrid" || (self.namespace == "fnx" && self.name == "topological_sort")
     }
     pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
         for text in [&self.namespace, &self.name] {
@@ -1359,6 +1360,221 @@ impl<E, C> GraphSetSource<E, C> for WithOwnedRows<'_, E, C> {
 mod tests {
     use super::*;
     use crate::set_text::{ReadOrderProjection, ReadPageNumber, ReadStageTemplate};
+
+    mod topological_order {
+        use super::*;
+        use crate::{GqlParameters, PreparedGraphSet, PreparedGraphSetText};
+        use fgdb_types::CanonicalScalar;
+        use std::cell::Cell;
+
+        fn rows() -> Vec<GraphValueRow> {
+            // Dependency order deliberately disagrees with full-width VId
+            // order. Canonical tuple sorting would move the first row last.
+            [(9, 0), (2, 1), (6, 2)]
+                .into_iter()
+                .map(|(node, rank)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(VId((1_u128 << 100) + node)),
+                        GraphValue::Scalar(CanonicalScalar::Int(rank)),
+                    ])
+                })
+                .collect()
+        }
+
+        struct Host<'a> {
+            cursor_available: bool,
+            opened: &'a Cell<usize>,
+            invalid_last_row: bool,
+        }
+
+        impl GraphSetSource<&'static str, ()> for Host<'_> {
+            fn pattern(
+                &mut self,
+                _: &PreparedGraphPattern<GraphValueRow>,
+                _: GqlQueryPolicy,
+            ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, ()>>
+            {
+                panic!("a topological call must not open a pattern source")
+            }
+
+            fn supports_procedure_rows(&self) -> bool {
+                self.cursor_available
+            }
+
+            fn procedure(
+                &mut self,
+                call: &PreparedProcedureCall,
+                arguments: &[GraphValue],
+                _: GqlQueryPolicy,
+            ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, ()>>>
+            {
+                assert_eq!(call.namespace(), "fnx");
+                assert_eq!(call.name(), "topological_sort");
+                assert!(arguments.is_empty());
+                assert!(call.preserves_row_order());
+                self.opened.set(self.opened.get() + 1);
+                let mut value: Vec<_> = rows()
+                    .into_iter()
+                    .map(|row| {
+                        GraphValueRow::from_owned_values(
+                            call.outputs()
+                                .iter()
+                                .map(|field| match field.as_str() {
+                                    "node" => row.values()[0].clone(),
+                                    "rank" => row.values()[1].clone(),
+                                    _ => panic!("unexpected topological output"),
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                if self.invalid_last_row {
+                    *value.last_mut().unwrap() = GraphValueRow::unit();
+                }
+                Some(Ok(GqlQueryExecution {
+                    value,
+                    rows: GqlExecutionStats {
+                        snapshot_records: 7,
+                        result_rows: 3,
+                    },
+                    evaluator: GlaExecutionStats::default(),
+                }))
+            }
+
+            fn procedure_rows(
+                &mut self,
+                _: &PreparedProcedureCall,
+                _: &[GraphValue],
+                _: GqlQueryPolicy,
+            ) -> Option<
+                Result<GraphProcedureExecution<&'static str, ()>, GqlQueryError<&'static str, ()>>,
+            > {
+                panic!("dependency order cannot satisfy an ascending-VId cursor contract")
+            }
+        }
+
+        fn prepare(text: &str) -> PreparedGraphSet {
+            PreparedGraphSetText::prepare(text, |_, _| None)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+        }
+
+        #[test]
+        fn parsed_topological_calls_keep_dependency_order_through_pages_and_folds() {
+            let expected = rows();
+            let repeated: Vec<_> = expected
+                .iter()
+                .flat_map(|row| [row.clone(), row.clone()])
+                .collect();
+            let reversed_columns = expected
+                .iter()
+                .map(|row| {
+                    GraphValueRow::from_owned_values(vec![
+                        row.values()[1].clone(),
+                        row.values()[0].clone(),
+                    ])
+                })
+                .collect();
+            let cases = [
+                (
+                    "CALL fnx.topological_sort() YIELD node, rank RETURN node, rank",
+                    expected.clone(),
+                ),
+                (
+                    "CALL fnx.topological_sort() YIELD node, rank WITH node, rank RETURN node, rank SKIP 1 LIMIT 1",
+                    vec![expected[1].clone()],
+                ),
+                (
+                    "CALL fnx.topological_sort() YIELD node, rank UNWIND [7, 7] AS occurrence RETURN node, rank",
+                    repeated,
+                ),
+                (
+                    "CALL fnx.topological_sort() YIELD rank, node RETURN rank, node",
+                    reversed_columns,
+                ),
+                (
+                    "CALL fnx.topological_sort() YIELD node, rank RETURN node, rank ORDER BY node",
+                    vec![
+                        expected[1].clone(),
+                        expected[2].clone(),
+                        expected[0].clone(),
+                    ],
+                ),
+                (
+                    "CALL fnx.topological_sort() YIELD node, rank RETURN node, rank LIMIT 0",
+                    Vec::new(),
+                ),
+            ];
+            let policy = GqlQueryPolicy::new(100, 100, 10_000, 10_000);
+            for (text, expected) in cases {
+                let query = prepare(text);
+                for cursor_available in [false, true] {
+                    let opened = Cell::new(0);
+                    let host = Host {
+                        cursor_available,
+                        opened: &opened,
+                        invalid_last_row: false,
+                    };
+                    let actual = query
+                        .execute_governed_from_source(policy, host, || Ok(()))
+                        .unwrap();
+                    assert_eq!(actual.value, expected, "{text}");
+                    assert_eq!(opened.get(), 1, "even LIMIT 0 admits its source once");
+
+                    let opened = Cell::new(0);
+                    let host = Host {
+                        cursor_available,
+                        opened: &opened,
+                        invalid_last_row: false,
+                    };
+                    let mut folded = Vec::new();
+                    query
+                        .fold_governed(
+                            policy,
+                            host,
+                            || Ok(()),
+                            |row, _| {
+                                folded.push(row);
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                    assert_eq!(folded, expected, "folded {text}");
+                    assert_eq!(opened.get(), 1);
+                }
+            }
+        }
+
+        #[test]
+        fn topological_zero_pages_still_validate_every_source_row() {
+            for text in [
+                "CALL fnx.topological_sort() YIELD node, rank RETURN node, rank LIMIT 0",
+                "CALL fnx.topological_sort() YIELD node, rank UNWIND [7, 7] AS occurrence RETURN node, rank LIMIT 0",
+            ] {
+                let query = prepare(text);
+                for cursor_available in [false, true] {
+                    let opened = Cell::new(0);
+                    let host = Host {
+                        cursor_available,
+                        opened: &opened,
+                        invalid_last_row: true,
+                    };
+                    assert!(matches!(
+                        query.execute_governed_from_source(
+                            GqlQueryPolicy::new(100, 100, 10_000, 10_000),
+                            host,
+                            || Ok(()),
+                        ),
+                        Err(GqlQueryError::Source(
+                            crate::GraphSetExecutionError::InputSchema { operand: 0 }
+                        ))
+                    ));
+                    assert_eq!(opened.get(), 1);
+                }
+            }
+        }
+    }
 
     #[test]
     fn unprojected_call_keeps_the_existing_transcript_fixture() {

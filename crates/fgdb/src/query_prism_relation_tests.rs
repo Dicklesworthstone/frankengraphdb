@@ -1087,6 +1087,7 @@ fn indexed_decoded_projection_paired_complete_call_benchmark() {
                             FnxValue::Vertex(vertex) => vertex.0,
                             FnxValue::Score(value) | FnxValue::Float(value) => u128::from(value.to_bits()),
                             FnxValue::Integer(value) => u128::from(*value),
+                            FnxValue::Boolean(value) => u128::from(*value),
                         })
                     });
                     std::hint::black_box(checksum);

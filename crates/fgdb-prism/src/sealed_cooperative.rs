@@ -147,6 +147,8 @@ impl FnxCallSpec {
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::MinimumSpanningTree
                 | FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
+                | FnxAlgorithm::TopologicalSort
+                | FnxAlgorithm::IsDirectedAcyclicGraph
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -358,6 +360,26 @@ impl FnxCallSpec {
                     yield_now,
                 };
                 return super::cuts::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::TopologicalSort | FnxAlgorithm::IsDirectedAcyclicGraph
+            ) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::dag::execute_cooperative(
                     self,
                     graph,
                     limits,

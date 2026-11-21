@@ -62,6 +62,8 @@ pub enum FnxExecutionError<C> {
     NonFiniteWeightSum,
     /// The selected source reaches a negative cycle under exact edge sums.
     ReachableNegativeCycle,
+    /// Topological ordering requires the complete directed projection to be acyclic.
+    DirectedCycle,
     /// A final exact shortest distance rounds outside finite binary64 range.
     NonFiniteDistanceSum,
     InvalidNumericResult,
@@ -101,6 +103,7 @@ impl<C> FnxExecutionError<C> {
             Self::NegativeWeight => FnxExecutionError::NegativeWeight,
             Self::NonFiniteWeightSum => FnxExecutionError::NonFiniteWeightSum,
             Self::ReachableNegativeCycle => FnxExecutionError::ReachableNegativeCycle,
+            Self::DirectedCycle => FnxExecutionError::DirectedCycle,
             Self::NonFiniteDistanceSum => FnxExecutionError::NonFiniteDistanceSum,
             Self::InvalidNumericResult => FnxExecutionError::InvalidNumericResult,
             Self::InvalidUpstreamResult => FnxExecutionError::InvalidUpstreamResult,
@@ -138,6 +141,9 @@ impl<C: core::fmt::Display> core::fmt::Display for FnxExecutionError<C> {
             Self::NonFiniteWeightSum => f.write_str("PageRank outgoing weight sum is non-finite"),
             Self::ReachableNegativeCycle => {
                 f.write_str("analytics source reaches a negative cycle")
+            }
+            Self::DirectedCycle => {
+                f.write_str("topological ordering requires a directed acyclic graph")
             }
             Self::NonFiniteDistanceSum => {
                 f.write_str("shortest distance is outside finite binary64 range")
@@ -182,10 +188,12 @@ impl<C: core::error::Error + 'static> core::error::Error for FnxExecutionError<C
 pub enum FnxValue {
     Vertex(VId),
     Score(f64),
-    /// Exact hop or triangle count, never rounded through an f64 score column.
+    /// Exact count or ordering rank, never rounded through an f64 score column.
     Integer(u64),
     /// A finite weighted distance, distinct from a centrality score.
     Float(f64),
+    /// An exact graph predicate, distinct from numeric scores or counts.
+    Boolean(bool),
 }
 
 /// One canonical result cell, including its type tag. Feeding the complete
@@ -213,6 +221,11 @@ pub(crate) fn hash_result_value(hash: &mut Hasher, value: FnxValue) {
             bytes[0] = 3;
             bytes[1..9].copy_from_slice(&value.to_bits().to_le_bytes());
             9
+        }
+        FnxValue::Boolean(value) => {
+            bytes[0] = 4;
+            bytes[1] = u8::from(value);
+            2
         }
     };
     hash.update(&bytes[..len]);
@@ -556,6 +569,10 @@ pub(crate) enum KernelValues {
     EndpointPairs(Vec<(usize, usize)>),
     /// A minimum spanning forest in canonical weight/endpoint order.
     WeightedEndpointPairs(Vec<crate::spanning_tree::WeightedEndpoint>),
+    /// Output positions follow canonical DFS reverse postorder, not VId order.
+    TopologicalOrder(Vec<usize>),
+    /// A graph-level predicate always produces one row, even for an empty graph.
+    Acyclic(bool),
 }
 pub(crate) struct KernelOutput {
     pub values: KernelValues,
@@ -569,6 +586,8 @@ impl KernelValues {
             Self::TargetDistance { distance, .. } => usize::from(distance.is_some()),
             Self::TargetHopDistance { distance, .. } => usize::from(distance.is_some()),
             Self::WeightedEndpointPairs(values) => values.len(),
+            Self::TopologicalOrder(values) => values.len(),
+            Self::Acyclic(_) => 1,
             _ => population,
         }
     }
@@ -591,6 +610,8 @@ impl KernelValues {
             Self::SelectedVertices(values) => values.get(index).copied().unwrap_or(false),
             Self::EndpointPairs(values) => index < values.len(),
             Self::WeightedEndpointPairs(values) => index < values.len(),
+            Self::TopologicalOrder(values) => index < values.len(),
+            Self::Acyclic(_) => index == 0,
         }
     }
     pub(crate) fn value<C>(
@@ -663,6 +684,20 @@ impl KernelValues {
                     _ => FnxValue::Float(edge.weight),
                 })
             }
+            (FnxOutput::Vertex, Self::TopologicalOrder(values)) => values
+                .get(index)
+                .and_then(|&ordinal| vertices.get(ordinal).copied())
+                .map(FnxValue::Vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult),
+            (FnxOutput::Rank, Self::TopologicalOrder(values)) if index < values.len() => {
+                Ok(FnxValue::Integer(
+                    u64::try_from(index).map_err(|_| FnxExecutionError::SizeOverflow)?,
+                ))
+            }
+            (FnxOutput::Acyclic, Self::Acyclic(value)) if index == 0 => {
+                Ok(FnxValue::Boolean(*value))
+            }
+            (FnxOutput::Vertex, Self::Acyclic(_)) => Err(FnxExecutionError::InvalidUpstreamResult),
             (FnxOutput::Vertex, _) => vertices
                 .get(index)
                 .copied()
@@ -1703,8 +1738,12 @@ impl FnxCallSpec {
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::MinimumSpanningTree
                 | FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
+                | FnxAlgorithm::IsDirectedAcyclicGraph
         ) {
             admit("result rows", n, limits.max_result_rows)?;
+        }
+        if matches!(algorithm, FnxAlgorithm::IsDirectedAcyclicGraph) {
+            admit("result rows", 1, limits.max_result_rows)?;
         }
         let shallow_degree = match algorithm {
             FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff }
@@ -1835,6 +1874,9 @@ impl FnxCallSpec {
             FnxAlgorithm::ArticulationPoints | FnxAlgorithm::Bridges => {
                 crate::cuts::Cuts::estimated_work(n, arcs, self.outputs().len())
             }
+            FnxAlgorithm::TopologicalSort | FnxAlgorithm::IsDirectedAcyclicGraph => {
+                crate::dag::Dag::estimated_work(n, arcs, self.outputs().len())
+            }
             FnxAlgorithm::MinimumSpanningTree => Some(crate::spanning_tree::estimated_work::<C>(
                 n,
                 arcs,
@@ -1880,6 +1922,8 @@ impl FnxCallSpec {
             | FnxAlgorithm::KatzCentrality(_)
             | FnxAlgorithm::ArticulationPoints
             | FnxAlgorithm::Bridges
+            | FnxAlgorithm::TopologicalSort
+            | FnxAlgorithm::IsDirectedAcyclicGraph
             | FnxAlgorithm::MinimumSpanningTree => 0,
             FnxAlgorithm::SingleSourceBellmanFordPathLength { .. } => 0,
             _ => {
@@ -2080,6 +2124,16 @@ impl FnxCallSpec {
             FnxAlgorithm::MinimumSpanningTree => {
                 let (output, bytes) =
                     crate::spanning_tree::run(graph, limits.max_result_rows, &mut checkpoint)?;
+                kernel_workspace_bytes = bytes;
+                output
+            }
+            FnxAlgorithm::TopologicalSort | FnxAlgorithm::IsDirectedAcyclicGraph => {
+                let (output, bytes) = crate::dag::run(
+                    graph,
+                    matches!(algorithm, FnxAlgorithm::IsDirectedAcyclicGraph),
+                    limits.max_result_rows,
+                    &mut checkpoint,
+                )?;
                 kernel_workspace_bytes = bytes;
                 output
             }
@@ -2346,6 +2400,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("shortest_path.rs"));
         hash_text(&mut hash, include_str!("clustering.rs"));
         hash_text(&mut hash, include_str!("cuts.rs"));
+        hash_text(&mut hash, include_str!("dag.rs"));
         hash_text(&mut hash, include_str!("spanning_tree.rs"));
         hash_text(&mut hash, include_str!("bellman_ford.rs"));
         hash_text(
@@ -2838,6 +2893,8 @@ mod tests {
             (FnxValue::Integer(0), 2, 0, 8),
             (FnxValue::Integer(u64::MAX), 2, u64::MAX as u128, 8),
             (FnxValue::Float(-0.0), 3, 1 << 63, 8),
+            (FnxValue::Boolean(false), 4, 0, 1),
+            (FnxValue::Boolean(true), 4, 1, 1),
             (
                 FnxValue::Float(f64::from_bits(0x7ff8_0000_0000_0042)),
                 3,
@@ -2873,6 +2930,7 @@ mod tests {
         let calls = [
             FnxCallSpec::pagerank(PageRankOptions::default()),
             FnxCallSpec::weakly_connected_components(),
+            FnxCallSpec::is_directed_acyclic_graph(),
             FnxCallSpec::single_source_shortest_path_length(VId(0), None),
             FnxCallSpec::single_source_dijkstra_path_length(
                 crate::DijkstraOptions::new(VId(0), None).unwrap(),
@@ -2912,6 +2970,10 @@ mod tests {
                         FnxValue::Float(value) => {
                             transcript.push(3);
                             transcript.extend_from_slice(&value.to_bits().to_le_bytes());
+                        }
+                        FnxValue::Boolean(value) => {
+                            transcript.push(4);
+                            transcript.push(u8::from(value));
                         }
                     }
                 }

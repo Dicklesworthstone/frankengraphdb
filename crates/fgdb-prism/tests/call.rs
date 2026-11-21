@@ -107,10 +107,10 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    // Epoch 35 admits directed total-degree centrality without changing procedure
-    // ordinals or bound-call identity versions.
-    assert_eq!(FnxSignatureRegistry::version(), 35);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 30);
+    // Epoch 36 appends directed DAG procedures without changing existing
+    // procedure ordinals or bound-call identity versions.
+    assert_eq!(FnxSignatureRegistry::version(), 36);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 32);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);
