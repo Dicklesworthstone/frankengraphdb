@@ -21,6 +21,7 @@
 //! POST /v1/databases/<name>/write-if-current (exact-frontier conditional write)
 //! POST /v1/databases/<name>/write-batch    (one atomic ingestion program)
 //! POST /v1/databases/<name>/transaction    (up to 32 mixed statements, one commit)
+//! POST /v1/databases/<name>/read-transaction (up to 32 reads, one native read owner)
 //! POST /v1/databases/<name>/compact        (Admin only, empty body)
 //! POST /v1/databases/<name>/scrub          (Admin only, empty body)
 //!      Authorization: Bearer <hex capability token>
@@ -43,6 +44,11 @@
 //! or `"mode":"write"` on every entry. It requires write authority, shares one
 //! native workspace and cumulative allowance, admits its complete JSON output
 //! before commit, and returns all results beside one terminal completion.
+//! A read-transaction accepts the same envelope with only `"mode":"read"`
+//! entries, requires Read authority, and pins one native read snapshot without
+//! acquiring a writer. Its cumulative allowance and complete response budget
+//! cover the whole script; successful close reports `committed:false` at the
+//! original basis. It creates no graph commit or resumable transaction handle.
 //! A write answers
 //! `{"v":1,"seq":N,"statements":M,"committed":true|false}`, with `columns`
 //! and `rows` first when it is a `CREATE/INSERT ... RETURN`. A refusal answers
@@ -961,7 +967,8 @@ pub(crate) async fn respond<'s>(
     let mode = match verb {
         "query" => Some(ExecuteMode::Read),
         "write" => Some(ExecuteMode::Write),
-        "write-batch" | "query-batch" | "query-diff" | "write-if-current" | "transaction" => None,
+        "write-batch" | "query-batch" | "query-diff" | "write-if-current" | "transaction"
+        | "read-transaction" => None,
         _ => {
             return json_response(
                 404,
@@ -995,8 +1002,17 @@ pub(crate) async fn respond<'s>(
     if !output.protected(cx, &db.authority, verified) {
         return refusal_response(ErrorCode::Execution, "connection unavailable");
     }
-    if verb == "transaction" {
-        return transaction::respond(cx, server, db, &token, &request, output).await;
+    if matches!(verb, "transaction" | "read-transaction") {
+        return transaction::respond(
+            cx,
+            server,
+            db,
+            &token,
+            &request,
+            output,
+            verb == "read-transaction",
+        )
+        .await;
     }
     if verb == "query-batch" {
         // As with historical differences, read rights precede body parsing.

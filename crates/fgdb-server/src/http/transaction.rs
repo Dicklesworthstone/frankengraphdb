@@ -1,16 +1,24 @@
-//! Finite mixed HTTP scripts use the same native owner as explicit FGP.
+//! Finite HTTP scripts use the same read or write native owner as explicit FGP.
 //! Input adaptation finishes before BEGIN; every result is retained privately
 //! and admitted before COMMIT. There is no HTTP-specific transaction lifecycle.
 
 use super::*;
 use crate::Served;
-use crate::execute::transaction::NativeWriteTransaction;
+use crate::execute::transaction::{
+    NativeReadTransaction, NativeTransaction, NativeWriteTransaction,
+};
 use fgdb_protocol::client::MAX_TRANSACTION_BATCH_STATEMENTS;
 use fgdb_protocol::json::{JsonParseError, parse_json_controlled};
-use fgdb_warden::{ExecutionPermit, WriteAccess};
+use fgdb_warden::{ExecutionPermit, ReadAccess, WriteAccess};
+
+enum Admission<'s> {
+    Read(ExecutionPermit<'s, ReadAccess>),
+    Write(ExecutionPermit<'s, WriteAccess>),
+}
 
 fn statements(
     request: &Request,
+    read_only: bool,
     mut checkpoint: impl FnMut() -> Result<(), Refusal>,
 ) -> Result<Vec<Execute>, Response> {
     let malformed = |detail: &str| refusal_response(ErrorCode::Protocol, detail);
@@ -51,6 +59,12 @@ fn statements(
                 Some(Json::String(mode)) if mode == "write" => ExecuteMode::Write,
                 _ => return Err(malformed("each statement needs mode \"read\" or \"write\"")),
             };
+            if read_only && mode != ExecuteMode::Read {
+                return Err(refusal_response(
+                    ErrorCode::PermissionDenied,
+                    "a read-only transaction accepts only Read statements",
+                ));
+            }
             let statement = statement_fields(fields, mode)?;
             if statement.statement.trim().is_empty() {
                 return Err(malformed("transaction statements must not be empty"));
@@ -69,14 +83,17 @@ fn statements(
 fn checkpoint(
     cx: &Cx,
     generation: &Generation,
-    admission: &mut ExecutionPermit<'_, WriteAccess>,
+    admission: &mut Admission<'_>,
 ) -> Result<(), Refusal> {
     cx.checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
     generation.check().map_err(Refusal::from)?;
-    admission
-        .checkpoint_at(crate::unix_millis())
-        .map_err(|error| crate::execute::write_refusal(&error))
+    let now = crate::unix_millis();
+    match admission {
+        Admission::Read(permit) => permit.checkpoint_at(now),
+        Admission::Write(permit) => permit.checkpoint_at(now),
+    }
+    .map_err(|error| crate::execute::write_refusal(&error))
 }
 
 fn response_budget() -> Refusal {
@@ -168,10 +185,17 @@ async fn execute(
     token: &CapabilityToken,
     statements: &[Execute],
     generation: &Generation,
-    admission: &mut ExecutionPermit<'_, WriteAccess>,
+    admission: &mut Admission<'_>,
     maximum: usize,
 ) -> Result<Response, Refusal> {
-    let mut owner = NativeWriteTransaction::begin(cx, db, token).await?;
+    let mut owner = match admission {
+        Admission::Read(_) => {
+            NativeTransaction::Read(NativeReadTransaction::begin(cx, db, token).await?)
+        }
+        Admission::Write(_) => {
+            NativeTransaction::Write(NativeWriteTransaction::begin(cx, db, token).await?)
+        }
+    };
     // A recovery during body adaptation or BEGIN cannot silently select a new
     // generation under the response's original authority binding.
     generation.check().map_err(Refusal::from)?;
@@ -207,24 +231,36 @@ pub(super) async fn respond<'s>(
     token: &CapabilityToken,
     request: &Request,
     output: &OutputAuthority<'s>,
+    read_only: bool,
 ) -> Response {
-    // This opens a write-capable owner, including for a read-only script.
-    // Read-only credentials use /query-batch. Rights precede body diagnostics.
+    // The route selects the operation ceiling before body inspection. Default
+    // /transaction retains write admission; /read-transaction requires Read.
+    // Neither a body field nor a read-only grant can silently change the owner.
     // This unspent guard checks live validity without re-verifying the token's
     // MAC for every copied cell. It never supplies a second execution budget;
     // all semantic work and rows are charged by the retained native owner.
     let now = crate::unix_millis();
-    let mut admission = match db
-        .authority
-        .verify_at(token, crate::TRUNK, now)
-        .and_then(|capability| capability.into_write_at(crate::TRUNK, now))
-    {
-        Ok(admission) => admission,
-        Err(error) => {
-            let Refusal { code, message } = crate::execute::write_refusal(&error);
-            return refusal_response(code, &message);
-        }
-    };
+    let mut admission =
+        match db
+            .authority
+            .verify_at(token, crate::TRUNK, now)
+            .and_then(|capability| {
+                if read_only {
+                    capability
+                        .into_read_at(crate::TRUNK, now)
+                        .map(Admission::Read)
+                } else {
+                    capability
+                        .into_write_at(crate::TRUNK, now)
+                        .map(Admission::Write)
+                }
+            }) {
+            Ok(admission) => admission,
+            Err(error) => {
+                let Refusal { code, message } = crate::execute::write_refusal(&error);
+                return refusal_response(code, &message);
+            }
+        };
     let generation = match db.db.generation() {
         Ok(generation) => generation,
         Err(error) => return refusal_response(error.code(), error.message()),
@@ -234,7 +270,9 @@ pub(super) async fn respond<'s>(
     if !output.pin_generation(generation.clone()) {
         return refusal_response(ErrorCode::Execution, "connection unavailable");
     }
-    let statements = match statements(request, || checkpoint(cx, &generation, &mut admission)) {
+    let statements = match statements(request, read_only, || {
+        checkpoint(cx, &generation, &mut admission)
+    }) {
         Ok(statements) => statements,
         Err(response) => return response,
     };
@@ -269,7 +307,7 @@ mod tests {
         )
         .into_bytes();
         let mut checks = 0;
-        let response = statements(&request, || {
+        let response = statements(&request, false, || {
             checks += 1;
             if checks > 1 {
                 Err(Refusal::new(ErrorCode::Cancelled, "admission cancelled"))

@@ -306,6 +306,14 @@ arguments and admit every complete transaction envelope against the negotiated
 frame limit **before BEGIN**. Server syntax, symbol binding, capability checks
 and cumulative native allowances remain authoritative.
 
+The corresponding `execute_read_transaction_batch` and
+`execute_read_transaction_batch_streaming` methods select the native read-only
+owner and require `ExecuteMode::Read` for every entry. They reject any other mode
+across the complete script before BEGIN, including when the credential also has
+write rights. Successful completion is `ReadClosed` at the original basis; no
+write workspace or graph commit is created. The original managed methods retain
+their write-owner behavior.
+
 The collected method returns `TransactionBatchAnswer { results, end }` only
 after validated completion. The streaming method invokes indexed schema, row
 and statement-end callbacks; schemas receive the original basis and every
@@ -331,6 +339,12 @@ array contains 1–32 records with explicit `mode: "read" | "write"`,
 `statement` and optional typed `parameters`. Local input admission finishes
 before credential access, and negotiated envelope admission still precedes
 BEGIN. This uses the existing server bindings and original signed allowance.
+
+Add `--read-only` to select the managed read-only driver. Every record must have
+`"mode":"read"`; write entries and savepoint controls refuse during local input
+admission, before credentials are opened. Read-only capability tokens can use
+this mode. Without the flag, the command retains its existing mixed Read/Write
+script and write-authority requirements.
 
 CLI schema and row records carry a one-based `statement` and
 `provisional:true`; schema records also carry `basis_seq`. No statement END
@@ -521,7 +535,8 @@ curl --fail-with-body http://127.0.0.1:7474/v1/databases/social/transaction \
 Later statements read earlier staged effects. All statements retain the original
 capability, snapshot basis and cumulative native allowances, including result-row
 limits. The endpoint requires write authority even for a script containing only
-reads; use `/query-batch` with read-only credentials. Reads, `MATCH` and `MERGE`
+reads; use `/read-transaction` with read-only credentials and this same envelope.
+The separate `/query-batch` route retains its read-batch format. Reads, `MATCH` and `MERGE`
 also require read rights. Existing label, relation and property restrictions
 apply before observation and effects.
 
@@ -552,6 +567,72 @@ final native commit can publish, and the HTTP transport rechecks authority and
 the original recovery generation before every physical write and flush. Lost
 responses and `outcome_unknown` can mean the transaction committed; no request is
 retried and there is no HTTP transaction handle, resume or outcome lookup.
+
+### Read-only HTTP transaction scripts
+
+`POST /v1/databases/<name>/read-transaction` accepts the same `statements` envelope
+as `/transaction`, with 1–32 independently parameterized entries and
+`"mode":"read"` on every entry. It requires **Read authority**; ReadWrite
+credentials can also select this narrower operation. The route checks that
+authority before inspecting the body, so Write-only and Admin credentials cannot
+obtain statement or JSON diagnostics. The existing `/transaction` route continues
+to require write authority and use a write owner, including for all-read scripts.
+
+For example, save this body as `read-transaction.json`:
+
+```json
+{
+  "statements": [
+    {
+      "mode": "read",
+      "statement": "MATCH (p:Person) RETURN count(*) AS people"
+    },
+    {
+      "mode": "read",
+      "statement": "MATCH (p:Person {name:$name}) RETURN p.name AS name",
+      "parameters": {"name": "Ada"}
+    }
+  ]
+}
+```
+
+```sh
+curl --fail-with-body http://127.0.0.1:7474/v1/databases/social/read-transaction \
+  -H "Authorization: Bearer $FGDB_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data-binary @read-transaction.json
+```
+
+Every entry reads the same immutable native snapshot under one retained Read
+permit. Concurrent commits cannot change later statements' answers. Scope
+masking applies before observation, and all statements spend the original
+cumulative allowance. A different historical cut or branch is refused under the
+[native read-only transaction contract](#explicit-read-only-transactions).
+This route creates no write workspace. It uses the existing snapshot-admission
+path, including that path's database-read-lock fallback when a published
+snapshot cannot be upgraded.
+
+The response retains the transaction envelope and typed result cells:
+`{"v":1,"basis":B,"results":[{"columns":[...],"rows":[...]},...],"seq":B,"statements":M,"committed":false}`.
+Both `basis` and the final `seq` identify the original snapshot, even if the
+database head advances while the script runs. Successful close releases the
+read owner and publishes no graph marker or new commit sequence.
+
+Complete input adaptation, including refusal of a later Write entry, finishes
+before BEGIN. Mutation text mislabeled as Read still fails through the native
+read-only compiler. The same cumulative execution limits and complete JSON
+response budget as `/transaction` apply. A late statement, conversion or
+output-budget failure releases the owner and returns one error without any
+successful-prefix results. The original recovery generation and live authority
+remain checked through physical response writes and flushes. There is no HTTP
+transaction handle, resume or automatic retry.
+
+The [managed SDK methods and `remote transaction --read-only`
+command](#explicit-transaction-client-contract) expose the same read owner over
+FGP. The CLI file contains a JSON array and uses typed parameter strings; HTTP
+uses the enclosing `statements` object and ordinary JSON parameter values shown
+above. Regression sources are present; runtime qualification remains pending in
+[implementation status](../IMPLEMENTATION_STATUS.md).
 
 ### Consistent read batches
 
@@ -1364,6 +1445,9 @@ application output is admitted.
   allowed `Host` (default `localhost`, `127.0.0.1`, `[::1]` and the listen IP),
   which defeats DNS rebinding against a loopback listener. Results are
   buffered whole: an HTTP response has no per-row flow control.
+  `/transaction` and `/read-transaction` additionally execute bounded scripts
+  under one native write or read owner; the read route requires Read authority
+  and closes at its original basis with `committed:false`.
   `fgdb_protocol::json` holds the one strict JSON grammar and the cell
   encoding the CLI and the adapter share.
 - **The Bolt-compat subset** (`fgdbd serve --bolt-listen`, crate

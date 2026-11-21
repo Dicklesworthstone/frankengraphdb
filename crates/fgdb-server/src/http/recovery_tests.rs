@@ -3,25 +3,102 @@ use crate::recovery::tests::{WakeCounter, WireIo, fail_after_marker, served, set
 use asupersync::lab::run_async_under_lab;
 
 #[test]
+fn read_transactions_use_the_published_snapshot_while_a_writer_is_held() {
+    use std::future::Future;
+
+    let ((), report) = run_async_under_lab(0xba7c_1005, |root| async move {
+        let (server, token, _) = served(&root, "http-read-transaction-writer").await;
+        let db = &server.databases["test"];
+        // Keep the existing published source upgradeable. The read path may
+        // use its normal fallback when no published snapshot is retained.
+        let (published, _) = db.db.read_view(&root).await.unwrap();
+        let writer = db.db.write(&root).await.unwrap();
+        let request = |path: &str| {
+            let mut request = asupersync::http::h1::types::RequestBuilder::new(Method::Post, path)
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", fgdb_protocol::json::hex(&token.encode())),
+                )
+                .build();
+            request.body = br#"{"statements":[{"mode":"read","statement":"RETURN 1 AS first"},{"mode":"read","statement":"RETURN 2 AS second"}]}"#.to_vec();
+            request
+        };
+        {
+            let output = OutputAuthority::new();
+            let mut response = std::pin::pin!(respond(
+                &root,
+                &server,
+                request("/v1/databases/test/read-transaction"),
+                &output,
+            ));
+            let Poll::Ready(response) = response
+                .as_mut()
+                .poll(&mut Context::from_waker(std::task::Waker::noop()))
+            else {
+                panic!("read-only HTTP transactions must not wait for this writer");
+            };
+            assert_eq!(response.status, 200, "{response:?}");
+            let body = std::str::from_utf8(&response.body).unwrap();
+            assert!(
+                body.ends_with(r#""seq":0,"statements":2,"committed":false}"#),
+                "{body}"
+            );
+        }
+        {
+            // Mutation control: selecting the original write owner must
+            // still wait for its writer, even with only read statements.
+            let output = OutputAuthority::new();
+            let mut response = std::pin::pin!(respond(
+                &root,
+                &server,
+                request("/v1/databases/test/transaction"),
+                &output,
+            ));
+            assert!(
+                response
+                    .as_mut()
+                    .poll(&mut Context::from_waker(std::task::Waker::noop()))
+                    .is_pending()
+            );
+        }
+        drop(writer);
+        drop(published);
+        assert_eq!(db.db.read(&root).await.unwrap().frontier().unwrap().0, 0);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn transaction_success_and_error_responses_keep_the_original_recovery_fence() {
     let ((), report) = run_async_under_lab(0xba7c_1004, |root| async move {
-        for (name, failed) in [
-            ("http-transaction-success-fence", false),
-            ("http-transaction-error-fence", true),
+        for (name, failed, read_only) in [
+            ("http-transaction-success-fence", false, false),
+            ("http-transaction-error-fence", true, false),
+            ("http-read-transaction-success-fence", false, true),
+            ("http-read-transaction-error-fence", true, true),
         ] {
             let (server, token, _) = served(&root, name).await;
             let db = &server.databases["test"];
             let output = Arc::new(OutputAuthority::new());
             let mut request = asupersync::http::h1::types::RequestBuilder::new(
                 Method::Post,
-                "/v1/databases/test/transaction",
+                if read_only {
+                    "/v1/databases/test/read-transaction"
+                } else {
+                    "/v1/databases/test/transaction"
+                },
             )
             .header(
                 "Authorization",
                 format!("Bearer {}", fgdb_protocol::json::hex(&token.encode())),
             )
             .build();
-            request.body = if failed {
+            request.body = if read_only && failed {
+                br#"{"statements":[{"mode":"read","statement":"RETURN 1 AS prefix"},{"mode":"read","statement":"RETURN $missing AS absent"}]}"#.to_vec()
+            } else if read_only {
+                br#"{"statements":[{"mode":"read","statement":"RETURN 1 AS value"}]}"#.to_vec()
+            } else if failed {
                 br#"{"statements":[{"mode":"write","statement":"CREATE (n) RETURN 1 AS prefix"},{"mode":"read","statement":"RETURN $missing AS absent"}]}"#.to_vec()
             } else {
                 br#"{"statements":[{"mode":"write","statement":"CREATE (n) RETURN 1 AS value"}]}"#
@@ -34,12 +111,23 @@ fn transaction_success_and_error_responses_keep_the_original_recovery_fence() {
                 assert!(!body.contains("\"results\""), "{body}");
             } else {
                 assert_eq!(response.status, 200, "{body}");
-                assert!(body.contains("\"committed\":true"), "{body}");
+                let completion = if read_only {
+                    "\"committed\":false"
+                } else {
+                    "\"committed\":true"
+                };
+                assert!(body.contains(completion), "{body}");
             }
             {
                 let guard = db.db.read(&root).await.unwrap();
-                assert_eq!(guard.frontier().unwrap().0, u64::from(!failed));
-                assert_eq!(guard.vertices().unwrap().len(), usize::from(!failed));
+                assert_eq!(
+                    guard.frontier().unwrap().0,
+                    u64::from(!failed && !read_only)
+                );
+                assert_eq!(
+                    guard.vertices().unwrap().len(),
+                    usize::from(!failed && !read_only)
+                );
             }
             fail_after_marker(&root, db, 71).await;
             let (io, wire) = WireIo::new(vec![], false);

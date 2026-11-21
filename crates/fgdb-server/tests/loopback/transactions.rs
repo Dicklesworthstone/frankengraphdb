@@ -73,6 +73,18 @@ async fn http_transaction(address: SocketAddr, scope: &Grant, body: &str) -> (u1
     .await
 }
 
+async fn http_read_transaction(address: SocketAddr, scope: &Grant, body: &str) -> (u16, String) {
+    http(
+        address,
+        "POST",
+        "/v1/databases/social/read-transaction",
+        "127.0.0.1",
+        Some(&token(scope)),
+        body,
+    )
+    .await
+}
+
 async fn http_ages(address: SocketAddr) -> String {
     let (status, body) = http(
         address,
@@ -85,6 +97,147 @@ async fn http_ages(address: SocketAddr) -> String {
     .await;
     assert_eq!(status, 200, "{body}");
     body
+}
+
+#[test]
+fn http_read_transactions_need_only_read_authority_and_keep_scope_and_completion() {
+    run(async |cx| {
+        let (address, shutdown, mut server) = start_http(cx, "http-read-transaction-scope").await;
+        let (status, body) = http_transaction(
+            address,
+            &grant(Rights::ReadWrite),
+            r#"{"statements":[{"mode":"write","statement":"CREATE (:Person {name:'Ann',age:21}),(:Company {name:'Hidden',age:99})"}]}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let mut scope = grant(Rights::Read);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        let (status, body) = http_read_transaction(
+            address,
+            &scope,
+            r#"{"statements":[
+              {"mode":"read","statement":"MATCH (n) RETURN n.name AS name,n.age AS age"},
+              {"mode":"read","statement":"MATCH (n:Person) RETURN n.age+$increment AS next","parameters":{"increment":2}}
+            ]}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"basis":1,"results":[{"columns":["name","age"],"rows":[[{"type":"null"},{"type":"int","value":"21"}]]},{"columns":["next"],"rows":[[{"type":"int","value":"23"}]]}],"seq":1,"statements":2,"committed":false}"#
+        );
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"21"}]],"seq":1}"#
+        );
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn http_read_transaction_admission_cannot_upgrade_to_a_writer() {
+    run(async |cx| {
+        let (address, shutdown, mut server) =
+            start_http(cx, "http-read-transaction-admission").await;
+        let (status, body) =
+            http_read_transaction(address, &grant(Rights::Write), "not JSON").await;
+        assert_eq!(status, 403, "read rights precede body diagnostics: {body}");
+        let (status, body) = http_read_transaction(address, &grant(Rights::Read), "not JSON").await;
+        assert_eq!(
+            status, 400,
+            "an authorized malformed body is diagnosed: {body}"
+        );
+        for rights in [Rights::Read, Rights::ReadWrite] {
+            // This prefix would fail at execution. A later Write envelope
+            // must instead refuse during whole-input admission, before BEGIN.
+            for control in ["CREATE (:Person {age:9})", "SAVEPOINT held"] {
+                let request = format!(
+                    r#"{{"statements":[{{"mode":"read","statement":"RETURN 1/0 AS prefix"}},{{"mode":"write","statement":{}}}]}}"#,
+                    fgdb_protocol::json::quote(control),
+                );
+                let (status, body) = http_read_transaction(address, &grant(rights), &request).await;
+                assert_eq!(status, 403, "{body}");
+                assert!(body.contains("only Read statements"), "{body}");
+                assert!(!body.contains("\"results\""), "{body}");
+                assert!(!body.contains("\"committed\""), "{body}");
+            }
+        }
+        // Mislabeling graph mutation as a read cannot bypass the native
+        // binder's read ceiling, even when the token itself permits writes.
+        let (status, body) = http_read_transaction(
+            address,
+            &grant(Rights::ReadWrite),
+            r#"{"statements":[{"mode":"read","statement":"RETURN 1 AS prefix"},{"mode":"read","statement":"CREATE (:Person {age:9})"}]}"#,
+        )
+        .await;
+        assert!(status >= 400, "{body}");
+        assert!(!body.contains("\"results\""), "{body}");
+        assert!(!body.contains("\"committed\""), "{body}");
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[],"seq":0}"#
+        );
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn http_read_transactions_refuse_whole_results_on_late_failure_or_shared_limits() {
+    run(async |cx| {
+        let (address, shutdown, mut server) = start_http(cx, "http-read-transaction-limits").await;
+        let mut limited = grant(Rights::Read);
+        limited.limits.max_rows = 1;
+        let (status, body) = http_read_transaction(
+            address,
+            &limited,
+            r#"{"statements":[{"mode":"read","statement":"RETURN 1 AS first"},{"mode":"read","statement":"RETURN 2 AS second"}]}"#,
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        assert!(body.contains("\"budget\""), "{body}");
+        assert!(!body.contains("\"results\""), "{body}");
+        let (status, body) = http_read_transaction(
+            address,
+            &grant(Rights::Read),
+            r#"{"statements":[{"mode":"read","statement":"RETURN 1 AS prefix"},{"mode":"read","statement":"RETURN $missing AS absent"}]}"#,
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert!(!body.contains("\"results\""), "{body}");
+        for (value, copies) in [("x".repeat(2000), 3), ("\n".repeat(2500), 1)] {
+            let statement = format!(
+                r#"{{"mode":"read","statement":"RETURN $value AS value","parameters":{{"value":{}}}}}"#,
+                fgdb_protocol::json::quote(&value),
+            );
+            let request = format!(
+                r#"{{"statements":[{}]}}"#,
+                vec![statement; copies].join(",")
+            );
+            let (status, body) =
+                http_read_transaction(address, &grant(Rights::Read), &request).await;
+            assert_eq!(status, 422, "{body}");
+            assert!(body.contains("complete transaction response"), "{body}");
+            assert!(!body.contains("\"results\""), "{body}");
+            assert!(!body.contains("\"committed\""), "{body}");
+        }
+        // Refusals release the session-local owner and consume no revision.
+        let (status, body) = http_read_transaction(
+            address,
+            &limited,
+            r#"{"statements":[{"mode":"read","statement":"RETURN 7 AS value"}]}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"basis":0,"results":[{"columns":["value"],"rows":[[{"type":"int","value":"7"}]]}],"seq":0,"statements":1,"committed":false}"#
+        );
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
 }
 
 #[test]

@@ -24,6 +24,55 @@ use std::cell::{Cell, RefCell};
 mod read;
 pub(crate) use read::NativeReadTransaction;
 
+/// The native owner selected by the caller's operation ceiling. Adapters use
+/// this same dispatch; selecting read-only never constructs a write workspace.
+pub(crate) enum NativeTransaction<'server> {
+    Read(NativeReadTransaction<'server>),
+    Write(NativeWriteTransaction<'server>),
+}
+
+impl NativeTransaction<'_> {
+    pub(crate) fn generation(&self) -> Generation {
+        match self {
+            Self::Read(owner) => owner.generation(),
+            Self::Write(owner) => owner.generation(),
+        }
+    }
+
+    pub(crate) fn basis(&self) -> CommitSeq {
+        match self {
+            Self::Read(owner) => owner.basis(),
+            Self::Write(owner) => owner.basis(),
+        }
+    }
+
+    pub(crate) async fn execute_framed(
+        &mut self,
+        cx: &Cx,
+        request: &Execute,
+        frame_budget: usize,
+    ) -> Result<Answer, Refusal> {
+        match self {
+            Self::Read(owner) => owner.execute_framed(cx, request, frame_budget),
+            Self::Write(owner) => owner.execute_framed(cx, request, frame_budget).await,
+        }
+    }
+
+    pub(crate) async fn commit(self, cx: &Cx) -> Result<Answer, Refusal> {
+        match self {
+            Self::Read(owner) => owner.commit(cx),
+            Self::Write(owner) => owner.commit(cx).await,
+        }
+    }
+
+    pub(crate) fn rollback(self) {
+        match self {
+            Self::Read(owner) => owner.rollback(),
+            Self::Write(owner) => owner.rollback(),
+        }
+    }
+}
+
 /// Connection-scoped ownership of the existing native transaction. This does
 /// not add a durable transaction lease, reattachment, or outcome lookup.
 pub(crate) struct NativeWriteTransaction<'s> {

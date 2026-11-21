@@ -4,6 +4,7 @@
 //! introduced, and a lost commit reply is never replayed.
 
 use super::*;
+use crate::execute::transaction::NativeTransaction;
 use crate::execute::{NativeReadTransaction, NativeWriteTransaction};
 use fgdb_protocol::body::{
     ExecuteTransaction, TransactionBegun, TransactionCompletion, TransactionHandle,
@@ -15,53 +16,6 @@ pub(super) struct ActiveTransaction<'server> {
     native: NativeTransaction<'server>,
     statement: u64,
     pub(super) last_stream: Option<StreamId>,
-}
-
-enum NativeTransaction<'server> {
-    Read(NativeReadTransaction<'server>),
-    Write(NativeWriteTransaction<'server>),
-}
-
-impl NativeTransaction<'_> {
-    fn generation(&self) -> Generation {
-        match self {
-            Self::Read(owner) => owner.generation(),
-            Self::Write(owner) => owner.generation(),
-        }
-    }
-
-    fn basis(&self) -> fgdb_types::CommitSeq {
-        match self {
-            Self::Read(owner) => owner.basis(),
-            Self::Write(owner) => owner.basis(),
-        }
-    }
-
-    async fn execute_framed(
-        &mut self,
-        cx: &Cx,
-        request: &Execute,
-        frame_budget: usize,
-    ) -> Result<Answer, Refusal> {
-        match self {
-            Self::Read(owner) => owner.execute_framed(cx, request, frame_budget),
-            Self::Write(owner) => owner.execute_framed(cx, request, frame_budget).await,
-        }
-    }
-
-    async fn commit(self, cx: &Cx) -> Result<Answer, Refusal> {
-        match self {
-            Self::Read(owner) => owner.commit(cx),
-            Self::Write(owner) => owner.commit(cx).await,
-        }
-    }
-
-    fn rollback(self) {
-        match self {
-            Self::Read(owner) => owner.rollback(),
-            Self::Write(owner) => owner.rollback(),
-        }
-    }
 }
 
 impl ActiveTransaction<'_> {
