@@ -12,6 +12,41 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Authorized external terminal aggregates — qualification pending
+
+Source review 2026-11-20: `AuthorizedOrderedReadSession::execute_ordered_aggregate`
+connects terminal COUNT/SUM/AVG/MIN/MAX/COLLECT to the existing complete scoped
+relation owner and external group reducer. FGP `ReadOrdered` and prepared
+`OrderedStream` select this typed cursor for aggregate facades, including exact
+historical cuts and admitted WITH/UNWIND/set inputs. Unsupported definitions
+refuse before query input or scratch writes; no eager fallback occurs.
+
+Complete source occurrences, grouping, HAVING, computed output, DISTINCT,
+ordering and paging retain native semantics. Count cells remain u64, integer
+sums i128 and exact averages reduced rationals through scratch and wire
+conversion. COLLECT and COLLECT DISTINCT retain native occurrence order across
+partition passes; each collection must fit its per-value memory and row limits.
+Final group slots preserve hidden/repeated keys without narrowing values through
+ordinary rows. LIMIT zero still validates all reached input and group expressions.
+
+The source and reducer share the session's historical pin, scope and signed
+permit. Physical sort work is prepaid; only final delivery spends signed rows.
+Live authority and served-generation checks surround asynchronous work and
+delivery. Failure or a dropped pending pull cannot later report successful
+exhaustion. Existing anonymous scratch, memory reservations and concurrency
+leases retain their normal cleanup. Terminal output expressions that require
+additional graph-element reads remain unsupported; carried input-stage property
+reads retain their scoped reader. The source graph remains resident, and this
+adds neither durable result retention nor a whole-query memory bound.
+
+New native/server/FGP regression sources cover exact values, forced partitioning,
+collection order, masked inputs, prepared old/new/old snapshots, flow credit,
+private input versus delivered-row limits, cancellation, late failures beneath
+LIMIT zero, recovery and issuer retirement. Independent source review caught
+and corrected nested input error classification and the small-memory fixture's
+catalog admission. Runtime and full exact-tree qualification remain open under
+`fgdb-w10-snapshotquery-rzh`; no broader SnapshotQuery contract is closed.
+
 ### 2026-11-20 session qualification receipt
 
 The typed MERGE-map correction, DAG procedures, ECS native-run admission and

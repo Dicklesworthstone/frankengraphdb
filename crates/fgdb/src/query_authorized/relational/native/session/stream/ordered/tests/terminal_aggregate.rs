@@ -317,6 +317,10 @@ fn limit_zero_evaluates_reached_inputs_and_complete_group_outputs() {
             "UNWIND [1,2] AS x RETURN 1/(COUNT(*)-2) AS value LIMIT 0",
             "MATCH (n:L) RETURN 1/(SUM(n.p)-8) AS value LIMIT 0",
         ] {
+            // A failed private write may poison its scratch owner while the
+            // capability session remains valid. Each failure gets fresh files.
+            let (mut ordered, _, _) =
+                session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
             let prepared = ordered.prepare(&cx, text, &params).unwrap();
             let error = ordered
                 .execute_ordered_aggregate(&cx, &prepared, &params)

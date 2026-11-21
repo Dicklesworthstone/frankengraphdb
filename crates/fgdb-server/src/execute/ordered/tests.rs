@@ -495,3 +495,95 @@ fn ordered_difference_preserves_signed_multiplicity_and_refuses_stale_delivery()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn ordered_aggregate_cursors_fence_recovery_and_live_authority_without_claiming_exhaustion() {
+    let ((), report) = run_async_under_lab(0x79a0_a601, |root| async move {
+        let (mut server, token, path) = served(&root, "ordered-aggregate-fences").await;
+        let directory = path.join("ordered-scratch");
+        asupersync::fs::create_dir(&directory).await.unwrap();
+        let mut config = crate::OrderedReadConfig::new(&directory);
+        config.max_concurrent = 1;
+        config.sort.run_rows = 2;
+        config.sort.page_bytes = 31;
+        config.sort.max_sort_work = 1_000_000;
+        Arc::get_mut(server.databases.get_mut("test").unwrap())
+            .unwrap()
+            .ordered_reads = Some(
+            crate::ordered::OrderedReads::open(&root, config)
+                .await
+                .unwrap(),
+        );
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = contexts.query();
+        let mut initial = vertex(1);
+        initial.create_vertex(fgdb_types::VId(2), vec![], vec![]);
+        initial.create_vertex(fgdb_types::VId(3), vec![], vec![]);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), initial)
+            .await
+            .unwrap();
+        let parameters = fgdb_gql::GqlParameters::new();
+        let text = "MATCH (n) RETURN n AS node, COUNT(*) AS rows GROUP BY n ORDER BY node";
+        let generation = accepted(ordered_generation(db, &token));
+        let (mut session, _) =
+            accepted(read_ordered_session(&root, db, &token, None, generation.clone()).await);
+        let prepared = accepted(session.prepare(&query, text, &parameters));
+        let execution = accepted(session.start(&query, &prepared, &parameters));
+        assert_eq!(execution.columns(), ["node", "rows"]);
+        let mut cursor = accepted(execution.finish().await);
+        assert_eq!(cursor.snapshot_seq(), 1);
+        assert_eq!(
+            accepted(cursor.next().await),
+            Some(vec![WireValue::Vertex(1), WireValue::Count(1)])
+        );
+        assert!(!cursor.exhausted());
+        fail_after_marker(&root, db, 4).await;
+        assert!(matches!(
+            settled(db).await,
+            crate::DatabaseStatus::Ready { .. }
+        ));
+        assert_eq!(
+            cursor.next().await.err().unwrap().code,
+            ErrorCode::DatabaseRecovering
+        );
+        assert!(!cursor.exhausted());
+        assert!(accepted(cursor.next().await).is_none());
+        assert!(!cursor.exhausted());
+        drop(cursor);
+        drop(session);
+
+        // Releasing a failed aggregate cursor returns the one scratch slot.
+        // A fresh generation can run, but retirement remains live during pulls.
+        let generation = accepted(ordered_generation(db, &token));
+        let (mut fresh, _) =
+            accepted(read_ordered_session(&root, db, &token, None, generation).await);
+        let prepared = accepted(fresh.prepare(&query, text, &parameters));
+        let mut cursor = accepted(
+            accepted(fresh.start(&query, &prepared, &parameters))
+                .finish()
+                .await,
+        );
+        assert_eq!(cursor.snapshot_seq(), 2);
+        assert_eq!(
+            accepted(cursor.next().await),
+            Some(vec![WireValue::Vertex(1), WireValue::Count(1)])
+        );
+        assert!(db.authority.retire());
+        assert_eq!(
+            cursor.next().await.err().unwrap().code,
+            ErrorCode::PermissionDenied
+        );
+        assert!(!cursor.exhausted());
+        assert!(accepted(cursor.next().await).is_none());
+        assert!(!cursor.exhausted());
+        drop(cursor);
+        drop(fresh);
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

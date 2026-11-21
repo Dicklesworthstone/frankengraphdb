@@ -23,6 +23,8 @@ pub(super) async fn start_ordered(
     asupersync::fs::create_dir(&directory).await.unwrap();
     let mut order = OrderedReadConfig::new(&directory);
     order.memory_bytes = 64 * 1024;
+    order.sort.group_capacity = 2;
+    order.sort.max_partitions = 32;
     order.sort.run_rows = 2;
     order.sort.page_bytes = 31;
     order.sort.max_row_bytes = 4096;
@@ -430,8 +432,8 @@ fn external_order_requires_host_opt_in_and_validates_all_input_with_limit_zero()
         assert_eq!(server_code(error), ErrorCode::Budget);
         assert_eq!(rows, 0);
         owner.ping(cx, 406).await.unwrap();
-        // Unsupported ordered profiles refuse before LIMIT 0 can conceal the
-        // missing source operator; no eager buffered execution is substituted.
+        // Aggregation consumes the complete input under the same host bound,
+        // even when LIMIT 0 suppresses every final group.
         assert_eq!(
             server_code(
                 owner
@@ -444,8 +446,334 @@ fn external_order_requires_host_opt_in_and_validates_all_input_with_limit_zero()
                     .await
                     .unwrap_err()
             ),
-            ErrorCode::Statement
+            ErrorCode::Budget
         );
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+        empty_scratch(&directory).await;
+    });
+}
+
+#[test]
+fn external_aggregates_preserve_exact_values_collections_masking_and_prepared_history() {
+    run(async |cx| {
+        let (addr, shutdown, mut task, directory) =
+            start_ordered(cx, "external-aggregate-results", 100).await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed(cx, &mut owner).await;
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Company {age:999,name:'hidden'})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut scope = grant(Rights::Read);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.relations = Scope::only([RelationId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+
+        let summary = "MATCH (n) RETURN COUNT(*) AS rows, SUM(n.age) AS total, \
+            AVG(n.age) AS average, COUNT(n.name) AS hidden, COLLECT(n.age) AS ages";
+        let eager = reader
+            .execute(cx, ExecuteMode::Read, summary, vec![])
+            .await
+            .unwrap();
+        let external = reader
+            .execute(cx, ExecuteMode::ReadOrdered, summary, vec![])
+            .await
+            .unwrap();
+        // The oracle also pins the native collection order across spill runs;
+        // hidden labels and properties cannot enter any aggregate input.
+        assert_eq!(external, eager);
+        assert_eq!(
+            external.columns,
+            ["rows", "total", "average", "hidden", "ages"]
+        );
+        assert_eq!(external.rows.len(), 1);
+        assert_eq!(
+            external.rows[0][..4],
+            [
+                WireValue::Count(12),
+                WireValue::WideInt(30),
+                WireValue::Average {
+                    numerator: 5,
+                    denominator: 2,
+                },
+                WireValue::Count(0),
+            ]
+        );
+        assert_eq!(external.outcome, Outcome::Rows { seq: 2 });
+
+        let collected = reader
+            .execute(
+                cx,
+                ExecuteMode::ReadOrdered,
+                "UNWIND [3,1,3,2] AS value RETURN COUNT(*) AS rows, \
+                 COLLECT(value) AS items, COLLECT(DISTINCT value) AS unique_items",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            collected.rows,
+            [vec![
+                WireValue::Count(4),
+                WireValue::List([3, 1, 3, 2].map(WireValue::Int).to_vec()),
+                WireValue::List([3, 1, 2].map(WireValue::Int).to_vec()),
+            ]]
+        );
+        let grouped = reader
+            .execute(
+                cx,
+                ExecuteMode::ReadOrdered,
+                "MATCH (n:Person) RETURN n.age AS age, COUNT(*) AS rows, n.age AS repeated \
+                 GROUP BY n.age ORDER BY age DESC",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(grouped.columns, ["age", "rows", "repeated"]);
+        assert_eq!(
+            grouped.rows,
+            (0..6)
+                .rev()
+                .map(|age| vec![
+                    WireValue::Int(age),
+                    WireValue::Count(2),
+                    WireValue::Int(age),
+                ])
+                .collect::<Vec<_>>()
+        ); // More groups than the two-row flow window and sort run.
+
+        let historical = "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $cut \
+            RETURN COUNT(*) AS rows, SUM(n.age) AS total, AVG(n.age) AS average LIMIT $take";
+        let arguments = |cut, take| {
+            vec![
+                ("cut".into(), WireValue::Count(cut)),
+                ("take".into(), WireValue::Count(take)),
+            ]
+        };
+        let handle = reader
+            .prepare_read(cx, historical, arguments(1, 1))
+            .await
+            .unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) SET n.age = n.age + 100",
+                vec![],
+            )
+            .await
+            .unwrap();
+        for (cut, total, numerator) in [(1, 30, 5), (3, 1230, 205), (1, 30, 5)] {
+            let mut columns = Vec::new();
+            let mut rows = Vec::new();
+            let outcome = reader
+                .execute_prepared_streaming(
+                    cx,
+                    PreparedReadMode::OrderedStream,
+                    handle,
+                    arguments(cut, 1),
+                    |names| {
+                        columns = names.to_vec();
+                        Ok(())
+                    },
+                    |row| {
+                        rows.push(row);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(columns, ["rows", "total", "average"]);
+            assert_eq!(
+                rows,
+                [vec![
+                    WireValue::Count(12),
+                    WireValue::WideInt(total),
+                    WireValue::Average {
+                        numerator,
+                        denominator: 2,
+                    },
+                ]]
+            );
+            assert_eq!(outcome, Outcome::Rows { seq: cut });
+        }
+        reader.release_prepared(cx, handle).await.unwrap();
+
+        owner
+            .execute_batch(
+                cx,
+                "CREATE (:Person {age:$age})",
+                vec![vec![("age".into(), WireValue::Int(i64::MAX))]; 2],
+            )
+            .await
+            .unwrap();
+        let wide = reader
+            .execute(
+                cx,
+                ExecuteMode::ReadOrdered,
+                "MATCH (n:Person) WHERE n.age=$age RETURN SUM(n.age) AS total, AVG(n.age) AS average",
+                vec![("age".into(), WireValue::Int(i64::MAX))],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            wide.rows,
+            [vec![
+                WireValue::WideInt(i128::from(i64::MAX) * 2),
+                WireValue::Average {
+                    numerator: i128::from(i64::MAX),
+                    denominator: 1,
+                },
+            ]]
+        );
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+        empty_scratch(&directory).await;
+    });
+}
+
+#[test]
+fn external_aggregate_delivery_budgets_cancellation_and_limit_zero_preserve_complete_input() {
+    run(async |cx| {
+        let (addr, shutdown, mut task, directory) =
+            start_ordered(cx, "external-aggregate-delivery", 100).await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed(cx, &mut owner).await;
+        let mut scope = grant(Rights::Read);
+        scope.limits.max_rows = 2;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let summary = "MATCH (n:Person) RETURN COUNT(*) AS rows";
+        assert_eq!(
+            reader
+                .execute(cx, ExecuteMode::ReadOrdered, summary, vec![])
+                .await
+                .unwrap()
+                .rows,
+            [vec![WireValue::Count(12)]]
+        ); // A twelve-row source spends one delivered-row allowance.
+        let groups = "MATCH (n:Person) RETURN n.age AS age, COUNT(*) AS rows \
+            GROUP BY n.age ORDER BY age";
+        let mut prefix = Vec::new();
+        let error = reader
+            .execute_streaming(
+                cx,
+                ExecuteMode::ReadOrdered,
+                groups,
+                vec![],
+                |_| Ok(()),
+                |row| {
+                    prefix.push(row);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(error), ErrorCode::Budget);
+        assert_eq!(
+            prefix,
+            [
+                vec![WireValue::Int(0), WireValue::Count(2)],
+                vec![WireValue::Int(1), WireValue::Count(2)],
+            ]
+        );
+        reader.ping(cx, 411).await.unwrap();
+        assert_eq!(
+            reader
+                .execute(
+                    cx,
+                    ExecuteMode::ReadOrdered,
+                    &format!("{groups} LIMIT 2"),
+                    vec![],
+                )
+                .await
+                .unwrap()
+                .rows,
+            prefix
+        );
+        let mut callbacks = 0;
+        let error = reader
+            .execute_streaming(
+                cx,
+                ExecuteMode::ReadOrdered,
+                groups,
+                vec![],
+                |_| Err(ClientError::Protocol("stop before aggregate input")),
+                |_| {
+                    callbacks += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Protocol("stop before aggregate input")
+        ));
+        assert_eq!(callbacks, 0);
+        reader.ping(cx, 412).await.unwrap();
+        let error = reader
+            .execute_streaming(
+                cx,
+                ExecuteMode::ReadOrdered,
+                groups,
+                vec![],
+                |_| Ok(()),
+                |_| {
+                    callbacks += 1;
+                    Err(ClientError::Protocol("stop after one external group"))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Protocol("stop after one external group")
+        ));
+        assert_eq!(callbacks, 1);
+        reader.ping(cx, 413).await.unwrap();
+
+        for take in [0, 1] {
+            let mut rows = 0;
+            let error = reader
+                .execute_streaming(
+                    cx,
+                    ExecuteMode::ReadOrdered,
+                    &format!(
+                        "MATCH (n:Person) RETURN n.age AS age, SUM(10 / (n.age - 5)) AS total \
+                         GROUP BY n.age ORDER BY age LIMIT {take}"
+                    ),
+                    vec![],
+                    |_| Ok(()),
+                    |_| {
+                        rows += 1;
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(server_code(error), ErrorCode::Execution);
+            assert_eq!(rows, 0);
+            reader.ping(cx, 414 + take).await.unwrap();
+        }
+        reader.close(cx).await.unwrap();
         owner.close(cx).await.unwrap();
         shutdown.trigger();
         task.join(cx).await.unwrap();

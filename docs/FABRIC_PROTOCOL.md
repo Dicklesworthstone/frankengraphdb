@@ -1109,16 +1109,26 @@ application output is admitted.
   vertex scans, fixed-edge joins and admitted probes. Property-only projections,
   compiler-admitted hidden sort keys, DISTINCT and final SKIP/LIMIT retain the
   query's native semantics, including historical cuts. Scope masking precedes
-  input expressions, ordering and distinctness. Unsupported physical profiles,
-  including aggregate and compound plans, refuse even with LIMIT 0. Native
-  aggregate streaming remains available through `ReadStream`/`SourceStream`.
+  input expressions, ordering and distinctness. Terminal COUNT/SUM/AVG/MIN/MAX
+  and COLLECT use the same scoped complete-relation source and bounded external
+  reducer, including admitted WITH/UNWIND/set inputs and prepared historical
+  cuts. Their native HAVING, output DISTINCT, ordering and paging finish before
+  delivery. Counts retain u64, integer sums i128 and exact averages their reduced
+  numerator/denominator. COLLECT and COLLECT DISTINCT preserve native occurrence
+  order; each resulting value must fit its admitted memory and row ceilings.
+  Complete input validation and reached completed-group expressions still run
+  beneath LIMIT 0. Unsupported sources and terminal output expressions requiring
+  graph-element property/metadata reads refuse before query input is read or
+  written to scratch.
+  Input-stage property reads remain capability-scoped. Native aggregate
+  streaming also remains available through `ReadStream`/`SourceStream`.
 
   The operator enables this mode per database with
   `fgdbd serve ... --database <name>=<path> ... --query-scratch-dir <directory>`.
   The directory must already exist. Embedded hosts set
   `DatabaseConfig.ordered_reads = Some(OrderedReadConfig::new(directory))` and
   may adjust its physical limits. Defaults are one shared 64 MiB tracked spill
-  buffer pool, four concurrent ordered sessions, two files of at most 512 MiB
+  buffer pool, four concurrent ordered sessions, three files of at most 512 MiB
   each per session, at most 100,000 input rows, 256 rows per initial sort run,
   1,024 sort runs, 32 KiB pages, 1 MiB encoded rows and 10,000,000 sort-work
   units. Each file additionally allows at most 8,192 runs and 128 MiB per run.
@@ -1467,6 +1477,11 @@ input/work/final-row allowances, callback cancellation and connection reuse:
 tests received independent source review and scoped formatting/whitespace checks;
 their compilation and execution remain unverified under the pinned foundation's
 compiler-memory blocker. Existing unrelated formatting drift was preserved.
+The terminal aggregate additions (2026-11-20) cover exact wide/rational values,
+collection order, masked inputs, old/new/old prepared snapshot rebinding, group
+flow credit, late LIMIT-zero failures, recovery and live issuer retirement.
+These regression sources likewise await compiler/runtime qualification; no
+durable result ownership or whole-query memory bound is implied.
 On 2026-10-12, the dependency-free command
 `cargo test -p fgdb-protocol --lib --no-default-features --locked --offline -j1`
 passed all 10 library tests, including the new mode discriminators, unchanged

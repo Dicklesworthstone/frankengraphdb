@@ -22,13 +22,24 @@ pub(crate) struct OrderedSession<'a> {
 }
 
 pub(crate) struct OrderedExecution<'q> {
-    native: fgdb::AuthorizedOrderExecution<'q, File>,
+    native: OrderExecution<'q>,
     generation: Generation,
 }
 
+enum OrderExecution<'q> {
+    Rows(fgdb::AuthorizedOrderExecution<'q, File>),
+    Aggregate(fgdb::AuthorizedAggregateOrderExecution<'q, File>),
+}
+
 pub(crate) struct OrderedCursor<'q> {
-    native: fgdb::AuthorizedSpoolCursor<'q, File>,
+    native: OrderSource<'q>,
     generation: Generation,
+    failed: bool,
+}
+
+enum OrderSource<'q> {
+    Rows(fgdb::AuthorizedSpoolCursor<'q, File>),
+    Aggregate(fgdb::AuthorizedAggregateSpoolCursor<'q, File>),
 }
 
 pub(crate) struct DifferenceExecution<'q> {
@@ -297,7 +308,20 @@ impl OrderedSession<'_> {
     ) -> Result<OrderedExecution<'q>, Refusal> {
         let generation = self.generation.clone();
         let _operation = generation.enter().map_err(Refusal::from)?;
-        let result = self.native.execute_ordered(cx, prepared, parameters);
+        // Select one admitted compiler before opening a source. Aggregate
+        // results retain their exact numeric domain through typed scratch rows.
+        let result = match prepared.facade_class() {
+            fgdb::NativeReadClass::Aggregate
+            | fgdb::NativeReadClass::TemporalAggregate
+            | fgdb::NativeReadClass::PipelineAggregate => self
+                .native
+                .execute_ordered_aggregate(cx, prepared, parameters)
+                .map(OrderExecution::Aggregate),
+            _ => self
+                .native
+                .execute_ordered(cx, prepared, parameters)
+                .map(OrderExecution::Rows),
+        };
         generation.check().map_err(Refusal::from)?;
         Ok(OrderedExecution {
             native: result.map_err(spool_refusal)?,
@@ -334,7 +358,10 @@ impl OrderedSession<'_> {
 
 impl<'q> OrderedExecution<'q> {
     pub(crate) fn columns(&self) -> &[String] {
-        self.native.columns()
+        match &self.native {
+            OrderExecution::Rows(execution) => execution.columns(),
+            OrderExecution::Aggregate(execution) => execution.columns(),
+        }
     }
 
     pub(crate) fn finish(
@@ -342,38 +369,94 @@ impl<'q> OrderedExecution<'q> {
     ) -> Pin<Box<dyn Future<Output = Result<OrderedCursor<'q>, Refusal>> + Send + 'q>> {
         Box::pin(async move {
             let Self { native, generation } = self;
-            let native = in_generation(
-                &generation,
-                async move { native.await.map_err(spool_refusal) },
-            )
+            let native = in_generation(&generation, async move {
+                match native {
+                    OrderExecution::Rows(execution) => execution
+                        .await
+                        .map(OrderSource::Rows)
+                        .map_err(spool_refusal),
+                    OrderExecution::Aggregate(execution) => execution
+                        .await
+                        .map(OrderSource::Aggregate)
+                        .map_err(spool_refusal),
+                }
+            })
             .await?;
-            Ok(OrderedCursor { native, generation })
+            Ok(OrderedCursor {
+                native,
+                generation,
+                failed: false,
+            })
         })
     }
 }
 
 impl OrderedCursor<'_> {
     pub(crate) fn snapshot_seq(&self) -> u64 {
-        self.native.snapshot_seq().0
+        match &self.native {
+            OrderSource::Rows(cursor) => cursor.snapshot_seq().0,
+            OrderSource::Aggregate(cursor) => cursor.snapshot_seq().0,
+        }
     }
     pub(crate) fn exhausted(&self) -> bool {
-        self.native.state() == ScanState::Exhausted
+        let state = match &self.native {
+            OrderSource::Rows(cursor) => cursor.state(),
+            OrderSource::Aggregate(cursor) => cursor.state(),
+        };
+        !self.failed && state == ScanState::Exhausted
     }
     pub(crate) async fn next(&mut self) -> Result<Option<Vec<WireValue>>, Refusal> {
+        if self.failed {
+            return Ok(None);
+        }
+        // A dropped pull, generation refusal or decode failure permanently
+        // fuses delivery; a later None cannot certify a refused prefix.
+        self.failed = true;
         let generation = self.generation.clone();
-        in_generation(&generation, async {
-            let frame = self.native.next_row().await.map_err(spool_refusal)?;
-            frame
-                .map(|frame| {
-                    GraphValueRow::decode_canonical(frame.as_ref())
-                        .map(|row| row.values().iter().map(convert::graph).collect())
-                        .map_err(|_| {
-                            Refusal::new(ErrorCode::Execution, "invalid canonical ordered row")
+        let result = in_generation(&generation, async {
+            match &mut self.native {
+                OrderSource::Rows(cursor) => {
+                    let frame = cursor.next_row().await.map_err(spool_refusal)?;
+                    frame
+                        .map(|frame| {
+                            GraphValueRow::decode_canonical(frame.as_ref())
+                                .map(|row| row.values().iter().map(convert::graph).collect())
+                                .map_err(|_| {
+                                    Refusal::new(
+                                        ErrorCode::Execution,
+                                        "invalid canonical ordered row",
+                                    )
+                                })
                         })
-                })
-                .transpose()
+                        .transpose()
+                }
+                OrderSource::Aggregate(cursor) => {
+                    let row = cursor.next_row().await.map_err(spool_refusal)?;
+                    Ok(row.map(|row| {
+                        // Output ordinals are validated by the native compiler.
+                        // Counts, wide sums and rational averages never narrow
+                        // through an intermediate GraphValue representation.
+                        cursor
+                            .output_slots()
+                            .iter()
+                            .map(|slot| match *slot {
+                                fgdb_gql::GraphAggregateTextSlot::GroupKey(at) => {
+                                    convert::graph(&row.keys()[at])
+                                }
+                                fgdb_gql::GraphAggregateTextSlot::Aggregate(at) => {
+                                    convert::cell(&row.values()[at])
+                                }
+                            })
+                            .collect()
+                    }))
+                }
+            }
         })
-        .await
+        .await;
+        if result.is_ok() {
+            self.failed = false;
+        }
+        result
     }
 }
 
@@ -448,6 +531,7 @@ pub(crate) fn spool_refusal(error: impl Into<NativeSpoolError>) -> Refusal {
         NativeSpoolError::Authorized(error) | NativeSpoolError::Prepare(error) => {
             return query_refusal(*error);
         }
+        NativeSpoolError::Aggregate(error) => return aggregate_spool_refusal(*error),
         error => error,
     };
     let code = match &error {
@@ -465,6 +549,35 @@ pub(crate) fn spool_refusal(error: impl Into<NativeSpoolError>) -> Refusal {
         NativeSpoolError::SortOrder(_) | NativeSpoolError::Spill(SpillError::InvalidLimits) => {
             ErrorCode::Statement
         }
+        _ => ErrorCode::Execution,
+    };
+    Refusal::new(code, error.to_string())
+}
+
+fn aggregate_spool_refusal(error: fgdb::NativeAggregateSpoolError) -> Refusal {
+    use fgdb::NativeAggregateSpoolError;
+    let error = match error {
+        NativeAggregateSpoolError::Prepare(error) => return query_refusal(*error),
+        NativeAggregateSpoolError::Spool(error) => return spool_refusal(error),
+        error => error,
+    };
+    let code = match &error {
+        NativeAggregateSpoolError::Execute(error) if gql_budget(error) => ErrorCode::Budget,
+        NativeAggregateSpoolError::BufferedExecute(error) if gql_budget(error) => ErrorCode::Budget,
+        NativeAggregateSpoolError::Execute(error)
+            if matches!(error.as_ref(), GqlQueryError::Interrupted(_)) =>
+        {
+            ErrorCode::Cancelled
+        }
+        NativeAggregateSpoolError::BufferedExecute(error)
+            if matches!(error.as_ref(), GqlQueryError::Interrupted(_)) =>
+        {
+            ErrorCode::Cancelled
+        }
+        NativeAggregateSpoolError::PartitionLimit { .. }
+        | NativeAggregateSpoolError::PartitionDepth
+        | NativeAggregateSpoolError::InputRows { .. } => ErrorCode::Budget,
+        NativeAggregateSpoolError::Unsupported => ErrorCode::Statement,
         _ => ErrorCode::Execution,
     };
     Refusal::new(code, error.to_string())
