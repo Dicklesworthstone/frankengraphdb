@@ -317,6 +317,15 @@ impl RowProjectionSpec {
         self.filter = code.to_vec().into_boxed_slice();
         Ok(self)
     }
+    /// Borrow the validated ordinary projection and its input predicate.
+    /// Expanded UNWIND specifications are not equivalent to a plain projection.
+    pub(crate) fn ordinary_parts(&self) -> Option<(&[GraphSetProjection], &[GraphSetPredicateOp])> {
+        if self.expand_last || self.expand_range {
+            return None;
+        }
+        Some((&self.projection, &self.filter))
+    }
+
     pub fn input_types(&self) -> &[GraphSetColumnType] {
         &self.input
     }

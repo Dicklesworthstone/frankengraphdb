@@ -8,10 +8,31 @@ mod window;
 
 pub use apply::{
     MaintainedApplyJoin, MaintainedCollectedCount, MaintainedCountJoin, MaintainedDistinctApply,
-    MaintainedExistenceJoin,
+    MaintainedExistenceJoin, MaintainedFilteredCount,
 };
 
 impl PreparedGraphSet {
+    /// Retain a complete logical input through an already validated ordinary
+    /// projection. Only the specification can supply precise domains, including
+    /// its same-domain NULL defaults; no caller can assert a narrower type.
+    fn project_incremental_spec(
+        mut self,
+        spec: &crate::row_projection::RowProjectionSpec,
+    ) -> Option<Self> {
+        if self.types.as_slice() != spec.input_types() {
+            return None;
+        }
+        let (projection, filter) = spec.ordinary_parts()?;
+        if !filter.is_empty() {
+            self = self.filter(filter).ok()?;
+        }
+        let mut projected = self.project(projection.to_vec(), spec.quantifier()).ok()?;
+        // General CASE inference widens to Any, while the immutable checked
+        // specification may prove a copied value with a same-domain default.
+        projected.types = spec.column_types().to_vec();
+        Some(projected)
+    }
+
     /// Peel exactly one finite relational window, preserving its entire input
     /// node. The ALL window runs after the node's own quantifier. A page without
     /// ORDER BY inherits a scope/filter child's selected order; pattern wrappers

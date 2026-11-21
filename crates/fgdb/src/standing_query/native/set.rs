@@ -776,6 +776,85 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 checkpoint,
             )?
         } else if let Some(plan) =
+            query.incremental_filtered_count_with_control(&mut |_| checkpoint())?
+        {
+            // A filtered count belongs to one exact invocation tuple. Keep
+            // outer multiplicity out of the body, then restore every original
+            // occurrence only after its complete predicate/projection pipeline.
+            let left = self.compile(cx, plan.left, policy, checkpoint)?;
+            let input_policy = group::input_policy(policy);
+            let right = self.compile_group_input(cx, plan.right, input_policy, checkpoint)?;
+            let state = self.database.prepare_standing_projection(
+                cx,
+                left,
+                plan.outer,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            let outer = self.append(StandingQuery::Projection(Box::new(state)));
+            checkpoint()?;
+            let state = self.database.prepare_standing_projection(
+                cx,
+                outer,
+                plan.arguments,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            let arguments = self.append_private(StandingQuery::Projection(Box::new(state)));
+            checkpoint()?;
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [arguments, right],
+                &plan.join,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            let mut input = self.append_private(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+            for spec in plan.body {
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    input,
+                    spec,
+                    input_policy,
+                    self.database.standing_queries.len(),
+                )?;
+                input = self.append_private(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            let state = self.database.prepare_standing_group_rows(
+                cx,
+                input,
+                plan.group,
+                input_policy,
+                self.database.standing_queries.len(),
+                &plan.group_columns,
+                &plan.group_types,
+            )?;
+            let grouped = self.append_private(StandingQuery::Group(Box::new(state)));
+            checkpoint()?;
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [outer, grouped],
+                &plan.restore,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            input = self.append(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+            for spec in plan.output {
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    input,
+                    spec,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                input = self.append(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            input
+        } else if let Some(plan) =
             query.incremental_apply_distinct_with_control(&mut |_| checkpoint())?
         {
             // Distinctness belongs to one argument tuple, not the outer bag.

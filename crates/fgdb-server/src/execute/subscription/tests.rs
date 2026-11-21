@@ -1968,3 +1968,215 @@ fn capability_quotient_noninterference_10000_hidden_mutations_and_revocation() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn filtered_counts_subscribe_with_property_deltas_zero_rows_and_exact_receipts() {
+    use fgdb::WriteBatch;
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+    use fgdb_warden::Scope;
+
+    let ((), report) = run_async_under_lab(0x79a0_c017, |root| async move {
+        let (server, token, _) = served(&root, "subscription-filtered-counts").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut names = SymbolCatalog::default();
+        names
+            .bind_all([
+                ("Owner", CatalogSymbol::Label(LabelId(1))),
+                ("Target", CatalogSymbol::Label(LabelId(2))),
+                ("Secret", CatalogSymbol::Label(LabelId(3))),
+                ("R", CatalogSymbol::Relation(RelationId(1))),
+                ("Hidden", CatalogSymbol::Relation(RelationId(2))),
+                ("score", CatalogSymbol::Property(PropertyKeyId(1))),
+                ("selected", CatalogSymbol::Property(PropertyKeyId(2))),
+                ("secret", CatalogSymbol::Property(PropertyKeyId(3))),
+            ])
+            .unwrap();
+        {
+            let mut writer = db.db.write(&root).await.unwrap();
+            writer
+                .register_symbols(&contexts.commit(), &names)
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(
+                VId(1),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(2))],
+            );
+            seed.create_vertex(VId(3), vec![LabelId(1)], vec![]);
+            seed.create_vertex(
+                VId(2),
+                vec![LabelId(2)],
+                vec![(PropertyKeyId(2), CanonicalScalar::Int(1))],
+            );
+            seed.create_vertex(
+                VId(4),
+                vec![LabelId(2)],
+                vec![(PropertyKeyId(2), CanonicalScalar::Int(0))],
+            );
+            seed.create_vertex(
+                VId(9),
+                vec![LabelId(3)],
+                vec![(PropertyKeyId(2), CanonicalScalar::Int(1))],
+            );
+            for (id, from, to) in [(1, 1, 2), (2, 1, 2), (3, 1, 4), (4, 3, 2), (5, 1, 9)] {
+                seed.add_edge(EId(id), VId(from), VId(to), vec![]);
+            }
+            writer.write(&contexts.commit(), seed).await.unwrap();
+        }
+        let scoped = token
+            .attenuate(Restriction::Labels(Scope::only([LabelId(1), LabelId(2)])))
+            .unwrap()
+            .attenuate(Restriction::Relations(Scope::only([RelationId(1)])))
+            .unwrap()
+            .attenuate(Restriction::Properties(Scope::only([
+                PropertyKeyId(1),
+                PropertyKeyId(2),
+            ])))
+            .unwrap()
+            .attenuate(Restriction::MaxNodes(40_000))
+            .unwrap()
+            .attenuate(Restriction::MaxWork(200_000))
+            .unwrap()
+            .attenuate(Restriction::MaxRows(8))
+            .unwrap();
+        let statement = request(
+            "SUBSCRIBE TO MATCH (a:Owner) WITH a,a.score AS score CALL (a,score) { MATCH (a)-[:R]->(b:Target {selected:1}) WHERE score > 1 AND b <> a RETURN count(*) AS degree } RETURN a,degree",
+        );
+        let mut subscription = success(subscribe(&root, db, &scoped, &statement).await);
+        assert_eq!(subscription.columns, ["a", "degree"]);
+        let row = |owner, degree| vec![WireValue::Vertex(owner), WireValue::Int(degree)];
+        let baseline = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert!(baseline.batch.is_snapshot());
+        assert_eq!(baseline.entries, [(1, row(1, 2)), (1, row(3, 0))]);
+        assert_eq!(subscription.consumer.acknowledged_frontier(), None);
+
+        // A property edit enters the independent RHS while the baseline is
+        // pending. The pending wire batch and its native receipt stay exact.
+        let mut selected = WriteBatch::new(RelationId(1));
+        selected.set_vertex_property(VId(4), PropertyKeyId(2), Some(CanonicalScalar::Int(1)));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), selected)
+            .await
+            .unwrap();
+        let replay = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert!(Arc::ptr_eq(&baseline.batch, &replay.batch));
+        assert_eq!(replay.entries, baseline.entries);
+        assert_eq!(subscription.consumer.acknowledged_frontier(), None);
+        subscription
+            .consumer
+            .acknowledge(baseline.batch.receipt())
+            .unwrap();
+
+        let changed = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert!(!changed.batch.is_snapshot());
+        assert_eq!(changed.batch.from(), Some(baseline.batch.frontier()));
+        assert_eq!(
+            changed.batch.frontier(),
+            CommitSeq(baseline.batch.frontier().0 + 1)
+        );
+        assert_eq!(changed.entries, [(-1, row(1, 2)), (1, row(1, 3))]);
+
+        // The imported outer property controls the whole invocation. A later
+        // false condition emits one zero row, and cannot rewrite this receipt.
+        let mut disabled = WriteBatch::new(RelationId(1));
+        disabled.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(1)));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), disabled)
+            .await
+            .unwrap();
+        let mut hidden = WriteBatch::new(RelationId(2));
+        hidden.add_edge(EId(50), VId(1), VId(4), vec![]);
+        hidden.set_vertex_property(VId(1), PropertyKeyId(3), Some(CanonicalScalar::Int(99)));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), hidden)
+            .await
+            .unwrap();
+        let replay = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert!(Arc::ptr_eq(&changed.batch, &replay.batch));
+        assert_eq!(replay.entries, changed.entries);
+        assert_eq!(
+            subscription.consumer.acknowledged_frontier(),
+            Some(baseline.batch.frontier())
+        );
+        subscription
+            .consumer
+            .acknowledge(changed.batch.receipt())
+            .unwrap();
+
+        let zero = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert_eq!(zero.batch.from(), Some(changed.batch.frontier()));
+        assert_eq!(
+            zero.batch.frontier(),
+            CommitSeq(changed.batch.frontier().0 + 1)
+        );
+        assert_eq!(zero.entries, [(1, row(1, 0)), (-1, row(1, 3))]);
+        let replay = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert!(Arc::ptr_eq(&zero.batch, &replay.batch));
+        assert_eq!(replay.entries, zero.entries);
+        subscription
+            .consumer
+            .acknowledge(zero.batch.receipt())
+            .unwrap();
+        assert!(success(poll(&root, db, &scoped, &mut subscription).await).is_none());
+        assert_eq!(
+            subscription.consumer.acknowledged_frontier(),
+            Some(zero.batch.frontier())
+        );
+
+        // Hidden properties and relation changes consume no public frontier,
+        // including after the previous hidden physical commit was skipped.
+        let mut hidden = WriteBatch::new(RelationId(2));
+        hidden.delete_edge(EId(50));
+        hidden.set_vertex_property(VId(1), PropertyKeyId(3), None);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), hidden)
+            .await
+            .unwrap();
+        assert!(success(poll(&root, db, &scoped, &mut subscription).await).is_none());
+        assert_eq!(
+            subscription.consumer.acknowledged_frontier(),
+            Some(zero.batch.frontier())
+        );
+
+        let mut enabled = WriteBatch::new(RelationId(1));
+        enabled.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(2)));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), enabled)
+            .await
+            .unwrap();
+        let recovered = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert_eq!(recovered.batch.from(), Some(zero.batch.frontier()));
+        assert_eq!(
+            recovered.batch.frontier(),
+            CommitSeq(zero.batch.frontier().0 + 1)
+        );
+        assert_eq!(recovered.entries, [(-1, row(1, 0)), (1, row(1, 3))]);
+        subscription
+            .consumer
+            .acknowledge(recovered.batch.receipt())
+            .unwrap();
+        assert!(success(poll(&root, db, &scoped, &mut subscription).await).is_none());
+        drop(subscription);
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

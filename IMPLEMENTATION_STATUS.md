@@ -12,6 +12,42 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Filtered correlated COUNT maintenance — qualification pending
+
+Native standing queries now admit a single correlated COUNT with row-local
+WHERE or join predicates, including imported scalar thresholds and complete
+static property-selected graph sources. COUNT(*), COUNT(value), and
+COUNT(DISTINCT value) use the existing exact group owner.
+
+The fallback compiles one exact nullable invocation domain, deduplicates only
+the imported arguments, retains every body filter/projection in order, groups
+before restoring the original outer occurrences, and zero-fills empty bodies.
+Duplicate outer rows therefore retain their multiplicity without multiplying
+the count. Existing optimized equality-count recipes and ordinary one-shot or
+pull query lowering are unchanged. Native subscription admission counts all
+private owners before source access, and witness rows use input budgets rather
+than the final result-row allowance.
+
+Regression sources cover weighted/null invocations, simultaneous source
+changes, static RHS property updates, imported-property changes, parallel-edge
+support/retractions, empty groups, count-distinct, cancellation, whole-circuit
+rebuild, private witness budgets, and failure before a zero-length ordered
+page. An uninvoked fallible body remains unexecuted; an invoked discarded
+expression is still evaluated in its original position. Deferred RHS property
+readers, unproved argument domains, relational DISTINCT inside the count body,
+nested invocation and unsupported ordering/page profiles still refuse.
+
+The subscription regression also covers scoped baseline and delta delivery,
+exact pending-batch redelivery, acknowledgment frontiers, and hidden commits
+that must not advance a subscriber's public frontier.
+
+Manual source review is complete. After the execution workspace recovered,
+the pinned Rustfmt successfully parsed and formatted all twelve changed Rust
+files. First-party compilation, runtime assertions and full exact-tree
+qualification remain **UNRUN** for this increment. Earlier pinned-foundation
+compiler terminations are not qualification of this changed tree.
+The broader open `fgdb-w6-zset-circuits-kjv` and `fgdb-epic-w6-65w` remain open.
+
 ### Batch-at-a-time authoritative delta replay — qualification pending
 
 Source review 2026-11-20: the privileged embedded `delta_replay(after, through)`

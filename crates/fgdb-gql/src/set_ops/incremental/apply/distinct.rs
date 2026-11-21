@@ -26,7 +26,7 @@ pub struct MaintainedDistinctApply<'a> {
     pub output: Vec<RowProjectionSpec>,
 }
 
-fn projection<E>(
+pub(super) fn projection<E>(
     input: &[GraphSetColumnType],
     values: Vec<GraphSetValue>,
     quantifier: GraphSetQuantifier,
@@ -50,7 +50,7 @@ fn projection<E>(
 /// as (is_null, nonnull_value), using a same-domain filler only when NULL. The
 /// flag distinguishes a real filler value, including vertex/edge zero. These
 /// private values never enter a source read or escape into the public result.
-fn keyed_outer<E>(
+pub(super) fn keyed_outer<E>(
     input: &[GraphSetColumnType],
     columns: &[usize],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,

@@ -28,6 +28,28 @@ pub struct MaintainedCountJoin<'a> {
     pub output: Vec<RowProjectionSpec>,
 }
 
+/// Per-invocation filtered COUNT through the existing native row operators.
+///
+/// Project the original left bag through outer, then DISTINCT its arguments.
+/// Join those arguments with the complete right source and apply body in
+/// order. Group by the private invocation key, Left-join through restore to
+/// the ORIGINAL keyed outer bag, and apply output for zero-fill/public names.
+/// The host must share sources and publish all stages atomically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaintainedFilteredCount<'a> {
+    pub left: &'a PreparedGraphSet,
+    pub right: &'a PreparedGraphSet,
+    pub outer: RowProjectionSpec,
+    pub arguments: RowProjectionSpec,
+    pub join: RowJoinSpec,
+    pub body: Vec<RowProjectionSpec>,
+    pub group: PreparedGraphSetAggregate,
+    pub group_columns: Vec<String>,
+    pub group_types: Vec<GraphSetColumnType>,
+    pub restore: RowJoinSpec,
+    pub output: Vec<RowProjectionSpec>,
+}
+
 /// Owned native COUNT recipe peeled from a single-part pattern's `Collect`
 /// witness scope when every enclosing reference observes only its cardinality.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +114,275 @@ fn count_summary<'a, E>(
 }
 
 impl PreparedGraphSet {
+    /// Prove a reader-free filtered COUNT with exact invocation identity.
+    ///
+    /// This fallback retains every ordered body projection and filter rather
+    /// than tracing a counted column back through discarded computation. It
+    /// admits COUNT(*), COUNT(value) and COUNT(DISTINCT value), including an
+    /// imported value. The independent RHS keeps the existing conditional
+    /// source-effect proof: no property reader or uninvoked fallible source is
+    /// moved into eager maintenance.
+    ///
+    /// Argument tuples use the existing NULL-safe canonical key proof.
+    /// DISTINCT arguments prevent duplicate outer occurrences from multiplying
+    /// the count; the final Left restoration preserves those occurrences and
+    /// emits zero for empty bodies. NULL is an invocation value, not a missing
+    /// invocation. Body evaluation happens only for active argument tuples,
+    /// and native grouping owns counted NULL/distinct support and retractions.
+    ///
+    /// Pages, relational DISTINCT, grouped/multiple summaries, unsupported key
+    /// domains and reader/ordinal effects retain their conservative refusal.
+    /// The optimized existing source-restriction recipe remains preferred.
+    pub fn incremental_filtered_count_with_control<E>(
+        &self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<MaintainedFilteredCount<'_>>, E> {
+        control(GlaExecutionEvent::Work)?;
+        if !self.unadorned_incremental_node() {
+            return Ok(None);
+        }
+        let SetNode::Apply {
+            left,
+            right: body_query,
+            imports,
+            kind: ApplyKind::Inner,
+        } = &self.node
+        else {
+            return Ok(None);
+        };
+        let Some(summary) = count_summary(body_query, control)? else {
+            return Ok(None);
+        };
+        let mut stages = Vec::new();
+        let Some(base) = body(
+            summary.input(),
+            imports.is_empty(),
+            false,
+            &mut stages,
+            control,
+        )?
+        else {
+            return Ok(None);
+        };
+        if !independent(base.right, control)? {
+            return Ok(None);
+        }
+        for stage in &stages {
+            control(GlaExecutionEvent::Work)?;
+            if let Stage::Project(_, cells) = stage {
+                for cell in *cells {
+                    control(GlaExecutionEvent::Work)?;
+                    if !cell.value().is_scan_local() {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        let slots = match base.arguments {
+            Some(input) => {
+                let Some(slots) = argument_slots(input, imports, control)? else {
+                    return Ok(None);
+                };
+                slots
+            }
+            None => Vec::new(),
+        };
+        let Some(outer) = distinct::keyed_outer(&left.types, &slots, control)? else {
+            return Ok(None);
+        };
+        let left_width = left.types.len();
+        let argument_width = slots.len();
+        let key_width = outer.column_types().len() - left_width;
+        let right_width = base.right.types.len();
+        charge(argument_width + key_width, control)?;
+        let mut values: Vec<_> = slots.into_iter().map(GraphSetValue::Column).collect();
+        values.extend((left_width..left_width + key_width).map(GraphSetValue::Column));
+        let Some(arguments) = distinct::projection(
+            outer.column_types(),
+            values,
+            GraphSetQuantifier::Distinct,
+            control,
+        )?
+        else {
+            return Ok(None);
+        };
+        let joined = if let Some(spec) = base.spec
+            && !spec.keys().is_empty()
+        {
+            RowJoinSpec::new(arguments.column_types(), &base.right.types, spec.keys())
+        } else {
+            RowJoinSpec::cross(arguments.column_types(), &base.right.types)
+        };
+        let Ok(mut join) = joined else {
+            return Ok(None);
+        };
+        if let Some(code) = base.spec.and_then(RowJoinSpec::predicate) {
+            charge(argument_width + right_width, control)?;
+            let positions: Vec<_> = (0..argument_width)
+                .chain((0..right_width).map(|column| argument_width + key_width + column))
+                .collect();
+            let code = rebound(code, &positions, control)?;
+            let Ok(selected) = join.with_predicate(&code) else {
+                return Ok(None);
+            };
+            join = selected;
+        }
+        // Keep original body positions unchanged; append invocation identity
+        // after the complete argument/source frame and after each projection.
+        charge(argument_width + right_width + key_width, control)?;
+        let values = (0..argument_width)
+            .chain(argument_width + key_width..argument_width + key_width + right_width)
+            .chain(argument_width..argument_width + key_width)
+            .map(GraphSetValue::Column)
+            .collect();
+        let input_types: Vec<_> = join.column_types().collect();
+        let Some(frame) = project(&input_types, values, control)? else {
+            return Ok(None);
+        };
+        let mut types = frame.column_types().to_vec();
+        let mut width = argument_width + right_width;
+        let mut body = vec![frame];
+        for stage in stages {
+            control(GlaExecutionEvent::Work)?;
+            let step = match stage {
+                Stage::Project(query, cells) => {
+                    charge(cells.len() + key_width, control)?;
+                    let mut values: Vec<_> =
+                        cells.iter().map(|cell| cell.value().clone()).collect();
+                    values.extend((width..width + key_width).map(GraphSetValue::Column));
+                    let Some(step) = project(&types, values, control)? else {
+                        return Ok(None);
+                    };
+                    if step.column_types().get(..cells.len()) != Some(query.types.as_slice()) {
+                        return Ok(None);
+                    }
+                    width = cells.len();
+                    step
+                }
+                Stage::Filter(code) => {
+                    charge(types.len() + code.len(), control)?;
+                    let Ok(step) =
+                        RowProjectionSpec::selection(types.clone(), names(types.len()), code)
+                    else {
+                        return Ok(None);
+                    };
+                    step
+                }
+            };
+            types = step.column_types().to_vec();
+            body.push(step);
+        }
+        // Grouping retains the actual complete relational input. The host
+        // builds this same shared-source circuit, not a same-schema surrogate.
+        charge(left.types.len() + base.right.types.len(), control)?;
+        let Some(active) = (**left).clone().project_incremental_spec(&outer) else {
+            return Ok(None);
+        };
+        let Some(active) = active.project_incremental_spec(&arguments) else {
+            return Ok(None);
+        };
+        let Ok(mut active) = active.join(base.right.clone(), join.clone()) else {
+            return Ok(None);
+        };
+        for step in &body {
+            charge(
+                step.input_types().len() + step.column_types().len(),
+                control,
+            )?;
+            let Some(next) = active.project_incremental_spec(step) else {
+                return Ok(None);
+            };
+            active = next;
+        }
+        let Some((function, argument)) = summary.aggregate_specs().next() else {
+            return Ok(None);
+        };
+        let mut count_name = None;
+        for suffix in 0..=active.columns.len() {
+            charge(1 + active.columns.len(), control)?;
+            let candidate = format!("__fg_count_{suffix}");
+            if !active.columns.contains(&candidate) {
+                count_name = Some(candidate);
+                break;
+            }
+        }
+        let Some(count_name) = count_name else {
+            return Ok(None);
+        };
+        let count = match (function, argument) {
+            (GraphAggregateFunction::CountRows, None) => GraphAggregate::count_rows(&count_name),
+            (GraphAggregateFunction::Count, Some(column)) => {
+                GraphAggregate::count(&count_name, column)
+            }
+            (GraphAggregateFunction::CountDistinct, Some(column)) => {
+                GraphAggregate::count_distinct(&count_name, column)
+            }
+            _ => return Ok(None),
+        };
+        charge(key_width, control)?;
+        let keys: Vec<_> = (width..width + key_width).collect();
+        let Ok(grouped) = active.group_by(&keys, &[count]) else {
+            return Ok(None);
+        };
+        let PreparedGraphSet {
+            node: SetNode::Aggregate(group),
+            columns: group_columns,
+            types: group_types,
+            ..
+        } = grouped
+        else {
+            return Ok(None);
+        };
+        charge(
+            key_width + outer.column_types().len() + group_types.len(),
+            control,
+        )?;
+        let keys: Vec<_> = (0..key_width).map(|key| (left_width + key, key)).collect();
+        let Ok(restore) = RowJoinSpec::new(outer.column_types(), &group_types, &keys) else {
+            return Ok(None);
+        };
+        let restore = restore.with_kind(RowJoinKind::Left);
+        let Ok(zero_filled) = GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Column(outer.column_types().len() + key_width),
+            GraphIntegerOp::Literal(Some(0)),
+            GraphIntegerOp::Coalesce,
+        ]) else {
+            return Ok(None);
+        };
+        charge(left_width + 4, control)?;
+        let mut values: Vec<_> = (0..left_width).map(GraphSetValue::Column).collect();
+        values.push(GraphSetValue::Integer(zero_filled));
+        let types: Vec<_> = restore.column_types().collect();
+        let Some(public) = project(&types, values, control)? else {
+            return Ok(None);
+        };
+        if public.column_types() != self.types.as_slice() {
+            return Ok(None);
+        }
+        charge(self.types.len(), control)?;
+        let Ok(named) = RowProjectionSpec::selection(
+            self.types.clone(),
+            self.columns.clone(),
+            &[GraphSetPredicateOp::Truth(Some(true))],
+        ) else {
+            return Ok(None);
+        };
+        control(GlaExecutionEvent::Work)?;
+        Ok(Some(MaintainedFilteredCount {
+            left,
+            right: base.right,
+            outer,
+            arguments,
+            join,
+            body,
+            group: *group,
+            group_columns,
+            group_types,
+            restore,
+            output: vec![public, named],
+        }))
+    }
+
     /// Prove a bounded correlated global count is a native group circuit.
     ///
     /// Only Inner Apply with one untransformed, keyless count is admitted.
