@@ -12,6 +12,39 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Batch-at-a-time authoritative delta replay — qualification pending
+
+Source review 2026-11-20: the privileged embedded `delta_replay(after, through)`
+and `next_delta_replay(&CommitCx, &mut cursor)` APIs replay one complete Local
+committed batch per pull through the existing `read_delta_batch` verifier.
+Checkpoint-omitted history does not require installing a full missing suffix
+in the resident `LocalDeltaBatchIndex`. Later commits cannot extend the admitted
+end, and empty logical ticks retain their canonical batch identity.
+
+Each pull rechecks the current root identity tuple, position/end marker and
+chain commitments, exact next predecessor, health, range and retention. Future
+cuts, substituted history, missing retained markers/capsules, corruption and
+I/O failures are typed refusals. Existing explicit retirement remains distinct
+from an unloaded checkpoint prefix. All awaits and fallible checks precede the
+sole cursor advance; failures, cancellation and dropped pending pulls preserve
+the cursor, graph snapshot, loaded history and materialization floor.
+
+The reader holds no snapshot lease, retention obligation, durable subscription
+record or ACK authority. It is not a masked feed or public CDC/resume protocol.
+Identity inherits the existing namespace and committed-history authority, not
+physical-directory uniqueness. One batch is indivisible; existing verification
+diagnostic evidence remains retained and can grow across pulls. No whole-handle
+memory ceiling is claimed.
+
+Five regression sources exercise checkpoint reopen, canonical bytes and empty
+ticks, one capsule read per pull, fixed ends across later commits, clone repeat
+delivery, foreign/divergent sources, both boundary commitments, explicit cuts,
+I/O/missing/substituted capsule failures, pending drop, cancellation, health
+fencing and u64 endpoint arithmetic. Pinned formatting and independent source
+review pass. Compiler/runtime and full exact-tree qualification remain open
+under `fgdb-w6-delta-consumption-iyc`; durable consumer/retention and subscription
+delivery machinery remain unfinished.
+
 ### Authorized external terminal aggregates — qualification pending
 
 Source review 2026-11-20: `AuthorizedOrderedReadSession::execute_ordered_aggregate`

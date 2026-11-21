@@ -134,6 +134,8 @@ pub use bulk_load::{
 
 mod fcw;
 pub use fcw::FirstCommitterWinsValidator;
+mod delta_replay;
+pub use delta_replay::{DeltaReplayCursor, DeltaReplayError};
 mod pinned_tzdb;
 pub use pinned_tzdb::{PinnedTzdb, TzdbArtifactError, TzdbTransition, TzdbZone};
 

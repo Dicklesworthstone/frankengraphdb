@@ -1029,6 +1029,20 @@ fn main() -> fgdb::Result<()> {
 }
 ```
 
+**Batch-at-a-time committed replay — qualification pending.** Privileged embedded consumers can select a fixed committed interval with `Database::delta_replay(after, through)` and pull one complete authenticated batch with `next_delta_replay`. This reads checkpoint-omitted history directly through the existing Chronicle verifier without populating the entire missing `LocalDeltaBatchIndex` prefix:
+
+```rust
+let through = db.frontier()?;
+let mut replay = db.delta_replay(last_applied, through)?;
+while let Some(batch) = db.next_delta_replay(&commit, &mut replay).await? {
+    println!("committed batch at {:?}", batch.commit_seq());
+}
+```
+
+Later writes do not extend `through`. Empty logical ticks still return a batch; repeated reads reproduce its canonical bytes and committed identity. Each pull rechecks the existing database identity and both boundary marker/chain commitments, and advances only after complete authentication and final cancellation checks. Missing/corrupt capsules, future cuts, changed history and explicit retirement return typed errors. Failure or a dropped pending pull leaves the cursor, graph snapshot and loaded delta window unchanged. Applications own their durable applied-position checkpoint and idempotency; this cursor records batches returned, not acknowledged effects.
+
+The cursor holds no retention lease, durable consumer state or protected resume capability. It is an unmasked Local committed-delta API, separate from query-result subscriptions and public CDC. Its source identity inherits the current namespace/history authority, not physical-directory uniqueness. Each batch remains indivisible, and existing verification diagnostics are retained, so the bound is one batch of new payload per pull rather than total process memory. Source review and focused regression sources cover checkpoint reopen, fixed endpoints, canonical replay, retirement and failure atomicity; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
+
 **Buffered native reads available today.** `Database::open_buffered_read_view` opens an owned, fixed checkpoint without constructing the resident graph snapshot or a block writer. Its async `vertex`, `edge`, and bounded incoming/outgoing `adjacency_at` methods fault authenticated immutable objects through the Strata extent cache. The corresponding `*_at` methods read historical statements with the same winning-version and retirement metadata as the ordinary resident view. `open_buffered_read_view_with_vfs` provides the same path through an injected filesystem.
 
 The caller supplies a shared `MemoryPool` and `BufferedReadLimits`: root bytes, source bytes inspected during admission, block/vertex-patch counts, per-operation work, and cache frame/extent limits. Metadata, decoding workspace, admission history, cache frames and returned `BufferedValue` rows retain reservations for their lifetimes. A held result remains charged after its view is dropped. Point reads currently scan the admitted descriptors; bounded adjacency returns the complete winning incidence or a resource error, and parallel edges remain distinct.
