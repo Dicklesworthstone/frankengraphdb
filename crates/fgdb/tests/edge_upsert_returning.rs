@@ -55,6 +55,25 @@ impl GraphSymbolResolver for Catalog {
     }
 }
 
+#[derive(Clone, Copy)]
+struct StarCatalog;
+impl GraphSymbolResolver for StarCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "*") => Some(GraphSymbol::Property(Q)),
+            (GraphSymbolKind::Property, "missing") => Some(GraphSymbol::Property(PropertyKeyId(3))),
+            _ => symbols(kind, name),
+        }
+    }
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_property(P, "p");
+        catalog.insert_property(Q, "*");
+        catalog.insert_property(PropertyKeyId(3), "missing");
+        Some(catalog)
+    }
+}
+
 fn map(entries: Vec<(&str, GraphValue)>) -> GraphValue {
     GraphValue::map(
         entries
@@ -788,6 +807,138 @@ fn relationship_maps_keep_duplicate_occurrences_and_compose_with_groups_and_tail
                 read(&db, cx, "MATCH ()-[r:R]->() RETURN r.p AS p"),
                 vec![vec![int(30)]]
             );
+        }
+    });
+}
+
+#[test]
+fn relationship_merge_tails_distinguish_literal_star_from_complete_maps() {
+    run(async |commit, cx, txcx| {
+        // Exercise both the unique and occurrence-preserving upsert owners,
+        // plus the plain relationship MERGE compiler. Expected values are
+        // derived from the two S occurrences, not from another query path.
+        for owner in 0..3 {
+            for grouped in [false, true] {
+                for star_first in [false, true] {
+                    let mut db = Database::open_memory(commit, keys()).await.unwrap();
+                    seed(&mut db, commit, true).await;
+                    let merge = if owner == 2 {
+                        "MERGE (a)-[r:R {p:7, `*`:13}]->(b)"
+                    } else {
+                        "MERGE (a)-[r:R]->(b) ON CREATE SET r.p=7,r.`*`=13 \
+                         ON MATCH SET r.p=r.p+1,r.`*`=r.`*`+1"
+                    };
+                    let head = if grouped {
+                        "WITH count(*) AS hits,r AS edge"
+                    } else {
+                        "WITH r AS selected WITH selected AS edge"
+                    };
+                    let columns = if star_first {
+                        "edge.`*` AS star,edge{.*} AS document,properties(edge) AS full"
+                    } else {
+                        "edge{.*} AS document,properties(edge) AS full,edge.`*` AS star"
+                    };
+                    let statement = format!(
+                        "MATCH (a:Item)-[:S]->(b:Item) {merge} {head} \
+                         RETURN {columns},keys(edge) AS names,edge.missing AS missing{}",
+                        if grouped { ",hits" } else { "" }
+                    );
+                    let mut txn = db.begin(txcx).unwrap();
+                    for round in 0..2 {
+                        let result = if owner == 2 {
+                            let query = fgdb_gql::PreparedGraphEdgeMergeQueryText::prepare(
+                                &statement,
+                                S,
+                                StarCatalog,
+                            )
+                            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                            .bind_parameters(&GqlParameters::new())
+                            .unwrap();
+                            txn.execute_graph_edge_merge_query_engine_governed(
+                                &mut db,
+                                cx,
+                                &query,
+                                policy(2).merge,
+                            )
+                            .unwrap()
+                            .1
+                        } else {
+                            let query = PreparedGraphEdgeUpsertQueryText::prepare(
+                                &statement,
+                                S,
+                                StarCatalog,
+                            )
+                            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                            .bind_parameters(&GqlParameters::new())
+                            .unwrap();
+                            if owner == 0 {
+                                txn.execute_graph_edge_upsert_query_engine_governed(
+                                    &mut db,
+                                    cx,
+                                    &query,
+                                    policy(2),
+                                )
+                                .unwrap()
+                                .2
+                            } else {
+                                txn.execute_graph_edge_upserts_query_engine_governed(
+                                    &mut db,
+                                    cx,
+                                    &query,
+                                    policy(2),
+                                )
+                                .unwrap()
+                                .1
+                            }
+                        };
+                        let advance = match owner {
+                            0 => round,
+                            1 => round * 2 + 1,
+                            _ => 0,
+                        };
+                        let document = map(vec![("*", int(13 + advance)), ("p", int(7 + advance))]);
+                        let mut expected = if star_first {
+                            vec![int(13 + advance), document.clone(), document]
+                        } else {
+                            vec![document.clone(), document, int(13 + advance)]
+                        };
+                        expected.push(GraphValue::List(
+                            vec![text("*"), text("p")].into_boxed_slice(),
+                        ));
+                        expected.push(GraphValue::Scalar(CanonicalScalar::Null));
+                        let occurrences = if owner == 0 { 1 } else { 2 };
+                        if grouped {
+                            expected.push(int(occurrences));
+                        }
+                        let rows = if grouped { 1 } else { occurrences as usize };
+                        assert_eq!(
+                            result.value,
+                            vec![GraphValueRow::from_owned_values(expected); rows],
+                            "owner={owner}, round={round}: {statement}"
+                        );
+                    }
+                    txn.finish(&mut db, commit).await.unwrap();
+                    let edge = db
+                        .edges()
+                        .unwrap()
+                        .into_iter()
+                        .find(|edge| edge.entry.relation == R)
+                        .unwrap();
+                    let advance = match owner {
+                        0 => 1,
+                        1 => 3,
+                        _ => 0,
+                    };
+                    assert_eq!(
+                        edge.props,
+                        vec![
+                            (P, CanonicalScalar::Int(7 + advance).into()),
+                            (Q, CanonicalScalar::Int(13 + advance).into()),
+                        ],
+                        "complete maps and literal field reads never modify the stored graph"
+                    );
+                }
+            }
         }
     });
 }

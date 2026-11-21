@@ -225,21 +225,24 @@ impl<'a> Parser<'a> {
             ) {
                 continue;
             }
-            if key.text == "*" {
-                let value = crate::set_text::ReadValueTemplate::ElementMetadata {
-                    kind: crate::GraphElementMetadata::Properties,
-                    value: Box::new(returning.projection[at].value.clone()),
-                    catalog: self.syntax.element_catalog.request(),
-                };
-                mutation_query::push_tail_map_read(
-                    &mut returning.projection,
-                    &mut schema,
-                    &mut reads,
-                    (alias, key),
-                    value,
-                )?;
-                continue;
-            }
+            let key = match key {
+                BoundaryReadKey::Properties { at: source_at } => {
+                    let value = crate::set_text::ReadValueTemplate::ElementMetadata {
+                        kind: crate::GraphElementMetadata::Properties,
+                        value: Box::new(returning.projection[at].value.clone()),
+                        catalog: self.syntax.element_catalog.request(),
+                    };
+                    mutation_query::push_tail_map_read(
+                        &mut returning.projection,
+                        &mut schema,
+                        &mut reads,
+                        (alias, source_at),
+                        value,
+                    )?;
+                    continue;
+                }
+                BoundaryReadKey::Property(key) => key,
+            };
             let variable = returning.variable;
             let column = returning.map_input(self, variable, ReturnMapInput::Property(key))?;
             let column = match &mut returning.grouping {

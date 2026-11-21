@@ -1296,16 +1296,13 @@ impl<'a> Parser<'a> {
         &mut self,
         schema: Vec<(Name<'a>, GraphSetColumnType)>,
         visible: usize,
-        reads: Vec<(&'a str, Name<'a>, usize)>,
+        reads: Vec<(&'a str, BoundaryReadKey<'a>, usize)>,
     ) -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {
         if !reads.is_empty() {
             self.boundary_reads = Some(BoundaryReads {
                 visible,
                 width: schema.len(),
-                reads: reads
-                    .into_iter()
-                    .map(|(alias, key, column)| (alias, BoundaryReadKey::Property(key), column))
-                    .collect(),
+                reads,
                 functions: Vec::new(),
                 grouped: Vec::new(),
                 scoped: Vec::new(),
@@ -1323,13 +1320,22 @@ impl<'a> Parser<'a> {
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
-        self.write_property_reads(outputs, false, false)
+        Ok(self
+            .write_property_reads(outputs, false, false)?
+            .into_iter()
+            .map(|(alias, key)| {
+                let BoundaryReadKey::Property(key) = key else {
+                    unreachable!("property-only capture does not request complete maps")
+                };
+                (alias, key)
+            })
+            .collect())
     }
 
     pub(super) fn write_tail_reads_with_maps(
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
-    ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
+    ) -> Result<Vec<(Name<'a>, BoundaryReadKey<'a>)>, GraphPatternTextError> {
         self.write_property_reads(outputs, false, true)
     }
 
@@ -1340,7 +1346,16 @@ impl<'a> Parser<'a> {
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
-        self.write_property_reads(outputs, true, false)
+        Ok(self
+            .write_property_reads(outputs, true, false)?
+            .into_iter()
+            .map(|(alias, key)| {
+                let BoundaryReadKey::Property(key) = key else {
+                    unreachable!("property-only capture does not request complete maps")
+                };
+                (alias, key)
+            })
+            .collect())
     }
 
     fn write_property_reads(
@@ -1348,8 +1363,8 @@ impl<'a> Parser<'a> {
         outputs: &[(Name<'a>, GraphSetColumnType)],
         skip_set_targets: bool,
         include_maps: bool,
-    ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
-        let mut reads: Vec<(Name<'a>, Name<'a>)> = Vec::new();
+    ) -> Result<Vec<(Name<'a>, BoundaryReadKey<'a>)>, GraphPatternTextError> {
+        let mut reads: Vec<(Name<'a>, BoundaryReadKey<'a>)> = Vec::new();
         let mut lexer = self.lexer.clone();
         let mut token = self.current;
         // The three tokens before `token`, oldest first.
@@ -1481,14 +1496,14 @@ impl<'a> Parser<'a> {
                         })
                         && !reads
                             .iter()
-                            .any(|(read, known)| read.text == alias && known.text == key)
+                            .any(|(read, known)| read.text == alias && known.is_property(key))
                     {
                         reads.push((
                             Name { text: alias, at },
-                            Name {
+                            BoundaryReadKey::Property(Name {
                                 text: key,
                                 at: token.at,
-                            },
+                            }),
                         ));
                     }
                 }
@@ -1510,17 +1525,14 @@ impl<'a> Parser<'a> {
                 })
                 && !reads
                     .iter()
-                    .any(|(read, known)| read.text == alias && known.text == "*")
+                    .any(|(read, known)| read.text == alias && known.is_properties())
             {
                 reads.push((
                     Name {
                         text: alias,
                         at: source.at,
                     },
-                    Name {
-                        text: "*",
-                        at: source.at,
-                    },
+                    BoundaryReadKey::Properties { at: source.at },
                 ));
             }
             back = [back[1], back[2], Some(token)];
@@ -1589,7 +1601,7 @@ impl MutationReturnTemplate {
 pub(super) fn push_tail_read<'a>(
     projection: &mut Vec<ReadProjectionTemplate>,
     schema: &mut Vec<(Name<'a>, GraphSetColumnType)>,
-    reads: &mut Vec<(&'a str, Name<'a>, usize)>,
+    reads: &mut Vec<(&'a str, BoundaryReadKey<'a>, usize)>,
     (alias, key): (Name<'a>, Name<'a>),
     column: usize,
 ) -> Result<(), GraphPatternTextError> {
@@ -1616,7 +1628,7 @@ pub(super) fn push_tail_read<'a>(
         },
         GraphSetColumnType::Stored,
     ));
-    reads.push((alias.text, key, schema.len() - 1));
+    reads.push((alias.text, BoundaryReadKey::Property(key), schema.len() - 1));
     Ok(())
 }
 
@@ -1626,8 +1638,8 @@ pub(super) fn push_tail_read<'a>(
 pub(super) fn push_tail_map_read<'a>(
     projection: &mut Vec<ReadProjectionTemplate>,
     schema: &mut Vec<(Name<'a>, GraphSetColumnType)>,
-    reads: &mut Vec<(&'a str, Name<'a>, usize)>,
-    (alias, key): (Name<'a>, Name<'a>),
+    reads: &mut Vec<(&'a str, BoundaryReadKey<'a>, usize)>,
+    (alias, at): (Name<'a>, usize),
     value: ReadValueTemplate,
 ) -> Result<(), GraphPatternTextError> {
     let name = return_projection::pipeline::BOUNDARY_READ_NAMES
@@ -1636,7 +1648,7 @@ pub(super) fn push_tail_map_read<'a>(
         .find(|name| schema.iter().all(|(output, _)| output.text != *name))
         .ok_or_else(|| {
             error(
-                key.at,
+                at,
                 GraphPatternTextErrorKind::Expected(
                     "at most 16 carried-element property reads after a WITH",
                 ),
@@ -1646,14 +1658,12 @@ pub(super) fn push_tail_map_read<'a>(
         name: name.to_owned(),
         value,
     });
-    schema.push((
-        Name {
-            text: name,
-            at: key.at,
-        },
-        GraphSetColumnType::Any,
+    schema.push((Name { text: name, at }, GraphSetColumnType::Any));
+    reads.push((
+        alias.text,
+        BoundaryReadKey::Properties { at },
+        schema.len() - 1,
     ));
-    reads.push((alias.text, key, schema.len() - 1));
     Ok(())
 }
 

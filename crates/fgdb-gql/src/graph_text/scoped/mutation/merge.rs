@@ -2864,10 +2864,7 @@ impl<'a> ParsedVertexRowsReturn<'_, 'a> {
         Ok((!reads.is_empty()).then(|| BoundaryReads {
             visible,
             width: self.output.len(),
-            reads: reads
-                .into_iter()
-                .map(|(alias, key, column)| (alias, BoundaryReadKey::Property(key), column))
-                .collect(),
+            reads,
             functions: Vec::new(),
             grouped: Vec::new(),
             scoped: Vec::new(),
@@ -3275,9 +3272,11 @@ impl PreparedGraphVertexMergeRowsText {
         let (mut parser, row, owned, leading) = match from {
             Some(from) => {
                 let (columns, types) = from.owned_columns();
-                let mut parser = parser
-                    .with_call_scope(from.call_scope)
-                    .resume_after(from.boundary, &from.parameters, from.at)?;
+                let mut parser = parser.with_call_scope(from.call_scope).resume_after(
+                    from.boundary,
+                    &from.parameters,
+                    from.at,
+                )?;
                 if multipart {
                     // OPTIONAL, inline CALL and multiple MATCH clauses read
                     // one complete relation over the preceding write's rows.

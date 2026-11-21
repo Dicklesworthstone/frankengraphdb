@@ -2276,8 +2276,7 @@ impl<'a> Parser<'a> {
             }
             let mut returning =
                 ParsedEdgeReturn::identity_head(relationship, path, row, keep, edge, at)?;
-            returning.tail =
-                Some(self.edge_merge_tail(&mut returning, columns, output, true)?);
+            returning.tail = Some(self.edge_merge_tail(&mut returning, columns, output, true)?);
             return Ok(returning);
         }
         // Under RETURN, a WITH head continues to this statement's own tail.
@@ -2491,6 +2490,9 @@ impl<'a> Parser<'a> {
         let mut reads = Vec::new();
         let requested = if self.chain_write && self.at_chained_write()? {
             self.write_chain_reads(&schema)?
+                .into_iter()
+                .map(|(alias, key)| (alias, BoundaryReadKey::Property(key)))
+                .collect()
         } else {
             self.write_tail_reads_with_maps(&schema)?
         };
@@ -2512,21 +2514,24 @@ impl<'a> Parser<'a> {
             else {
                 continue;
             };
-            if key.text == "*" {
-                let value = crate::set_text::ReadValueTemplate::ElementMetadata {
-                    kind: crate::GraphElementMetadata::Properties,
-                    value: Box::new(returning.projection[at].value.clone()),
-                    catalog: self.syntax.element_catalog.request(),
-                };
-                mutation_query::push_tail_map_read(
-                    &mut returning.projection,
-                    &mut schema,
-                    &mut reads,
-                    (alias, key),
-                    value,
-                )?;
-                continue;
-            }
+            let key = match key {
+                BoundaryReadKey::Properties { at: source_at } => {
+                    let value = crate::set_text::ReadValueTemplate::ElementMetadata {
+                        kind: crate::GraphElementMetadata::Properties,
+                        value: Box::new(returning.projection[at].value.clone()),
+                        catalog: self.syntax.element_catalog.request(),
+                    };
+                    mutation_query::push_tail_map_read(
+                        &mut returning.projection,
+                        &mut schema,
+                        &mut reads,
+                        (alias, source_at),
+                        value,
+                    )?;
+                    continue;
+                }
+                BoundaryReadKey::Property(key) => key,
+            };
             let property = match binding {
                 EdgeBinding::Edge => EdgeBinding::Property(key),
                 EdgeBinding::Endpoint { start } => EdgeBinding::EndpointProperty { start, key },

@@ -79,6 +79,20 @@ impl GraphSymbolResolver for VisibleCatalog {
         Some(catalog)
     }
 }
+
+struct StarCatalog;
+impl GraphSymbolResolver for StarCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        if kind == GraphSymbolKind::Property && name == "*" {
+            Some(GraphSymbol::Property(SECRET))
+        } else {
+            symbols(kind, name)
+        }
+    }
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        VisibleCatalog.reverse_catalog()
+    }
+}
 fn lab<F>(seed: u64, body: impl FnOnce(PurposeContexts) -> F + Send + 'static)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
@@ -300,6 +314,135 @@ fn wildcard_relationship_maps_mask_before_naming_and_keep_singular_and_batch_wor
             }
         }
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn with_tail_keeps_hidden_literal_star_null_and_complete_map_visible() {
+    lab(0xa9d1, |contexts| async move {
+        let authority = authority();
+        let token = authority.issue_at(&grant(2), NOW).unwrap();
+        let prepare = |suffix: &str| {
+            PreparedGraphEdgeUpsertQueryText::prepare(
+                &format!(
+                    "{HEAD} ON MATCH SET r.p=r.p+1 \
+                     WITH count(*) AS occurrences,r AS edge \
+                     RETURN edge{{.*}} AS document,edge.`*` AS hidden,occurrences{suffix}"
+                ),
+                S,
+                StarCatalog,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+        };
+        let query = prepare("");
+        let late_failure = prepare(",1/0 AS invalid LIMIT 0");
+        for plural in [false, true] {
+            let mut costs = None;
+            for hidden in [None, Some(CanonicalScalar::Int(991))] {
+                let mut db = Database::open_memory(&contexts.commit(), keys())
+                    .await
+                    .unwrap();
+                seed(&mut db, &contexts.commit(), None).await;
+                let mut properties = vec![(P, CanonicalScalar::Int(7))];
+                if let Some(value) = &hidden {
+                    properties.push((SECRET, value.clone()));
+                }
+                let mut edge = WriteBatch::new(R);
+                edge.add_edge(EId(13), VId(1), VId(2), properties);
+                db.write(&contexts.commit(), edge).await.unwrap();
+                let output = if plural {
+                    db.execute_graph_edge_upserts_query_authorized(
+                        &contexts.txn(),
+                        &contexts.query(),
+                        &contexts.commit(),
+                        &authority,
+                        &token,
+                        "main",
+                        &query,
+                        policy(2),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap()
+                    .1
+                } else {
+                    db.execute_graph_edge_upsert_query_authorized(
+                        &contexts.txn(),
+                        &contexts.query(),
+                        &contexts.commit(),
+                        &authority,
+                        &token,
+                        "main",
+                        &query,
+                        policy(2),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap()
+                    .2
+                };
+                let occurrences = if plural { 2 } else { 1 };
+                let visible = CanonicalScalar::Int(7 + occurrences);
+                assert_eq!(output.value.len(), 1);
+                assert_eq!(
+                    output.value[0].values(),
+                    &[
+                        GraphValue::map(vec![("p".into(), GraphValue::Scalar(visible.clone()))])
+                            .unwrap(),
+                        GraphValue::Scalar(CanonicalScalar::Null),
+                        GraphValue::Scalar(CanonicalScalar::Int(occurrences)),
+                    ]
+                );
+                let observed = (output.rows, output.evaluator);
+                if let Some(expected) = costs {
+                    assert_eq!(
+                        observed, expected,
+                        "hidden and absent fields have identical public work"
+                    );
+                }
+                costs = Some(observed);
+                let mut expected = vec![(P, visible.into())];
+                if let Some(hidden) = hidden {
+                    expected.push((SECRET, hidden.into()));
+                }
+                assert_eq!(db.edge(EId(13)).unwrap().unwrap().props, expected);
+                let before = (db.frontier().unwrap(), db.edges().unwrap());
+                let failed = if plural {
+                    db.execute_graph_edge_upserts_query_authorized(
+                        &contexts.txn(),
+                        &contexts.query(),
+                        &contexts.commit(),
+                        &authority,
+                        &token,
+                        "main",
+                        &late_failure,
+                        policy(0),
+                        || NOW,
+                    )
+                    .await
+                    .is_err()
+                } else {
+                    db.execute_graph_edge_upsert_query_authorized(
+                        &contexts.txn(),
+                        &contexts.query(),
+                        &contexts.commit(),
+                        &authority,
+                        &token,
+                        "main",
+                        &late_failure,
+                        policy(0),
+                        || NOW,
+                    )
+                    .await
+                    .is_err()
+                };
+                assert!(failed, "LIMIT 0 cannot hide a late expression failure");
+                assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), before);
+                assert_eq!(contexts.txn().outstanding_obligations(), 0);
+            }
+        }
     });
 }
 
