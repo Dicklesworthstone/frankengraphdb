@@ -13,13 +13,16 @@
 //!   determinism test would pass just as well against a generator that always
 //!   returned the same answer.
 
-use asupersync::fs::{OpenOptions, Vfs};
-use asupersync::io::AsyncWrite;
+use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs, VfsFile};
+use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use fgdb_sim::vfs::{DEFAULT_SECTOR_BYTES, FaultKind, FaultPlan, FaultVfs, Trigger};
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
+use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
 
 const SECTOR: usize = DEFAULT_SECTOR_BYTES as usize;
 
@@ -656,6 +659,732 @@ fn dirent_lie_pending(kind: FaultKind) -> Option<u64> {
 async fn sync_dir<V: Vfs>(vfs: &FaultVfs<V>, dir: &Path) -> std::io::Result<()> {
     let handle = vfs.open(dir, &OpenOptions::new().read(true)).await?;
     asupersync::fs::VfsFile::sync_all(&handle).await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirectoryGateAction {
+    FailOpen,
+    FailSync,
+    PauseBeforeSync,
+    PauseAfterSync,
+}
+
+#[derive(Default)]
+struct DirectoryGateState {
+    action: Option<DirectoryGateAction>,
+    hits: usize,
+    reached: bool,
+    released: bool,
+    waker: Option<Waker>,
+}
+
+struct DirectoryGate {
+    path: PathBuf,
+    state: Mutex<DirectoryGateState>,
+}
+
+impl DirectoryGate {
+    fn state(&self) -> MutexGuard<'_, DirectoryGateState> {
+        self.state.lock().expect("directory gate lock")
+    }
+
+    fn arm(&self, action: DirectoryGateAction) {
+        *self.state() = DirectoryGateState {
+            action: Some(action),
+            ..DirectoryGateState::default()
+        };
+    }
+
+    fn take(&self, path: &Path, opening: bool) -> Option<DirectoryGateAction> {
+        if path != self.path {
+            return None;
+        }
+        let mut state = self.state();
+        let action = state.action?;
+        if opening != (action == DirectoryGateAction::FailOpen) {
+            return None;
+        }
+        state.action = None;
+        state.hits += 1;
+        Some(action)
+    }
+
+    async fn pause(&self) {
+        poll_fn(|cx| {
+            let mut state = self.state();
+            state.reached = true;
+            if state.released {
+                Poll::Ready(())
+            } else {
+                state.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    fn release(&self) {
+        let waker = {
+            let mut state = self.state();
+            state.released = true;
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+/// All namespace and byte operations reach MemVfs. Only one explicitly armed
+/// directory open/sync can fail or pause; no durability bookkeeping is copied.
+struct DirectoryGateVfs {
+    inner: fgdb::MemVfs,
+    gate: Arc<DirectoryGate>,
+}
+
+impl DirectoryGateVfs {
+    fn new(path: &Path) -> Self {
+        Self {
+            inner: fgdb::MemVfs::new().expect("memory filesystem"),
+            gate: Arc::new(DirectoryGate {
+                path: path.to_path_buf(),
+                state: Mutex::new(DirectoryGateState::default()),
+            }),
+        }
+    }
+}
+
+struct DirectoryGateFile {
+    inner: <fgdb::MemVfs as Vfs>::File,
+    path: PathBuf,
+    gate: Arc<DirectoryGate>,
+}
+
+impl AsyncRead for DirectoryGateFile {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for DirectoryGateFile {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, bytes)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl AsyncSeek for DirectoryGateFile {
+    fn poll_seek(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        Pin::new(&mut self.inner).poll_seek(cx, pos)
+    }
+}
+
+impl VfsFile for DirectoryGateFile {
+    async fn metadata(&self) -> io::Result<Metadata> {
+        self.inner.metadata().await
+    }
+
+    async fn sync_all(&self) -> io::Result<()> {
+        let action = self.gate.take(&self.path, false);
+        if action == Some(DirectoryGateAction::FailSync) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "planted backing directory sync failure",
+            ));
+        }
+        if action == Some(DirectoryGateAction::PauseBeforeSync) {
+            self.gate.pause().await;
+        }
+        self.inner.sync_all().await?;
+        if action == Some(DirectoryGateAction::PauseAfterSync) {
+            self.gate.pause().await;
+        }
+        Ok(())
+    }
+
+    async fn sync_data(&self) -> io::Result<()> {
+        self.inner.sync_data().await
+    }
+
+    async fn set_len(&self, size: u64) -> io::Result<()> {
+        self.inner.set_len(size).await
+    }
+
+    async fn set_permissions(&self, permissions: Permissions) -> io::Result<()> {
+        self.inner.set_permissions(permissions).await
+    }
+}
+
+impl Vfs for DirectoryGateVfs {
+    type File = DirectoryGateFile;
+
+    async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<Self::File> {
+        if self.gate.take(path, true) == Some(DirectoryGateAction::FailOpen) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "planted backing directory open failure",
+            ));
+        }
+        Ok(DirectoryGateFile {
+            inner: self.inner.open(path, options).await?,
+            path: path.to_path_buf(),
+            gate: Arc::clone(&self.gate),
+        })
+    }
+
+    async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
+        self.inner.metadata(path).await
+    }
+    async fn symlink_metadata(&self, path: &Path) -> io::Result<Metadata> {
+        self.inner.symlink_metadata(path).await
+    }
+    async fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
+        self.inner.set_permissions(path, permissions).await
+    }
+    async fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir(path).await
+    }
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+    async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_dir(path).await
+    }
+    async fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_dir_all(path).await
+    }
+    async fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_file(path).await
+    }
+    async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
+        self.inner.read_dir(path).await
+    }
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.inner.rename(from, to).await
+    }
+    async fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+        self.inner.copy(from, to).await
+    }
+    async fn hard_link(&self, original: &Path, link: &Path) -> io::Result<()> {
+        self.inner.hard_link(original, link).await
+    }
+    async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.inner.canonicalize(path).await
+    }
+    async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        self.inner.read_link(path).await
+    }
+    async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.inner.read(path).await
+    }
+    async fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        self.inner.read_to_string(path).await
+    }
+    async fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write(path, bytes).await
+    }
+}
+
+async fn await_directory_gate<F: Future<Output = io::Result<()>>>(
+    mut sync: Pin<&mut F>,
+    gate: &DirectoryGate,
+) {
+    poll_fn(|cx| match sync.as_mut().poll(cx) {
+        Poll::Ready(result) => Poll::Ready(Err(format!(
+            "directory sync completed before reaching its gate: {result:?}"
+        ))),
+        Poll::Pending if gate.state().reached => Poll::Ready(Ok(())),
+        Poll::Pending => Poll::Pending,
+    })
+    .await
+    .expect("directory sync must reach its armed suspension point");
+    assert_eq!(gate.state().hits, 1);
+}
+
+#[test]
+fn directory_backing_failures_preserve_debt_until_a_successful_retry() {
+    for failure in [DirectoryGateAction::FailOpen, DirectoryGateAction::FailSync] {
+        for retry in [false, true] {
+            run_and_expect_lab_green(0xfa08, move |_| async move {
+                let backing = DirectoryGateVfs::new(Path::new("."));
+                let gate = Arc::clone(&backing.gate);
+                let vfs = FaultVfs::new(
+                    backing,
+                    FaultPlan {
+                        dirent_loss: Trigger::Always,
+                        ..FaultPlan::faultless()
+                    },
+                );
+                vfs.create_dir(Path::new("old")).await.unwrap();
+                let directory = vfs
+                    .open(Path::new("."), &OpenOptions::new().read(true))
+                    .await
+                    .unwrap();
+                gate.arm(failure);
+                let error = directory
+                    .sync_all()
+                    .await
+                    .expect_err("planted backing failure");
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert_eq!(
+                    error.to_string(),
+                    if failure == DirectoryGateAction::FailOpen {
+                        "planted backing directory open failure"
+                    } else {
+                        "planted backing directory sync failure"
+                    }
+                );
+                assert_eq!(gate.state().hits, 1);
+                assert_eq!(
+                    vfs.pending_dirent_ops(),
+                    1,
+                    "a failed barrier settles nothing"
+                );
+                assert!(
+                    vfs.events().is_empty(),
+                    "backing errors are not injected lies"
+                );
+                if retry {
+                    directory.sync_all().await.expect("unarmed retry succeeds");
+                    assert_eq!(vfs.pending_dirent_ops(), 0);
+                }
+                vfs.crash().await.unwrap();
+                if retry {
+                    assert!(vfs.metadata(Path::new("old")).await.unwrap().is_dir());
+                    assert!(vfs.events().is_empty());
+                } else {
+                    assert_eq!(
+                        vfs.metadata(Path::new("old")).await.unwrap_err().kind(),
+                        io::ErrorKind::NotFound
+                    );
+                    let events = vfs.events();
+                    assert_eq!(events.len(), 1);
+                    assert_eq!(events[0].path, Path::new("old"));
+                    assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "created" });
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn cancelled_directory_barriers_preserve_debt_until_a_successful_retry() {
+    for pause in [
+        DirectoryGateAction::PauseBeforeSync,
+        DirectoryGateAction::PauseAfterSync,
+    ] {
+        for retry in [false, true] {
+            run_and_expect_lab_green(0xfa09, move |_| async move {
+                let backing = DirectoryGateVfs::new(Path::new("."));
+                let gate = Arc::clone(&backing.gate);
+                let vfs = FaultVfs::new(
+                    backing,
+                    FaultPlan {
+                        dirent_loss: Trigger::Always,
+                        ..FaultPlan::faultless()
+                    },
+                );
+                vfs.create_dir(Path::new("old")).await.unwrap();
+                let directory = vfs
+                    .open(Path::new("."), &OpenOptions::new().read(true))
+                    .await
+                    .unwrap();
+                gate.arm(pause);
+                let mut sync = Box::pin(directory.sync_all());
+                await_directory_gate(sync.as_mut(), &gate).await;
+                assert_eq!(vfs.pending_dirent_ops(), 1);
+                drop(sync);
+                gate.release();
+                assert_eq!(
+                    vfs.pending_dirent_ops(),
+                    1,
+                    "dropping a barrier retains debt"
+                );
+                if retry {
+                    directory.sync_all().await.unwrap();
+                    assert_eq!(vfs.pending_dirent_ops(), 0);
+                }
+                vfs.crash().await.unwrap();
+                if retry {
+                    assert!(vfs.metadata(Path::new("old")).await.unwrap().is_dir());
+                    assert!(vfs.events().is_empty());
+                } else {
+                    assert_eq!(
+                        vfs.metadata(Path::new("old")).await.unwrap_err().kind(),
+                        io::ErrorKind::NotFound
+                    );
+                    let events = vfs.events();
+                    assert_eq!(events.len(), 1);
+                    assert_eq!(events[0].path, Path::new("old"));
+                    assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "created" });
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn directory_barriers_retire_only_captured_operations_despite_vector_compaction() {
+    for settle_old_first in [false, true] {
+        run_and_expect_lab_green(0xfa0a, move |_| async move {
+            let backing = DirectoryGateVfs::new(Path::new("."));
+            let gate = Arc::clone(&backing.gate);
+            let vfs = FaultVfs::new(
+                backing,
+                FaultPlan {
+                    dirent_loss: Trigger::Always,
+                    ..FaultPlan::faultless()
+                },
+            );
+            vfs.create_dir(Path::new("old")).await.unwrap();
+            let directory = vfs
+                .open(Path::new("."), &OpenOptions::new().read(true))
+                .await
+                .unwrap();
+            gate.arm(DirectoryGateAction::PauseAfterSync);
+            let mut sync = Box::pin(directory.sync_all());
+            await_directory_gate(sync.as_mut(), &gate).await;
+            assert_eq!(vfs.pending_dirent_ops(), 1);
+            if settle_old_first {
+                sync_dir(&vfs, Path::new(".")).await.unwrap();
+                assert_eq!(vfs.pending_dirent_ops(), 0);
+            }
+            vfs.create_dir(Path::new("new")).await.unwrap();
+            assert_eq!(
+                vfs.pending_dirent_ops(),
+                if settle_old_first { 1 } else { 2 }
+            );
+            gate.release();
+            sync.await.expect("captured barrier completes");
+            assert_eq!(
+                vfs.pending_dirent_ops(),
+                1,
+                "the later operation still owes a barrier"
+            );
+            vfs.crash().await.unwrap();
+            assert!(vfs.metadata(Path::new("old")).await.unwrap().is_dir());
+            assert_eq!(
+                vfs.metadata(Path::new("new")).await.unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+            let events = vfs.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].path, Path::new("new"));
+            assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "created" });
+        });
+    }
+}
+
+#[test]
+fn a_directory_barrier_cannot_retire_debt_from_a_later_crash_generation() {
+    run_and_expect_lab_green(0xfa0b, move |_| async move {
+        let backing = DirectoryGateVfs::new(Path::new("."));
+        let gate = Arc::clone(&backing.gate);
+        let vfs = FaultVfs::new(
+            backing,
+            FaultPlan {
+                dirent_loss: Trigger::Always,
+                ..FaultPlan::faultless()
+            },
+        );
+        vfs.create_dir(Path::new("old")).await.unwrap();
+        let directory = vfs
+            .open(Path::new("."), &OpenOptions::new().read(true))
+            .await
+            .unwrap();
+        gate.arm(DirectoryGateAction::PauseAfterSync);
+        let mut sync = Box::pin(directory.sync_all());
+        await_directory_gate(sync.as_mut(), &gate).await;
+        vfs.crash().await.unwrap();
+        vfs.create_dir(Path::new("new")).await.unwrap();
+        gate.release();
+        let error = sync
+            .await
+            .expect_err("an old handle cannot finish after crash");
+        assert_eq!(
+            error.to_string(),
+            "file handle did not survive the simulated crash"
+        );
+        assert_eq!(vfs.pending_dirent_ops(), 1);
+        vfs.crash().await.unwrap();
+        assert_eq!(
+            vfs.metadata(Path::new("new")).await.unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let events = vfs.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].path, Path::new("old"));
+        assert_eq!(events[1].path, Path::new("new"));
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind == FaultKind::DirentLoss { op: "created" })
+        );
+    });
+}
+
+#[test]
+fn directory_aliases_settle_the_same_debt_but_each_ancestor_still_needs_a_sync() {
+    for sync_root in [false, true] {
+        run_and_expect_lab_green(0xfa04, move |_| async move {
+            let backing = fgdb::MemVfs::new().expect("memory filesystem");
+            let vfs = FaultVfs::new(
+                backing.clone(),
+                FaultPlan {
+                    dirent_loss: Trigger::Always,
+                    ..FaultPlan::faultless()
+                },
+            );
+            vfs.create_dir_all(Path::new("keys/nested"))
+                .await
+                .expect("create both names without a dot anchor");
+            assert_eq!(vfs.pending_dirent_ops(), 2);
+            assert_eq!(
+                backing.canonicalize(Path::new("keys")).await.unwrap(),
+                backing.canonicalize(Path::new("./keys")).await.unwrap(),
+                "the backing namespace identifies both spellings"
+            );
+            sync_dir(&vfs, Path::new("./keys"))
+                .await
+                .expect("sync through the other spelling");
+            assert_eq!(
+                vfs.pending_dirent_ops(),
+                1,
+                "the nested name is settled, but keys still owes the root"
+            );
+            if sync_root {
+                sync_dir(&vfs, Path::new("."))
+                    .await
+                    .expect("settle the originally empty parent path");
+                assert_eq!(vfs.pending_dirent_ops(), 0);
+            }
+            vfs.crash().await.expect("crash with every loss armed");
+            if sync_root {
+                assert!(
+                    vfs.metadata(Path::new("keys/nested"))
+                        .await
+                        .expect("both fenced names survive")
+                        .is_dir()
+                );
+                assert!(vfs.events().is_empty());
+            } else {
+                assert_eq!(
+                    vfs.metadata(Path::new("./keys/nested"))
+                        .await
+                        .expect_err("an unfenced ancestor loses the whole subtree")
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                let events = vfs.events();
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].path, Path::new("keys"));
+                assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "created" });
+            }
+        });
+    }
+}
+
+#[test]
+fn absolute_directory_creation_stays_inside_the_backing_namespace_and_requires_ancestor_sync() {
+    for sync_root in [false, true] {
+        run_and_expect_lab_green(0xfa07, move |_| async move {
+            let backing = fgdb::MemVfs::new().expect("memory filesystem");
+            let root = backing.canonicalize(Path::new(".")).await.unwrap();
+            let parent = root.join("absolute");
+            let nested = parent.join("nested");
+            let vfs = FaultVfs::new(
+                backing,
+                FaultPlan {
+                    dirent_loss: Trigger::Always,
+                    ..FaultPlan::faultless()
+                },
+            );
+            vfs.create_dir_all(&nested)
+                .await
+                .expect("absolute descendants are inside the backing namespace");
+            assert_eq!(vfs.pending_dirent_ops(), 2);
+            vfs.create_dir_all(&nested)
+                .await
+                .expect("an existing directory is an idempotent success");
+            assert_eq!(vfs.pending_dirent_ops(), 2);
+            sync_dir(&vfs, &parent)
+                .await
+                .expect("fence the nested name");
+            assert_eq!(vfs.pending_dirent_ops(), 1);
+            if sync_root {
+                sync_dir(&vfs, &root)
+                    .await
+                    .expect("fence the ancestor name");
+                assert_eq!(vfs.pending_dirent_ops(), 0);
+            }
+            vfs.crash().await.expect("crash with every loss armed");
+            if sync_root {
+                assert!(vfs.metadata(&nested).await.unwrap().is_dir());
+                assert!(vfs.events().is_empty());
+            } else {
+                assert_eq!(
+                    vfs.metadata(&nested)
+                        .await
+                        .expect_err("the unfenced ancestor and its subtree are lost")
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                let events = vfs.events();
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].path, parent);
+                assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "created" });
+            }
+        });
+    }
+}
+
+#[test]
+fn created_and_removed_files_accept_directory_alias_barriers() {
+    run_and_expect_lab_green(0xfa05, |_| async move {
+        let vfs = FaultVfs::new(
+            fgdb::MemVfs::new().expect("memory filesystem"),
+            FaultPlan {
+                dirent_loss: Trigger::Always,
+                ..FaultPlan::faultless()
+            },
+        );
+        vfs.create_dir(Path::new("keys"))
+            .await
+            .expect("create directory");
+        sync_dir(&vfs, Path::new("."))
+            .await
+            .expect("fence its name");
+        assert_eq!(vfs.pending_dirent_ops(), 0);
+        write_and_sync(&vfs, Path::new("journal"), b"root bytes")
+            .await
+            .expect("create bare relative file");
+        write_and_sync(&vfs, Path::new("keys/log"), b"nested bytes")
+            .await
+            .expect("create nested file");
+        assert_eq!(vfs.pending_dirent_ops(), 2);
+        sync_dir(&vfs, Path::new(".")).await.expect("root barrier");
+        assert_eq!(vfs.pending_dirent_ops(), 1);
+        sync_dir(&vfs, Path::new("./keys"))
+            .await
+            .expect("alias barrier");
+        assert_eq!(vfs.pending_dirent_ops(), 0);
+        vfs.crash().await.expect("first crash");
+        assert_eq!(vfs.read(Path::new("journal")).await.unwrap(), b"root bytes");
+        assert_eq!(
+            vfs.read(Path::new("keys/log")).await.unwrap(),
+            b"nested bytes"
+        );
+        vfs.remove_file(Path::new("./keys/log"))
+            .await
+            .expect("unlink alias");
+        assert_eq!(vfs.pending_dirent_ops(), 1);
+        sync_dir(&vfs, Path::new("keys"))
+            .await
+            .expect("unlink barrier");
+        assert_eq!(vfs.pending_dirent_ops(), 0);
+        vfs.crash().await.expect("second crash");
+        assert_eq!(
+            vfs.read(Path::new("keys/log"))
+                .await
+                .expect_err("unlink stays durable")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(vfs.read(Path::new("journal")).await.unwrap(), b"root bytes");
+        assert!(vfs.events().is_empty());
+    });
+}
+
+#[test]
+fn rename_aliases_deduplicate_one_parent_but_do_not_skip_a_distinct_parent() {
+    for (destination, settle_source) in [("./keys/b", false), ("other/b", false), ("other/b", true)]
+    {
+        run_and_expect_lab_green(0xfa06, move |_| async move {
+            let backing = fgdb::MemVfs::new().expect("memory filesystem");
+            backing
+                .create_dir(Path::new("keys"))
+                .await
+                .expect("durable source directory");
+            backing
+                .create_dir(Path::new("other"))
+                .await
+                .expect("durable target directory");
+            let vfs = FaultVfs::new(
+                backing,
+                FaultPlan {
+                    dirent_loss: Trigger::Always,
+                    ..FaultPlan::faultless()
+                },
+            );
+            write_and_sync(&vfs, Path::new("keys/a"), b"renamed bytes")
+                .await
+                .unwrap();
+            sync_dir(&vfs, Path::new("keys")).await.unwrap();
+            assert_eq!(vfs.pending_dirent_ops(), 0);
+            vfs.rename(Path::new("keys/a"), Path::new(destination))
+                .await
+                .unwrap();
+            assert_eq!(vfs.pending_dirent_ops(), 1);
+            let same_parent = destination == "./keys/b";
+            let destination_parent = if same_parent { "./keys" } else { "./other" };
+            sync_dir(&vfs, Path::new(destination_parent)).await.unwrap();
+            assert_eq!(vfs.pending_dirent_ops(), usize::from(!same_parent));
+            if settle_source {
+                sync_dir(&vfs, Path::new("./keys")).await.unwrap();
+                assert_eq!(vfs.pending_dirent_ops(), 0);
+            }
+            vfs.crash().await.expect("crash with rename loss armed");
+            if same_parent || settle_source {
+                assert_eq!(
+                    vfs.read(Path::new(destination)).await.unwrap(),
+                    b"renamed bytes"
+                );
+                assert_eq!(
+                    vfs.read(Path::new("keys/a"))
+                        .await
+                        .expect_err("source stays absent")
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                assert!(vfs.events().is_empty());
+            } else {
+                assert_eq!(
+                    vfs.read(Path::new("keys/a")).await.unwrap(),
+                    b"renamed bytes"
+                );
+                assert_eq!(
+                    vfs.read(Path::new(destination))
+                        .await
+                        .expect_err("rename was not fully fenced")
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                let events = vfs.events();
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].path, Path::new(destination));
+                assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "renamed" });
+            }
+        });
+    }
 }
 
 #[test]

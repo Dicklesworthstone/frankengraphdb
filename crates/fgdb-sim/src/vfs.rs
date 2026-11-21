@@ -116,8 +116,9 @@
 //!   cross-directory rename);
 //! * the backing store is updated immediately — pre-crash readers see the
 //!   new namespace exactly as a page cache would show it;
-//! * an **honest directory sync** settles every pending operation owing that
-//!   directory (and syncs the backing directory);
+//! * an **honest directory sync** captures the pending operations owing that
+//!   directory and settles only those operations after the backing sync
+//!   succeeds in the same crash generation;
 //! * a **lying directory sync** ([`FaultPlan::dirent_lie`]) reports success
 //!   and settles nothing — the names are still volatile;
 //! * at [`FaultVfs::crash`], each still-pending operation is put to
@@ -620,8 +621,12 @@ fn trace_fault_point(lab: &Lab, class: Class, ordinal: u64) {
 /// One namespace operation applied to the backing store whose durability is
 /// still owed to one or two parent-directory syncs.
 struct NamespaceOp {
+    /// Stable identity across awaits and vector compaction. A captured clone
+    /// keeps the allocation alive, so a later operation cannot reuse it.
+    identity: Arc<()>,
     /// Parent directories that must honestly sync before this operation is
-    /// durable. Two entries only for a cross-directory rename.
+    /// durable, identified by the backing VFS's canonical paths. Two
+    /// entries only for a cross-directory rename.
     owing: Vec<PathBuf>,
     kind: NamespaceKind,
 }
@@ -1070,6 +1075,22 @@ impl<V: Vfs> FaultVfs<V> {
         Some(parent.join(name))
     }
 
+    /// Resolve the barrier identity before changing the namespace. A bare
+    /// relative name has the current directory as its parent, not an empty
+    /// path for the backing VFS to interpret. Leave alias resolution to
+    /// that VFS: lexical normalization is wrong in the presence of symlinks.
+    async fn namespace_parent(&self, path: &Path) -> io::Result<Option<PathBuf>> {
+        let Some(parent) = path.parent() else {
+            return Ok(None);
+        };
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        self.backing.canonicalize(parent).await.map(Some)
+    }
+
     fn record_namespace(&self, owing: Vec<PathBuf>, kind: NamespaceKind) {
         // An operation with no parent to sync (a root-level path) has no
         // barrier to model; it is durable the moment the backing store
@@ -1077,7 +1098,11 @@ impl<V: Vfs> FaultVfs<V> {
         if owing.is_empty() {
             return;
         }
-        self.lab.lock().namespace.push(NamespaceOp { owing, kind });
+        self.lab.lock().namespace.push(NamespaceOp {
+            identity: Arc::new(()),
+            owing,
+            kind,
+        });
     }
 
     /// How many crashes have been simulated.
@@ -1145,6 +1170,7 @@ pub struct FaultFile<V: Vfs> {
     backing: Arc<V>,
     lab: Arc<Lab>,
     path: PathBuf,
+    canonical_path: PathBuf,
     generation: u64,
     is_dir: bool,
     inode: Arc<Inode<V::File>>,
@@ -1275,13 +1301,18 @@ impl<V: Vfs> FaultFile<V> {
     /// The directory half of the sync surface: settle or lie about the
     /// pending dirent operations owing this directory.
     async fn sync_dirents(&self) -> io::Result<()> {
-        let pending_ops = {
+        let captured = {
             let lab = self.lab.lock();
+            if lab.generation != self.generation {
+                return Err(lost_handle());
+            }
             lab.namespace
                 .iter()
-                .filter(|op| op.owing.contains(&self.path))
-                .count() as u64
+                .filter(|op| op.owing.contains(&self.canonical_path))
+                .map(|op| Arc::clone(&op.identity))
+                .collect::<Vec<_>>()
         };
+        let pending_ops = captured.len() as u64;
         if pending_ops == 0 {
             // Nothing owes this directory, so no fault class is eligible: an
             // honest no-op must not consume a trigger count. This is also
@@ -1292,6 +1323,9 @@ impl<V: Vfs> FaultFile<V> {
 
         let decision = {
             let mut lab = self.lab.lock();
+            if lab.generation != self.generation {
+                return Err(lost_handle());
+            }
             let decision = lab.decide(Class::DirentLie);
             if decision.fires {
                 lab.record(&self.path, FaultKind::DirentSyncLie { pending_ops });
@@ -1305,22 +1339,33 @@ impl<V: Vfs> FaultFile<V> {
             return Ok(());
         }
 
-        // Honest: every pending operation stops owing this directory, and an
-        // operation owing nothing further is durable. Matching is by the
-        // path this handle was opened with — the same spelling callers pass
-        // when they create under a directory and then sync it.
-        {
-            let mut lab = self.lab.lock();
-            for op in &mut lab.namespace {
-                op.owing.retain(|dir| dir != &self.path);
-            }
-            lab.namespace.retain(|op| !op.owing.is_empty());
-        }
         let directory = self
             .backing
             .open(&self.path, &OpenOptions::new().read(true))
             .await?;
-        directory.sync_all().await
+        self.alive()?;
+        directory.sync_all().await?;
+
+        // Neither a backing failure nor cancellation retires debt. After a
+        // successful barrier, settle only its captured operations: a new
+        // operation may have arrived while open or sync was pending, and a
+        // concurrent barrier may already have removed a captured operation.
+        {
+            let mut lab = self.lab.lock();
+            if lab.generation != self.generation {
+                return Err(lost_handle());
+            }
+            for op in &mut lab.namespace {
+                if captured
+                    .iter()
+                    .any(|identity| Arc::ptr_eq(identity, &op.identity))
+                {
+                    op.owing.retain(|dir| dir != &self.canonical_path);
+                }
+            }
+            lab.namespace.retain(|op| !op.owing.is_empty());
+        }
+        Ok(())
     }
 
     async fn flush_through(&self) -> io::Result<()> {
@@ -1702,13 +1747,18 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
         } else {
             truncates(opts).await?
         };
+        let parent = if existed {
+            None
+        } else {
+            self.namespace_parent(path).await?
+        };
         let opened = self
             .backing
             .open(path, &opts.clone().truncate(false))
             .await?;
         if !existed {
             self.record_namespace(
-                path.parent().map(Path::to_path_buf).into_iter().collect(),
+                parent.into_iter().collect(),
                 NamespaceKind::Created {
                     path: path.to_path_buf(),
                     entry_kind: CreatedEntryKind::File,
@@ -1750,7 +1800,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             self.inodes
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .entry(key)
+                .entry(key.clone())
                 .or_insert(candidate)
                 .clone()
         };
@@ -1765,6 +1815,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             backing: Arc::clone(&self.backing),
             lab: Arc::clone(&self.lab),
             path: path.to_path_buf(),
+            canonical_path: key,
             generation: self.lab.lock().generation,
             is_dir: is_directory,
             inode,
@@ -1785,9 +1836,10 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
     }
 
     async fn create_dir(&self, path: &Path) -> io::Result<()> {
+        let parent = self.namespace_parent(path).await?;
         self.backing.create_dir(path).await?;
         self.record_namespace(
-            path.parent().map(Path::to_path_buf).into_iter().collect(),
+            parent.into_iter().collect(),
             NamespaceKind::Created {
                 path: path.to_path_buf(),
                 entry_kind: CreatedEntryKind::Directory,
@@ -1801,31 +1853,33 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
         // attributed to the parent directory whose sync makes it durable.
         // Recording only after our create succeeds avoids claiming a racing
         // creator's namespace operation as ours.
-        let mut components: Vec<&Path> = path
+        // Stop at the first existing directory. An absolute path inside a
+        // confined VFS need not grant access to its host ancestors (for
+        // example, MemVfs's private shadow root is below the host /tmp).
+        let mut components = Vec::new();
+        for component in path
             .ancestors()
             .filter(|candidate| !candidate.as_os_str().is_empty())
-            .collect();
-        components.reverse();
-        for component in components {
+        {
             match self.backing.metadata(component).await {
-                Ok(metadata) if metadata.file_type().is_dir() => continue,
+                Ok(metadata) if metadata.file_type().is_dir() => break,
                 Ok(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
                         format!("{} exists and is not a directory", component.display()),
                     ));
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    components.push(component);
+                }
                 Err(error) => return Err(error),
             }
-
+        }
+        for component in components.into_iter().rev() {
+            let parent = self.namespace_parent(component).await?;
             match self.backing.create_dir(component).await {
                 Ok(()) => self.record_namespace(
-                    component
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .into_iter()
-                        .collect(),
+                    parent.into_iter().collect(),
                     NamespaceKind::Created {
                         path: component.to_path_buf(),
                         entry_kind: CreatedEntryKind::Directory,
@@ -1870,6 +1924,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             Err(error) => return Err(error),
         };
         let key = self.name_key(path).await;
+        let parent = self.namespace_parent(path).await?;
         self.backing.remove_file(path).await?;
         if let Some(key) = key {
             self.inodes
@@ -1879,7 +1934,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
         }
         if let Some(durable) = durable {
             self.record_namespace(
-                path.parent().map(Path::to_path_buf).into_iter().collect(),
+                parent.into_iter().collect(),
                 NamespaceKind::Removed {
                     path: path.to_path_buf(),
                     durable,
@@ -1900,6 +1955,13 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             Err(error) => return Err(error),
         };
         let (from_key, to_key) = (self.name_key(from).await, self.name_key(to).await);
+        let mut owing: Vec<PathBuf> = self
+            .namespace_parent(from)
+            .await?
+            .into_iter()
+            .chain(self.namespace_parent(to).await?)
+            .collect();
+        owing.dedup();
         self.backing.rename(from, to).await?;
         {
             let mut inodes = self.inodes.lock().unwrap_or_else(|p| p.into_inner());
@@ -1912,13 +1974,6 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
                 inodes.insert(to_key, inode);
             }
         }
-        let mut owing: Vec<PathBuf> = from
-            .parent()
-            .into_iter()
-            .chain(to.parent())
-            .map(Path::to_path_buf)
-            .collect();
-        owing.dedup();
         self.record_namespace(
             owing,
             NamespaceKind::Renamed {
