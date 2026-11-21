@@ -53,8 +53,10 @@ struct RemoteOptions {
     /// Complete statement input for a consistent read batch or one explicit
     /// transaction. Every record retains its own text and typed arguments.
     statements_file: Option<PathBuf>,
-    /// The statements file is a mixed read/write transaction script.
+    /// The statements file is an explicit transaction script.
     transaction: bool,
+    /// Pin a native read owner instead of opening a writer for the script.
+    read_only_transaction: bool,
     /// Admit every parameter set against one pinned read session and share its
     /// execution allowance. The batch has one successful terminal record.
     consistent_batch: bool,
@@ -91,6 +93,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut tls_ca_file = None;
     let mut rows_file = None;
     let mut statements_file = None;
+    let mut read_only_transaction = false;
     let mut consistent_batch = false;
     let mut prepared_batch = false;
     let mut csv_types = None;
@@ -129,6 +132,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--statements-file" if statements_file.is_none() => {
                 statements_file = Some(PathBuf::from(value()?));
             }
+            "--read-only" if !read_only_transaction => read_only_transaction = true,
             "--consistent-batch" if !consistent_batch => consistent_batch = true,
             "--prepared-batch" if !prepared_batch => prepared_batch = true,
             "--prepared-jsonl" if prepared_jsonl.is_none() => {
@@ -242,6 +246,11 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     if read_mode.is_some() && verb != "query" {
         return Err(Failure::usage("--read-mode applies only to query"));
     }
+    if read_only_transaction && verb != "transaction" {
+        return Err(Failure::usage(
+            "--read-only applies only to remote transaction",
+        ));
+    }
     if max_batches.is_some() && mode != ExecuteMode::Subscribe {
         return Err(Failure::usage("--max-batches applies only to subscribe"));
     }
@@ -353,6 +362,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         rows_file,
         statements_file,
         transaction: verb == "transaction",
+        read_only_transaction,
         consistent_batch,
         prepared_batch,
         csv_types,
@@ -655,7 +665,9 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
         return runtime.block_on(async {
             // Admit every step before credentials, connection or BEGIN. The
             // shared client driver owns provisional delivery and final commit.
-            let script = transaction::TransactionScript::read(&cx, path).await?;
+            let script =
+                transaction::TransactionScript::read(&cx, path, options.read_only_transaction)
+                    .await?;
             let mut client = connect(&cx, &options).await?;
             client
                 .select(&cx, &options.database)
@@ -1278,15 +1290,41 @@ mod tests {
         };
         let options = script(&[]).unwrap_or_else(|error| panic!("{}", error.message));
         assert!(options.transaction);
+        assert!(!options.read_only_transaction);
         assert_eq!(options.statements_file, Some(PathBuf::from("steps.json")));
         assert_eq!(options.mode, ExecuteMode::Write);
         assert!(options.statement.is_empty());
+        let read_only =
+            script(&["--read-only"]).unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(read_only.transaction);
+        assert!(read_only.read_only_transaction);
+        assert_eq!(read_only.statements_file, Some(PathBuf::from("steps.json")));
+        assert!(
+            script(&[
+                "--read-only",
+                "--tls-server-name",
+                "db.example",
+                "--tls-ca-file",
+                "ca.pem",
+            ])
+            .is_ok()
+        );
+        for verb in ["query", "write", "subscribe"] {
+            assert_eq!(
+                self::options(verb, &["--read-only"])
+                    .err()
+                    .expect("read-only transaction flag has one owner")
+                    .code,
+                2
+            );
+        }
         assert!(
             script(&["--tls-server-name", "db.example", "--tls-ca-file", "ca.pem"]).is_ok()
         );
         for flags in [
             vec!["RETURN 1"],
             vec!["--statements-file", "again.json"],
+            vec!["--read-only", "--read-only"],
             vec!["--rows-file", "rows.json"],
             vec!["--csv-types", "id=int64"],
             vec!["--prepared-jsonl", "writes.jsonl"],

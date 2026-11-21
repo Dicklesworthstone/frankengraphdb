@@ -380,7 +380,7 @@ An output error cancels and drains the request, and no refusal retries,
 reprepares, or falls back to independent reads. Use the ordinary TLS options
 when connecting through an encrypted endpoint.
 
-## Mixed read/write transactions on a server
+## Explicit transactions on a server
 
 `remote transaction --statements-file` runs a finite script through one explicit
 FGP transaction. Each step supplies its own statement and typed parameters;
@@ -439,11 +439,22 @@ there is no successful terminal, rollback claim or automatic retry. If writing
 the final output fails **after** confirmed completion, the diagnostic retains
 the known sequence; repeating the script could duplicate effects.
 
-The server requires Write or ReadWrite authority to begin, and reads also need
-Read authority. TLS flags work as for other remote commands. This command does
-not accept positional GQL, `--param`, `--rows-file`, prepared-input flags,
-read modes or `--if-current`. Savepoints, reattachment, historical writer reads
-and durable outcome lookup remain outside this connection-scoped profile.
+The default requires Write or ReadWrite authority to begin, and reads also need
+Read authority. For a read-only script, pass `--read-only` and use `"mode":"read"`
+on every entry. The CLI rejects write modes and savepoint controls before reading
+credentials; the SDK admits every negotiated request before sending
+`BEGIN_READ_TRANSACTION`. Read authority alone is sufficient. All statements use
+one pinned native snapshot and cumulative allowance without opening a writer;
+later external commits are invisible, and successful completion is `read_closed`
+at the original `basis_seq`. Provisional delivery, cancellation, callback failure
+and missing-completion handling follow the same rules as the default mode.
+
+TLS flags work as for other remote commands. This command does not accept
+positional GQL, `--param`, `--rows-file`, prepared-input flags, read modes or
+`--if-current`. Default write transactions support `SAVEPOINT`, `ROLLBACK TO`
+and `RELEASE` as `mode:write` entries without parameters. Reattachment,
+historical writer reads and durable outcome lookup remain outside this
+connection-scoped profile.
 The CLI streams delivery without collecting the full script's results; each
 server statement still uses the existing buffered execution owner.
 

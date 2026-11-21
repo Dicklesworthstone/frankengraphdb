@@ -111,12 +111,38 @@ impl Client {
         cx: &Cx,
         statements: Vec<Execute>,
     ) -> Result<TransactionBatchAnswer, ClientError> {
+        self.collect_transaction_batch(cx, statements, false).await
+    }
+
+    /// Execute 1–32 Read statements with read authority alone. Every statement
+    /// uses one pinned native snapshot and one cumulative signed allowance;
+    /// the server never opens a writer for this batch. Non-Read modes and all
+    /// request envelopes are refused locally before BEGIN.
+    ///
+    /// A successful result carries exactly ReadClosed at the original basis.
+    /// No query is retried or sent outside the retained read owner. Like the
+    /// mixed form, this collected helper retains all rows until completion.
+    pub async fn execute_read_transaction_batch(
+        &mut self,
+        cx: &Cx,
+        statements: Vec<Execute>,
+    ) -> Result<TransactionBatchAnswer, ClientError> {
+        self.collect_transaction_batch(cx, statements, true).await
+    }
+
+    async fn collect_transaction_batch(
+        &mut self,
+        cx: &Cx,
+        statements: Vec<Execute>,
+        read_only: bool,
+    ) -> Result<TransactionBatchAnswer, ClientError> {
         let mut columns = Vec::new();
         let mut rows: Vec<Vec<Vec<WireValue>>> = Vec::new();
         let end = self
-            .execute_transaction_batch_streaming(
+            .execute_transaction_batch_mode(
                 cx,
                 statements,
+                read_only,
                 |_, _, names| {
                     columns.push(names.to_vec());
                     Ok(())
@@ -164,7 +190,48 @@ impl Client {
     pub async fn execute_transaction_batch_streaming(
         &mut self,
         cx: &Cx,
+        statements: Vec<Execute>,
+        on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
+        on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
+    ) -> Result<TransactionBatchEnd, ClientError> {
+        self.execute_transaction_batch_mode(
+            cx,
+            statements,
+            false,
+            on_columns,
+            on_row,
+            on_result_end,
+        )
+        .await
+    }
+
+    /// Stream a finite Read-only script under one pinned native read owner.
+    /// Callback indexes, cumulative limits, provisional delivery and cleanup
+    /// match [`Self::execute_transaction_batch_streaming`]. Read authority is
+    /// sufficient; a write mode is refused before any BEGIN is sent, even if
+    /// this connection also has write authority.
+    ///
+    /// Successful completion is ReadClosed at the original snapshot. A
+    /// callback rejection rolls back or cancels the owner, and an incomplete
+    /// completion requires reconnecting without a retry or successful result.
+    pub async fn execute_read_transaction_batch_streaming(
+        &mut self,
+        cx: &Cx,
+        statements: Vec<Execute>,
+        on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
+        on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
+    ) -> Result<TransactionBatchEnd, ClientError> {
+        self.execute_transaction_batch_mode(cx, statements, true, on_columns, on_row, on_result_end)
+            .await
+    }
+
+    async fn execute_transaction_batch_mode(
+        &mut self,
+        cx: &Cx,
         mut statements: Vec<Execute>,
+        read_only: bool,
         mut on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
         mut on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
         mut on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
@@ -175,6 +242,11 @@ impl Client {
             ));
         }
         for statement in &mut statements {
+            if read_only && statement.mode != ExecuteMode::Read {
+                return Err(ClientError::Protocol(
+                    "a read-only transaction batch accepts only Read statements",
+                ));
+            }
             if statement.statement.trim().is_empty() {
                 return Err(ClientError::Protocol(
                     "transaction batch statements must not be empty",
@@ -200,7 +272,11 @@ impl Client {
             .map_err(|_| ClientError::Protocol("request exceeds the negotiated frame limit"))?;
         }
         let count = statements.len() as u32;
-        let begun = self.begin_transaction(cx).await?;
+        let begun = if read_only {
+            self.begin_read_transaction(cx).await?
+        } else {
+            self.begin_transaction(cx).await?
+        };
         let mut owner = TransactionBatchGuard { client: self };
         let mut rows = 0_u64;
         for (index, statement) in statements.iter().enumerate() {

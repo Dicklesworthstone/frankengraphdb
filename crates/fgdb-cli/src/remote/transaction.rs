@@ -1,4 +1,4 @@
-//! A finite mixed read/write script executes in one native transaction.
+//! A finite mixed or read-only script executes in one native transaction.
 //! Every input and request envelope is admitted before authentication. Rows
 //! are flushed provisionally as statements finish; only the final transaction
 //! receipt establishes completion. Refusal never retries a statement or batch.
@@ -21,11 +21,13 @@ const MAX_INPUT_BYTES: usize = CLIENT_MAX_FRAME as usize;
 /// The whole finite script is retained; its answers are never collected.
 pub(super) struct TransactionScript {
     statements: Vec<Execute>,
+    read_only: bool,
 }
 
 impl TransactionScript {
     pub(super) fn parse(
         input: &str,
+        read_only: bool,
         mut checkpoint: impl FnMut() -> Result<(), Failure>,
     ) -> Result<Self, Failure> {
         checkpoint()?;
@@ -77,6 +79,11 @@ impl TransactionScript {
                     )));
                 }
             };
+            if read_only && mode != ExecuteMode::Read {
+                return Err(Failure::usage(format!(
+                    "transaction statement {at}: --read-only requires mode read for every statement"
+                )));
+            }
             let Some(Json::String(statement)) = fields.remove("statement") else {
                 return Err(Failure::usage(format!(
                     "transaction statement {at} needs a statement string"
@@ -150,14 +157,17 @@ impl TransactionScript {
             statements.push(envelope.statement);
         }
         checkpoint()?;
-        Ok(Self { statements })
+        Ok(Self {
+            statements,
+            read_only,
+        })
     }
 
-    pub(super) async fn read(cx: &Cx, path: &Path) -> Result<Self, Failure> {
+    pub(super) async fn read(cx: &Cx, path: &Path, read_only: bool) -> Result<Self, Failure> {
         let bytes = batch::read_input(cx, path, "--statements-file").await?;
         let input = core::str::from_utf8(&bytes)
             .map_err(|_| Failure::usage("--statements-file must be UTF-8"))?;
-        Self::parse(input, || cx.checkpoint().map_err(Failure::io))
+        Self::parse(input, read_only, || cx.checkpoint().map_err(Failure::io))
     }
 
     pub(super) async fn execute(
@@ -186,15 +196,31 @@ impl TransactionScript {
             sink.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
-        let result = client
-            .execute_transaction_batch_streaming(
-                cx,
-                self.statements,
-                |index, basis, columns| lock().columns(cx, index, basis, columns),
-                |index, row| lock().row(cx, index, &row),
-                |index, rows| lock().result_end(cx, index, rows),
-            )
-            .await;
+        let on_columns =
+            |index, basis, columns: &[String]| lock().columns(cx, index, basis, columns);
+        let on_row = |index, row: Vec<WireValue>| lock().row(cx, index, &row);
+        let on_result_end = |index, rows| lock().result_end(cx, index, rows);
+        let result = if self.read_only {
+            client
+                .execute_read_transaction_batch_streaming(
+                    cx,
+                    self.statements,
+                    on_columns,
+                    on_row,
+                    on_result_end,
+                )
+                .await
+        } else {
+            client
+                .execute_transaction_batch_streaming(
+                    cx,
+                    self.statements,
+                    on_columns,
+                    on_row,
+                    on_result_end,
+                )
+                .await
+        };
         sink.into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .finish(result)
@@ -430,7 +456,7 @@ mod tests {
     use fgdb_protocol::body::{MAX_NAME_BYTES, MAX_PARAMETERS};
 
     fn parse(input: &str) -> Result<TransactionScript, Failure> {
-        TransactionScript::parse(input, || Ok(()))
+        TransactionScript::parse(input, false, || Ok(()))
     }
 
     #[test]
@@ -471,6 +497,38 @@ mod tests {
                 ExecuteTransaction::decode(&envelope.encode().unwrap()).unwrap(),
                 envelope
             );
+        }
+    }
+
+    #[test]
+    fn read_only_scripts_require_read_modes_and_refuse_transaction_controls() {
+        let input = r#"[
+            {"mode":"read","statement":"RETURN $x","parameters":{"x":"int:7"}},
+            {"mode":"read","statement":"MATCH (n) RETURN count(*)"}
+        ]"#;
+        let script = TransactionScript::parse(input, true, || Ok(()))
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(script.read_only);
+        assert_eq!(script.statements.len(), 2);
+        assert_eq!(
+            script.statements[0].parameters,
+            [("x".into(), WireValue::Int(7))]
+        );
+        for (mode, statement) in [
+            ("write", "CREATE (n)"),
+            ("write", "SAVEPOINT kept"),
+            ("read", "SAVEPOINT kept"),
+            ("read", "ROLLBACK TO kept"),
+            ("read", "RELEASE kept"),
+        ] {
+            let input = format!(
+                r#"[{{"mode":"read","statement":"RETURN 1"}},{{"mode":"{mode}","statement":"{statement}"}}]"#
+            );
+            let error = TransactionScript::parse(&input, true, || Ok(()))
+                .err()
+                .expect("read-only script refused before execution");
+            assert_eq!(error.code, 2);
+            assert!(error.message.contains("transaction statement 2"));
         }
     }
 
@@ -633,7 +691,7 @@ mod tests {
             {"mode":"read","statement":"RETURN $x","parameters":{"x":"text:fresh"}}
         ]"#;
         let mut total = 0;
-        TransactionScript::parse(source, || {
+        TransactionScript::parse(source, false, || {
             total += 1;
             Ok(())
         })
@@ -641,7 +699,7 @@ mod tests {
         assert!(total > 6);
         for stop in 1..=total {
             let mut seen = 0;
-            let error = TransactionScript::parse(source, || {
+            let error = TransactionScript::parse(source, false, || {
                 seen += 1;
                 if seen == stop {
                     let mut failure = Failure::io("original cancellation");
@@ -671,7 +729,7 @@ mod tests {
             " ".repeat(2 * fgdb_protocol::json::JSON_PARSE_RUN_BYTES)
         );
         let mut polls = 0;
-        let error = TransactionScript::parse(&source, || {
+        let error = TransactionScript::parse(&source, false, || {
             polls += 1;
             if polls == 3 {
                 Err(Failure::io("cancelled during JSON parsing"))

@@ -12,7 +12,8 @@ const BASIS: u64 = 7;
 const WRITE_QUERY: &str = "CREATE (:Person {name:$name}) RETURN $name AS name";
 
 fn admitted(input: &str) -> TransactionScript {
-    TransactionScript::parse(input, || Ok(())).unwrap_or_else(|error| panic!("{}", error.message))
+    TransactionScript::parse(input, false, || Ok(()))
+        .unwrap_or_else(|error| panic!("{}", error.message))
 }
 
 fn mixed() -> TransactionScript {
@@ -84,10 +85,24 @@ fn completed(request: u64, outcome: Outcome) -> Frame {
 }
 
 fn assert_submission(frames: &[Frame], statements: usize, commits: usize) {
+    assert_submission_mode(frames, statements, commits, FrameKind::BeginTransaction);
+}
+
+fn assert_submission_mode(frames: &[Frame], statements: usize, commits: usize, begin: FrameKind) {
     assert_eq!(
         frames
             .iter()
-            .filter(|frame| frame.header().kind() == FrameKind::BeginTransaction)
+            .filter(|frame| frame.header().kind() == begin)
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                frame.header().kind(),
+                FrameKind::BeginTransaction | FrameKind::BeginReadTransaction
+            ))
             .count(),
         1
     );
@@ -237,65 +252,79 @@ fn mixed_transaction_files_keep_typed_arguments_private_until_one_completion() {
 #[test]
 fn read_only_transaction_reports_its_basis_and_keeps_empty_statement_schema() {
     let ((), report) = run_async_under_lab(0x79a0_0812, |root| async move {
-        let transaction = admitted(
-            r#"[
+        for read_only in [false, true] {
+            let transaction = TransactionScript::parse(
+                r#"[
                 {"mode":"read","statement":"MATCH (n:Absent) RETURN n.name AS name"},
                 {"mode":"read","statement":"RETURN $name AS name","parameters":{"name":"text:Ada"}}
             ]"#,
-        );
-        let flushes = Arc::new(AtomicUsize::new(0));
-        let io = script(
-            vec![
-                (begun(), 0),
-                (provisional_chunk(5, Some(vec!["name".into()]), vec![]), 0),
-                (statement_end(5, 1, 0), 1),
-                (
-                    provisional_chunk(
-                        6,
-                        Some(vec!["name".into()]),
-                        vec![vec![WireValue::Text("Ada".into())]],
-                    ),
-                    1,
-                ),
-                (statement_end(6, 2, 1), 3),
-                (
-                    completed(
-                        7,
-                        Outcome::ReadClosed {
-                            seq: BASIS,
-                            statements: 2,
-                        },
-                    ),
-                    3,
-                ),
-            ],
-            Arc::clone(&flushes),
-        );
-        let written = Arc::clone(&io.written);
-        let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
-        client.select(&root, "social").await.unwrap();
-        let mut out = Output {
-            bytes: vec![],
-            flushes,
-            fail_on: None,
-        };
-        transaction
-            .execute(&root, &mut client, true, &mut out)
-            .await
+                read_only,
+                || Ok(()),
+            )
             .unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(
-            String::from_utf8(out.bytes)
-                .unwrap()
-                .lines()
-                .collect::<Vec<_>>(),
-            [
-                r#"{"v":1,"event":"columns","statement":1,"stream":true,"provisional":true,"basis_seq":7,"columns":["name"]}"#,
-                r#"{"v":1,"event":"columns","statement":2,"stream":true,"provisional":true,"basis_seq":7,"columns":["name"]}"#,
-                r#"{"v":1,"event":"row","statement":2,"provisional":true,"cells":[{"type":"text","value":"Ada"}]}"#,
-                r#"{"v":1,"event":"result","kind":"transaction","outcome":"read_closed","seq":7,"basis_seq":7,"statements":2,"count":1}"#,
-            ]
-        );
-        assert_submission(&sent_frames(&written.lock().unwrap()), 2, 1);
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let io = script(
+                vec![
+                    (begun(), 0),
+                    (provisional_chunk(5, Some(vec!["name".into()]), vec![]), 0),
+                    (statement_end(5, 1, 0), 1),
+                    (
+                        provisional_chunk(
+                            6,
+                            Some(vec!["name".into()]),
+                            vec![vec![WireValue::Text("Ada".into())]],
+                        ),
+                        1,
+                    ),
+                    (statement_end(6, 2, 1), 3),
+                    (
+                        completed(
+                            7,
+                            Outcome::ReadClosed {
+                                seq: BASIS,
+                                statements: 2,
+                            },
+                        ),
+                        3,
+                    ),
+                ],
+                Arc::clone(&flushes),
+            );
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: None,
+            };
+            transaction
+                .execute(&root, &mut client, true, &mut out)
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(
+                String::from_utf8(out.bytes)
+                    .unwrap()
+                    .lines()
+                    .collect::<Vec<_>>(),
+                [
+                    r#"{"v":1,"event":"columns","statement":1,"stream":true,"provisional":true,"basis_seq":7,"columns":["name"]}"#,
+                    r#"{"v":1,"event":"columns","statement":2,"stream":true,"provisional":true,"basis_seq":7,"columns":["name"]}"#,
+                    r#"{"v":1,"event":"row","statement":2,"provisional":true,"cells":[{"type":"text","value":"Ada"}]}"#,
+                    r#"{"v":1,"event":"result","kind":"transaction","outcome":"read_closed","seq":7,"basis_seq":7,"statements":2,"count":1}"#,
+                ]
+            );
+            assert_submission_mode(
+                &sent_frames(&written.lock().unwrap()),
+                2,
+                1,
+                if read_only {
+                    FrameKind::BeginReadTransaction
+                } else {
+                    FrameKind::BeginTransaction
+                },
+            );
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -651,7 +680,7 @@ fn every_statement_is_preflighted_at_the_exact_negotiated_limit_before_begin() {
 fn invalid_transaction_file_is_rejected_before_reading_a_missing_credential() {
     use std::sync::atomic::AtomicU64;
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    for oversized in [false, true] {
+    for scenario in 0..4 {
         let path = std::env::temp_dir().join(format!(
             "fgdb-remote-transaction-{}-{}",
             std::process::id(),
@@ -662,9 +691,9 @@ fn invalid_transaction_file_is_rejected_before_reading_a_missing_credential() {
             .write(true)
             .open(&path)
             .unwrap();
-        if oversized {
+        if scenario == 0 {
             file.set_len((1 << 20) + 1).unwrap();
-        } else {
+        } else if scenario == 1 {
             // An otherwise valid prefix cannot be submitted before the late
             // untyped parameter is rejected by local admission.
             file.write_all(
@@ -672,6 +701,19 @@ fn invalid_transaction_file_is_rejected_before_reading_a_missing_credential() {
                     {"mode":"write","statement":"CREATE (:Person)"},
                     {"mode":"read","statement":"RETURN $x","parameters":{"x":7}}
                 ]"#,
+            )
+            .unwrap();
+        } else {
+            // A late write mode or a control disguised as a read refuses in
+            // --read-only mode before the missing credential is observed.
+            let (mode, statement) = if scenario == 2 {
+                ("write", "CREATE (:Person)")
+            } else {
+                ("read", "SAVEPOINT kept")
+            };
+            write!(
+                file,
+                r#"[{{"mode":"read","statement":"RETURN 1"}},{{"mode":"{mode}","statement":"{statement}"}}]"#,
             )
             .unwrap();
         }
@@ -692,12 +734,76 @@ fn invalid_transaction_file_is_rejected_before_reading_a_missing_credential() {
         args.push(token.to_str().unwrap().to_owned());
         args.push("--statements-file".into());
         args.push(path.to_str().unwrap().to_owned());
+        if scenario >= 2 {
+            args.push("--read-only".into());
+        }
         let mut output = Vec::new();
         let error = super::super::run(&args, true, &mut output)
             .expect_err("invalid input must precede the absent credential");
         assert_eq!(error.code, 2, "{}", error.message);
         assert!(output.is_empty());
     }
+}
+
+#[test]
+fn read_only_script_never_accepts_a_write_completion() {
+    let ((), report) = run_async_under_lab(0x79a0_0821, |root| async move {
+        let transaction = TransactionScript::parse(
+            r#"[{"mode":"read","statement":"RETURN 7 AS value"}]"#,
+            true,
+            || Ok(()),
+        )
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let io = script(
+            vec![
+                (begun(), 0),
+                (
+                    provisional_chunk(5, Some(vec!["value".into()]), vec![vec![WireValue::Int(7)]]),
+                    0,
+                ),
+                (statement_end(5, 1, 1), 2),
+                (
+                    completed(
+                        6,
+                        Outcome::WriteCommitted {
+                            seq: BASIS + 1,
+                            statements: 1,
+                        },
+                    ),
+                    2,
+                ),
+            ],
+            Arc::clone(&flushes),
+        );
+        let written = Arc::clone(&io.written);
+        let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+        client.select(&root, "social").await.unwrap();
+        let mut out = Output {
+            bytes: vec![],
+            flushes,
+            fail_on: None,
+        };
+        let error = transaction
+            .execute(&root, &mut client, true, &mut out)
+            .await
+            .expect_err("a read owner cannot publish a write completion");
+        assert_eq!(error.code, 5);
+        assert!(error.message.contains("completion was not confirmed"));
+        let output = String::from_utf8(out.bytes).unwrap();
+        assert_eq!(output.lines().count(), 2);
+        assert!(!output.contains(r#""event":"result""#));
+        let before = written.lock().unwrap().len();
+        assert!(client.ping(&root, 31).await.is_err());
+        assert_eq!(written.lock().unwrap().len(), before);
+        assert_submission_mode(
+            &sent_frames(&written.lock().unwrap()),
+            1,
+            1,
+            FrameKind::BeginReadTransaction,
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
