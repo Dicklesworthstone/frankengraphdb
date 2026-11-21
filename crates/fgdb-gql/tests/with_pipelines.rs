@@ -2808,6 +2808,83 @@ fn percentiles_aggregate_in_a_pipelines_with_stage() {
     );
 }
 
+#[test]
+fn collected_aggregate_fallbacks_and_conditions_keep_with_grouping_and_empty_inputs() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [CanonicalScalar::Int(1)];
+    let rows = |text: &str| run(&prepare(text), &values, wide(), &mut || Ok(()));
+    let number = |value: &GraphValue| match value.as_scalar() {
+        Some(CanonicalScalar::Int(value)) => {
+            fgdb_types::CanonicalF64::from_i64_rounded(*value).get()
+        }
+        Some(CanonicalScalar::Float(value)) => value.get(),
+        other => panic!("a numeric result, got {other:?}"),
+    };
+    let grouped = rows(
+        "UNWIND [[0,NULL],[1,10],[1,30],[2,NULL]] AS row \
+         WITH row[0] AS g,row[1] AS x \
+         WITH g,coalesce(percentileCont(x,0.5),0) AS median, \
+         CASE WHEN count(x)>0 THEN stDevP(x) ELSE -1 END AS spread, \
+         coalesce(NULL,CASE WHEN true THEN percentileDisc(x,0.5) ELSE stDev(true) END,0) AS discrete \
+         RETURN g,median,spread,discrete ORDER BY g",
+    ).unwrap().value;
+    assert_eq!(ints(&grouped, 0), [Some(0), Some(1), Some(2)]);
+    let measured = grouped
+        .iter()
+        .map(|row| {
+            (
+                number(row.get(1).unwrap()),
+                number(row.get(2).unwrap()),
+                number(row.get(3).unwrap()),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        measured,
+        [(0.0, -1.0, 0.0), (20.0, 10.0, 10.0), (0.0, -1.0, 0.0)]
+    );
+
+    // The keyless group still exists for an empty input. A percentile's
+    // invalid probability is observed only if its branch is selected.
+    for (input, expected) in [("[]", 7), ("[NULL]", 7)] {
+        let text = format!(
+            "UNWIND {input} AS x \
+            WITH CASE WHEN count(x)=0 THEN 7 ELSE percentileCont(x,2) END AS v, \
+            coalesce(percentileDisc(x,0.5),42) AS fallback RETURN v,fallback"
+        );
+        let result = rows(&text).unwrap().value;
+        assert_eq!(ints(&result, 0), [Some(expected)]);
+        assert_eq!(ints(&result, 1), [Some(42)]);
+    }
+    let failure = rows(
+        "UNWIND [1] AS x \
+        WITH CASE WHEN count(x)=0 THEN 7 ELSE percentileCont(x,2) END AS v RETURN v",
+    )
+    .unwrap_err();
+    assert!(
+        format!("{failure:?}").contains("NumberOutOfRange"),
+        "{failure:?}"
+    );
+}
+
+#[test]
+fn lazy_collected_calls_preserve_aggregate_input_scope_refusals() {
+    for text in [
+        "MATCH (n) WITH CASE WHEN true THEN 0 ELSE percentileDisc(sum(n.p),0.5) END AS p RETURN p",
+        "MATCH (n) WITH coalesce(0,stDev(collect(n.p))) AS p RETURN p",
+        "MATCH (n) WITH [x IN collect(n.p) | coalesce(0,percentileDisc(x,0.5))] AS p RETURN p",
+        "MATCH (n) WITH [x IN collect(n.p) | CASE WHEN true THEN 0 ELSE stDev(x) END] AS p RETURN p",
+    ] {
+        let calls = Cell::new(0);
+        let result = PreparedGraphSetText::prepare(text, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{text}");
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+}
+
 /// `RETURN ... AS alias ORDER BY alias.key` where the alias holds a computed
 /// map, a map projection or literal, orders by that entry, as openCypher
 /// does (`RETURN n{.name, .age} AS person ORDER BY person.age`). A graph

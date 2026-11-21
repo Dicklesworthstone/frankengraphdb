@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-20 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-21 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,55 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Managed read-only transaction batches — qualification pending
+
+The Rust SDK now exposes collected and streaming read-only transaction batches;
+the remote CLI selects them with `transaction --read-only`. Complete script
+admission precedes BEGIN, and every envelope must be Read. The CLI also refuses
+savepoint controls before opening credentials. Existing mixed batches retain
+their write-owner behavior. Streamed rows remain provisional until the native
+ReadClosed receipt confirms the original basis and statement count; cancellation
+cleanup and refusal of malformed completion receipts retain the existing client
+connection fences.
+
+HTTP exposes `POST /v1/databases/<name>/read-transaction` with the existing
+transaction JSON envelope. Read authority precedes body diagnostics; a later
+Write envelope refuses the complete script before BEGIN. All statements use
+one native read owner, snapshot and cumulative signed allowance. Successful
+close returns the original basis with `committed:false`; no graph publication
+occurs. Complete response admission withholds successful-prefix results on
+late failure, and the original recovery generation fences physical output.
+The existing snapshot-admission fallback remains; this is not a universal
+nonblocking-read claim.
+
+Regression sources cover scoped read credentials, preflight refusals, read
+completion validation, cleanup, shared execution/output limits, a retained
+published snapshot while a writer is held, and success/error recovery fences.
+Changed-source formatting and independent source reviews are complete. Full
+exact-tree qualification remains open, as do the broader `fgdb-huu9`,
+`fgdb-w10-embedded-54r`, `fgdb-w10-server-rte` and `fgdb-w10-adapters-b1f` beads.
+See [the HTTP contract and examples](docs/FABRIC_PROTOCOL.md#read-only-http-transaction-scripts).
+
+### Conditional percentile and deviation summaries — qualification pending
+
+`percentileDisc`, `percentileCont`, `stDev` and `stDevP` now compose with lazy
+CASE and COALESCE through the existing aggregate value-expression owner in
+RETURN, WITH, HAVING and ORDER BY. Unselected summary applications are skipped;
+selected failures remain observable even under LIMIT 0. Grouping still admits
+and evaluates aggregate input expressions and builds their collections before
+branch selection. Invalid nested aggregates and local-input scopes still refuse.
+
+Selected COUNT, wide integer SUM and exact AVG values preserve their native
+domains. Simple CASE compares these values through the existing exact numeric
+comparison helper, without i64 narrowing or binary64 rounding. Ordinary graph
+value equality and NULL/cross-domain behavior retain their existing semantics.
+
+Regression sources cover selected/unselected failures, empty and all-NULL
+groups, parameter rebinding, HAVING and ranking, native/pipeline routes, and
+exact comparisons around 2^53, above i64, and at u64::MAX. Full exact-tree
+qualification and the broader `fgdb-fkl6u` bead remain open. See
+[the query semantics and example](docs/graph_patterns.md#conditional-percentile-and-deviation-summaries).
 
 ### Authorized transaction savepoints — qualification pending
 

@@ -854,61 +854,129 @@ fn deviation_order_expressions_collect_hidden_inputs_without_widening_rows() {
 }
 
 #[test]
-fn collected_numeric_calls_refuse_scalar_lazy_scopes_before_resolution() {
-    use std::cell::Cell;
+fn collected_numeric_calls_keep_lazy_conditions_and_fallbacks() {
+    let values = data(&[(1, Some(4)), (2, Some(8))]);
     for pipeline in [false, true] {
-        let input = if pipeline { "p" } else { "n.p" };
         let head = if pipeline {
             "MATCH (n) WITH n.p AS p RETURN count(*) AS c,collect(p) AS values"
         } else {
             "MATCH (n) RETURN count(*) AS c,collect(n.p) AS values"
         };
-        for rank in [
-            format!("CASE WHEN true THEN 0 ELSE stDev({input}) + 1 END"),
-            format!("CASE c WHEN 0 THEN 0 ELSE stDevP({input}) END"),
-            format!("CASE WHEN true THEN 0 WHEN stDev({input}) > 0 THEN 1 ELSE 2 END"),
-            format!("coalesce(0, sqrt(stDev({input})))"),
-            format!("coalesce(c, percentileDisc({input}, 0.5) + 1)"),
-            format!("CASE WHEN true THEN 0 ELSE stDev({input})[0] END"),
-            format!("CASE WHEN true THEN 0 ELSE stDev({input})[0..1] END"),
-            format!("CASE WHEN true THEN 0 ELSE 0 + values[stDev({input}) + 1] END"),
-            format!("CASE WHEN true THEN 0 ELSE size(stDev({input})) END"),
-            format!("coalesce(0, size(stDev({input})))"),
-            format!("CASE WHEN true THEN 0 ELSE size([stDev({input})]) END"),
-            format!("coalesce(0, size([{{value: stDev({input})}}]))"),
-            format!("CASE WHEN true THEN 0 ELSE size([stDev({input})][0..1]) END"),
-            format!("coalesce(0, size([stDev({input}) + 1]))"),
-        ] {
-            // Refusal belongs to preparation, even when a zero page or empty
-            // source would otherwise hide eager evaluation of an untaken arm.
-            for page in ["", " LIMIT 0"] {
-                let statement = format!("{head} ORDER BY {rank}{page}");
-                let calls = Cell::new(0);
-                let resolve = |kind: GraphSymbolKind, name: &str| {
-                    calls.set(calls.get() + 1);
-                    catalog(kind, name)
-                };
-                let failure = if pipeline {
-                    format!(
-                        "{:?}",
-                        fgdb_gql::PreparedGraphPipelineAggregateText::prepare(&statement, resolve)
-                            .expect_err("unsupported lazy collected call")
-                    )
-                } else {
-                    format!(
-                        "{:?}",
-                        PreparedGraphAggregateText::prepare(&statement, resolve)
-                            .expect_err("unsupported lazy collected call")
-                    )
-                };
-                assert!(
-                    failure
-                        .contains("collected aggregate functions outside scalar CASE and COALESCE"),
-                    "{statement}: {failure}"
-                );
-                assert_eq!(calls.get(), 0, "{statement}");
+        for selected in [false, true] {
+            let condition = !selected;
+            let first = if selected { "NULL" } else { "0" };
+            let subject_match = if selected { 3 } else { 2 };
+            for rank in [
+                format!("CASE WHEN {condition} THEN 0 ELSE stDev(true) + 1 END"),
+                format!("CASE c WHEN {subject_match} THEN 0 ELSE stDevP(true) END"),
+                format!("CASE WHEN {condition} THEN 0 WHEN stDev(true) > 0 THEN 1 ELSE 2 END"),
+                format!("coalesce({first}, sqrt(stDev(true)))"),
+                format!("coalesce({first}, percentileDisc(true, 0.5) + 1)"),
+                format!("CASE WHEN {condition} THEN 0 ELSE stDev(true)[0] END"),
+                format!("CASE WHEN {condition} THEN 0 ELSE stDev(true)[0..1] END"),
+                format!("CASE WHEN {condition} THEN 0 ELSE 0 + values[stDev(true) + 1] END"),
+                format!("CASE WHEN {condition} THEN 0 ELSE size(stDev(true)) END"),
+                format!("coalesce({first}, size(stDev(true)))"),
+                format!("CASE WHEN {condition} THEN 0 ELSE size([stDev(true)]) END"),
+                format!("coalesce({first}, size([{{value: stDev(true)}}]))"),
+                format!("CASE WHEN {condition} THEN 0 ELSE size([stDev(true)][0..1]) END"),
+                format!("coalesce({first}, size([stDev(true) + 1]))"),
+            ] {
+                // The same bad numeric call fails only when selected. A
+                // zero page still evaluates ranking, so it cannot conceal
+                // an eager call or suppress a selected-branch failure.
+                for page in ["", " LIMIT 0"] {
+                    let statement = format!("{head} ORDER BY {rank}{page}");
+                    let query = if pipeline {
+                        fgdb_gql::PreparedGraphPipelineAggregateText::prepare(&statement, catalog)
+                            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                            .bind_parameters(&GqlParameters::new())
+                            .unwrap()
+                    } else {
+                        text(&statement)
+                    };
+                    let result = execute(&query, &values, policy(), || Ok::<_, ()>(()));
+                    if selected {
+                        assert!(
+                            matches!(
+                            result,
+                            Err(GqlQueryError::Source(
+                                GraphAggregateError::OutputExpression {
+                                    error: fgdb_gql::GraphIntegerError {
+                                        kind: fgdb_gql::GraphIntegerErrorKind::IncompatibleOperands,
+                                        ..
+                                    },
+                                    ..
+                                }
+                            ))
+                        ),
+                            "{statement}: {result:?}"
+                        );
+                    } else {
+                        let rows = result
+                            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                            .value;
+                        assert_eq!(rows.len(), usize::from(page.is_empty()), "{statement}");
+                        if let Some(row) = rows.first() {
+                            assert_eq!(row.values().len(), 2);
+                            assert_eq!(row.values()[0].as_count(), Some(2));
+                            assert_eq!(
+                                row.values()[1].as_value().unwrap().as_list().unwrap().len(),
+                                2
+                            );
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+#[test]
+fn lazy_percentiles_rebind_and_filter_complete_groups() {
+    let values = data(&[(1, Some(10)), (1, Some(30)), (2, None), (3, Some(8))]);
+    let statement = "MATCH (n) RETURN n.g AS k, \
+        CASE WHEN count(n.p)=0 THEN 0 ELSE percentileCont(n.p,$quantile)*2 END AS v \
+        HAVING coalesce(percentileDisc(n.p,0.5),0)>$floor \
+        ORDER BY coalesce(percentileCont(n.p,0.5),0) DESC";
+    let template = PreparedGraphAggregateText::prepare_with_parameter_types(
+        statement,
+        &[
+            ("quantile", GqlParameterType::Int64),
+            ("floor", GqlParameterType::Int64),
+        ],
+        catalog,
+    )
+    .unwrap();
+    let frozen = template.canonical_template_bytes();
+    for (quantile, floor, expected) in [
+        (0, -1, vec![(1, 20.0), (3, 16.0), (2, 0.0)]),
+        (1, 9, vec![(1, 60.0)]),
+    ] {
+        let parameters = GqlParameters::new()
+            .with_int64("quantile", quantile)
+            .unwrap()
+            .with_int64("floor", floor)
+            .unwrap();
+        let query = template.bind_parameters(&parameters).unwrap();
+        let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap()
+            .value;
+        let observed = rows
+            .iter()
+            .map(|row| {
+                let value = match row.values()[1].as_value().unwrap().as_scalar().unwrap() {
+                    CanonicalScalar::Int(value) => {
+                        fgdb_types::CanonicalF64::from_i64_rounded(*value).get()
+                    }
+                    CanonicalScalar::Float(value) => value.get(),
+                    value => panic!("a numeric conditional result, got {value:?}"),
+                };
+                (bucket(row, 0), value)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected);
+        assert_eq!(template.canonical_template_bytes(), frozen);
     }
 }
 
@@ -929,6 +997,16 @@ fn ordinary_aggregate_conditionals_keep_exact_mean_and_wide_sum_ranks() {
         ),
         (
             "CASE WHEN count(*) > 1 THEN sum(n.p) ELSE sum(n.p) END",
+            [3, 2, 1],
+        ),
+        ("coalesce(avg(n.p), percentileDisc(true,0.5))", [3, 2, 1]),
+        ("coalesce(sum(n.p), stDev(true))", [3, 2, 1]),
+        (
+            "CASE avg(n.p) WHEN 9007199254740992 THEN 0 WHEN 9007199254740993 THEN 1 ELSE coalesce(2,stDev(true)) END",
+            [3, 2, 1],
+        ),
+        (
+            "CASE sum(n.p) WHEN sum(n.p) THEN sum(n.p) ELSE percentileDisc(true,0.5) END",
             [3, 2, 1],
         ),
     ] {
@@ -953,6 +1031,51 @@ fn ordinary_aggregate_conditionals_keep_exact_mean_and_wide_sum_ranks() {
         assert_eq!(
             wide.values()[2].as_integer(),
             Some(2 * i128::from(i64::MAX))
+        );
+    }
+}
+
+#[test]
+fn collected_lazy_arms_preserve_exact_output_having_and_order() {
+    let maximum = i64::MAX;
+    let values = data(&[
+        (1, Some(maximum)),
+        (1, Some(maximum - 2)),
+        (2, Some(maximum)),
+        (2, Some(maximum - 1)),
+    ]);
+    for threshold in [0, maximum - 1] {
+        let baseline = text(&format!(
+            "MATCH (n) RETURN n.g AS k,count(*) AS c,sum(n.p) AS s,avg(n.p) AS a \
+            HAVING avg(n.p) > {threshold} ORDER BY avg(n.p) DESC"
+        ));
+        let conditional = text(&format!(
+            "MATCH (n) RETURN n.g AS k,\
+            CASE WHEN count(*) > 1 THEN count(*) ELSE stDev(true) END AS c,\
+            coalesce(sum(n.p),percentileDisc(true,0.5)) AS s,\
+            CASE WHEN true THEN avg(n.p) ELSE percentileCont(true,0.5) END AS a \
+            HAVING CASE WHEN true THEN avg(n.p) ELSE stDev(true) END > {threshold} \
+            ORDER BY coalesce(avg(n.p),percentileCont(true,0.5)) DESC"
+        ));
+        let expected = execute(&baseline, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap()
+            .value;
+        let actual = execute(&conditional, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap()
+            .value;
+        assert_eq!(actual, expected, "threshold {threshold}");
+        assert_eq!(bucket(&actual[0], 0), 2);
+        assert_eq!(actual.len(), if threshold == 0 { 2 } else { 1 });
+        assert_eq!(actual[0].values()[1].as_count(), Some(2));
+        assert_eq!(
+            actual[0].values()[2].as_integer(),
+            Some(2 * i128::from(maximum) - 1)
+        );
+        assert_eq!(
+            actual[0].values()[3]
+                .as_average()
+                .map(|average| (average.numerator(), average.denominator())),
+            Some((2 * i128::from(maximum) - 1, 2))
         );
     }
 }

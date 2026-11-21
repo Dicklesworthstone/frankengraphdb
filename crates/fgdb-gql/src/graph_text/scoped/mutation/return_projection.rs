@@ -42,6 +42,20 @@ struct ReadValueRoute {
     endpoint: bool,
 }
 
+/// Numeric summaries evaluated from a hidden Collect need the same lazy
+/// branch ownership as composite values. Recognize calls without consuming
+/// input or registering either their summary or their argument reads.
+fn collected_aggregate_at(
+    token: Token<'_>,
+    lexer: &Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    Ok(matches!(token.kind, TokenKind::Word(word)
+        if ["PERCENTILEDISC", "PERCENTILECONT", "STDEV", "STDEVP"]
+            .iter()
+            .any(|name| word.eq_ignore_ascii_case(name)))
+        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+}
+
 impl<'a> ValueResolver<'_, 'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         match self {
@@ -2310,11 +2324,7 @@ impl<'a> Parser<'a> {
     /// A resolved scalar expression may read that function through one let
     /// slot; the graph/row scalar grammar does not acquire aggregate calls.
     pub(super) fn collected_aggregate_call(&self) -> Result<bool, GraphPatternTextError> {
-        Ok(matches!(self.current.kind, TokenKind::Word(word)
-            if ["PERCENTILEDISC", "PERCENTILECONT", "STDEV", "STDEVP"]
-                .iter()
-                .any(|name| word.eq_ignore_ascii_case(name)))
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+        collected_aggregate_at(self.current, &self.lexer)
     }
 
     /// Whether the value here is a let operand, or size(), followed by a
@@ -3098,6 +3108,12 @@ impl<'a> Parser<'a> {
             if let TokenKind::Word(word) = token.kind
                 && !property
             {
+                // The collection is an aggregate input, but applying its
+                // numeric function belongs to the reached WHEN or selected
+                // result. An outer scalar let would evaluate untaken arms.
+                if collected_aggregate_at(token, &lexer)? {
+                    return Ok(true);
+                }
                 if simple && cases == 1 && groups == 0 && word.eq_ignore_ascii_case("WHEN") {
                     let mut ahead = lexer.clone();
                     let value = ahead.next()?;
@@ -4365,8 +4381,15 @@ impl<'a> Parser<'a> {
         }
         let mut depth = 1_usize;
         let mut first = true;
+        let mut property = false;
         loop {
             let token = lexer.next()?;
+            // COALESCE evaluates its arguments left to right. In particular,
+            // a failing percentile/deviation in a later argument must not be
+            // evaluated after an earlier non-NULL value already won.
+            if !property && collected_aggregate_at(token, &lexer)? {
+                return Ok(true);
+            }
             // As for CASE, a local may be an element or collection. Its
             // value/property reads must be evaluated in this argument's
             // scope, after earlier non-NULL arguments have been considered.
@@ -4441,6 +4464,7 @@ impl<'a> Parser<'a> {
                 TokenKind::End => return Ok(false),
                 _ => {}
             }
+            property = matches!(token.kind, TokenKind::Punct(b'.'));
         }
     }
 

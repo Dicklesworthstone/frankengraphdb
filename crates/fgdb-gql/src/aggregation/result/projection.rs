@@ -453,10 +453,38 @@ fn expression<'g>(
         // Three-valued equality with the row evaluator's law (fgdb-9cawv).
         GraphSetValue::Equal { left, right } => {
             let left = expression(left, input, column, control)?.into_owned(control)?;
-            let left = graph_value(left, column)?;
             let right = expression(right, input, column, control)?.into_owned(control)?;
-            let right = graph_value(right, column)?;
-            let truth = crate::set_ops::evaluate_equality(&left, &right, control)?;
+            let truth = if !matches!(left, GraphAggregateValue::Value(_))
+                || !matches!(right, GraphAggregateValue::Value(_))
+            {
+                // A simple CASE can reach this value-language comparison
+                // when a different arm contains a percentile. Its selector
+                // still owns the exact count, wide sum or average: narrowing
+                // to i64 or rounding to binary64 can change the selected arm.
+                let left = result_cell(&left);
+                let right = result_cell(&right);
+                control(GlaExecutionEvent::Work)?;
+                for cell in [left, right] {
+                    for _ in 0..cell.payload_units() {
+                        control(GlaExecutionEvent::Work)?;
+                    }
+                }
+                if left.is_null() || right.is_null() {
+                    None
+                } else if let Some(order) = left.numeric_comparison(right) {
+                    Some(order == Ordering::Equal)
+                } else if left.not_a_number() || right.not_a_number() {
+                    Some(false)
+                } else {
+                    // The scalar predicate law leaves a Decimal compared
+                    // with a different numeric domain UNKNOWN.
+                    None
+                }
+            } else {
+                let left = graph_value(left, column)?;
+                let right = graph_value(right, column)?;
+                crate::set_ops::evaluate_equality(&left, &right, control)?
+            };
             control(GlaExecutionEvent::ScratchEntry)?;
             OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
                 truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
@@ -1516,6 +1544,85 @@ mod incremental_row_tests {
             query
                 .incremental_row(vec![null], vec![GraphAggregateValue::Count(1)])
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn value_case_compares_and_returns_wide_aggregate_cells_exactly() {
+        let source = shape(&[], None);
+        let cells = vec![
+            GraphAggregateValue::Count(u64::MAX),
+            GraphAggregateValue::Integer(2 * i128::from(i64::MAX)),
+            GraphAggregateValue::Average(GraphExactAverage::new(9_007_199_254_740_993, 1).unwrap()),
+        ];
+        let row = source.incremental_row(Vec::new(), cells.clone()).unwrap();
+        let scalar = |value| GraphSetValue::Value(GraphValue::Scalar(value));
+        let equal = |left, right| GraphSetValue::Equal {
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let mut projection = (0..3)
+            .map(|column| {
+                crate::GraphSetProjection::new(
+                    format!("selected_{column}"),
+                    GraphSetValue::Case {
+                        arms: vec![(
+                            equal(GraphSetValue::Column(column), GraphSetValue::Column(column)),
+                            GraphSetValue::Column(column),
+                        )],
+                        otherwise: Some(Box::new(scalar(CanonicalScalar::Null))),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        for (name, left, right) in [
+            (
+                "unequal_wide",
+                GraphSetValue::Column(0),
+                GraphSetValue::Column(1),
+            ),
+            (
+                "rounded_average",
+                GraphSetValue::Column(2),
+                scalar(CanonicalScalar::Int(9_007_199_254_740_992)),
+            ),
+            (
+                "exact_average",
+                GraphSetValue::Column(2),
+                scalar(CanonicalScalar::Int(9_007_199_254_740_993)),
+            ),
+            (
+                "null",
+                GraphSetValue::Column(0),
+                scalar(CanonicalScalar::Null),
+            ),
+            (
+                "other_domain",
+                GraphSetValue::Column(1),
+                scalar(CanonicalScalar::Bool(true)),
+            ),
+        ] {
+            projection.push(crate::GraphSetProjection::new(name, equal(left, right)));
+        }
+        let query = source.with_output_projection(projection).unwrap();
+        let output = query
+            .project_incremental_output(&row, &mut |_| Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(&output.values()[..3], cells.as_slice());
+        let comparisons = output.values()[3..]
+            .iter()
+            .map(|value| value.as_value().unwrap().as_scalar().unwrap().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            comparisons,
+            [
+                CanonicalScalar::Bool(false),
+                CanonicalScalar::Bool(false),
+                CanonicalScalar::Bool(true),
+                CanonicalScalar::Null,
+                CanonicalScalar::Bool(false),
+            ]
         );
     }
 

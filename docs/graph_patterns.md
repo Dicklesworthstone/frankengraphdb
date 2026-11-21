@@ -393,6 +393,34 @@ and MERGE point-projection laws, and the CLI and FGP loopback suites. These
 additions have source review and pinned formatter checks here; compilation
 and Rust test execution remain **unverified** in this workspace.
 
+## Conditional percentile and deviation summaries
+
+`percentileDisc`, `percentileCont`, `stDev` and `stDevP` compose with searched
+and simple `CASE` and with `COALESCE` in aggregate `RETURN`, `WITH`, `HAVING`
+and `ORDER BY` expressions. For example:
+
+```text
+MATCH (n:Person)
+RETURN n.team AS team,
+       coalesce(percentileCont(n.score, 0.5), 0) AS median,
+       CASE WHEN count(n.score) < 2 THEN 0 ELSE stDev(n.score) END AS deviation
+ORDER BY median DESC, team
+```
+
+`CASE` evaluates conditions until one is true and then evaluates that result;
+`COALESCE` stops at its first non-NULL result. A percentile or deviation
+application in an unselected branch is not evaluated. Selected ordinary
+`COUNT`, `SUM` and `AVG` results retain their native count, wide integer and
+exact average domains. Simple `CASE` compares those numeric selectors without
+narrowing a wide sum or rounding an exact average to binary64.
+
+This branch selection happens after grouping. Aggregate input expressions are
+still admitted and evaluated for their input rows, and the input collections
+are built before selecting an output branch. A dead branch cannot hide an
+invalid aggregate scope, nested aggregate, unknown name, or failure in an
+aggregate's input expression. Errors in a selected summary application remain
+errors, including in a ranking expression when `LIMIT 0` returns no rows.
+
 ## UNION column semantics
 
 Text `UNION` operands must expose the same column names. Reordered names are
