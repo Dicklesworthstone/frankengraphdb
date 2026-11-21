@@ -11,8 +11,8 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphElementMetadata, GraphSymbol, GraphSymbolKind,
-    PreparedGraphSet, PreparedGraphText, PreparedGraphWriteChain, PreparedGraphWriteChainText,
-    ReverseSymbolCatalog,
+    PreparedGraphSet, PreparedGraphText, PreparedGraphTransactionControl, PreparedGraphWriteChain,
+    PreparedGraphWriteChainText, ReverseSymbolCatalog,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts,
@@ -2030,5 +2030,460 @@ fn canonical_parameter_bytes_accumulate_and_refusal_aborts_the_unpublished_prefi
         assert!(db.vertices().unwrap().is_empty());
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+fn savepoint_control(text: &str) -> PreparedGraphTransactionControl {
+    PreparedGraphTransactionControl::prepare(text)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn savepoints_restore_deleted_metadata_nested_prefixes_and_one_atomic_commit() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 20, || NOW)
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("CREATE (a:Visible {p:1})-[:R]->(b:Visible {p:2})"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("SAVEPOINT kept"),
+                |rows, _, _| {
+                    assert!(rows.is_empty());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("MATCH (n:Visible {p:1}) DETACH DELETE n"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("SAVEPOINT younger"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("CREATE (:Visible {p:3})"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("ROLLBACK TO kept"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .read(
+                &mut db,
+                query,
+                &read("MATCH (n:Visible) RETURN n ORDER BY n.p"),
+                |rows, _, output| {
+                    assert_eq!(rows.len(), 2);
+                    for (row, expected) in rows.iter().zip([1, 2]) {
+                        let [GraphValue::Vertex(vertex)] = row.values() else {
+                            panic!("vertex result")
+                        };
+                        assert_eq!(
+                            output.metadata(
+                                ElementId::Vertex(*vertex),
+                                GraphElementMetadata::Properties,
+                                &names()
+                            )?,
+                            Some(GraphValue::map(vec![("p".into(), integer(expected))]).unwrap())
+                        );
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        // Releasing a shadowing name reveals the older saved prefix.
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("SAVEPOINT kept"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("MATCH (n:Visible {p:1}) SET n.p=10"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("RELEASE kept"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("ROLLBACK TO kept"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("MATCH (n:Visible {p:1}) SET n.p=9"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        assert!(db.vertices().unwrap().is_empty());
+        assert!(matches!(owner.commit(&mut db).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq } if commit_seq.0 == 1));
+        let vertices = db.vertices().unwrap();
+        assert_eq!(vertices.len(), 2);
+        for expected in [2, 9] {
+            assert!(vertices.iter().any(|vertex| {
+                vertex
+                    .props
+                    .contains(&(P, CanonicalScalar::Int(expected).into()))
+            }));
+        }
+        assert_eq!(db.edges().unwrap().len(), 1);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn savepoint_controls_preserve_successful_write_classification_and_consumed_limits() {
+    run(async |commit, query, txn| {
+        for written in [false, true] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::Write), NOW).unwrap();
+            let mut owner = db
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+                .unwrap();
+            owner
+                .control(
+                    &mut db,
+                    query,
+                    &savepoint_control("SAVEPOINT empty"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            if written {
+                owner
+                    .stage_chain(
+                        &mut db,
+                        query,
+                        &chain("CREATE (:Visible {p:1})"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
+            }
+            owner
+                .control(
+                    &mut db,
+                    query,
+                    &savepoint_control("ROLLBACK TO empty"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            owner
+                .control(
+                    &mut db,
+                    query,
+                    &savepoint_control("RELEASE empty"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            let completion = owner.commit(&mut db).await.unwrap();
+            assert_eq!(
+                matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }),
+                written
+            );
+            assert_eq!(db.frontier().unwrap().0, u64::from(written));
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        for statement_limit in [3, 10] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::Write), NOW).unwrap();
+            let bounded = GraphInsertPolicy::new(policy().query, 1, 100).with_mutation_limit(100);
+            let mut owner = db
+                .begin_authorized_write(
+                    txn,
+                    commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    bounded,
+                    statement_limit,
+                    || NOW,
+                )
+                .unwrap();
+            owner
+                .control(
+                    &mut db,
+                    query,
+                    &savepoint_control("SAVEPOINT empty"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            owner
+                .stage_chain(
+                    &mut db,
+                    query,
+                    &chain("CREATE (:Visible {p:1})"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            let used = owner.statistics().unwrap();
+            owner
+                .control(
+                    &mut db,
+                    query,
+                    &savepoint_control("ROLLBACK TO empty"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            let restored = owner.statistics().unwrap();
+            assert_eq!(restored.created_vertices, 1);
+            assert_eq!(restored.completed_statements, 3);
+            assert!(restored.evaluator.work_units > used.evaluator.work_units);
+            assert!(restored.evaluator.scratch_entries >= used.evaluator.scratch_entries);
+            assert!(
+                owner
+                    .stage_chain(
+                        &mut db,
+                        query,
+                        &chain("CREATE (:Visible {p:2})"),
+                        |_, _, _| Ok(())
+                    )
+                    .is_err()
+            );
+            assert!(!owner.is_active());
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap().0, 0);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn savepoint_controls_abort_unknown_names_stale_bases_and_late_authority_failures() {
+    run(async |commit, query, txn| {
+        for failure in 0..5 {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+            let now = AtomicU64::new(NOW);
+            let mut owner = db
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || {
+                    now.load(Ordering::Relaxed)
+                })
+                .unwrap();
+            owner
+                .stage_chain(
+                    &mut db,
+                    query,
+                    &chain("CREATE (:Visible {p:1})"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            if failure == 1 {
+                let mut winner = WriteBatch::new(R);
+                winner.create_vertex(VId(99), vec![L], vec![(P, CanonicalScalar::Int(99))]);
+                db.write(commit, winner).await.unwrap();
+            }
+            let control = savepoint_control(if failure == 0 {
+                "ROLLBACK TO absent"
+            } else {
+                "SAVEPOINT kept"
+            });
+            let mut admitted = false;
+            let error = owner
+                .control(&mut db, query, &control, |_, work, _| {
+                    admitted = true;
+                    match failure {
+                        2 => now.store(1001, Ordering::Relaxed),
+                        3 => issuer.retire(),
+                        4 => {
+                            let _ = work(u64::MAX);
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })
+                .unwrap_err();
+            assert_eq!(admitted, failure >= 2);
+            assert!(has_error(&error, |error| match failure {
+                0 => matches!(error, WriteTxnError::UnknownSavepoint),
+                1 => matches!(error, WriteTxnError::SnapshotAdvanced { .. }),
+                2 | 3 => matches!(error, WriteTxnError::Authorization(_)),
+                _ => matches!(error, WriteTxnError::AuthorizedMutationRefused),
+            }));
+            assert!(!owner.is_active());
+            assert_eq!(db.vertices().unwrap().len(), usize::from(failure == 1));
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn savepoint_rollback_keeps_read_witnesses_until_native_commit_validation() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+        db.write(commit, seed).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("SAVEPOINT before"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .read(
+                &mut db,
+                query,
+                &read("MATCH (n:Visible) RETURN n.p AS p"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("MATCH (n:Visible {p:7}) SET n.p=7"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("ROLLBACK TO before"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        let mut winner = WriteBatch::new(R);
+        winner.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(8)));
+        let frontier = db.write(commit, winner).await.unwrap();
+        // Go directly to commit so stale statement admission cannot hide a
+        // lost witness in the restored empty overlay.
+        assert!(matches!(
+            owner.commit(&mut db).await.unwrap_err(),
+            WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins {
+                law: "FG-LAW-FCW-READ-01",
+                ..
+            })
+        ));
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(
+            db.vertices().unwrap()[0].props,
+            vec![(P, CanonicalScalar::Int(8).into())]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn savepoint_controls_check_cancellation_after_empty_output_admission() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    run(async |commit, query, txn| {
+        let mut output_checkpoint = None;
+        for interrupt in [false, true] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::Write), NOW).unwrap();
+            let mut owner = db
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+                .unwrap();
+            owner
+                .stage_chain(
+                    &mut db,
+                    query,
+                    &chain("CREATE (:Visible {p:1})"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            let stop = if interrupt {
+                Some(output_checkpoint.unwrap() + 1)
+            } else {
+                None
+            };
+            let probe = Arc::new(SimulationCheckpointProbe::new(stop));
+            let checked = query.with_checkpoint_probe(Arc::clone(&probe));
+            let mut admitted = false;
+            let result = owner.control(
+                &mut db,
+                &checked,
+                &savepoint_control("SAVEPOINT kept"),
+                |rows, _, _| {
+                    assert!(rows.is_empty());
+                    admitted = true;
+                    if !interrupt {
+                        output_checkpoint = Some(probe.calls());
+                    }
+                    Ok(())
+                },
+            );
+            assert!(admitted);
+            if interrupt {
+                assert!(has_error(&result.unwrap_err(), |error| matches!(
+                    error,
+                    WriteTxnError::Interrupted(_)
+                )));
+                assert!(!owner.is_active());
+                assert!(matches!(
+                    owner.commit(&mut db).await,
+                    Err(WriteTxnError::Finished)
+                ));
+            } else {
+                result.unwrap();
+                assert!(probe.calls() > output_checkpoint.unwrap());
+                owner.rollback();
+            }
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap().0, 0);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
     });
 }

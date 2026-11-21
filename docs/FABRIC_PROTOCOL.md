@@ -250,6 +250,39 @@ A read-only owner accepts only `ReadClosed`; even an otherwise well-formed
 `WriteCommitted` response poisons that request and requires reconnecting.
 A handle is local to one connection and grants no authority on another one.
 
+The same active write owner accepts savepoint controls through ordinary
+EXECUTE_TRANSACTION Write statements, with no parameters or new frame tag:
+`SAVEPOINT name`, `ROLLBACK TO [SAVEPOINT] name`, and
+`RELEASE [SAVEPOINT] name`. The Rust helpers `create_savepoint`,
+`rollback_to_savepoint`, and `release_savepoint` send exactly those existing
+envelopes and validate an empty provisional result. They do not begin, commit,
+retry or replay a transaction. A server without this statement profile refuses
+the syntax; the client does not fall back to a separate transaction.
+
+Names are case-sensitive, nonempty native identifiers of at most 128 UTF-8
+bytes. Backticks delimit spaces and keywords; embedded backticks and control
+characters are refused. Up to 64 savepoints may be live in the native owner.
+Reusing a name shadows its older savepoint. Rollback restores the newest
+matching prefix, retains that target and discards younger savepoints. Release
+discards the newest matching target and all younger savepoints while retaining
+the staged effects; an older same-name target becomes visible again.
+
+Only graph effects and the live savepoint stack rewind. Allocated identities,
+read/conflict witnesses, consumed capability/native allowances and successful
+statement ordinals remain cumulative. Earlier delivered rows remain provisional
+observations and are not retracted. Controls alone close as ReadClosed. Once a
+graph write succeeds, even rollback of every effect retains WriteCommitted
+classification at the single native completion. Unknown names, malformed
+controls, stale bases, authority/cancellation failures or rejected output abort
+the entire owner. Savepoints cannot recover an already failed transaction.
+
+HTTP transaction batches and Bolt explicit write transactions use this same
+typed parser and authorized native owner. A Read envelope or read-only owner
+cannot execute a control; autocommit does not create an implicit savepoint
+workspace. The CLI uses unchanged `mode:"write"` records and preflights the
+complete name stack before credentials. Its output keeps the ordinary empty
+provisional statement records and final transaction receipt.
+
 The client blocks unrelated business requests and authority refresh while an
 explicit owner is active. Local mode/value/frame admission failures send
 nothing and preserve the owner. Definite execution refusals discard it.

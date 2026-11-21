@@ -12,6 +12,38 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Authorized transaction savepoints — qualification pending
+
+The existing explicit authorized write owner now accepts typed SAVEPOINT,
+ROLLBACK TO [SAVEPOINT], and RELEASE [SAVEPOINT] controls. FGP Write envelopes,
+HTTP transaction batches, and Bolt explicit write transactions use the same
+bounded parser and native workspace. Rust SDK helpers and remote CLI statement
+files expose those controls without new protocol tags or a separate commit
+path; CLI preflight validates modes, parameters and the case-sensitive stack.
+
+Rollback restores the prepared overlay and the chain-retirement journal,
+including revived vertex/edge metadata. Graph effects and the live savepoint
+stack rewind; identity reservations, consumed allowances, successful statement
+ordinals and read/conflict witnesses remain cumulative. Controls alone retain
+ReadClosed completion. A successful graph write retains WriteCommitted
+classification even if all its effects are later rolled back. Any failed
+authorized control aborts the complete unpublished owner.
+
+Regression sources cover nested/shadowed names, release, restored deletions
+and metadata, conflict witnesses, zero-effect completion, non-refunded limits,
+expiry/retirement/cancellation and rejected output, plus parser, SDK wire,
+FGP/HTTP/Bolt and fragmented CLI transport behavior. Provisional rows delivered
+before rollback remain observations; this does not add durable transaction
+leases, reattachment, retries or recovery of an already failed owner.
+
+Independent source review found no remaining blocker. All sixteen changed Rust
+files, including the merged COUNT/savepoint exports, were parsed and formatted
+with pinned Rustfmt; whitespace checks passed. Compilation, runtime assertions,
+Clippy/UBS and full exact-tree proof remain **UNRUN** for this increment under
+the interrupted executor/foundation-build environment. Progress is recorded
+against open `fgdb-w10-embedded-54r`, `fgdb-w10-server-rte` and `fgdb-huu9`;
+none is closed by this slice.
+
 ### Lazy post-seal native property reads — qualification pending
 
 Native durable-run readers now retain admitted suffix topology, original root

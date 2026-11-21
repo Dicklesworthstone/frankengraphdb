@@ -8,6 +8,7 @@ struct EmbeddedSavepoint {
     staged_len: usize,
     prepared: Option<std::sync::Arc<PreparedWrite>>,
     prepared_source_ordered: bool,
+    chain_retirements_len: Option<usize>,
 }
 
 impl WriteTxn {
@@ -37,6 +38,10 @@ impl WriteTxn {
             staged_len: self.staged.len(),
             prepared: self.prepared.clone(),
             prepared_source_ordered: self.prepared_source_ordered,
+            chain_retirements_len: self
+                .chain_retirements
+                .as_ref()
+                .map(|retired| retired.journal.len()),
         };
         self.savepoints.push(saved);
         Ok(())
@@ -74,6 +79,15 @@ impl WriteTxn {
         let appended = self.staged.len() > staged_len;
         let discarded = core::mem::replace(&mut self.prepared, restored);
         self.prepared_source_ordered = self.savepoints[index].prepared_source_ordered;
+        // The authorized multi-statement owner retains this ledger between
+        // calls. Restore it with the overlay so rolled-back deletions cannot
+        // hide revived vertices/edges or poison later metadata reads.
+        if let (Some(retired), Some(len)) = (
+            &mut self.chain_retirements,
+            self.savepoints[index].chain_retirements_len,
+        ) {
+            retired.truncate(len);
+        }
         self.truncate_staged(staged_len);
         self.savepoints.truncate(index + 1);
         if appended && let Some(prepared) = discarded {

@@ -2350,3 +2350,96 @@ fn bolt_explicit_hybrid_reads_track_the_staged_graph_and_rollback() {
         finish(cx, shutdown, serving).await;
     });
 }
+
+#[test]
+fn bolt_savepoints_restore_hydrated_graphs_and_refuse_unknown_names_atomically() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "explicit-savepoints").await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        for query in [
+            "CREATE (a:Person {age:1})-[:KNOWS]->(b:Person {age:2})",
+            "SAVEPOINT kept",
+            "MATCH (n:Person {age:1}) DETACH DELETE n",
+            "ROLLBACK TO SAVEPOINT kept",
+            "RELEASE SAVEPOINT kept",
+        ] {
+            client
+                .expect(0x10, request(query, vec![], vec![]), SUCCESS)
+                .await;
+            let (rows, summary) = client.pull_all().await;
+            assert!(rows.is_empty());
+            assert_eq!(
+                get(&summary, "fgdb_transaction_local"),
+                Some(&Value::Bool(true))
+            );
+            assert!(get(&summary, "bookmark").is_none());
+        }
+        client
+            .expect(
+                0x10,
+                request("MATCH (n:Person) RETURN n ORDER BY n.age", vec![], vec![]),
+                SUCCESS,
+            )
+            .await;
+        let (rows, _) = client.pull_all().await;
+        assert_eq!(rows.len(), 2);
+        for (row, age) in rows.iter().zip([1, 2]) {
+            assert_eq!(get(node_properties(&row[0]), "age"), Some(&Value::Int(age)));
+        }
+        let read = "MATCH (n:Person) RETURN n.age AS age ORDER BY age";
+        assert!(
+            observer
+                .execute(cx, ExecuteMode::Read, read, vec![])
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        let completion = client.expect(0x12, vec![], SUCCESS).await;
+        assert_eq!(
+            get(&completion, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        let expected = vec![vec![WireValue::Int(1)], vec![WireValue::Int(2)]];
+        assert_eq!(
+            observer
+                .execute(cx, ExecuteMode::Read, read, vec![])
+                .await
+                .unwrap()
+                .rows,
+            expected
+        );
+
+        client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request("CREATE (:Person {age:99})", vec![], vec![]),
+                SUCCESS,
+            )
+            .await;
+        client.pull_all().await;
+        client
+            .expect(0x10, request("RELEASE absent", vec![], vec![]), FAILURE)
+            .await;
+        client.expect(0x12, vec![], IGNORED).await;
+        client.expect(0x0f, vec![], SUCCESS).await;
+        assert_eq!(
+            observer
+                .execute(cx, ExecuteMode::Read, read, vec![])
+                .await
+                .unwrap()
+                .rows,
+            expected
+        );
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+        observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}

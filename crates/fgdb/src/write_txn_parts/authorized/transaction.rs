@@ -10,8 +10,9 @@ use super::{
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertStats};
 use fgdb_gql::{
-    GqlParameters, GqlQueryExecution, GqlQueryPolicy, GraphWriteProgramStats, PreparedGraphSet,
-    PreparedGraphWriteChain,
+    GlaLimitDimension, GlaLimitExceeded, GqlParameters, GqlQueryExecution, GqlQueryPolicy,
+    GraphSavepointOperation, GraphWriteProgramStats, PreparedGraphSet,
+    PreparedGraphTransactionControl, PreparedGraphWriteChain,
 };
 use fgdb_types::{CommitSeq, EmbeddedTxnCompletion, QueryCx};
 use fgdb_warden::{ExecutionPermit, PlannerPredicates, WriteAccess};
@@ -77,6 +78,7 @@ pub struct AuthorizedWriteTransaction<'issuer, Clock> {
     max_statements: usize,
     completed_statements: usize,
     delivered_rows: u64,
+    executed_write: bool,
 }
 
 impl<Clock> core::fmt::Debug for AuthorizedWriteTransaction<'_, Clock> {
@@ -138,6 +140,7 @@ impl<V: Vfs + Clone> Database<V> {
                 max_statements,
                 completed_statements: 0,
                 delivered_rows: 0,
+                executed_write: false,
             })
         })
     }
@@ -366,8 +369,116 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         })?;
         self.delivered_rows = self.delivered_rows.saturating_add(result.rows.result_rows);
         self.completed_statements += 1;
+        self.executed_write = true;
         self.state = Some(IdleState::leave(state));
         Ok(result)
+    }
+
+    /// Apply a typed savepoint control to this same unpublished workspace.
+    ///
+    /// Only effects and the live savepoint stack rewind. Consumed native and
+    /// signed allowances, statement ordinals, identity reservations and every
+    /// read/conflict witness remain cumulative. Controls require the retained
+    /// Write authority but do not require Read authority or create a write.
+    ///
+    /// The checked output is empty and provisional. An unknown name, stale
+    /// basis, output refusal, expired authority or cancellation aborts the
+    /// entire owner, exactly as for a failed graph statement.
+    pub fn control<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        query_cx: &QueryCx,
+        control: &PreparedGraphTransactionControl,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<(), chain::Fault> {
+        let idle = self
+            .state
+            .take()
+            .ok_or_else(|| chain::source(WriteTxnError::Finished))?;
+        let mut state = idle.enter(&self.cx);
+        let policy = self.statement_policy();
+        self.cx.with_restriction(|| {
+            self.admit_statement(&mut state, database, query_cx)
+                .map_err(chain::source)?;
+            let transaction = state.workspace.transaction();
+            // Charge the bounded name/stack traversal before touching it.
+            // Rollback also visits the discarded staging and retirement
+            // journals. Neither this work nor retained scratch is refunded.
+            let mut units = control.name().len() as u128 + 1;
+            if control.operation() != GraphSavepointOperation::Save {
+                units += transaction.savepoints.len() as u128 * 128;
+            }
+            if control.operation() == GraphSavepointOperation::RollbackTo {
+                units += transaction.staged.len() as u128
+                    + transaction
+                        .chain_retirements
+                        .as_ref()
+                        .map_or(0, |retired| retired.journal.len()) as u128;
+            }
+            let work = u128::from(state.used.evaluator.work_units) + units;
+            let scratch = u128::from(state.used.evaluator.scratch_entries)
+                + u128::from(control.operation() == GraphSavepointOperation::Save);
+            for (observed, limit, dimension) in [
+                (
+                    work,
+                    policy.query.evaluator.max_work_units,
+                    GlaLimitDimension::WorkUnits,
+                ),
+                (
+                    scratch,
+                    policy.query.evaluator.max_scratch_entries,
+                    GlaLimitDimension::ScratchEntries,
+                ),
+            ] {
+                if observed > u128::from(limit) {
+                    return Err(chain::source(WriteTxnError::OutputLimit(
+                        GlaLimitExceeded {
+                            dimension,
+                            limit,
+                            observed,
+                        },
+                    )));
+                }
+            }
+            state.execution.work(units as u64).map_err(chain::source)?;
+            state.used.evaluator.work_units = work as u64;
+            state.used.evaluator.scratch_entries = scratch as u64;
+            match control.operation() {
+                GraphSavepointOperation::Save => transaction.savepoint(database, control.name()),
+                GraphSavepointOperation::RollbackTo => {
+                    transaction.rollback_to_savepoint(database, control.name())
+                }
+                GraphSavepointOperation::Release => {
+                    transaction.release_savepoint(database, control.name())
+                }
+            }
+            .map_err(chain::source)?;
+            let mut result = GqlQueryExecution {
+                value: Vec::<GraphValueRow>::new(),
+                rows: state.used.selection,
+                evaluator: state.used.evaluator,
+            };
+            super::output::admit_output(
+                transaction,
+                database,
+                query_cx,
+                &self.scope,
+                &mut state.execution,
+                policy.query,
+                &mut result,
+                admit,
+            )
+            .map_err(chain::source)?;
+            state.used.evaluator = result.evaluator;
+            Self::finish_statement(&mut state, query_cx).map_err(chain::source)
+        })?;
+        self.completed_statements += 1;
+        self.state = Some(IdleState::leave(state));
+        Ok(())
     }
 
     /// Execute a standalone prepared read over the same authorized transaction
@@ -457,7 +568,8 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
     /// Publish once through the canonical native completion owner.
     /// A successful write statement takes the write terminal path even if it
     /// matched no rows or produced no effects. Only an exclusively read-only
-    /// transaction returns ReadClosed.
+    /// transaction returns ReadClosed. Savepoint controls alone are read-only;
+    /// rolling back successful graph writes does not erase their classification.
     /// Live authority and cancellation are checked by the native completion
     /// checkpoints before publication. Semantic conflict/unknown outcomes keep
     /// their native meaning; this method never retries or replays statements.
@@ -471,6 +583,12 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
             .with_restriction_async(async {
                 state.workspace.transaction().ensure_database(database)?;
                 state.execution.checkpoint()?;
+                if self.executed_write {
+                    state
+                        .workspace
+                        .transaction()
+                        .retain_write_classification(database)?;
+                }
                 state.execution.bind_decision(state.workspace.transaction());
                 state
                     .workspace

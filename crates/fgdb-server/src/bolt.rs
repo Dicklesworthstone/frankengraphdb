@@ -870,7 +870,7 @@ impl<'s> Connection<'s> {
                 Failure::from_refusal(crate::execute::write_refusal(&error))
             })?;
         let columns = statement.columns();
-        let is_write = matches!(&statement, TransactionStatement::Write(_));
+        let is_write = statement.requires_write();
         if is_write && request_read_only {
             return Err(read_only());
         }
@@ -999,6 +999,15 @@ impl<'s> Connection<'s> {
                     )
                 })
                 .map(|_| ()),
+            TransactionStatement::Control(control) => {
+                owner.control(&mut guard, &query_cx, control, |rows, work, metadata| {
+                    collect(
+                        crate::execute::graph_output_rows(columns, rows, work),
+                        work,
+                        metadata,
+                    )
+                })
+            }
             TransactionStatement::Write(statement) => owner
                 .stage_chain(&mut guard, &query_cx, statement, |rows, work, metadata| {
                     collect(

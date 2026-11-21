@@ -14,7 +14,7 @@ use fgdb_gql::{
     GqlMapArgumentText, GqlParameters, GqlTextOffsets, GraphAggregateTextSlot, GraphSymbol,
     GraphSymbolKind, GraphSymbolResolver, PreparedGraphAggregateText,
     PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate, PreparedGraphSetText,
-    PreparedGraphWriteChainText, ReverseSymbolCatalog,
+    PreparedGraphTransactionControl, PreparedGraphWriteChainText, ReverseSymbolCatalog,
 };
 use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteMode, Outcome};
 use fgdb_types::{CommitSeq, EmbeddedTxnCompletion, PurposeContexts};
@@ -151,8 +151,7 @@ impl<'s> NativeWriteTransaction<'s> {
                 }
                 write_refusal(&error)
             })?;
-        if request.mode == ExecuteMode::Read && matches!(&statement, TransactionStatement::Write(_))
-        {
+        if request.mode == ExecuteMode::Read && statement.requires_write() {
             return Err(Refusal::new(
                 ErrorCode::PermissionDenied,
                 "a Read request cannot execute a write in an explicit transaction",
@@ -196,6 +195,16 @@ impl<'s> NativeWriteTransaction<'s> {
                     ))
                 })
                 .map(|_| ()),
+            TransactionStatement::Control(control) => {
+                owner.control(&mut guard, &query, control, |rows, work, _| {
+                    collect(edge_upsert_output::collect_with_frame_budget(
+                        &columns,
+                        rows,
+                        work,
+                        Some(frame_budget),
+                    ))
+                })
+            }
             TransactionStatement::Write(statement) => owner
                 .stage_chain(&mut guard, &query, statement, |rows, work, _| {
                     collect(edge_upsert_output::collect_with_frame_budget(
@@ -293,14 +302,20 @@ pub(crate) enum TransactionStatement {
         slots: Vec<GraphAggregateTextSlot>,
     },
     Write(Box<fgdb_gql::PreparedGraphWriteChain>),
+    Control(PreparedGraphTransactionControl),
 }
 
 impl TransactionStatement {
+    pub(crate) fn requires_write(&self) -> bool {
+        matches!(self, Self::Write(_) | Self::Control(_))
+    }
+
     pub(crate) fn columns(&self) -> &[String] {
         match self {
             Self::Read(statement) => statement.columns(),
             Self::Aggregate { columns, .. } => columns,
             Self::Write(statement) => statement.columns(),
+            Self::Control(_) => &[],
         }
     }
 }
@@ -458,6 +473,18 @@ pub(crate) fn prepare_transaction_statement(
     let catalog = TransactionCatalog::new(symbols, scope, work);
     let charge = |units| catalog.charge(units).map_err(|error| write_refusal(&error));
     charge(1)?;
+    if let Some(control) = PreparedGraphTransactionControl::prepare(text)
+        .map_err(|error| transaction_statement_error(None, error))?
+    {
+        if parameters.parameter_types().next().is_some() {
+            return Err(Refusal::new(
+                ErrorCode::Statement,
+                "savepoint controls do not accept parameters",
+            ));
+        }
+        catalog.check()?;
+        return Ok(TransactionStatement::Control(control));
+    }
     let lowered_read = GqlMapArgumentText::lower_fields(text, parameters);
     let (read_text, read_parameters) = lowered_read
         .as_ref()

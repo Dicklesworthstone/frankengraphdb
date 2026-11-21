@@ -171,9 +171,10 @@ pub use evidence_page::{
 };
 pub use graph_text::{
     GqlMapArgumentError, GqlMapArgumentText, GqlRefusalClass, GqlTextOffsets,
-    GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol,
-    GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
-    PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog, reads_element_identity,
+    GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind,
+    GraphSavepointOperation, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+    MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS, PreparedGraphAggregateText, PreparedGraphText,
+    PreparedGraphTransactionControl, ReverseSymbolCatalog, reads_element_identity,
     starts_fnx_graph_projection, statement_time_required,
 };
 pub use identified::IdentifiedNeighbors;

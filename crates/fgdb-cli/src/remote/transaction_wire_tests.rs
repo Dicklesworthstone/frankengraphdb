@@ -12,8 +12,7 @@ const BASIS: u64 = 7;
 const WRITE_QUERY: &str = "CREATE (:Person {name:$name}) RETURN $name AS name";
 
 fn admitted(input: &str) -> TransactionScript {
-    TransactionScript::parse(input, || Ok(()))
-        .unwrap_or_else(|error| panic!("{}", error.message))
+    TransactionScript::parse(input, || Ok(())).unwrap_or_else(|error| panic!("{}", error.message))
 }
 
 fn mixed() -> TransactionScript {
@@ -346,7 +345,11 @@ fn late_statement_failure_never_commits_or_retries_a_provisional_prefix() {
             assert!(!error.message.contains("rolled back"));
             let output = String::from_utf8(out.bytes).unwrap();
             assert_eq!(output.lines().count(), 4);
-            assert!(output.lines().all(|line| line.contains(r#""provisional":true"#)));
+            assert!(
+                output
+                    .lines()
+                    .all(|line| line.contains(r#""provisional":true"#))
+            );
             assert!(!output.contains(r#""event":"result""#));
             assert_submission(&sent_frames(&written.lock().unwrap()), 2, 0);
         }
@@ -459,7 +462,11 @@ fn missing_or_unknown_commit_keeps_provisional_rows_without_success_or_replay() 
             assert!(!error.message.contains("rolled back"));
             let output = String::from_utf8(out.bytes).unwrap();
             assert_eq!(output.lines().count(), 2);
-            assert!(output.lines().all(|line| line.contains(r#""provisional":true"#)));
+            assert!(
+                output
+                    .lines()
+                    .all(|line| line.contains(r#""provisional":true"#))
+            );
             assert!(!output.contains(r#""event":"result""#));
             let frames = sent_frames(&written.lock().unwrap());
             assert_submission(&frames, 1, 1);
@@ -608,7 +615,9 @@ fn every_statement_is_preflighted_at_the_exact_negotiated_limit_before_begin() {
                 flushes,
                 fail_on: None,
             };
-            let result = transaction.execute(&root, &mut client, true, &mut out).await;
+            let result = transaction
+                .execute(&root, &mut client, true, &mut out)
+                .await;
             let frames = sent_frames(&written.lock().unwrap());
             if excess == 0 {
                 result.unwrap_or_else(|error| panic!("{}", error.message));
@@ -619,7 +628,10 @@ fn every_statement_is_preflighted_at_the_exact_negotiated_limit_before_begin() {
                     .collect();
                 assert_eq!(requests[1].header().frame_len(), 4096);
             } else {
-                assert_eq!(result.expect_err("the second statement is too large").code, 5);
+                assert_eq!(
+                    result.expect_err("the second statement is too large").code,
+                    5
+                );
                 assert!(out.bytes.is_empty());
                 assert_eq!(out.flushes.load(Ordering::SeqCst), 0);
                 assert_eq!(
@@ -686,4 +698,104 @@ fn invalid_transaction_file_is_rejected_before_reading_a_missing_credential() {
         assert_eq!(error.code, 2, "{}", error.message);
         assert!(output.is_empty());
     }
+}
+
+#[test]
+fn savepoint_files_keep_provisional_observations_and_one_final_completion() {
+    let ((), report) = run_async_under_lab(0x79a0_0820, |root| async move {
+        let transaction = admitted(
+            r#"[
+            {"mode":"write","statement":"SAVEPOINT kept"},
+            {"mode":"write","statement":"CREATE (:Person {age:1}) RETURN 1 AS value"},
+            {"mode":"write","statement":"ROLLBACK TO SAVEPOINT kept"},
+            {"mode":"write","statement":"RELEASE kept"},
+            {"mode":"read","statement":"RETURN 2 AS value"}
+        ]"#,
+        );
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let io = script(
+            vec![
+                (begun(), 0),
+                (provisional_chunk(5, Some(vec![]), vec![]), 0),
+                (statement_end(5, 1, 0), 1),
+                (
+                    provisional_chunk(6, Some(vec!["value".into()]), vec![vec![WireValue::Int(1)]]),
+                    1,
+                ),
+                (statement_end(6, 2, 1), 3),
+                (provisional_chunk(7, Some(vec![]), vec![]), 3),
+                (statement_end(7, 3, 0), 4),
+                (provisional_chunk(8, Some(vec![]), vec![]), 4),
+                (statement_end(8, 4, 0), 5),
+                (
+                    provisional_chunk(9, Some(vec!["value".into()]), vec![vec![WireValue::Int(2)]]),
+                    5,
+                ),
+                (statement_end(9, 5, 1), 7),
+                (
+                    completed(
+                        10,
+                        Outcome::WriteCommitted {
+                            seq: 8,
+                            statements: 5,
+                        },
+                    ),
+                    7,
+                ),
+            ],
+            Arc::clone(&flushes),
+        );
+        let written = Arc::clone(&io.written);
+        let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+        client.select(&root, "social").await.unwrap();
+        let mut out = Output {
+            bytes: vec![],
+            flushes,
+            fail_on: None,
+        };
+        transaction
+            .execute(&root, &mut client, true, &mut out)
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            String::from_utf8(out.bytes)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [
+                r#"{"v":1,"event":"columns","statement":1,"stream":true,"provisional":true,"basis_seq":7,"columns":[]}"#,
+                r#"{"v":1,"event":"columns","statement":2,"stream":true,"provisional":true,"basis_seq":7,"columns":["value"]}"#,
+                r#"{"v":1,"event":"row","statement":2,"provisional":true,"cells":[{"type":"int","value":"1"}]}"#,
+                r#"{"v":1,"event":"columns","statement":3,"stream":true,"provisional":true,"basis_seq":7,"columns":[]}"#,
+                r#"{"v":1,"event":"columns","statement":4,"stream":true,"provisional":true,"basis_seq":7,"columns":[]}"#,
+                r#"{"v":1,"event":"columns","statement":5,"stream":true,"provisional":true,"basis_seq":7,"columns":["value"]}"#,
+                r#"{"v":1,"event":"row","statement":5,"provisional":true,"cells":[{"type":"int","value":"2"}]}"#,
+                r#"{"v":1,"event":"result","kind":"transaction","outcome":"write_committed","seq":8,"basis_seq":7,"statements":5,"count":2}"#,
+            ]
+        );
+        assert_eq!(out.flushes.load(Ordering::SeqCst), 8);
+        let frames = sent_frames(&written.lock().unwrap());
+        assert_submission(&frames, 5, 1);
+        let requests: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame.header().kind() == FrameKind::ExecuteTransaction)
+            .map(|frame| ExecuteTransaction::decode(frame.payload()).unwrap())
+            .collect();
+        for (index, text) in [
+            (0, "SAVEPOINT kept"),
+            (2, "ROLLBACK TO SAVEPOINT kept"),
+            (3, "RELEASE kept"),
+        ] {
+            assert_eq!(requests[index].handle, HANDLE);
+            assert_eq!(requests[index].statement.mode, ExecuteMode::Write);
+            assert_eq!(requests[index].statement.statement, text);
+            assert!(requests[index].statement.parameters.is_empty());
+        }
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame.header().kind() == FrameKind::RollbackTransaction)
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

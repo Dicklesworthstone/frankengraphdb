@@ -46,7 +46,9 @@ impl TransactionScript {
         })?;
         checkpoint()?;
         let Json::Array(records) = json else {
-            return Err(Failure::usage("--statements-file must contain a JSON array"));
+            return Err(Failure::usage(
+                "--statements-file must contain a JSON array",
+            ));
         };
         if records.is_empty() || records.len() > MAX_TRANSACTION_BATCH_STATEMENTS {
             return Err(Failure::usage(format!(
@@ -54,6 +56,7 @@ impl TransactionScript {
             )));
         }
         let mut statements = Vec::new();
+        let mut savepoints: Vec<String> = Vec::new();
         statements
             .try_reserve_exact(records.len())
             .map_err(Failure::io)?;
@@ -94,6 +97,35 @@ impl TransactionScript {
                 Some(arguments) => batch::parameters(arguments, at, &mut checkpoint)?,
                 None => Vec::new(),
             };
+            if let Some(control) = fgdb_gql::PreparedGraphTransactionControl::prepare(&statement)
+                .map_err(|error| Failure::usage(format!("transaction statement {at}: {error}")))?
+            {
+                if mode != ExecuteMode::Write || !parameters.is_empty() {
+                    return Err(Failure::usage(format!(
+                        "transaction statement {at}: savepoint controls require mode write and no parameters"
+                    )));
+                }
+                use fgdb_gql::GraphSavepointOperation;
+                match control.operation() {
+                    GraphSavepointOperation::Save => savepoints.push(control.name().to_owned()),
+                    GraphSavepointOperation::RollbackTo | GraphSavepointOperation::Release => {
+                        let index = savepoints
+                            .iter()
+                            .rposition(|name| name == control.name())
+                            .ok_or_else(|| {
+                                Failure::usage(format!(
+                                    "transaction statement {at}: unknown savepoint"
+                                ))
+                            })?;
+                        savepoints.truncate(
+                            index
+                                + usize::from(
+                                    control.operation() == GraphSavepointOperation::RollbackTo,
+                                ),
+                        );
+                    }
+                }
+            }
             // This nonzero selector is used only to measure the exact request
             // envelope, including its sixteen handle bytes. It is never sent
             // or returned: the SDK obtains the real selector from BEGIN.
@@ -105,9 +137,9 @@ impl TransactionScript {
                     parameters,
                 },
             };
-            let encoded = envelope.encode().map_err(|error| {
-                Failure::usage(format!("transaction statement {at}: {error}"))
-            })?;
+            let encoded = envelope
+                .encode()
+                .map_err(|error| Failure::usage(format!("transaction statement {at}: {error}")))?;
             if encoded.len() > (CLIENT_MAX_FRAME as usize).saturating_sub(MAX_HEADER_LEN) {
                 return Err(Failure::usage(format!(
                     "transaction statement {at} exceeds the client frame limit; the script was not sent"
@@ -207,7 +239,9 @@ impl<W: Write> TransactionOutput<'_, W> {
                 return Err(Failure::io("remote transaction result order is invalid"));
             }
             if self.basis.is_some_and(|previous| previous != basis) {
-                return Err(Failure::io("remote transaction basis changed between statements"));
+                return Err(Failure::io(
+                    "remote transaction basis changed between statements",
+                ));
             }
             let statement = u64::from(index) + 1;
             let line = if self.robot {
@@ -248,7 +282,9 @@ impl<W: Write> TransactionOutput<'_, W> {
                 return Err(Failure::io("remote transaction row has no columns"));
             };
             if active != index || width != row.len() {
-                return Err(Failure::io("remote transaction row does not match its result"));
+                return Err(Failure::io(
+                    "remote transaction row does not match its result",
+                ));
             }
             let rows = rows
                 .checked_add(1)
@@ -309,7 +345,10 @@ impl<W: Write> TransactionOutput<'_, W> {
         let end = match result {
             Ok(end) => end,
             Err(error) => {
-                let error = self.failed.take().unwrap_or_else(|| transaction_failure(error));
+                let error = self
+                    .failed
+                    .take()
+                    .unwrap_or_else(|| transaction_failure(error));
                 return Err(unconfirmed(error, self.sent));
             }
         };
@@ -436,6 +475,39 @@ mod tests {
     }
 
     #[test]
+    fn transaction_controls_preflight_the_exact_name_stack_and_preserve_wire_text() {
+        let script = parse(
+            r#"[
+            {"mode":"write","statement":"SAVEPOINT `雪 step`;"},
+            {"mode":"write","statement":"CREATE (n)"},
+            {"mode":"write","statement":"SAVEPOINT `雪 step`"},
+            {"mode":"write","statement":"RELEASE `雪 step`"},
+            {"mode":"write","statement":"ROLLBACK TO SAVEPOINT `雪 step`"},
+            {"mode":"write","statement":"RELEASE SAVEPOINT `雪 step`"}
+        ]"#,
+        )
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(script.statements.len(), 6);
+        assert_eq!(script.statements[0].statement, "SAVEPOINT `雪 step`;");
+        for invalid in [
+            r#"[{"mode":"write","statement":"ROLLBACK TO absent"}]"#,
+            r#"[{"mode":"write","statement":"SAVEPOINT kept"},{"mode":"write","statement":"RELEASE Kept"}]"#,
+            r#"[{"mode":"write","statement":"SAVEPOINT kept; CREATE (n)"}]"#,
+            r#"[{"mode":"read","statement":"SAVEPOINT kept"}]"#,
+            r#"[{"mode":"write","statement":"SAVEPOINT kept","parameters":{"unused":"int:1"}}]"#,
+            r#"[{"mode":"write","statement":"SAVEPOINT kept"},{"mode":"write","statement":"SAVEPOINT younger"},{"mode":"write","statement":"ROLLBACK TO kept"},{"mode":"write","statement":"RELEASE younger"}]"#,
+        ] {
+            assert_eq!(
+                parse(invalid)
+                    .err()
+                    .expect("control refused before credentials")
+                    .code,
+                2
+            );
+        }
+    }
+
+    #[test]
     fn malformed_late_statements_and_noncanonical_fields_refuse_the_entire_script() {
         let first = r#"{"mode":"write","statement":"CREATE (n)"}"#;
         for late in [
@@ -522,7 +594,10 @@ mod tests {
         for fields in [too_many, long_name, r#""":"null""#.into()] {
             let source =
                 format!(r#"[{{"mode":"read","statement":"RETURN 1","parameters":{{{fields}}}}}]"#);
-            assert_eq!(parse(&source).err().expect("parameter limit refused").code, 2);
+            assert_eq!(
+                parse(&source).err().expect("parameter limit refused").code,
+                2
+            );
         }
 
         // Short decimal coordinates expand to packed four-byte floats. Every

@@ -14,6 +14,7 @@ pub(crate) mod page;
 mod parameters;
 mod row_fields;
 mod scoped;
+mod transaction_control;
 pub use crate::algebra::GraphPathFunction;
 use crate::algebra::{
     GlaDirection, GraphColumn, GraphMatchMode, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
@@ -29,6 +30,7 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 pub use map_arguments::{GqlMapArgumentError, GqlMapArgumentText, GqlTextOffsets};
 use scoped::{BoundScope, ScopeSyntax};
 use std::collections::{BTreeMap, BTreeSet};
+pub use transaction_control::{GraphSavepointOperation, PreparedGraphTransactionControl};
 
 /// Definition admission, not execution work or a promise of cheap matching.
 pub const MAX_GRAPH_TEXT_BYTES: usize = 65_536;

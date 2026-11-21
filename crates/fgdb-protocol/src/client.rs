@@ -4908,6 +4908,112 @@ mod tests {
     }
 
     #[test]
+    fn savepoint_helpers_use_only_existing_write_envelopes_and_keep_local_refusals_private() {
+        let ((), report) = run_async_under_lab(0x79a0_0460, |root| async move {
+            let handle = crate::body::TransactionHandle([0x61; 16]);
+            let empty = |request| {
+                rpc(
+                    FrameKind::TransactionResultChunk,
+                    request,
+                    StreamId([5; 16]),
+                    &ResultChunk {
+                        columns: Some(vec![]),
+                        rows: vec![],
+                    },
+                )
+            };
+            let completion = Outcome::ReadClosed {
+                seq: 3,
+                statements: 3,
+            };
+            let io = script(vec![
+                transaction_begun(4, handle),
+                empty(5),
+                transaction_end(5, handle, 1, 0),
+                empty(6),
+                transaction_end(6, handle, 2, 0),
+                empty(7),
+                transaction_end(7, handle, 3, 0),
+                rpc(
+                    FrameKind::TransactionCommitted,
+                    8,
+                    StreamId::CONTROL,
+                    &crate::body::TransactionCompletion {
+                        handle,
+                        outcome: completion,
+                    },
+                ),
+                rpc(FrameKind::Pong, 9, StreamId::CONTROL, &Ping { nonce: 60 }),
+            ]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            client.begin_transaction(&root).await.unwrap();
+            let before = written.lock().unwrap().len();
+            let too_long = "é".repeat(65);
+            for name in ["", "a`b", "line\nfeed", too_long.as_str()] {
+                assert!(matches!(
+                    client.create_savepoint(&root, handle, name).await,
+                    Err(ClientError::Protocol("invalid savepoint identifier"))
+                ));
+            }
+            assert_eq!(written.lock().unwrap().len(), before);
+            assert_eq!(
+                client
+                    .create_savepoint(&root, handle, "雪 step")
+                    .await
+                    .unwrap()
+                    .statement,
+                1
+            );
+            assert_eq!(
+                client
+                    .rollback_to_savepoint(&root, handle, "雪 step")
+                    .await
+                    .unwrap()
+                    .statement,
+                2
+            );
+            assert_eq!(
+                client
+                    .release_savepoint(&root, handle, "雪 step")
+                    .await
+                    .unwrap()
+                    .statement,
+                3
+            );
+            assert_eq!(
+                client.commit_transaction(&root, handle).await.unwrap(),
+                completion
+            );
+            client.ping(&root, 60).await.unwrap();
+            let frames = sent_frames(&written.lock().unwrap());
+            let requests: Vec<_> = frames
+                .iter()
+                .filter(|frame| frame.header().kind() == FrameKind::ExecuteTransaction)
+                .map(|frame| crate::body::ExecuteTransaction::decode(frame.payload()).unwrap())
+                .collect();
+            assert_eq!(requests.len(), 3);
+            for (request, text) in requests.iter().zip([
+                "SAVEPOINT `雪 step`",
+                "ROLLBACK TO SAVEPOINT `雪 step`",
+                "RELEASE SAVEPOINT `雪 step`",
+            ]) {
+                assert_eq!(request.handle, handle);
+                assert_eq!(request.statement.mode, ExecuteMode::Write);
+                assert_eq!(request.statement.statement, text);
+                assert!(request.statement.parameters.is_empty());
+            }
+            assert!(
+                !frames
+                    .iter()
+                    .any(|frame| frame.header().kind() == FrameKind::Execute)
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
     fn explicit_transaction_client_separates_provisional_rows_from_one_commit() {
         let ((), report) = run_async_under_lab(0x79a0_0410, |root| async move {
             let handle = crate::body::TransactionHandle([0x61; 16]);

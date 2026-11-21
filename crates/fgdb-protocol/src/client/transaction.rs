@@ -328,6 +328,80 @@ impl Client {
         Ok(TransactionAnswer { columns, rows, end })
     }
 
+    /// Save this active write transaction's current prefix. Reusing a name
+    /// shadows the older savepoint; no implicit BEGIN or COMMIT is sent.
+    pub async fn create_savepoint(
+        &mut self,
+        cx: &Cx,
+        handle: TransactionHandle,
+        name: &str,
+    ) -> Result<TransactionResultEnd, ClientError> {
+        self.transaction_control(cx, handle, "SAVEPOINT", name)
+            .await
+    }
+
+    /// Restore the newest matching prefix and discard younger savepoints.
+    /// Earlier delivered rows remain provisional observations. Consumed
+    /// allowances and statement ordinals are never refunded.
+    pub async fn rollback_to_savepoint(
+        &mut self,
+        cx: &Cx,
+        handle: TransactionHandle,
+        name: &str,
+    ) -> Result<TransactionResultEnd, ClientError> {
+        self.transaction_control(cx, handle, "ROLLBACK TO SAVEPOINT", name)
+            .await
+    }
+
+    /// Release the newest matching savepoint and all younger savepoints
+    /// without changing staged graph effects or committing the transaction.
+    pub async fn release_savepoint(
+        &mut self,
+        cx: &Cx,
+        handle: TransactionHandle,
+        name: &str,
+    ) -> Result<TransactionResultEnd, ClientError> {
+        self.transaction_control(cx, handle, "RELEASE SAVEPOINT", name)
+            .await
+    }
+
+    async fn transaction_control(
+        &mut self,
+        cx: &Cx,
+        handle: TransactionHandle,
+        command: &str,
+        name: &str,
+    ) -> Result<TransactionResultEnd, ClientError> {
+        // Match the bounded native graph identifier profile. Parameters cannot
+        // stand for identifiers; quote one validated identifier instead.
+        if name.is_empty()
+            || name.len() > 128
+            || name.contains('`')
+            || name.chars().any(char::is_control)
+        {
+            return Err(ClientError::Protocol("invalid savepoint identifier"));
+        }
+        let statement = Execute {
+            mode: ExecuteMode::Write,
+            statement: format!("{command} `{name}`"),
+            parameters: Vec::new(),
+        };
+        self.execute_transaction_streaming(
+            cx,
+            handle,
+            &statement,
+            |columns| {
+                if columns.is_empty() {
+                    Ok(())
+                } else {
+                    Err(ClientError::Protocol("savepoint control returned columns"))
+                }
+            },
+            |_| Err(ClientError::Protocol("savepoint control returned a row")),
+        )
+        .await
+    }
+
     /// Deliver provisional columns and rows under the ordinary flow window.
     /// Rejecting a callback sends cancellation and drains its terminal reply.
     /// The server also aborts on a late cancellation of this transaction's

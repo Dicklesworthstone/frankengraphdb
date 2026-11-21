@@ -1135,3 +1135,253 @@ fn raw_transaction_handles_are_connection_scoped_and_busy_requests_keep_the_owne
         server.join(cx).await.unwrap();
     });
 }
+
+#[test]
+fn explicit_savepoints_restore_the_private_graph_and_keep_completion_classification() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "explicit-savepoints").await;
+        let mut writer = connect(cx, addr, &grant(Rights::ReadWrite)).await;
+        let mut observer = connect(cx, addr, &grant(Rights::Read)).await;
+        let begun = writer.begin_transaction(cx).await.unwrap();
+        writer
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(
+                    ExecuteMode::Write,
+                    "CREATE (a:Person {age:1})-[:KNOWS]->(b:Person {age:2})",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            writer
+                .create_savepoint(cx, begun.handle, "雪 kept")
+                .await
+                .unwrap()
+                .statement,
+            2
+        );
+        writer
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(
+                    ExecuteMode::Write,
+                    "MATCH (n:Person {age:1}) DETACH DELETE n",
+                ),
+            )
+            .await
+            .unwrap();
+        writer
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(ExecuteMode::Write, "CREATE (:Person {age:3})"),
+            )
+            .await
+            .unwrap();
+        let rolled_back = writer
+            .rollback_to_savepoint(cx, begun.handle, "雪 kept")
+            .await
+            .unwrap();
+        assert_eq!(rolled_back.statement, 5);
+        assert_eq!(rolled_back.rows, 0);
+        let restored = writer
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(
+                    ExecuteMode::Read,
+                    "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.age AS a,b.age AS b",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored.rows, [vec![WireValue::Int(1), WireValue::Int(2)]]);
+        writer
+            .release_savepoint(cx, begun.handle, "雪 kept")
+            .await
+            .unwrap();
+        writer
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(ExecuteMode::Write, "MATCH (n:Person {age:1}) SET n.age=9"),
+            )
+            .await
+            .unwrap();
+        assert!(ages(cx, &mut observer).await.is_empty());
+        assert_eq!(
+            writer.commit_transaction(cx, begun.handle).await.unwrap(),
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 8
+            }
+        );
+        let expected = vec![vec![WireValue::Int(2)], vec![WireValue::Int(9)]];
+        assert_eq!(ages(cx, &mut observer).await, expected);
+
+        let begun = writer.begin_transaction(cx).await.unwrap();
+        writer
+            .create_savepoint(cx, begun.handle, "empty")
+            .await
+            .unwrap();
+        writer
+            .rollback_to_savepoint(cx, begun.handle, "empty")
+            .await
+            .unwrap();
+        writer
+            .release_savepoint(cx, begun.handle, "empty")
+            .await
+            .unwrap();
+        assert_eq!(
+            writer.commit_transaction(cx, begun.handle).await.unwrap(),
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 3
+            }
+        );
+
+        let begun = writer.begin_transaction(cx).await.unwrap();
+        writer
+            .create_savepoint(cx, begun.handle, "empty")
+            .await
+            .unwrap();
+        writer
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(ExecuteMode::Write, "CREATE (:Person {age:100})"),
+            )
+            .await
+            .unwrap();
+        writer
+            .rollback_to_savepoint(cx, begun.handle, "empty")
+            .await
+            .unwrap();
+        assert_eq!(
+            writer.commit_transaction(cx, begun.handle).await.unwrap(),
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 3
+            }
+        );
+        assert_eq!(ages(cx, &mut observer).await, expected);
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn refused_savepoint_statements_abort_every_earlier_provisional_write() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "explicit-savepoint-refusals").await;
+        let mut writer = connect(cx, addr, &grant(Rights::ReadWrite)).await;
+        let mut observer = connect(cx, addr, &grant(Rights::Read)).await;
+        for (mode, text) in [
+            (ExecuteMode::Write, "ROLLBACK TO missing"),
+            (ExecuteMode::Write, "SAVEPOINT kept extra"),
+            (
+                ExecuteMode::Write,
+                "SAVEPOINT kept; CREATE (:Person {age:99})",
+            ),
+            (ExecuteMode::Read, "SAVEPOINT kept"),
+        ] {
+            let begun = writer.begin_transaction(cx).await.unwrap();
+            writer
+                .execute_transaction(
+                    cx,
+                    begun.handle,
+                    &statement(ExecuteMode::Write, "CREATE (:Person {age:10})"),
+                )
+                .await
+                .unwrap();
+            assert!(
+                writer
+                    .execute_transaction(cx, begun.handle, &statement(mode, text))
+                    .await
+                    .is_err()
+            );
+            assert!(writer.commit_transaction(cx, begun.handle).await.is_err());
+            assert!(ages(cx, &mut observer).await.is_empty());
+        }
+        // Rolling back an older prefix discards its younger named savepoint.
+        let begun = writer.begin_transaction(cx).await.unwrap();
+        writer
+            .create_savepoint(cx, begun.handle, "older")
+            .await
+            .unwrap();
+        writer
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(ExecuteMode::Write, "CREATE (:Person {age:11})"),
+            )
+            .await
+            .unwrap();
+        writer
+            .create_savepoint(cx, begun.handle, "younger")
+            .await
+            .unwrap();
+        writer
+            .rollback_to_savepoint(cx, begun.handle, "older")
+            .await
+            .unwrap();
+        assert!(
+            writer
+                .release_savepoint(cx, begun.handle, "younger")
+                .await
+                .is_err()
+        );
+        assert!(ages(cx, &mut observer).await.is_empty());
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn http_transactions_apply_savepoints_before_the_single_native_completion() {
+    run(async |cx| {
+        let (address, shutdown, mut server) = start_http(cx, "http-savepoints").await;
+        let scope = grant(Rights::ReadWrite);
+        let (status, body) = http_transaction(
+            address,
+            &scope,
+            r#"{"statements":[
+            {"mode":"write","statement":"CREATE (:Person {age:1})"},
+            {"mode":"write","statement":"SAVEPOINT kept"},
+            {"mode":"write","statement":"MATCH (n:Person) SET n.age=2"},
+            {"mode":"write","statement":"ROLLBACK TO SAVEPOINT kept"},
+            {"mode":"read","statement":"MATCH (n:Person) RETURN n.age AS age"}
+        ]}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"basis":0,"results":[{"columns":[],"rows":[]},{"columns":[],"rows":[]},{"columns":[],"rows":[]},{"columns":[],"rows":[]},{"columns":["age"],"rows":[[{"type":"int","value":"1"}]]}],"seq":1,"statements":5,"committed":true}"#
+        );
+        let (status, body) = http_transaction(
+            address,
+            &scope,
+            r#"{"statements":[
+            {"mode":"write","statement":"CREATE (:Person {age:3})"},
+            {"mode":"write","statement":"RELEASE absent"}
+        ]}"#,
+        )
+        .await;
+        assert!(status >= 400, "{body}");
+        assert!(!body.contains("\"results\""), "{body}");
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"1"}]],"seq":1}"#
+        );
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
