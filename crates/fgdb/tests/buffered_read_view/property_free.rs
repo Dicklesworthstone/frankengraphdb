@@ -2,7 +2,10 @@
 //! history, visibility and controls while avoiding unused payload retention.
 
 use super::*;
+use asupersync::fs::Vfs;
 use fgdb::BufferedReadView;
+use fgdb_gql::edge_stream::{EdgeScanError, EdgeScanState};
+use fgdb_strata::store::BlockStore;
 use fgdb_types::QueryCx;
 use fgdb_types::context::SimulationCheckpointProbe;
 use std::sync::Arc;
@@ -74,6 +77,13 @@ fn property_free_queries_keep_historical_labels_and_pinned_publication_after_com
                 ("MATCH (n:L) RETURN n", true, 1),
                 ("MATCH (n:L) RETURN n,n AS again,n AS third", true, 3),
                 ("MATCH (n) WHERE n=n RETURN n", false, 1),
+                ("MATCH (n) WHERE NOT (n<>n OR false) RETURN n", false, 1),
+                (
+                    "MATCH (n:L) WHERE n=n AND true RETURN n,n AS again",
+                    true,
+                    2,
+                ),
+                ("MATCH (n) WHERE true OR NULL RETURN n", false, 1),
             ] {
                 let prepared = query(text);
                 for cut in 0..=frontier {
@@ -167,7 +177,6 @@ fn property_free_projection_fits_a_pool_that_refuses_the_requested_payload() {
             .chain((1..32).map(|at| format!("n.p AS copy_{at}")))
             .collect::<Vec<_>>()
             .join(",");
-        let identities = query(&format!("MATCH (n:L) RETURN {identity_columns}"));
         let properties = query(&format!("MATCH (n:L) RETURN {property_columns}"));
 
         // Leave enough for the normal two scan workspaces and one frame, but
@@ -176,11 +185,21 @@ fn property_free_projection_fits_a_pool_that_refuses_the_requested_payload() {
         let occupied = memory
             .reserve(&cx, memory.available() - 2304 * 1024)
             .unwrap();
-        let (rows, stats) = collect(&mut view, &cx, &identities, CommitSeq(1)).await;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].values(), vec![GraphValue::Vertex(selected); 32]);
-        assert_eq!(stats.snapshot_records, 2);
-        assert_eq!(stats.result_rows, 1);
+        for predicate in [
+            "",
+            " WHERE true",
+            " WHERE n=n AND true",
+            " WHERE true OR n<>n",
+            " WHERE id(n)=id(n) AND NOT false",
+        ] {
+            let text = format!("MATCH (n:L){predicate} RETURN {identity_columns}");
+            let identities = query(&text);
+            let (rows, stats) = collect(&mut view, &cx, &identities, CommitSeq(1)).await;
+            assert_eq!(rows.len(), 1, "{text}");
+            assert_eq!(rows[0].values(), vec![GraphValue::Vertex(selected); 32]);
+            assert_eq!(stats.snapshot_records, 2);
+            assert_eq!(stats.result_rows, 1);
+        }
 
         let mut cursor = view
             .stream_graph_values_governed(&cx, &properties, query_policy())
@@ -226,7 +245,7 @@ fn property_free_candidates_keep_record_admission_and_fuse_on_cancellation() {
         let cx = contexts.query();
         let (vfs, _) = history(&commit).await;
         let memory = pool();
-        let prepared = query("MATCH (n:L) RETURN n,n AS again");
+        let prepared = query("MATCH (n:L) WHERE n=n AND true RETURN n,n AS again");
         let mut view = open(&commit, &vfs, &memory).await;
         let mut cursor = view
             .stream_graph_values_governed(
@@ -313,6 +332,244 @@ fn property_free_candidates_keep_record_admission_and_fuse_on_cancellation() {
         drop(cursor);
         drop(view);
         assert_eq!(memory.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn boolean_edge_queries_skip_unused_sidecars_but_keep_eager_property_reads() {
+    let ((), report) = run_async_under_lab(0x6275_6613, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, reference) = history(&commit).await;
+        let memory = pool();
+        let mut view = open(&commit, &vfs, &memory).await;
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            &commit,
+            vfs.clone(),
+            vfs.database_dir(),
+            [0xb1; 32],
+            DatabaseSecurityNamespaceId([0xb2; 32]),
+        )
+        .await
+        .unwrap();
+        let root = store
+            .get_root(&commit, reference.partition_root())
+            .await
+            .unwrap();
+        let mut bodies = std::collections::BTreeMap::new();
+        for block in root.blocks {
+            let bytes = store
+                .get_bytes(&commit, fgdb_strata::DeltaBlockVersion(block.block_id))
+                .await
+                .unwrap();
+            if let Some((id, _)) = fgdb_strata::decode_block_with_properties(&bytes).unwrap().1 {
+                let path = store.path(id);
+                bodies.insert(path.clone(), vfs.read(&path).await.unwrap());
+            }
+        }
+        assert!(!bodies.is_empty(), "the fixture has actual property sidecars");
+        for path in bodies.keys() {
+            vfs.write(path, b"damaged unused Boolean-query sidecar")
+                .await
+                .unwrap();
+        }
+
+        for cut in [1, 3] {
+            let expected: Vec<_> = [(101, 1, 2), (102, 1, 3), (103, 4, 1), (104, 1, 2)]
+                .into_iter()
+                .filter(|(eid, _, _)| *eid != 102 || cut == 1)
+                .map(|(eid, src, dst)| {
+                    vec![
+                        GraphValue::Edge(EId(eid)),
+                        GraphValue::Vertex(VId(src)),
+                        GraphValue::Vertex(VId(dst)),
+                    ]
+                })
+                .collect();
+            for (predicate, selects) in [
+                ("a<>b AND r=r", true),
+                ("id(r)=id(r) AND NOT (a=b)", true),
+                ("true OR NULL", true),
+                ("false AND a<>b", false),
+                ("NULL OR false", false),
+            ] {
+                let text = format!("MATCH (a)-[r:R]->(b) WHERE {predicate} RETURN r,a,b");
+                let prepared = query(&text);
+                let mut cursor = view
+                    .stream_graph_edges_governed_at(
+                        &cx,
+                        &prepared,
+                        CommitSeq(cut),
+                        query_policy(),
+                    )
+                    .unwrap();
+                let mut rows = Vec::new();
+                while let Some(row) = cursor.next().await {
+                    rows.push(row.unwrap().row().values().to_vec());
+                }
+                if selects {
+                    assert_eq!(rows, expected, "{text} at {cut}");
+                } else {
+                    assert!(rows.is_empty(), "{text} at {cut}");
+                }
+                assert_eq!(cursor.row_stats().snapshot_records, 4);
+                assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);
+                assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                assert!(cursor.next().await.is_none());
+            }
+        }
+
+        // Boolean evaluation is eager: a decisive constant does not remove
+        // an actual property input or its source-error boundary.
+        for predicate in ["true OR r.p IS NOT NULL", "false AND r.p IS NOT NULL"] {
+            let prepared = query(&format!(
+                "MATCH (a)-[r:R]->(b) WHERE {predicate} RETURN r,a,b"
+            ));
+            let mut cursor = view
+                .stream_graph_edges_governed(&cx, &prepared, query_policy())
+                .unwrap();
+            assert!(matches!(
+                cursor.next().await,
+                Some(Err(GqlQueryError::Source(EdgeScanError::Source(_))))
+            ));
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert_eq!(cursor.row_stats().result_rows, 0);
+            let failed = cursor.row_stats();
+            assert!(cursor.next().await.is_none());
+            assert_eq!(cursor.row_stats(), failed);
+        }
+        for (path, bytes) in bodies {
+            vfs.write(&path, &bytes).await.unwrap();
+        }
+        let prepared = query("MATCH (a)-[r:R]->(b) WHERE true OR r.p IS NULL RETURN r,a,b");
+        let mut cursor = view
+            .stream_graph_edges_governed(&cx, &prepared, query_policy())
+            .unwrap();
+        let mut rows = 0;
+        while let Some(row) = cursor.next().await {
+            row.unwrap();
+            rows += 1;
+        }
+        assert_eq!(rows, 3, "restored demanded sidecars are read normally");
+        assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+        drop(cursor);
+        drop(view);
+        assert_eq!(memory.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn boolean_vertex_filters_keep_unknown_results_and_eager_arithmetic_errors() {
+    let ((), report) = run_async_under_lab(0x6275_6614, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let memory = pool();
+
+        for predicate in ["false AND n=n", "NULL OR false", "NOT (NULL AND true)"] {
+            let prepared = query(&format!("MATCH (n) WHERE {predicate} RETURN n"));
+            let mut view = open(&commit, &vfs, &memory).await;
+            for cut in 0..=3 {
+                let (rows, stats) = collect(&mut view, &cx, &prepared, CommitSeq(cut)).await;
+                assert!(rows.is_empty(), "{predicate} at {cut}");
+                assert_eq!(stats.snapshot_records, 4);
+                assert_eq!(stats.result_rows, 0);
+            }
+            drop(view);
+            assert_eq!(memory.used(), 0);
+        }
+
+        for (predicate, has_prefix, records) in [
+            ("true OR 10 / (n.p - 2) > 0", true, 2),
+            ("false AND 10 / (n.p - 2) > 0", false, 2),
+            ("true OR 1 / 0 = 1", false, 1),
+            ("false AND 1 / 0 = 1", false, 1),
+        ] {
+            let prepared = query(&format!("MATCH (n) WHERE {predicate} RETURN n"));
+            let mut view = open(&commit, &vfs, &memory).await;
+            let mut cursor = view
+                .stream_graph_values_governed(&cx, &prepared, query_policy())
+                .unwrap();
+            let held = if has_prefix {
+                Some(cursor.next().await.unwrap().unwrap())
+            } else {
+                None
+            };
+            assert!(
+                matches!(cursor.next().await, Some(Err(GqlQueryError::Data(_)))),
+                "{predicate}"
+            );
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert_eq!(cursor.row_stats().snapshot_records, records);
+            assert_eq!(cursor.row_stats().result_rows, u64::from(has_prefix));
+            let failed = cursor.row_stats();
+            assert!(cursor.next().await.is_none());
+            assert_eq!(cursor.row_stats(), failed);
+            drop(cursor);
+            drop(view);
+            if let Some(held) = held {
+                assert!(memory.used() > 0, "the delivered prefix owns its charge");
+                assert_eq!(held.values(), [GraphValue::Vertex(VId(1))]);
+                drop(held);
+            }
+            assert_eq!(memory.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn boolean_edge_filters_keep_hidden_endpoint_inputs_and_eager_arithmetic_errors() {
+    let ((), report) = run_async_under_lab(0x6275_6615, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let memory = pool();
+        for (predicate, prefix, records) in [
+            ("true OR 10 / (r.p - 10) > 0", vec![101, 103], 4),
+            ("false AND 10 / (r.p - 17) > 0", vec![], 1),
+            ("true OR 10 / (a.p - 11) > 0", vec![], 1),
+            ("false AND 10 / (b.p - 2) > 0", vec![], 1),
+            ("true OR 1 / 0 = 1", vec![], 1),
+            ("false AND 1 / 0 = 1", vec![], 1),
+        ] {
+            let prepared = query(&format!(
+                "MATCH (a)-[r:R]->(b) WHERE {predicate} RETURN r,a,b"
+            ));
+            let mut view = open(&commit, &vfs, &memory).await;
+            let mut cursor = view
+                .stream_graph_edges_governed(&cx, &prepared, query_policy())
+                .unwrap();
+            let mut held = Vec::new();
+            for eid in &prefix {
+                let row = cursor.next().await.unwrap().unwrap();
+                assert_eq!(row.row().values()[0], GraphValue::Edge(EId(*eid)));
+                held.push(row);
+            }
+            assert!(
+                matches!(cursor.next().await, Some(Err(GqlQueryError::Data(_)))),
+                "{predicate}"
+            );
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert_eq!(cursor.row_stats().snapshot_records, records);
+            assert_eq!(cursor.row_stats().result_rows, prefix.len() as u64);
+            let failed = cursor.row_stats();
+            assert!(cursor.next().await.is_none());
+            assert_eq!(cursor.row_stats(), failed);
+            drop(cursor);
+            drop(view);
+            assert_eq!(!held.is_empty(), memory.used() > 0);
+            for (row, eid) in held.iter().zip(prefix) {
+                assert_eq!(row.row().values()[0], GraphValue::Edge(EId(eid)));
+            }
+            drop(held);
+            assert_eq!(memory.used(), 0);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -109,11 +109,17 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     /// labels alone; visibility, candidate admission and all controls still
     /// run normally. This proof covers the complete evaluation projection,
     /// including hidden ordering cells, and never drops a fallible predicate.
-    /// Boolean bindings and graph probes conservatively require full fields.
+    /// Boolean programs retain every eager property operand, including inputs
+    /// of unselected scalar branches. Graph probes and unknown bindings remain
+    /// conservative; this proof never removes or evaluates an instruction.
     #[must_use]
     pub fn requires_properties(&self) -> bool {
         if self.tests.iter().any(|test| match test {
             Test::Predicate(VertexPredicate::HasLabel(_)) | Test::Identity(_) => false,
+            Test::Binding(GlaOperator::SelectBoolean { expression }) => {
+                expression.referenced_vertex_properties().next().is_some()
+                    || expression.referenced_edge_properties().next().is_some()
+            }
             Test::Predicate(_) | Test::Binding(_) | Test::Probe(_) | Test::Collect(_) => true,
         }) {
             return true;

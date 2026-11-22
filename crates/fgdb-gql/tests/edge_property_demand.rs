@@ -36,6 +36,15 @@ fn local_edge_property_demand_preserves_labels_identity_and_path_values() {
         ("MATCH (a)-[r:R]->(a) RETURN r,a", false),
         ("MATCH (a)-[r:R]->(b) WHERE a=b RETURN r,a,b", false),
         ("MATCH (a)-[r:R]->(b) WHERE a<>b RETURN r,a,b", false),
+        ("MATCH (a)-[r:R]->(b) WHERE id(a)<id(b) RETURN r,a,b", false),
+        ("MATCH (a)-[r:R]->(b) WHERE id(r)>=0 RETURN r,a,b", false),
+        ("MATCH (a)-[r:R]->(b) WHERE r=r OR a=b RETURN r,a,b", false),
+        ("MATCH (a)-[r:R]->(b) WHERE NOT (a=b) RETURN r,a,b", false),
+        ("MATCH (a)-[r:R]->(b) WHERE 1+2=3 RETURN r,a,b", false),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE 1/0=0 RETURN r,a,b LIMIT 0",
+            false,
+        ),
         (
             "MATCH p=(a)-[r:R]->(b) RETURN r,a,b,p,length(p) AS hops,nodes(p) AS ns,relationships(p) AS es",
             false,
@@ -51,6 +60,21 @@ fn local_edge_property_demand_preserves_labels_identity_and_path_values() {
         ),
         ("MATCH (a)-[r:R]->(b) WHERE r.p=1 RETURN r,a,b", true),
         ("MATCH (a)-[r:R]->(b) WHERE a.p=b.p RETURN r,a,b", true),
+        ("MATCH (a)-[r:R]->(b) WHERE true OR a.p=1 RETURN r,a,b", true),
+        ("MATCH (a)-[r:R]->(b) WHERE true OR b.p=1 RETURN r,a,b", true),
+        ("MATCH (a)-[r:R]->(b) WHERE true OR r.p=1 RETURN r,a,b", true),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE false AND r.p=1 RETURN r,a,b",
+            true,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE coalesce(r.p,1)=1 RETURN r,a,b",
+            true,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE coalesce(CASE WHEN true THEN 1 ELSE r.p END,0)=1 RETURN r,a,b",
+            true,
+        ),
         (
             "MATCH (a)-[r:R]->(b) WHERE a.p>1 OR b.p<0 RETURN r,a,b",
             true,
@@ -100,6 +124,16 @@ fn property_demand_includes_hidden_sort_cells_even_on_empty_pages() {
             true,
         ),
         (
+            "MATCH (a)-[r:R]->(b) WHERE id(r)>=0 RETURN a ORDER BY r LIMIT 0",
+            false,
+            true,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE id(r)>=0 RETURN r ORDER BY a.p LIMIT 0",
+            true,
+            true,
+        ),
+        (
             "MATCH (a)-[r:R]->(b) RETURN r.p AS value ORDER BY r LIMIT 0",
             true,
             true,
@@ -129,6 +163,18 @@ fn aggregate_property_demand_tracks_arguments_grouping_and_hidden_summaries() {
         ("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS rows", false),
         ("MATCH (a)-[r:R]-(b) RETURN COUNT(*) AS rows", false),
         ("MATCH (a:L)-[r:R]->(b) RETURN COUNT(r) AS rows", false),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE id(r)>=0 RETURN COUNT(*) AS rows",
+            false,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE 1/0=0 RETURN COUNT(*) AS rows LIMIT 0",
+            false,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE true OR r.p=1 RETURN COUNT(*) AS rows LIMIT 0",
+            true,
+        ),
         ("MATCH (a)-[r:R]->(b) RETURN COUNT(a) AS rows", false),
         (
             "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS rows",

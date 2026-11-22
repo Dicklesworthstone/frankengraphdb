@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-21 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-22 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,28 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Boolean filters over topology-only buffered records — qualification pending
+
+The compiled vertex and single-edge scan plans now derive Boolean property
+demand from the existing complete eager-operand metadata. Identity comparisons,
+constant predicates and identity arithmetic can use the authenticated topology
+sources, retaining same-cut endpoint labels without loading unrelated property
+records. The same proof reaches external-sort and aggregate input plans, including
+their hidden cells. It neither evaluates nor removes a predicate.
+
+Every referenced vertex/edge property still requires its source fields, including
+operands behind OR, AND, CASE and COALESCE. Joined/probed and unrecognized programs
+remain conservative. Source visibility, candidate/work accounting, cancellation,
+arithmetic errors and independent result reservations keep their existing owners.
+
+The increment adds compiler demand cases and public buffered-query regression
+sources. Manual source review is complete; compilation, runtime assertions,
+pinned formatting, Clippy, UBS and full exact-tree proof remain **UNRUN** because
+the executor became unavailable after repeated temporary-filesystem resets.
+The broader `fgdb-w3-properties-gou` and `fgdb-w3-tier-r-0tj` remain open. Their progress
+comments and exact-ID `scripts/br_sync.sh` export must be completed when the
+executor returns; no tracked Beads state or qualification claim is advanced here.
 
 ### Managed read-only transaction batches — qualification pending
 

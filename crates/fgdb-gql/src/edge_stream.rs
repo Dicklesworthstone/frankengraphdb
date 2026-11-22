@@ -105,8 +105,9 @@ impl EdgeScanPlan {
     /// property. A false result permits a source to supply topology and labels
     /// alone, while retaining its ordinary visibility, admission and controls.
     /// Hidden ordering cells and aggregate inputs participate in this proof.
-    /// Joined/probed plans and Boolean programs conservatively require full
-    /// fields; an unrecognized instruction or projection never permits omission.
+    /// Boolean programs retain every eager vertex/edge property operand,
+    /// including inputs of unselected scalar branches. Joined/probed plans and
+    /// unrecognized instructions or projections never permit omission.
     #[must_use]
     pub fn requires_properties(&self) -> bool {
         if self.joined.is_some()
@@ -118,6 +119,10 @@ impl EdgeScanPlan {
                         .iter()
                         .any(|predicate| !matches!(predicate, VertexPredicate::HasLabel(_))),
                     GlaOperator::VertexIdentity { .. } | GlaOperator::CapturePath { .. } => false,
+                    GlaOperator::SelectBoolean { expression } => {
+                        expression.referenced_vertex_properties().next().is_some()
+                            || expression.referenced_edge_properties().next().is_some()
+                    }
                     _ => true,
                 })
         {
