@@ -1,13 +1,14 @@
 use super::*;
 use crate::{
-    DatabaseKeys, DatabaseState, DerivedCheckpointError, DerivedCheckpointOutcome, MemVfs,
-    MemVfsFile, WriteBatch,
+    DatabaseKeys, DatabaseState, DerivedCheckpointError, DerivedCheckpointOutcome,
+    EmbeddedTxnCompletion, EmbeddedTxnState, MemVfs, MemVfsFile, PreparedWrite, WriteBatch,
+    WriteError, WriteTxn, WriteTxnError,
 };
 use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir};
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{
-    CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+    CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, TxnCx, VId,
 };
 use std::future::{Future, poll_fn};
 use std::io;
@@ -194,6 +195,295 @@ async fn database(cx: &CommitCx, vfs: &ReplayVfs, namespace: u8) -> Database<Rep
     Database::create_with_vfs(cx, vfs.clone(), &vfs.memory.database_dir(), keys(namespace))
         .await
         .unwrap()
+}
+
+async fn validation_fixture(
+    commit: &CommitCx,
+    txn_cx: &TxnCx,
+    consumer: u8,
+    conflict: bool,
+) -> (
+    Database<ReplayVfs>,
+    ReplayVfs,
+    Option<PreparedWrite>,
+    Option<WriteTxn>,
+) {
+    let vfs = ReplayVfs::new();
+    let mut db = database(commit, &vfs, 0x72).await;
+    let mut seed = create(1);
+    seed.create_vertex(
+        VId(2),
+        vec![],
+        vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+    );
+    db.write(commit, seed).await.unwrap();
+    let mut staged = WriteBatch::new(RelationId(1));
+    staged.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
+    staged.create_vertex(VId(99), vec![], vec![]);
+    let (prepared, transaction) = if consumer == 0 {
+        (Some(db.prepare_write(staged).unwrap()), None)
+    } else {
+        let mut transaction = db.begin(txn_cx).unwrap();
+        if consumer != 3 {
+            transaction.vertex(&db, VId(1)).unwrap();
+        }
+        if consumer == 1 {
+            transaction.write(&mut db, staged).unwrap();
+        }
+        (None, Some(transaction))
+    };
+    for value in [20, 30] {
+        let mut changed = WriteBatch::new(RelationId(1));
+        changed.set_vertex_property(
+            VId(if conflict { 1 } else { 2 }),
+            PropertyKeyId(1),
+            Some(CanonicalScalar::Int(value)),
+        );
+        db.write(commit, changed).await.unwrap();
+    }
+    // A public reopen cannot preserve these same-owner handles. Evict only
+    // derived batches to reproduce the exact lazy prefix shape, then append a
+    // genuinely resident tail through the ordinary publication path.
+    Arc::make_mut(&mut db.snapshot).delta_index =
+        crate::empty_delta_window_at(commit, &db.coordinator, CommitSeq(3)).unwrap();
+    db.delta_materialized_after = CommitSeq(3);
+    db.write(commit, create(3)).await.unwrap();
+    vfs.reset();
+    let mut cursor = db.delta_replay(CommitSeq(1), CommitSeq(3)).unwrap();
+    db.next_delta_replay(commit, &mut cursor)
+        .await
+        .unwrap()
+        .unwrap();
+    *vfs.alternate.lock().unwrap() = Some(vfs.reads.lock().unwrap()[0].clone());
+    vfs.reset();
+    (db, vfs, prepared, transaction)
+}
+
+async fn complete_validation_attempt(
+    db: &mut Database<ReplayVfs>,
+    commit: &CommitCx,
+    prepared: &mut Option<PreparedWrite>,
+    transaction: &mut Option<WriteTxn>,
+) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
+    if let Some(prepared) = prepared.take() {
+        db.commit_prepared(commit, prepared)
+            .await
+            .map(|commit_seq| EmbeddedTxnCompletion::WriteCommitted { commit_seq })
+            .map_err(WriteTxnError::from)
+    } else {
+        transaction
+            .as_mut()
+            .unwrap()
+            .finish_strict(db, commit)
+            .await
+    }
+}
+
+#[test]
+fn history_visitor_replays_only_missing_prefix_then_borrows_cached_tail() {
+    let ((), report) = run_async_under_lab(0xd31a_1010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let (mut db, vfs, _, transaction) =
+            validation_fixture(&commit, &contexts.txn(), 3, false).await;
+        transaction.unwrap().abort();
+        let snapshot = Arc::clone(&db.snapshot);
+        let window = db.delta_index().unwrap().clone();
+        let mut visited = Vec::new();
+        assert_eq!(
+            db.visit_delta_history(&commit, CommitSeq(1), |_, batch| {
+                visited.push(batch.commit_seq());
+                Ok::<(), ()>(())
+            })
+            .await
+            .unwrap(),
+            CommitSeq(4)
+        );
+        assert_eq!(visited, [CommitSeq(2), CommitSeq(3), CommitSeq(4)]);
+        assert_eq!(vfs.count(), 2);
+        assert!(Arc::ptr_eq(&snapshot, &db.snapshot));
+        assert_eq!(db.delta_index().unwrap(), &window);
+        assert_eq!(db.delta_materialized_after, CommitSeq(3));
+
+        vfs.reset();
+        visited.clear();
+        db.visit_delta_history(&commit, CommitSeq(3), |_, batch| {
+            visited.push(batch.commit_seq());
+            Ok::<(), ()>(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(visited, [CommitSeq(4)]);
+        assert_eq!(vfs.count(), 0, "cached batches never reread capsules");
+        assert!(matches!(
+            db.visit_delta_history(&commit, CommitSeq(5), |_, _| Ok::<(), ()>(()))
+                .await,
+            Err(DeltaHistoryError::Source(DeltaReplayError::Read(
+                ReadError::BeyondFrontier { .. }
+            )))
+        ));
+        Arc::make_mut(&mut db.snapshot)
+            .delta_index
+            .retire_prefix(CommitSeq(4))
+            .unwrap();
+        assert!(matches!(
+            db.visit_delta_history(&commit, CommitSeq(1), |_, _| Ok::<(), ()>(()))
+                .await,
+            Err(DeltaHistoryError::Source(DeltaReplayError::Read(
+                ReadError::DeltaCursorRetired { .. }
+            )))
+        ));
+        assert_eq!(vfs.count(), 0);
+        assert_eq!(db.delta_materialized_after, CommitSeq(3));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_and_strict_completion_do_not_publish_early_conflicts_before_source_authentication() {
+    let ((), report) = run_async_under_lab(0xd31a_1011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        // Direct preparation, strict write, strict observed read, and an empty
+        // strict read all require the complete interval before acceptance.
+        for consumer in 0..4 {
+            for fault in 0..3 {
+                let (mut db, vfs, mut prepared, mut transaction) =
+                    validation_fixture(&commit, &txn_cx, consumer, true).await;
+                let retry = prepared.clone();
+                let snapshot = Arc::clone(&db.snapshot);
+                let window = db.delta_index().unwrap().clone();
+                let manifest = db.manifest().unwrap();
+                vfs.allowed_reads.store(1, Ordering::SeqCst);
+                if fault == 0 {
+                    // The first missing batch has a genuine conflict, but a
+                    // later substituted capsule must retain source-error precedence.
+                    vfs.mode.store(2, Ordering::SeqCst);
+                    assert!(matches!(
+                        complete_validation_attempt(
+                            &mut db,
+                            &commit,
+                            &mut prepared,
+                            &mut transaction,
+                        )
+                        .await,
+                        Err(WriteTxnError::Write(WriteError::HistoryRebuild(_)))
+                    ));
+                } else {
+                    vfs.mode.store(3, Ordering::SeqCst);
+                    let mut pending = Box::pin(complete_validation_attempt(
+                        &mut db,
+                        &commit,
+                        &mut prepared,
+                        &mut transaction,
+                    ));
+                    poll_fn(|cx| {
+                        assert!(pending.as_mut().poll(cx).is_pending());
+                        assert_eq!(vfs.count(), 2);
+                        Poll::Ready(())
+                    })
+                    .await;
+                    if fault == 1 {
+                        root.set_cancel_requested(true);
+                        vfs.mode.store(0, Ordering::SeqCst);
+                        let error = pending.await.unwrap_err();
+                        root.set_cancel_requested(false);
+                        if consumer == 0 {
+                            assert!(matches!(error,
+                                WriteTxnError::Write(WriteError::HistoryRebuild(error))
+                                    if matches!(*error, RebuildError::Interrupted(_))));
+                        } else {
+                            assert!(matches!(error, WriteTxnError::Interrupted(_)));
+                        }
+                    } else {
+                        drop(pending);
+                    }
+                }
+                assert_eq!(vfs.count(), 2);
+                assert!(Arc::ptr_eq(&snapshot, &db.snapshot));
+                assert_eq!(db.delta_index().unwrap(), &window);
+                assert_eq!(db.delta_materialized_after, CommitSeq(3));
+                assert_eq!(db.frontier().unwrap(), CommitSeq(4));
+                assert_eq!(db.manifest().unwrap(), manifest);
+                assert_eq!(db.coordinator.chain().entries().len(), 4);
+                assert!(matches!(db.state(), DatabaseState::Healthy { .. }));
+                assert!(db.vertex(VId(99)).unwrap().is_none());
+                if let Some(transaction) = &transaction {
+                    assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
+                }
+                assert_eq!(txn_cx.outstanding_obligations(), 0);
+
+                if let Some(retry) = retry {
+                    vfs.reset();
+                    assert!(matches!(
+                        db.commit_prepared(&commit, retry).await,
+                        Err(WriteError::FirstCommitterWins { .. })
+                    ));
+                    assert_eq!(vfs.count(), 2);
+                    assert!(Arc::ptr_eq(&snapshot, &db.snapshot));
+                    assert_eq!(db.delta_index().unwrap(), &window);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_and_strict_success_preserve_unloaded_prefix_and_cached_tail() {
+    let ((), report) = run_async_under_lab(0xd31a_1012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        for consumer in 0..4 {
+            let (mut db, vfs, mut prepared, mut transaction) =
+                validation_fixture(&commit, &txn_cx, consumer, false).await;
+            let snapshot = Arc::clone(&db.snapshot);
+            let window = db.delta_index().unwrap().clone();
+            let completion =
+                complete_validation_attempt(&mut db, &commit, &mut prepared, &mut transaction)
+                    .await
+                    .unwrap();
+            assert_eq!(db.delta_materialized_after, CommitSeq(3));
+            assert_eq!(
+                db.delta_index().unwrap().retained_after_commit_seq(),
+                CommitSeq(3)
+            );
+            assert!(db.delta_index().unwrap().get(CommitSeq(2)).is_none());
+            assert!(db.delta_index().unwrap().get(CommitSeq(3)).is_none());
+            assert_eq!(snapshot.delta_index, window, "the prior pin is unchanged");
+            if consumer < 2 {
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: CommitSeq(5),
+                    }
+                );
+                assert_eq!(db.delta_since(CommitSeq(3)).unwrap().count(), 2);
+                assert!(db.vertex(VId(99)).unwrap().is_some());
+                // Strict writes preserve the sole ordinary publication path:
+                // its prepared validator authenticates the missing prefix again.
+                assert_eq!(vfs.count(), if consumer == 0 { 2 } else { 4 });
+            } else {
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::ReadClosed {
+                        snapshot_seq: CommitSeq(1),
+                        validated_through: CommitSeq(4),
+                    }
+                );
+                assert!(Arc::ptr_eq(&snapshot, &db.snapshot));
+                assert_eq!(db.delta_index().unwrap(), &window);
+                assert_eq!(vfs.count(), 2);
+            }
+            if let Some(transaction) = transaction {
+                assert_eq!(transaction.state(), EmbeddedTxnState::Completed(completion));
+            }
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 async fn restore_derived_checkpoint(

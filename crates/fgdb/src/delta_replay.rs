@@ -175,6 +175,14 @@ pub enum DeltaReplayError {
     Reconstruction(Box<RebuildError>),
 }
 
+/// Keep source admission separate from a consumer's own cancellation or
+/// validation refusal. Neither arm publishes a replacement history window.
+#[derive(Debug)]
+pub(crate) enum DeltaHistoryError<E> {
+    Source(DeltaReplayError),
+    Observer(E),
+}
+
 impl From<ReadError> for DeltaReplayError {
     fn from(error: ReadError) -> Self {
         Self::Read(error)
@@ -228,6 +236,109 @@ impl core::error::Error for DeltaReplayError {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Visit one complete validation interval without retaining omitted
+    /// history. Already admitted batches stay borrowed and require no capsule
+    /// I/O; only a checkpoint-omitted prefix uses the authoritative replay
+    /// cursor. An explicit retirement remains a refusal, even for an empty
+    /// consumer footprint. Each callback runs synchronously after batch I/O.
+    ///
+    /// Consumers retaining a semantic conflict must continue visiting until
+    /// this returns: a later source failure outranks that tentative conflict,
+    /// just as it did when the entire window was loaded before validation.
+    pub(crate) async fn visit_delta_history<E>(
+        &mut self,
+        cx: &CommitCx,
+        after: CommitSeq,
+        mut observe: impl FnMut(&Self, &LogicalDeltaBatch) -> Result<(), E>,
+    ) -> Result<CommitSeq, DeltaHistoryError<E>> {
+        use DeltaHistoryError::{Observer, Source};
+        let head = self
+            .frontier()
+            .map_err(DeltaReplayError::from)
+            .map_err(Source)?;
+        let floor = self.delta_materialized_after;
+        let retained = self.snapshot.delta_index.retained_after_commit_seq();
+        // Origin materialization also used to authenticate every historical
+        // schema object and its transition basis. Preserve that source check
+        // privately, keeping only the current catalog needed by the next tick.
+        let mut schema = (after == CommitSeq::ORIGIN && after < floor && retained == floor)
+            .then(crate::SchemaState::empty);
+        let cached_after = if after < floor && retained == floor {
+            let mut cursor = self.delta_replay(after, floor).map_err(Source)?;
+            while !cursor.is_exhausted() {
+                let expected = cursor.position().checked_successor().map_err(|_| {
+                    Source(DeltaReplayError::SequenceExhausted {
+                        after: cursor.position(),
+                    })
+                })?;
+                let batch = self
+                    .next_delta_replay(cx, &mut cursor)
+                    .await
+                    .map_err(Source)?
+                    .ok_or(Source(DeltaReplayError::Gap { expected }))?;
+                if let Some(schema) = &mut schema {
+                    schema
+                        .audit_entries(
+                            cx,
+                            &self.store,
+                            batch.coordinate_entries(),
+                            crate::schema_catalog::marker_at(
+                                self.coordinator.chain(),
+                                CommitSeq(batch.commit_seq().0 - 1),
+                            ),
+                        )
+                        .await
+                        .map_err(DeltaReplayError::from)
+                        .map_err(Source)?;
+                }
+                observe(self, &batch).map_err(Observer)?;
+            }
+            floor
+        } else {
+            after
+        };
+        // since() retains exact future/retired refusals and the complete
+        // resident suffix's original order. No batch or snapshot is cloned.
+        for batch in self
+            .delta_since(cached_after)
+            .map_err(DeltaReplayError::from)
+            .map_err(Source)?
+        {
+            cx.checkpoint()
+                .map_err(DeltaReplayError::Interrupted)
+                .map_err(Source)?;
+            if let Some(schema) = &mut schema {
+                schema
+                    .audit_entries(
+                        cx,
+                        &self.store,
+                        batch.coordinate_entries(),
+                        crate::schema_catalog::marker_at(
+                            self.coordinator.chain(),
+                            CommitSeq(batch.commit_seq().0 - 1),
+                        ),
+                    )
+                    .await
+                    .map_err(DeltaReplayError::from)
+                    .map_err(Source)?;
+            }
+            observe(self, batch).map_err(Observer)?;
+        }
+        if schema.is_some_and(|schema| schema.reference != self.snapshot.schema.reference) {
+            return Err(Source(DeltaReplayError::from(RebuildError::Store(
+                crate::StoreError::MalformedCatalog(
+                    fgdb_strata::catalog::CatalogError::InvalidTransition(
+                        "retained schema history disagrees with the selected generation",
+                    ),
+                ),
+            ))));
+        }
+        cx.checkpoint()
+            .map_err(DeltaReplayError::Interrupted)
+            .map_err(Source)?;
+        Ok(head)
+    }
+
     /// Select exactly `(after, through]` from this healthy Chronicle history.
     ///
     /// Both cuts must be committed and at or below the published frontier.

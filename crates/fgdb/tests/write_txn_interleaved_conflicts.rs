@@ -2,9 +2,11 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, MemVfs, WriteBatch, WriteError, WriteMismatchPolicy, WriteTxnError,
+    Database, DatabaseKeys, DatabaseState, MemVfs, QueryResult, WriteBatch, WriteError,
+    WriteMismatchPolicy, WriteTxnError,
 };
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
 use fgdb_types::{
     CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
     EmbeddedTxnState, PurposeContexts, VId,
@@ -33,6 +35,25 @@ fn seed_batch() -> WriteBatch {
 async fn seeded(cx: &CommitCx) -> Database<MemVfs> {
     let mut db = Database::open_memory(cx, keys()).await.expect("database");
     db.write(cx, seed_batch()).await.expect("seed");
+    db
+}
+
+async fn reopened_seeded(cx: &CommitCx) -> Database<MemVfs> {
+    let vfs = MemVfs::new().expect("vfs");
+    let path = vfs.database_dir();
+    let mut db = Database::create_with_vfs(cx, vfs.clone(), &path, keys())
+        .await
+        .expect("database");
+    db.write(cx, seed_batch()).await.expect("seed");
+    drop(db);
+    let db = Database::open_with_vfs(cx, vfs, &path, keys())
+        .await
+        .expect("lazy reopen");
+    assert!(db.delta_index().unwrap().is_empty());
+    assert_eq!(
+        db.delta_index().unwrap().retained_after_commit_seq(),
+        CommitSeq(1)
+    );
     db
 }
 
@@ -169,6 +190,190 @@ fn prepared_vertex_delete_conflicts_with_new_incident_edges() {
                 .expect("winning edge remains live")
                 .is_some()
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn strict_validation_after_lazy_open_preserves_earliest_read_and_write_witnesses() {
+    let ((), report) = run_async_under_lab(0xfc10_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txn_cx = contexts.txn();
+        let query = contexts.query();
+        for case in 0..5 {
+            let mut db = reopened_seeded(&cx).await;
+            let pinned = db.pinned_read_view().expect("pin original generation");
+            let mut txn = db.begin(&txn_cx).expect("begin at lazy anchor");
+            let mut staged = WriteBatch::new(R);
+            staged.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(5)));
+            staged.create_vertex(VId(199), vec![], vec![]);
+            let mut first = WriteBatch::new(R);
+            let mut second = WriteBatch::new(R);
+            let mut third = WriteBatch::new(R);
+            third.ensure_vertex(VId(8), vec![], vec![]);
+            let (expected_law, expected_element) = match case {
+                0 => {
+                    staged.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(5)));
+                    first.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(1)));
+                    second.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1)));
+                    third.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(0)));
+                    // Transaction validation selects the earliest conflicting
+                    // batch, unlike the prepared validator's latest-writer map.
+                    ("FG-LAW-FCW-01", ElementId::Vertex(VId(2)))
+                }
+                1 => {
+                    txn.vertex(&db, VId(2)).expect("full read witness");
+                    first.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1)));
+                    first.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(1)));
+                    second.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(0)));
+                    // A read conflict wins over a lower-identity blind write
+                    // in the same canonical batch.
+                    ("FG-LAW-FCW-READ-01", ElementId::Vertex(VId(2)))
+                }
+                2 => {
+                    assert!(txn.vertex(&db, VId(99)).expect("negative read").is_none());
+                    first.create_vertex(VId(99), vec![], vec![]);
+                    second.delete_vertex(VId(99));
+                    ("FG-LAW-FCW-READ-01", ElementId::Vertex(VId(99)))
+                }
+                3 => {
+                    // Exact metadata supplies the count without scanning the
+                    // population; its phantom witness must survive streaming.
+                    let result = txn
+                        .query(
+                            &db,
+                            &query,
+                            "MATCH (n) RETURN count(*) AS total",
+                            &GqlParameters::new(),
+                            |_: GraphSymbolKind, _: &str| None,
+                            GqlQueryPolicy::new(1, 1, 100_000, 10_000),
+                        )
+                        .expect("one-record exact count");
+                    let QueryResult::Rows { rows, .. } = result else {
+                        panic!("count returns rows");
+                    };
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_count(), Some(3));
+                    first.create_vertex(VId(99), vec![], vec![]);
+                    second.delete_vertex(VId(99));
+                    ("FG-LAW-FCW-READ-01", ElementId::Vertex(VId(99)))
+                }
+                _ => {
+                    let result = txn
+                        .query(
+                            &db,
+                            &query,
+                            "MATCH (n:Fresh) RETURN n",
+                            &GqlParameters::new(),
+                            |kind, name: &str| match (kind, name) {
+                                (GraphSymbolKind::Label, "Fresh") => {
+                                    Some(GraphSymbol::Label(LabelId(7)))
+                                }
+                                _ => None,
+                            },
+                            GqlQueryPolicy::new(10, 10, 100_000, 10_000),
+                        )
+                        .expect("empty label-selected scan");
+                    assert!(matches!(result, QueryResult::Rows { rows, .. } if rows.is_empty()));
+                    first.set_vertex_label(VId(2), LabelId(7), true);
+                    second.set_vertex_label(VId(2), LabelId(7), false);
+                    ("FG-LAW-FCW-READ-01", ElementId::Vertex(VId(2)))
+                }
+            };
+            txn.write(&mut db, staged).expect("stage private write");
+            for (index, batch) in [first, second, third].into_iter().enumerate() {
+                assert_eq!(
+                    db.write(&cx, batch).await.expect("intervening batch"),
+                    CommitSeq(index as u64 + 2),
+                );
+            }
+            let window = db.delta_index().unwrap().clone();
+            assert_eq!(window.len(), 3);
+            assert_eq!(window.retained_after_commit_seq(), CommitSeq(1));
+            let error = txn
+                .finish_strict(&mut db, &cx)
+                .await
+                .expect_err("complete original-basis validation");
+            let WriteTxnError::Write(WriteError::FirstCommitterWins { law, detail }) = error else {
+                panic!("case {case}: expected FCW rejection, got {error:?}");
+            };
+            assert_eq!(law, expected_law, "case {case}");
+            assert_eq!(
+                detail,
+                format!(
+                    "transaction dependency {expected_element:?} changed at {:?} after pinned basis {:?}",
+                    CommitSeq(2),
+                    CommitSeq(1),
+                ),
+                "case {case}",
+            );
+            assert_eq!(txn.state(), EmbeddedTxnState::Aborted);
+            assert_eq!(db.delta_index().unwrap(), &window);
+            assert_eq!(db.frontier().unwrap(), CommitSeq(4));
+            assert!(matches!(db.state(), DatabaseState::Healthy { .. }));
+            assert!(db.vertex(VId(199)).unwrap().is_none());
+            assert_eq!(pinned.frontier(), CommitSeq(1));
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn strict_success_after_lazy_open_preserves_the_loaded_window_and_read_close_cut() {
+    let ((), report) = run_async_under_lab(0xfc10_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txn_cx = contexts.txn();
+        for writes in [false, true] {
+            let mut db = reopened_seeded(&cx).await;
+            let pinned = db.pinned_read_view().expect("pin original generation");
+            let mut txn = db.begin(&txn_cx).expect("begin");
+            let before = txn.vertex(&db, VId(1)).expect("unchanged read");
+            if writes {
+                let mut batch = WriteBatch::new(R);
+                batch.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(5)));
+                txn.write(&mut db, batch).expect("private write");
+            }
+            unrelated_writes(&mut db, &cx).await;
+            let window = db.delta_index().unwrap().clone();
+            let completion = txn
+                .finish_strict(&mut db, &cx)
+                .await
+                .expect("independent suffix");
+            if writes {
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: CommitSeq(5),
+                    }
+                );
+                assert_eq!(db.delta_index().unwrap().len(), window.len() + 1);
+                assert_eq!(
+                    db.vertex(VId(2)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(5).into())]
+                );
+            } else {
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::ReadClosed {
+                        snapshot_seq: CommitSeq(1),
+                        validated_through: CommitSeq(4),
+                    }
+                );
+                assert_eq!(db.delta_index().unwrap(), &window);
+                assert_eq!(db.frontier().unwrap(), CommitSeq(4));
+            }
+            assert_eq!(db.vertex(VId(1)).unwrap(), before);
+            assert_eq!(
+                db.delta_index().unwrap().retained_after_commit_seq(),
+                CommitSeq(1)
+            );
+            assert_eq!(txn.state(), EmbeddedTxnState::Completed(completion));
+            assert_eq!(pinned.frontier(), CommitSeq(1));
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

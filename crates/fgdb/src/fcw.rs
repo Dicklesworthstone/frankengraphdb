@@ -2,7 +2,7 @@
 
 use fgdb_chronicle::{CommitDraft, CommitValidator, ValidationRejection};
 use fgdb_delta_types::{
-    DeltaRow, ElementId, IndexError, LocalDeltaBatchIndex, LogicalDeltaTemplate,
+    DeltaRow, ElementId, IndexError, LocalDeltaBatchIndex, LogicalDeltaBatch, LogicalDeltaTemplate,
 };
 use fgdb_types::{CommitSeq, VId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,6 +75,89 @@ impl FirstCommitterWinsValidator {
         self.dependencies.extend(elements);
         self.adjacency_dependencies.extend(adjacency);
         self
+    }
+
+    /// Retain only the conflict keys this exact preparation can inspect. The
+    /// complete authenticated suffix is still visited; unrelated committed
+    /// identities do not become a second history-sized last-writer index.
+    pub(crate) fn for_prepared<E>(
+        template: &LogicalDeltaTemplate,
+        elements: impl IntoIterator<Item = ElementId>,
+        adjacency: impl IntoIterator<Item = VId>,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, E> {
+        checkpoint()?;
+        let mut validator = Self::default();
+        for element in elements {
+            checkpoint()?;
+            validator.dependencies.insert(element);
+        }
+        for vertex in adjacency {
+            checkpoint()?;
+            validator.adjacency_dependencies.insert(vertex);
+        }
+        for coordinate in template.coordinate_entries() {
+            checkpoint()?;
+            for row in &coordinate.rows {
+                checkpoint()?;
+                visit_touched_elements(row, &mut |element| {
+                    checkpoint()?;
+                    validator.dependencies.insert(element);
+                    Ok::<(), E>(())
+                })?;
+                match row {
+                    DeltaRow::CreateEdge { src, dst, .. } => {
+                        validator.dependencies.insert(ElementId::Vertex(*src));
+                        validator.dependencies.insert(ElementId::Vertex(*dst));
+                    }
+                    DeltaRow::DeleteVertex { vid, .. } => {
+                        validator.adjacency_dependencies.insert(*vid);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(validator)
+    }
+
+    pub(crate) fn observe_prepared_batch<E>(
+        &mut self,
+        batch: &LogicalDeltaBatch,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        checkpoint()?;
+        for coordinate in batch.coordinate_entries() {
+            checkpoint()?;
+            for row in &coordinate.rows {
+                self.observe_prepared_row(row, batch.commit_seq(), checkpoint)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_prepared_row<E>(
+        &mut self,
+        row: &DeltaRow,
+        at: CommitSeq,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        checkpoint()?;
+        visit_touched_elements(row, &mut |element| {
+            checkpoint()?;
+            if self.dependencies.contains(&element) {
+                self.last_writer.insert(element, at);
+            }
+            Ok::<(), E>(())
+        })?;
+        if let DeltaRow::CreateEdge { src, dst, .. } = row {
+            for vertex in [src, dst] {
+                checkpoint()?;
+                if self.adjacency_dependencies.contains(vertex) {
+                    self.adjacency_insertions.insert(*vertex, at);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn observe(&mut self, row: &DeltaRow, at: CommitSeq) {
@@ -170,41 +253,56 @@ impl CommitValidator for FirstCommitterWinsValidator {
 /// A counter's algebra profile does not authorize a merge through this FCW
 /// validator; such a merge needs its own validated lane.
 fn touched_elements(row: &DeltaRow, touched: &mut BTreeSet<ElementId>) {
+    let result = visit_touched_elements(row, &mut |element| {
+        touched.insert(element);
+        Ok::<(), core::convert::Infallible>(())
+    });
+    match result {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
+}
+
+fn visit_touched_elements<E>(
+    row: &DeltaRow,
+    visit: &mut impl FnMut(ElementId) -> Result<(), E>,
+) -> Result<(), E> {
     match row {
         DeltaRow::CreateVertex { vid, .. } => {
-            touched.insert(ElementId::Vertex(*vid));
+            visit(ElementId::Vertex(*vid))?;
         }
         DeltaRow::CreateEdge { eid, .. } => {
-            touched.insert(ElementId::Edge(*eid));
+            visit(ElementId::Edge(*eid))?;
         }
         DeltaRow::DeleteVertex {
             vid,
             sorted_retired_incident_edges,
             ..
         } => {
-            touched.insert(ElementId::Vertex(*vid));
+            visit(ElementId::Vertex(*vid))?;
             for eid in sorted_retired_incident_edges {
-                touched.insert(ElementId::Edge(*eid));
+                visit(ElementId::Edge(*eid))?;
             }
         }
         DeltaRow::DeleteEdge { eid, .. } => {
-            touched.insert(ElementId::Edge(*eid));
+            visit(ElementId::Edge(*eid))?;
         }
         DeltaRow::LabelMembership { vid, .. } => {
-            touched.insert(ElementId::Vertex(*vid));
+            visit(ElementId::Vertex(*vid))?;
         }
         DeltaRow::Property { elem, .. }
         | DeltaRow::ValidTime { elem, .. }
         | DeltaRow::Counter { elem, .. } => {
-            touched.insert(*elem);
+            visit(*elem)?;
         }
         DeltaRow::Escrow { subject, .. } => {
-            touched.insert(*subject);
+            visit(*subject)?;
         }
         // Non-element state has separate validation requirements. Keep this
         // exhaustive so a new row family cannot silently escape FCW review.
         DeltaRow::Sketch { .. } | DeltaRow::Schema { .. } | DeltaRow::Constraint { .. } => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -347,6 +445,123 @@ mod tests {
                 frontier: CommitSeq(0)
             })
         ));
+    }
+
+    #[test]
+    fn prepared_history_keeps_only_dependency_keys_and_matches_full_fcw() {
+        let bytes = rows_template(vec![
+            edge(10, 7, 8),
+            DeltaRow::DeleteVertex {
+                vid: VId(9),
+                before_version: ObjectId([1; 32]),
+                sorted_retired_incident_edges: vec![EId(11)],
+            },
+        ]);
+        let prepared = LogicalDeltaTemplate::decode_canonical(&bytes).unwrap();
+        let mut checkpoint = || Ok::<(), ()>(());
+        let mut filtered = FirstCommitterWinsValidator::for_prepared(
+            &prepared,
+            [ElementId::Vertex(VId(13))],
+            [VId(17)],
+            &mut checkpoint,
+        )
+        .unwrap();
+        let mut full = FirstCommitterWinsValidator::default()
+            .with_dependencies([ElementId::Vertex(VId(13))], [VId(17)]);
+        for id in 100..=355 {
+            for row in [
+                DeltaRow::LabelMembership {
+                    vid: VId(id),
+                    label: LabelId(1),
+                    before: false,
+                    after: true,
+                },
+                edge(id + 1_000, id, id + 1),
+            ] {
+                full.observe(&row, CommitSeq(id as u64));
+                filtered
+                    .observe_prepared_row(&row, CommitSeq(id as u64), &mut checkpoint)
+                    .unwrap();
+            }
+        }
+        assert!(filtered.last_writer.is_empty());
+        assert!(filtered.adjacency_insertions.is_empty());
+        assert_eq!(full.last_writer.len(), 512);
+        assert_eq!(full.adjacency_insertions.len(), 257);
+
+        for (offset, row) in [
+            DeltaRow::LabelMembership {
+                vid: VId(13),
+                label: LabelId(1),
+                before: false,
+                after: true,
+            },
+            DeltaRow::LabelMembership {
+                vid: VId(13),
+                label: LabelId(1),
+                before: true,
+                after: false,
+            },
+            edge(777, 17, 99),
+            edge(778, 99, 17),
+            DeltaRow::DeleteVertex {
+                vid: VId(42),
+                before_version: ObjectId([2; 32]),
+                sorted_retired_incident_edges: vec![EId(11)],
+            },
+            DeltaRow::LabelMembership {
+                vid: VId(7),
+                label: LabelId(1),
+                before: false,
+                after: true,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let sequence = CommitSeq(400 + offset as u64);
+            full.observe(&row, sequence);
+            filtered
+                .observe_prepared_row(&row, sequence, &mut checkpoint)
+                .unwrap();
+        }
+        // Latest writer wins inside the summary, while validation retains
+        // canonical touched/endpoint/guard/adjacency conflict precedence.
+        assert_eq!(filtered.last_writer.len(), 3);
+        assert_eq!(filtered.adjacency_insertions.len(), 1);
+        assert_eq!(
+            filtered.last_writer[&ElementId::Vertex(VId(13))],
+            CommitSeq(401)
+        );
+        assert_eq!(filtered.adjacency_insertions[&VId(17)], CommitSeq(403));
+        assert_eq!(
+            validate(&mut filtered, &bytes, 500),
+            validate(&mut full, &bytes, 500)
+        );
+    }
+
+    #[test]
+    fn prepared_history_checks_cancellation_inside_wide_cascades() {
+        let bytes = template(&[7]);
+        let prepared = LogicalDeltaTemplate::decode_canonical(&bytes).unwrap();
+        let mut validator =
+            FirstCommitterWinsValidator::for_prepared(&prepared, [], [], &mut || Ok::<(), ()>(()))
+                .unwrap();
+        let cascade = DeltaRow::DeleteVertex {
+            vid: VId(99),
+            before_version: ObjectId([1; 32]),
+            sorted_retired_incident_edges: (0..100).map(EId).collect(),
+        };
+        let mut visited = 0;
+        assert_eq!(
+            validator.observe_prepared_row(&cascade, CommitSeq(1), &mut || {
+                visited += 1;
+                if visited == 17 { Err(17) } else { Ok(()) }
+            }),
+            Err(17)
+        );
+        assert_eq!(visited, 17);
+        assert!(validator.last_writer.is_empty());
     }
 
     #[test]

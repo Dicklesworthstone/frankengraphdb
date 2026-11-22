@@ -151,8 +151,8 @@ pub use derived_watermarks::{
 mod seal_maintenance;
 pub use seal_maintenance::SealPublicationError;
 mod schema_catalog;
-pub use schema_catalog::{SymbolCatalogError, SymbolCatalogOpenError, SymbolCatalogReadView};
 use schema_catalog::SchemaState;
+pub use schema_catalog::{SymbolCatalogError, SymbolCatalogOpenError, SymbolCatalogReadView};
 mod prepared_write;
 mod query;
 mod scrub;
@@ -237,13 +237,13 @@ use fgdb_chronicle::{
     RootBootstrap, RootSelection, RootSlot, RootStore, store::StoreError as SlotStoreError,
 };
 use fgdb_crypto::{Digest, zeroize::SharedSecret};
+#[cfg(test)]
+use fgdb_delta_types::SchemaEpoch;
 use fgdb_delta_types::{
     CanonicalError, CommittedMarker, CoordinateEntry, DeltaRow, ElementId, IndexError, LabelId,
     LocalDeltaBatchIndex, LogicalDeltaBatch, LogicalDeltaTemplate, PropertyKeyId, RelationId,
     fold_target_disjoint,
 };
-#[cfg(test)]
-use fgdb_delta_types::SchemaEpoch;
 use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
 use fgdb_strata::root::{PartitionRoot, RootError, merge_all_edges_with_props};
@@ -793,6 +793,10 @@ pub enum WriteError {
     /// Loading the authenticated conflict history failed before this write
     /// entered the durable commit protocol. The current graph remains valid.
     HistoryRebuild(Box<RebuildError>),
+    /// Streaming the authenticated conflict history failed before this write
+    /// entered the durable commit protocol. A source mismatch or gap cannot
+    /// be treated as an empty conflict interval.
+    HistoryReplay(Box<DeltaReplayError>),
     /// A schema effect or its immutable objects failed admission before D1.
     /// No marker was submitted and the published generation remains current.
     CatalogAdmission(Box<RebuildError>),
@@ -1004,6 +1008,30 @@ impl From<RebuildError> for WriteError {
         }
     }
 }
+impl From<DeltaReplayError> for WriteError {
+    fn from(error: DeltaReplayError) -> Self {
+        match error {
+            DeltaReplayError::Read(ReadError::BeyondFrontier { asked, frontier }) => {
+                Self::PreparedHistory(IndexError::BeyondFrontier { asked, frontier })
+            }
+            DeltaReplayError::Read(ReadError::DeltaCursorRetired {
+                asked,
+                retained_after,
+                frontier,
+            }) => Self::PreparedHistory(IndexError::CursorRetired {
+                asked,
+                retained_after,
+                frontier,
+            }),
+            DeltaReplayError::Read(ReadError::DeltaWindow(error)) => Self::PreparedHistory(error),
+            DeltaReplayError::Reconstruction(error) => Self::from(*error),
+            DeltaReplayError::Interrupted(error) => {
+                Self::HistoryRebuild(Box::new(RebuildError::Interrupted(error)))
+            }
+            error => Self::HistoryReplay(Box::new(error)),
+        }
+    }
+}
 impl From<CommitError> for WriteError {
     fn from(error: CommitError) -> Self {
         Self::Commit(Box::new(error))
@@ -1145,6 +1173,12 @@ impl core::fmt::Display for WriteError {
                 write!(
                     f,
                     "prepared-write conflict history could not be loaded: {error}"
+                )
+            }
+            Self::HistoryReplay(error) => {
+                write!(
+                    f,
+                    "prepared-write conflict history could not be replayed: {error}"
                 )
             }
             Self::CatalogAdmission(error) => write!(f, "catalog admission: {error}"),
@@ -3286,8 +3320,15 @@ impl<V: Vfs + Clone> Database<V> {
             let exact_counts = collector.finish(&mut control)?;
             cx.checkpoint().map_err(RebuildError::Interrupted)?;
             let schema = SchemaState::load(cx, &store, schema, root.published_at).await?;
-            let mut snapshot =
-                current_generation(manifest, schema, root_id, &root, blocks, block_props, patches);
+            let mut snapshot = current_generation(
+                manifest,
+                schema,
+                root_id,
+                &root,
+                blocks,
+                block_props,
+                patches,
+            );
             snapshot.exact_counts = exact_counts;
             snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
             Ok(EmbeddedReadView {
@@ -4808,7 +4849,9 @@ impl<V: Vfs + Clone> Database<V> {
             fgdb_strata::root::MAX_ROOT_PATCHES as usize,
         )
         .map_err(|error| WriteError::RootCapacity(Box::new(error)))?;
-        let next_schema = self.snapshot.schema
+        let next_schema = self
+            .snapshot
+            .schema
             .apply_template(
                 cx,
                 &self.store,
@@ -5761,11 +5804,12 @@ impl<V: Vfs + Clone> Database<V> {
     /// retirement, invent a missing capsule, or weaken first-committer-wins.
     /// Synchronous historical preparation, change-feed and resident-index
     /// callers may use this explicit I/O boundary before their existing APIs.
-    /// Prepared-write and transaction completion also call it before validating
-    /// any basis that lies below the loaded floor.
+    /// Semantic transaction rebase also uses this window. Prepared-write and
+    /// strict transaction validation stream missing history without retaining
+    /// it in the database.
     ///
     /// Type-erased like [`Self::commit_template`]: every controlled
-    /// transaction completion awaits it, so a caller's `Send` proof stops here
+    /// semantic transaction rebase awaits it, so a caller's `Send` proof stops here
     /// instead of descending through the window's capsule reads.
     pub fn ensure_delta_window<'a>(
         &'a mut self,
@@ -6573,7 +6617,10 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     replay_capacity: ReplayRootCapacity,
 ) -> Result<OpenedGeneration, RebuildError> {
     let SelectedCheckpoint {
-        root_id, manifest, schema, ..
+        root_id,
+        manifest,
+        schema,
+        ..
     } = checkpoint;
     // The sealed lists a retained writer holds come from the same verified
     // reads as the decoded state.
@@ -6609,7 +6656,13 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         writer.spent_vertices().len() as u64 + writer.spent_edges().len() as u64;
     let mut schema = SchemaState::load(cx, store, schema, published_at).await?;
     let mut snapshot = current_generation(
-        manifest, schema.clone(), root_id, &root, blocks, block_props, patches,
+        manifest,
+        schema.clone(),
+        root_id,
+        &root,
+        blocks,
+        block_props,
+        patches,
     );
     let mut versions = VersionHeads::from_checkpoint(&snapshot);
 
@@ -7067,7 +7120,10 @@ async fn ensure_slot_target_resolves<V: Vfs>(
         Ok(resolved)
             if resolved.len() == 1
                 && resolved[0].0.root == snapshot.root
-                && resolved[0].0.schema == snapshot.schema.reference => Ok(()),
+                && resolved[0].0.schema == snapshot.schema.reference =>
+        {
+            Ok(())
+        }
         outcome => Err(OpenError::SlotUnrecoverable {
             path: path.to_path_buf(),
             detail: format!(
@@ -7663,7 +7719,8 @@ async fn fold_stream<V: Vfs>(
                 error,
             })?;
 
-        *state.schema = state.schema
+        *state.schema = state
+            .schema
             .apply_template(
                 cx,
                 store,
@@ -8228,7 +8285,7 @@ mod lazy_delta_laws {
     }
 
     #[test]
-    fn prepared_and_transaction_completion_reload_the_complete_conflict_interval() {
+    fn prepared_and_transaction_completion_authenticate_the_complete_conflict_interval() {
         let ((), report) = run_async_under_lab(0xa673, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.commit();
@@ -8285,7 +8342,11 @@ mod lazy_delta_laws {
                         Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
                     ));
                 }
-                assert_eq!(db.delta_materialized_after, basis);
+                assert_eq!(
+                    db.delta_materialized_after,
+                    if mode == 0 { CommitSeq(2) } else { basis },
+                    "prepared validation streams; semantic rebase admits its history window"
+                );
                 assert_eq!(db.frontier().unwrap(), CommitSeq(2));
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props[0].1,

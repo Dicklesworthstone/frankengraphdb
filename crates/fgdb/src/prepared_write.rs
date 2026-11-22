@@ -453,19 +453,30 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(WriteError::ForeignPreparedWrite);
         }
         self.ensure_writable()?;
-        self.ensure_delta_window(cx, prepared.basis)
-            .await
-            .map_err(WriteError::from)?;
-        let validator =
-            FirstCommitterWinsValidator::from_history(prepared.basis, &self.snapshot.delta_index)
-                .map_err(WriteError::PreparedHistory)?
-                .with_scalar_resolver(self.keys.scalar_resolver.clone())
-                .with_dependencies(
-                    prepared.dependencies.elements.iter().copied(),
-                    prepared.dependencies.adjacency.iter().copied(),
-                );
+        let mut checkpoint = || {
+            cx.checkpoint()
+                .map_err(crate::RebuildError::Interrupted)
+                .map_err(WriteError::from)
+        };
+        checkpoint()?;
+        let mut validator = FirstCommitterWinsValidator::for_prepared(
+            &prepared.template,
+            prepared.dependencies.elements.iter().copied(),
+            prepared.dependencies.adjacency.iter().copied(),
+            &mut checkpoint,
+        )?
+        .with_scalar_resolver(self.keys.scalar_resolver.clone());
+        self.visit_delta_history(cx, prepared.basis, |_, batch| {
+            validator.observe_prepared_batch(batch, &mut checkpoint)
+        })
+        .await
+        .map_err(|error| match error {
+            crate::delta_replay::DeltaHistoryError::Source(error) => WriteError::from(error),
+            crate::delta_replay::DeltaHistoryError::Observer(error) => error,
+        })?;
         // Always install the validator for THIS basis, even if another prepared
-        // write just committed or failed. Prior attempted drafts are not history.
+        // write just committed or failed. Its full source interval has now
+        // authenticated; no partial candidate or omitted history was installed.
         self.coordinator.set_validator(Box::new(validator));
         self.commit_template_with_authz(
             cx,

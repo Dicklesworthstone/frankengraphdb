@@ -293,14 +293,26 @@ impl WriteTxn {
             return Err(WriteTxnError::NoPreparedWrite);
         }
         checkpoint()?;
-        attempt
-            .database
-            .ensure_delta_window(cx, attempt.transaction.basis)
-            .await
-            .map_err(|error| match error {
-                crate::RebuildError::Interrupted(error) => WriteTxnError::Interrupted(error),
-                error => WriteTxnError::Write(WriteError::from(error)),
-            })?;
+        let strict_conflict = if rebase.is_none() {
+            Some(
+                attempt
+                    .transaction
+                    .transaction_conflict_streamed(attempt.database, cx, &mut checkpoint)
+                    .await?,
+            )
+        } else {
+            // Semantic replay still consumes its existing synchronous history
+            // contract. Strict validation does not install an omitted prefix.
+            attempt
+                .database
+                .ensure_delta_window(cx, attempt.transaction.basis)
+                .await
+                .map_err(|error| match error {
+                    crate::RebuildError::Interrupted(error) => WriteTxnError::Interrupted(error),
+                    error => WriteTxnError::Write(WriteError::from(error)),
+                })?;
+            None
+        };
         // A new apply basis must never erase the interval over which earlier
         // point, negative and query observations need validation. Reuse the
         // ordinary witness checker BEFORE any policy can replace the basis.
@@ -345,10 +357,13 @@ impl WriteTxn {
             )?,
             None => {}
         }
-        if let Some((law, element, committed_at)) = attempt
-            .transaction
-            .transaction_conflict(attempt.database, &mut checkpoint)?
-        {
+        let conflict = match strict_conflict {
+            Some(conflict) => conflict,
+            None => attempt
+                .transaction
+                .transaction_conflict(attempt.database, &mut checkpoint)?,
+        };
+        if let Some((law, element, committed_at)) = conflict {
             return Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
                 law,
                 detail: format!(
@@ -376,7 +391,19 @@ impl WriteTxn {
             let commit_seq = attempt
                 .database
                 .commit_prepared_with_crash(cx, prepared, crash_at)
-                .await?;
+                .await
+                .map_err(|error| match error {
+                    // A strict write may replay its omitted prefix again for
+                    // prepared FCW. Interruption there is still pre-publication
+                    // validation, with the same typed transaction outcome.
+                    WriteError::HistoryRebuild(error) => match *error {
+                        crate::RebuildError::Interrupted(error) => {
+                            WriteTxnError::Interrupted(error)
+                        }
+                        error => WriteTxnError::Write(WriteError::HistoryRebuild(Box::new(error))),
+                    },
+                    error => WriteTxnError::Write(error),
+                })?;
             EmbeddedTxnCompletion::WriteCommitted { commit_seq }
         } else {
             debug_assert!(attempt.transaction.staged.is_empty());
@@ -628,109 +655,172 @@ impl WriteTxn {
         scope: ConflictScope,
         checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, WriteTxnError> {
+        let mutation_footprint = match scope {
+            ConflictScope::Reads => std::collections::BTreeSet::new(),
+            ConflictScope::ReadsAndWrites => self.mutation_footprint(checkpoint)?,
+        };
+        if !self.has_conflict_observations(&mutation_footprint) {
+            return Ok(None);
+        }
+        for batch in database.delta_since(self.basis)? {
+            if let Some(conflict) = self.transaction_conflict_in_batch(
+                database,
+                batch,
+                &mutation_footprint,
+                checkpoint,
+            )? {
+                return Ok(Some(conflict));
+            }
+        }
+        Ok(None)
+    }
+
+    fn has_conflict_observations(
+        &self,
+        mutation_footprint: &std::collections::BTreeSet<ElementId>,
+    ) -> bool {
+        !self.read_set.borrow().is_empty()
+            || !self.point_reads.borrow().is_empty()
+            || !self.count_reads.borrow().is_empty()
+            || !self.match_expansions.borrow().is_empty()
+            || !self.scanned_vertex_labels.borrow().is_empty()
+            || !self.scanned_edge_relations.borrow().is_empty()
+            || !mutation_footprint.is_empty()
+            || self.scanned_vertices.get()
+            || self.scanned_edges.get()
+    }
+
+    /// Preserve the earliest semantic conflict privately while authenticating
+    /// every omitted batch. The source window and all live graph state remain
+    /// untouched, including when a later capsule fails after an early conflict.
+    async fn transaction_conflict_streamed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, WriteTxnError> {
+        let mutation_footprint = self.mutation_footprint(checkpoint)?;
+        let observed = self.has_conflict_observations(&mutation_footprint);
+        let basis = self.basis;
+        let mut first_conflict = None;
+        let conflict = &mut first_conflict;
+        // Move the exclusive transaction borrow into the callback. Shared
+        // RefCell borrows are confined to the synchronous batch helper; none
+        // survives source I/O or makes the completion future require Sync.
+        let transaction = &mut *self;
+        database
+            .visit_delta_history(cx, basis, move |database, batch| {
+                checkpoint()?;
+                if observed && conflict.is_none() {
+                    *conflict = transaction.transaction_conflict_in_batch(
+                        database,
+                        batch,
+                        &mutation_footprint,
+                        checkpoint,
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|error| match error {
+                crate::delta_replay::DeltaHistoryError::Source(
+                    crate::DeltaReplayError::Interrupted(error),
+                ) => WriteTxnError::Interrupted(error),
+                crate::delta_replay::DeltaHistoryError::Source(error) => {
+                    WriteTxnError::Write(WriteError::from(error))
+                }
+                crate::delta_replay::DeltaHistoryError::Observer(error) => error,
+            })?;
+        Ok(first_conflict)
+    }
+
+    // Shared verbatim by the resident rebase/refresh paths and strict streamed
+    // completion. The original per-row and read-before-write precedence stays
+    // inside this helper rather than being reimplemented by a replay adapter.
+    fn transaction_conflict_in_batch<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        batch: &fgdb_delta_types::LogicalDeltaBatch,
+        mutation_footprint: &std::collections::BTreeSet<ElementId>,
+        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, WriteTxnError> {
         let read_set = self.read_set.borrow();
         let point_reads = self.point_reads.borrow();
         let count_reads = self.count_reads.borrow();
         let match_expansions = self.match_expansions.borrow();
         let scanned_vertex_labels = self.scanned_vertex_labels.borrow();
-        let mutation_footprint = match scope {
-            ConflictScope::Reads => std::collections::BTreeSet::new(),
-            ConflictScope::ReadsAndWrites => self.mutation_footprint(checkpoint)?,
-        };
         let scanned_vertices = self.scanned_vertices.get();
         let scanned_edges = self.scanned_edges.get();
         let scanned_edge_relations = self.scanned_edge_relations.borrow();
-        if read_set.is_empty()
-            && point_reads.is_empty()
-            && count_reads.is_empty()
-            && match_expansions.is_empty()
-            && scanned_vertex_labels.is_empty()
-            && scanned_edge_relations.is_empty()
-            && mutation_footprint.is_empty()
-            && !scanned_vertices
-            && !scanned_edges
-        {
-            return Ok(None);
-        }
-        // One complete suffix serves both read and mutation validation. Do not
-        // trust the coordinator's resettable in-memory FCW map for an old basis.
-        // delta_since refuses a retired prefix instead of silently validating
-        // against only the surviving tail. Validation precedes prepared.take().
-        for batch in database.delta_since(self.basis)? {
+        checkpoint()?;
+        let seq = batch.commit_seq();
+        let mut touched = std::collections::BTreeSet::new();
+        let mut endpoints = std::collections::BTreeSet::new();
+        for coordinate in batch.coordinate_entries() {
             checkpoint()?;
-            let seq = batch.commit_seq();
-            let mut touched = std::collections::BTreeSet::new();
-            let mut endpoints = std::collections::BTreeSet::new();
-            for coordinate in batch.coordinate_entries() {
+            for row in &coordinate.rows {
                 checkpoint()?;
-                for row in &coordinate.rows {
-                    checkpoint()?;
-                    match row {
-                        fgdb_delta_types::DeltaRow::CreateVertex { vid, labels, .. } => {
-                            if scanned_vertices {
+                match row {
+                    fgdb_delta_types::DeltaRow::CreateVertex { vid, labels, .. } => {
+                        if scanned_vertices {
+                            return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
+                        }
+                        for label in labels {
+                            checkpoint()?;
+                            if scanned_vertex_labels.contains(label) {
                                 return Ok(Some((
                                     "FG-LAW-FCW-READ-01",
                                     ElementId::Vertex(*vid),
                                     seq,
                                 )));
                             }
-                            for label in labels {
-                                checkpoint()?;
-                                if scanned_vertex_labels.contains(label) {
-                                    return Ok(Some((
-                                        "FG-LAW-FCW-READ-01",
-                                        ElementId::Vertex(*vid),
-                                        seq,
-                                    )));
-                                }
-                            }
                         }
-                        fgdb_delta_types::DeltaRow::LabelMembership {
-                            vid,
-                            label,
-                            after: true,
-                            ..
-                        } if scanned_vertex_labels.contains(label) => {
-                            return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
-                        }
-                        fgdb_delta_types::DeltaRow::CreateEdge {
-                            eid, src, relation, ..
-                        } if scanned_edges
-                            || scanned_edge_relations.contains(relation)
-                            || match_expansions.contains(&(*src, *relation)) =>
-                        {
-                            return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Edge(*eid), seq)));
-                        }
-                        _ => {}
                     }
-                    if let Some(element) = point_reads.conflict(row, checkpoint)? {
-                        return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
+                    fgdb_delta_types::DeltaRow::LabelMembership {
+                        vid,
+                        label,
+                        after: true,
+                        ..
+                    } if scanned_vertex_labels.contains(label) => {
+                        return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
                     }
-                    if let Some(element) = count_reads.conflict(database, row, seq, checkpoint)? {
-                        return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
-                    }
-                    if let Some(element) =
-                        point_reads.vertex_scan_conflict(database, row, seq, checkpoint)?
+                    fgdb_delta_types::DeltaRow::CreateEdge {
+                        eid, src, relation, ..
+                    } if scanned_edges
+                        || scanned_edge_relations.contains(relation)
+                        || match_expansions.contains(&(*src, *relation)) =>
                     {
-                        return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
+                        return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Edge(*eid), seq)));
                     }
-                    crate::adjacency_endpoints(row, &mut endpoints);
-                    validation_touches(row, &mut touched, checkpoint)?;
+                    _ => {}
                 }
+                if let Some(element) = point_reads.conflict(row, checkpoint)? {
+                    return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
+                }
+                if let Some(element) = count_reads.conflict(database, row, seq, checkpoint)? {
+                    return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
+                }
+                if let Some(element) =
+                    point_reads.vertex_scan_conflict(database, row, seq, checkpoint)?
+                {
+                    return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
+                }
+                crate::adjacency_endpoints(row, &mut endpoints);
+                validation_touches(row, &mut touched, checkpoint)?;
             }
-            // Preserve read-before-write conflict precedence and each set's
-            // canonical order. Every inspected element is cancellable.
-            for element in endpoints.iter().chain(touched.iter()) {
-                checkpoint()?;
-                if read_set.contains(element) {
-                    return Ok(Some(("FG-LAW-FCW-READ-01", *element, seq)));
-                }
+        }
+        // Preserve read-before-write conflict precedence and each set's
+        // canonical order. Every inspected element is cancellable.
+        for element in endpoints.iter().chain(touched.iter()) {
+            checkpoint()?;
+            if read_set.contains(element) {
+                return Ok(Some(("FG-LAW-FCW-READ-01", *element, seq)));
             }
-            for element in endpoints.iter().chain(touched.iter()) {
-                checkpoint()?;
-                if mutation_footprint.contains(element) {
-                    return Ok(Some(("FG-LAW-FCW-01", *element, seq)));
-                }
+        }
+        for element in endpoints.iter().chain(touched.iter()) {
+            checkpoint()?;
+            if mutation_footprint.contains(element) {
+                return Ok(Some(("FG-LAW-FCW-01", *element, seq)));
             }
         }
         Ok(None)

@@ -12,6 +12,44 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Streamed conflict validation and schema allocation — qualification pending
+
+Prepared writes and strict transaction completion now authenticate omitted
+Chronicle history one batch at a time and borrow the already-loaded suffix.
+They preserve the database's retained delta window and pinned generations.
+Prepared FCW retains last-writer and adjacency summaries only for the exact
+preparation's dependencies, including normalized guards, ensure aliases,
+created-edge endpoints and cascade/deletion dependencies. Unrelated intervening
+writers no longer populate that validation map. The history is still traversed.
+
+Strict completion reuses the existing point, negative, count and scan witness
+logic. Its earliest conflict remains private until the complete source interval
+authenticates; prepared validation retains latest-writer diagnostics and its
+canonical conflict precedence. A source failure, cancellation or dropped future
+cannot publish a partial candidate. Semantic rebase still uses explicit history
+materialization. Strict writes retain the sole ordinary prepared-commit path,
+which may authenticate an omitted prefix a second time; no cold-write latency
+improvement is claimed.
+
+Automatic schema-name allocation uses the same streaming traversal to reserve
+numeric IDs from removed fields and deleted elements. Origin replay also
+authenticates historical schema objects and transitions, keeping only its
+current private catalog and checking the final reference against the selected
+snapshot. It does not install historical schema generations or lower the delta
+floor. Traversal reports an encountered source failure before semantic conflicts;
+the order between multiple corrupt source objects follows the streamed walk.
+
+Regression sources cover bounded FCW summaries against the full validator,
+lazy reopen, mixed omitted/resident history, exact conflict witnesses, late
+corruption, cancellation, dropped futures, successful write/read completion,
+missing/corrupt prior schema objects and clean allocation retry. Pinned
+changed-source formatting, whitespace checks and static-only UBS pass. UBS ran
+without Cargo/Clippy and supplies no compiler or runtime verdict. Compiler, runtime and
+exact-tree qualification remain open under the broader `fgdb-agp1o`,
+`fgdb-e8gr4`, `fgdb-d5vo4` and `fgdb-7r8sy` work. One replay batch bounds payload
+retention, not total handle memory: current catalogs, snapshots, dependency sets
+and the existing verification diagnostics remain owned.
+
 ### Maintained correlated scalar aggregates — qualification pending
 
 Reader-free correlated scalar summaries now admit integer SUM and AVG,
