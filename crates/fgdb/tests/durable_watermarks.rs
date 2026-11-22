@@ -13,10 +13,12 @@ use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs, VfsFile};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, DerivedCheckpointOutcome, DerivedRebuildReason, MemVfs, WriteBatch,
+    Database, DatabaseKeys, DerivedCheckpointError, DerivedCheckpointOutcome, DerivedRebuildReason,
+    MaintainedBeaconError, MemVfs, ResidentIndexError, StandingQueryError, StandingQueryFailure,
+    WriteBatch,
 };
 use fgdb_beacon::read::{ReadOptions, ReadPolicy, Search};
-use fgdb_beacon::{DistanceMetric, HnswConfig, TextMatch, VectorSearch};
+use fgdb_beacon::{BeaconError, DistanceMetric, HnswConfig, TextMatch, VectorSearch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphSet,
@@ -84,6 +86,10 @@ fn zero_scan_policy() -> GqlQueryPolicy {
     // Zero snapshot records allowed: any full-graph vertex or Strata block scan
     // fails closed with SnapshotBudget!
     GqlQueryPolicy::new(0, 10_000, 100_000_000, 200_000)
+}
+
+fn assert_send<T: Send>(value: T) -> T {
+    value
 }
 
 async fn seed_base_graph(cx: &CommitCx, db: &mut Database<MemVfs>) -> CommitSeq {
@@ -536,6 +542,10 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
                 .await
                 .unwrap();
         assert_eq!(reopened.frontier().unwrap(), s2);
+        let loaded_window = reopened.delta_index().unwrap().clone();
+        assert!(loaded_window.is_empty());
+        assert_eq!(loaded_window.retained_after_commit_seq(), s2);
+        let pinned_before_restore = reopened.pinned_read_view().unwrap();
 
         // Catch up Beacon with max_staging_rows = 4 (vs 64-vertex corpus -> proves 0 full-graph scan!).
         let delta_only_maintenance = ReadPolicy {
@@ -564,6 +574,7 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
                 healed_by_raptorq: true,
             },
         );
+        assert_eq!(reopened.delta_index().unwrap(), &loaded_window);
 
         // Catch up Ripple reachability with max_snapshot_records = 0 (proves 0 Strata block scans!).
         let (restored_reach, reach_outcome) = reopened
@@ -586,6 +597,13 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
                 healed_by_raptorq: true,
             },
         );
+        assert_eq!(reopened.delta_index().unwrap(), &loaded_window);
+        assert_eq!(pinned_before_restore.frontier(), s2);
+        let pinned_result = pinned_before_restore
+            .execute_graph_set_governed(&query, &hybrid_plan, rebuild_policy())
+            .unwrap();
+        assert_eq!(pinned_result.value, expected_gql.value);
+        assert_eq!(pinned_result.rows.snapshot_records, 64);
 
         // Execute CALL hybrid.search on `reopened` with max_snapshot_records = 0:
         // proves CALL hybrid.search reuses the restored MaintainedBeaconIndex with 0 vertex scans!
@@ -640,6 +658,322 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
             .map(|(&pair, _)| pair)
             .collect();
         assert!(post_write_pairs.contains(&(VId(1), VId(4))));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn streamed_catch_up_coalesces_repeated_vertices_and_preserves_the_lazy_window_on_refusal() {
+    let ((), report) = run_async_under_lab(0xc198_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let watermark = seed_base_graph(&commit, &mut db).await;
+        let beacon = db
+            .register_beacon_index(&query, &beacon_options(), ReadPolicy::default())
+            .unwrap();
+        let reach = db
+            .register_standing_reachability(&query, LINKS, rebuild_policy())
+            .unwrap();
+        db.save_beacon_checkpoint(&commit, &query, &beacon, "repeated")
+            .await
+            .unwrap();
+        db.save_standing_reachability_checkpoint(&commit, &query, &reach, "repeated")
+            .await
+            .unwrap();
+
+        // Eight global ticks contain two versions of ONE changed document,
+        // two true no-ops, and edge lifetimes inside and outside the selected
+        // relation. The selected edge exercises real arrangement rederivation.
+        // No-op or irrelevant ticks must still advance the restored anchor.
+        let unrelated = RelationId(2);
+        for step in 0..8 {
+            let mut batch = WriteBatch::new(if matches!(step, 2 | 4) {
+                unrelated
+            } else {
+                LINKS
+            });
+            match step {
+                0 => batch.set_vertex_property(VId(2), BODY, Some(text("intermediate value"))),
+                2 => batch.add_edge(EId(990), VId(5), VId(1), vec![]),
+                3 => batch.set_vertex_property(VId(2), BODY, Some(text("restored needle"))),
+                4 => batch.delete_edge(EId(990)),
+                6 => batch.add_edge(EId(991), VId(5), VId(6), vec![]),
+                7 => batch.delete_edge(EId(991)),
+                _ => batch.ensure_vertex(VId(2), vec![], vec![]),
+            };
+            assert_eq!(db.write(&commit, batch).await.unwrap(), CommitSeq(step + 2));
+        }
+        let head = CommitSeq(9);
+        let expected_pairs: Vec<_> = (1..5_u128)
+            .flat_map(|source| ((source + 1)..=5).map(move |target| (VId(source), VId(target))))
+            .collect();
+        assert_eq!(
+            db.standing_reachability(&query, &reach)
+                .unwrap()
+                .rows()
+                .iter()
+                .map(|(&pair, weight)| {
+                    assert_eq!(weight.to_i128(), Some(1));
+                    pair
+                })
+                .collect::<Vec<_>>(),
+            expected_pairs,
+        );
+        let search = Search::Text {
+            query: "needle",
+            k: 8,
+            mode: TextMatch::Any,
+        };
+        let expected_search = db
+            .search_beacon_index(&query, &beacon, search, ReadPolicy::default())
+            .unwrap();
+        assert_eq!(expected_search.len(), 1);
+        drop(db);
+
+        let mut reopened =
+            Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+                .await
+                .unwrap();
+        let loaded_window = reopened.delta_index().unwrap().clone();
+        assert!(loaded_window.is_empty());
+        assert_eq!(loaded_window.retained_after_commit_seq(), head);
+        let pinned = reopened.pinned_read_view().unwrap();
+        let one_document = ReadPolicy {
+            max_work_units: 10_000_000,
+            max_source_scratch: 256,
+            max_staging_rows: 1,
+            max_result_rows: 64,
+        };
+        let (restored_beacon, outcome) = assert_send(reopened.load_or_rebuild_beacon_checkpoint(
+            &commit,
+            &query,
+            "repeated",
+            &beacon_options(),
+            one_document,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            DerivedCheckpointOutcome::CatchUp {
+                watermark_seq: watermark,
+                head_seq: head,
+                commits_replayed: 8,
+                touched_vertices: 1,
+                healed_by_raptorq: false,
+            },
+        );
+        assert_eq!(reopened.delta_index().unwrap(), &loaded_window);
+        assert_eq!(
+            reopened
+                .search_beacon_index(&query, &restored_beacon, search, ReadPolicy::default())
+                .unwrap(),
+            expected_search,
+        );
+        let (restored_reach, outcome) =
+            assert_send(reopened.load_or_rebuild_standing_reachability_checkpoint(
+                &commit,
+                &query,
+                "repeated",
+                LINKS,
+                zero_scan_policy(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            DerivedCheckpointOutcome::CatchUp {
+                watermark_seq: watermark,
+                head_seq: head,
+                commits_replayed: 8,
+                touched_vertices: 0,
+                healed_by_raptorq: false,
+            },
+        );
+        assert_eq!(reopened.delta_index().unwrap(), &loaded_window);
+        assert_eq!(
+            reopened
+                .standing_reachability(&query, &restored_reach)
+                .unwrap()
+                .rows()
+                .iter()
+                .map(|(&pair, _)| pair)
+                .collect::<Vec<_>>(),
+            expected_pairs,
+        );
+
+        // Decode and every replay tick share the same Ripple allowance. Use
+        // the observed complete-restore cost to cut each allowance one event
+        // short, including after actual relation changes and their retraction.
+        let restore_stats = *reopened
+            .standing_query_node_stats(&query, &restored_reach)
+            .unwrap()
+            .next()
+            .unwrap();
+        assert!(restore_stats.work_units > 0);
+        assert!(restore_stats.scratch_entries > 0);
+        for (policy, expected_failure) in [
+            (
+                GqlQueryPolicy::new(0, 10_000, restore_stats.work_units - 1, 200_000),
+                StandingQueryFailure::WorkBudget,
+            ),
+            (
+                GqlQueryPolicy::new(0, 10_000, 100_000_000, restore_stats.scratch_entries - 1),
+                StandingQueryFailure::ScratchBudget,
+            ),
+        ] {
+            assert!(matches!(
+                reopened
+                    .load_or_rebuild_standing_reachability_checkpoint(
+                        &commit,
+                        &query,
+                        "repeated",
+                        LINKS,
+                        policy,
+                    )
+                    .await,
+                Err(DerivedCheckpointError::Standing(StandingQueryError::Maintenance(actual)))
+                    if actual == expected_failure
+            ));
+            assert_eq!(reopened.delta_index().unwrap(), &loaded_window);
+            assert_eq!(
+                reopened
+                    .standing_query_node_stats(&query, &restored_reach)
+                    .unwrap()
+                    .next()
+                    .copied(),
+                Some(restore_stats),
+            );
+            assert_eq!(
+                reopened
+                    .standing_reachability(&query, &restored_reach)
+                    .unwrap()
+                    .frontier(),
+                head,
+            );
+        }
+        let (retried_reach, retry_outcome) = reopened
+            .load_or_rebuild_standing_reachability_checkpoint(
+                &commit,
+                &query,
+                "repeated",
+                LINKS,
+                GqlQueryPolicy::new(
+                    0,
+                    10_000,
+                    restore_stats.work_units,
+                    restore_stats.scratch_entries,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry_outcome, outcome);
+        assert_eq!(reopened.delta_index().unwrap(), &loaded_window);
+        assert_eq!(
+            reopened
+                .standing_reachability(&query, &retried_reach)
+                .unwrap()
+                .rows()
+                .iter()
+                .map(|(&pair, _)| pair)
+                .collect::<Vec<_>>(),
+            expected_pairs,
+        );
+
+        // The same saved checkpoint now needs TWO distinct documents. Each
+        // tick fits the one-document cap by itself; the complete suffix does
+        // not. Refusal must preserve the already installed live generations
+        // and the partly loaded native window, then permit an explicit retry.
+        let mut another = WriteBatch::new(LINKS);
+        another.set_vertex_property(VId(3), BODY, Some(text("another needle")));
+        let newest = reopened.write(&commit, another).await.unwrap();
+        assert_eq!(newest, CommitSeq(10));
+        let before_refusal = reopened.delta_index().unwrap().clone();
+        assert_eq!(before_refusal.len(), 1);
+        assert_eq!(before_refusal.retained_after_commit_seq(), head);
+        let expected_latest = reopened
+            .search_beacon_index(&query, &restored_beacon, search, ReadPolicy::default())
+            .unwrap();
+        assert_eq!(expected_latest.len(), 2);
+        assert!(matches!(
+            reopened
+                .load_or_rebuild_beacon_checkpoint(
+                    &commit,
+                    &query,
+                    "repeated",
+                    &beacon_options(),
+                    one_document,
+                )
+                .await,
+            Err(DerivedCheckpointError::Beacon(
+                MaintainedBeaconError::Resident(ResidentIndexError::Index(
+                    BeaconError::ResourceLimit {
+                        resource: "refresh vertices",
+                        limit: 1,
+                    }
+                ))
+            ))
+        ));
+        assert_eq!(reopened.delta_index().unwrap(), &before_refusal);
+        let status = reopened
+            .beacon_index_status(&query, &restored_beacon)
+            .unwrap();
+        assert_eq!(status.source_sequence, newest);
+        assert!(status.failure.is_none());
+        assert_eq!(
+            reopened
+                .search_beacon_index(&query, &restored_beacon, search, ReadPolicy::default())
+                .unwrap(),
+            expected_latest,
+        );
+        let (retried, outcome) = reopened
+            .load_or_rebuild_beacon_checkpoint(
+                &commit,
+                &query,
+                "repeated",
+                &beacon_options(),
+                ReadPolicy {
+                    max_staging_rows: 2,
+                    ..one_document
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            DerivedCheckpointOutcome::CatchUp {
+                watermark_seq: watermark,
+                head_seq: newest,
+                commits_replayed: 9,
+                touched_vertices: 2,
+                healed_by_raptorq: false,
+            },
+        );
+        assert_eq!(reopened.delta_index().unwrap(), &before_refusal);
+        assert_eq!(
+            reopened
+                .search_beacon_index(&query, &retried, search, ReadPolicy::default())
+                .unwrap(),
+            expected_latest,
+        );
+        let current_reach = reopened
+            .standing_reachability(&query, &restored_reach)
+            .unwrap();
+        assert_eq!(current_reach.frontier(), newest);
+        assert_eq!(
+            current_reach
+                .rows()
+                .iter()
+                .map(|(&pair, _)| pair)
+                .collect::<Vec<_>>(),
+            expected_pairs,
+        );
+        assert_eq!(pinned.frontier(), head);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

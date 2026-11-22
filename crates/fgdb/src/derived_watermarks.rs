@@ -13,10 +13,14 @@
 //!    encoded through page-framed XChaCha20-Poly1305 + systematic RFC 6330
 //!    RaptorQ (`ExtentObjectKind::IndexSegment`), healing minor symbol bit-rot
 //!    deterministically on read.
-//! 3. **Bounded `O(|Delta|)` catch-up**: when valid at `watermark_seq <=
-//!    committed_head_seq`, only the Chronicle delta suffix
-//!    `(watermark_seq..=committed_head_seq]` is replayed (`0` full-graph vertex
-//!    or Strata block scans).
+//! 3. **Batch-at-a-time catch-up**: when valid at `watermark_seq <=
+//!    committed_head_seq`, the Chronicle delta suffix is authenticated one
+//!    complete batch at a time without hydrating the database's history window.
+//!    Beacon coalesces affected identities before one final-state update;
+//!    Ripple advances its private arrangement under one cumulative allowance.
+//!    Neither restoration scans the complete graph. One batch, the affected
+//!    identities/arrangement and verification diagnostics retain their existing
+//!    bounds; this is not an O(delta) total-work or whole-handle memory claim.
 
 use std::path::{Path, PathBuf};
 
@@ -38,7 +42,7 @@ type BeaconOptions =
     fgdb_beacon::read::ReadOptions<fgdb_delta_types::PropertyKeyId, fgdb_delta_types::LabelId>;
 use crate::{
     BRANCH, Database, DatabaseKeys, GRAPH, MaintainedBeaconError, MaintainedBeaconIndex, ReadError,
-    RebuildError, RefreshReport, StandingQueryError, StandingQueryHandle, chain_commitment_at,
+    RefreshReport, StandingQueryError, StandingQueryHandle, chain_commitment_at,
     sync_vfs_directory,
 };
 use fgdb_beacon::read::ReadPolicy;
@@ -114,6 +118,9 @@ pub enum DerivedCheckpointError {
     Interrupted(Box<asupersync::error::Error>),
     Beacon(MaintainedBeaconError),
     Standing(StandingQueryError),
+    /// Authoritative history failed authentication or could not be read.
+    /// Unlike an optional checkpoint failure, this is never silently rebuilt.
+    Replay(Box<crate::DeltaReplayError>),
 }
 
 impl core::fmt::Display for DerivedCheckpointError {
@@ -126,6 +133,7 @@ impl core::fmt::Display for DerivedCheckpointError {
             Self::Interrupted(error) => error.fmt(f),
             Self::Beacon(error) => error.fmt(f),
             Self::Standing(error) => error.fmt(f),
+            Self::Replay(error) => error.fmt(f),
         }
     }
 }
@@ -139,9 +147,30 @@ impl core::error::Error for DerivedCheckpointError {
             Self::Interrupted(error) => Some(error.as_ref()),
             Self::Beacon(error) => Some(error),
             Self::Standing(error) => Some(error),
+            Self::Replay(error) => Some(error.as_ref()),
             Self::EmptyName => None,
         }
     }
+}
+
+impl From<crate::DeltaReplayError> for DerivedCheckpointError {
+    fn from(error: crate::DeltaReplayError) -> Self {
+        match error {
+            crate::DeltaReplayError::Interrupted(error) => Self::Interrupted(error),
+            error => Self::Replay(Box::new(error)),
+        }
+    }
+}
+
+impl From<crate::ResidentIndexError> for DerivedCheckpointError {
+    fn from(error: crate::ResidentIndexError) -> Self {
+        Self::Beacon(MaintainedBeaconError::Resident(error))
+    }
+}
+
+fn replay_was_retired(error: &DerivedCheckpointError) -> bool {
+    matches!(error, DerivedCheckpointError::Replay(error)
+        if matches!(error.as_ref(), crate::DeltaReplayError::Read(ReadError::DeltaCursorRetired { .. })))
 }
 
 fn derived_ecs_config(keys: &DatabaseKeys) -> StrataEcsConfig {
@@ -537,8 +566,10 @@ impl<V: Vfs + Clone> Database<V> {
 
     /// Rehydrate a Chronicle-watermarked `MaintainedBeaconIndex` from
     /// `<db_dir>/derived/beacon/` and catch up `(watermark_seq..=head_seq]` in
-    /// `O(|Delta|)` with zero full-graph vertex scans, or discard stale/corrupt
-    /// derived bytes (`FG-INV-18`) and rebuild from Chronicle.
+    /// one authenticated batch at a time with zero full-graph vertex scans,
+    /// or discard stale/corrupt derived bytes (`FG-INV-18`) and rebuild from
+    /// Chronicle. Catch-up preserves the database's loaded history window.
+    /// A damaged authoritative capsule is a terminal error, not a cache miss.
     pub async fn load_or_rebuild_beacon_checkpoint(
         &mut self,
         cx: &CommitCx,
@@ -607,29 +638,6 @@ impl<V: Vfs + Clone> Database<V> {
                         }
                         Ok(None) => DerivedRebuildReason::CorruptOrIncompatible,
                         Ok(Some(mut resident)) => {
-                            if watermark_seq < head_seq
-                                && let Err(err) = self.ensure_delta_window(cx, watermark_seq).await
-                            {
-                                match err {
-                                    RebuildError::Interrupted(cancel) => {
-                                        return Err(DerivedCheckpointError::Interrupted(cancel));
-                                    }
-                                    _ => {
-                                        let rebuilt = self
-                                            .register_beacon_index(query_cx, options, maintenance)
-                                            .map_err(DerivedCheckpointError::Beacon)?;
-                                        return Ok((
-                                            rebuilt,
-                                            DerivedCheckpointOutcome::RebuiltFromChronicle {
-                                                reason:
-                                                    DerivedRebuildReason::DeltaWindowUnavailable {
-                                                        watermark_seq,
-                                                    },
-                                            },
-                                        ));
-                                    }
-                                }
-                            }
                             let refresh_report = if watermark_seq == head_seq {
                                 RefreshReport {
                                     from: head_seq,
@@ -638,16 +646,28 @@ impl<V: Vfs + Clone> Database<V> {
                                     touched_vertices: 0,
                                 }
                             } else {
-                                match resident.refresh(query_cx, self, Some(head_seq), maintenance)
+                                match resident
+                                    .refresh_from_chronicle(
+                                        query_cx,
+                                        cx,
+                                        self,
+                                        head_seq,
+                                        maintenance,
+                                    )
+                                    .await
                                 {
                                     Ok(report) => report,
-                                    Err(
-                                        crate::ResidentIndexError::UnsupportedDelta
-                                        | crate::ResidentIndexError::IncompleteDelta { .. }
-                                        | crate::ResidentIndexError::Source(
-                                            ReadError::DeltaCursorRetired { .. },
-                                        ),
-                                    ) => {
+                                    Err(error)
+                                        if replay_was_retired(&error)
+                                            || matches!(
+                                                error,
+                                                DerivedCheckpointError::Beacon(
+                                                    MaintainedBeaconError::Resident(
+                                                        crate::ResidentIndexError::UnsupportedDelta
+                                                    )
+                                                )
+                                            ) =>
+                                    {
                                         let rebuilt = self
                                             .register_beacon_index(query_cx, options, maintenance)
                                             .map_err(DerivedCheckpointError::Beacon)?;
@@ -661,11 +681,7 @@ impl<V: Vfs + Clone> Database<V> {
                                             },
                                         ));
                                     }
-                                    Err(err) => {
-                                        return Err(DerivedCheckpointError::Beacon(
-                                            MaintainedBeaconError::Resident(err),
-                                        ));
-                                    }
+                                    Err(error) => return Err(error),
                                 }
                             };
                             let handle = self
@@ -765,9 +781,11 @@ impl<V: Vfs + Clone> Database<V> {
 
     /// Rehydrate a Chronicle-watermarked Ripple standing-reachability Z-set
     /// arrangement from `<db_dir>/derived/ripple/` and catch up
-    /// `(watermark_seq..=head_seq]` in `O(|Delta|)` with zero Strata block
-    /// scans, or discard stale/corrupt derived bytes (`FG-INV-18`) and rebuild
-    /// from Chronicle.
+    /// `(watermark_seq..=head_seq]` one authenticated batch at a time, with no
+    /// Strata block scans or history-window hydration. Decode and all replay
+    /// ticks share one work/scratch allowance, and no registration is installed
+    /// until the complete suffix succeeds. Stale/corrupt derived bytes rebuild
+    /// from Chronicle; damaged authoritative capsules remain terminal errors.
     pub async fn load_or_rebuild_standing_reachability_checkpoint(
         &mut self,
         cx: &CommitCx,
@@ -817,34 +835,31 @@ impl<V: Vfs + Clone> Database<V> {
                     plaintext,
                     healed_by_raptorq,
                 } => {
-                    if let Err(err) = self.ensure_delta_window(cx, watermark_seq).await {
-                        match err {
-                            RebuildError::Interrupted(cancel) => {
-                                return Err(DerivedCheckpointError::Interrupted(cancel));
-                            }
-                            _ => {
-                                let rebuilt = self
-                                    .register_standing_reachability(query_cx, relation, policy)
-                                    .map_err(DerivedCheckpointError::Standing)?;
-                                return Ok((
-                                    rebuilt,
-                                    DerivedCheckpointOutcome::RebuiltFromChronicle {
-                                        reason: DerivedRebuildReason::DeltaWindowUnavailable {
-                                            watermark_seq,
-                                        },
+                    match self
+                        .catch_up_or_none_standing_reachability(
+                            cx,
+                            query_cx,
+                            &plaintext,
+                            watermark_seq,
+                            relation,
+                            policy,
+                        )
+                        .await
+                    {
+                        Err(error) if replay_was_retired(&error) => {
+                            let rebuilt = self
+                                .register_standing_reachability(query_cx, relation, policy)
+                                .map_err(DerivedCheckpointError::Standing)?;
+                            return Ok((
+                                rebuilt,
+                                DerivedCheckpointOutcome::RebuiltFromChronicle {
+                                    reason: DerivedRebuildReason::DeltaWindowUnavailable {
+                                        watermark_seq,
                                     },
-                                ));
-                            }
+                                },
+                            ));
                         }
-                    }
-                    match self.catch_up_or_none_standing_reachability(
-                        query_cx,
-                        &plaintext,
-                        watermark_seq,
-                        relation,
-                        policy,
-                    ) {
-                        Err(err) => return Err(DerivedCheckpointError::Standing(err)),
+                        Err(error) => return Err(error),
                         Ok(None) => DerivedRebuildReason::CorruptOrIncompatible,
                         Ok(Some((state, commits_replayed))) => {
                             let handle = self.install_restored_standing_reachability(state);
@@ -1027,6 +1042,109 @@ mod bounded_read_tests {
                     .unwrap(),
                 ReadOutcome::Missing
             ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn ripple_restore_checks_embedded_marker_and_template_at_both_replay_boundaries() {
+        let ((), report) = run_async_under_lab(0xc198_0007, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query = contexts.query();
+            let vfs = crate::MemVfs::new().unwrap();
+            let keys = DatabaseKeys::new(
+                [0xc1; 32],
+                DatabaseSecurityNamespaceId([0xc2; 32]),
+                [0xc3; 32],
+            );
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys)
+                .await
+                .unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 1..=2 {
+                batch.create_vertex(VId(id), vec![LabelId(1)], vec![]);
+            }
+            batch.add_edge(EId(1), VId(1), VId(2), vec![]);
+            db.write(&commit, batch).await.unwrap();
+            let rebuild = GqlQueryPolicy::new(100, 100, 1_000_000, 10_000);
+            let no_scan = GqlQueryPolicy::new(0, 100, 1_000_000, 10_000);
+            let original = db
+                .register_standing_reachability(&query, RelationId(1), rebuild)
+                .unwrap();
+            let (_, watermark, payload) = db
+                .export_standing_reachability_checkpoint(&query, &original, usize::MAX)
+                .unwrap();
+            let chain_hash = chain_commitment_at(db.coordinator.chain(), watermark).unwrap();
+            let paths = checkpoint_paths(
+                &vfs.database_dir(),
+                &db.keys,
+                CheckpointKind::RippleReachability,
+                "embedded-anchor",
+            );
+
+            // FGRC v1 embeds its own committed marker and template digest.
+            // Re-authenticate the optional outer container after each mutation
+            // so this law exercises the inner anchor, not envelope rejection.
+            assert_eq!(&payload[..4], b"FGRC");
+            assert_eq!(payload[46], 1);
+            for with_suffix in [false, true] {
+                if with_suffix {
+                    let mut suffix = WriteBatch::new(RelationId(1));
+                    suffix.add_edge(EId(2), VId(2), VId(1), vec![]);
+                    db.write(&commit, suffix).await.unwrap();
+                }
+                for anchor_offset in [55, 87] {
+                    let mut incompatible = payload.clone();
+                    incompatible[anchor_offset] ^= 0x80;
+                    let container = encode_checkpoint_container(
+                        &db.keys,
+                        CheckpointKind::RippleReachability,
+                        watermark,
+                        chain_hash,
+                        &incompatible,
+                    )
+                    .unwrap();
+                    write_checkpoint_atomic(&commit, &vfs, &vfs.database_dir(), &paths, &container)
+                        .await
+                        .unwrap();
+                    let snapshot = std::sync::Arc::clone(&db.snapshot);
+                    let window = db.delta_index().unwrap().clone();
+                    let registrations = db.standing_queries.len();
+                    // A rejected cache cannot manufacture a successful
+                    // zero-scan restoration or publish a partial arrangement.
+                    assert!(
+                        db.load_or_rebuild_standing_reachability_checkpoint(
+                            &commit,
+                            &query,
+                            "embedded-anchor",
+                            RelationId(1),
+                            no_scan,
+                        )
+                        .await
+                        .is_err()
+                    );
+                    assert!(std::sync::Arc::ptr_eq(&snapshot, &db.snapshot));
+                    assert_eq!(db.delta_index().unwrap(), &window);
+                    assert_eq!(db.standing_queries.len(), registrations);
+                    let (_, outcome) = db
+                        .load_or_rebuild_standing_reachability_checkpoint(
+                            &commit,
+                            &query,
+                            "embedded-anchor",
+                            RelationId(1),
+                            rebuild,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        outcome,
+                        DerivedCheckpointOutcome::RebuiltFromChronicle {
+                            reason: DerivedRebuildReason::CorruptOrIncompatible,
+                        }
+                    );
+                }
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

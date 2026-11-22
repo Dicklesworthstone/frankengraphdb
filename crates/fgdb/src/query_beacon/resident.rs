@@ -20,7 +20,7 @@ use fgdb_beacon::{
 };
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, LogicalDeltaBatch, PropertyKeyId};
 use fgdb_gql::stream::{VertexScanEvent, VertexScanSource, VertexScanSourceError};
-use fgdb_types::{CommitSeq, QueryCx, VId};
+use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -340,6 +340,76 @@ impl ResidentIndex {
             let result = self.refresh_with_work(cx, database, through, policy, &work);
             complete(work.into_inner(), result)
         })
+    }
+
+    /// Checkpoint catch-up uses the same affected-ID union and single final
+    /// apply as resident refresh, but borrows one authenticated Chronicle
+    /// batch at a time. The omitted history stays omitted from the database's
+    /// delta window. One meter and one bounded ID set span the entire suffix;
+    /// repeated edits cannot reset limits or change ANN update ordering.
+    pub(crate) async fn refresh_from_chronicle<V: Vfs + Clone>(
+        &mut self,
+        cx: &QueryCx,
+        commit_cx: &CommitCx,
+        database: &mut Database<V>,
+        through: CommitSeq,
+        policy: ReadPolicy,
+    ) -> Result<RefreshReport, crate::DerivedCheckpointError> {
+        cx.checkpoint()
+            .map_err(crate::DerivedCheckpointError::Interrupted)?;
+        cx.with_restriction_async(async {
+            // The replay future owns an exclusive borrow of this Send meter.
+            // Shared RefCell borrows exist only in synchronous index phases,
+            // never across capsule I/O (RefCell itself is deliberately !Sync).
+            let mut work = RefCell::new(Meter::new(policy.max_work_units, |_| cx.checkpoint()));
+            let result = async {
+                work.get_mut().charge(1).map_err(Error::Index)?;
+                if !self.belongs_to(database) {
+                    return Err(Error::ForeignDatabase.into());
+                }
+                let from = self.source_sequence;
+                if through < from {
+                    return Err(Error::BeforeSource {
+                        source: from,
+                        requested: through,
+                    }
+                    .into());
+                }
+                let mut cursor = database.delta_replay(from, through)?;
+                let mut scratch = 0usize;
+                let mut affected = BTreeSet::new();
+                while !cursor.is_exhausted() {
+                    // Charge before the next capsule read, including an empty
+                    // logical tick; a spent allowance performs no further I/O.
+                    work.get_mut().charge(1).map_err(Error::Index)?;
+                    let batch = database
+                        .next_delta_replay(commit_cx, &mut cursor)
+                        .await?
+                        .ok_or(Error::IncompleteDelta {
+                            after: cursor.position(),
+                            through,
+                        })?;
+                    cx.checkpoint()
+                        .map_err(crate::DerivedCheckpointError::Interrupted)?;
+                    self.collect_affected(&batch, &mut affected, &mut scratch, policy, &work)?;
+                }
+                self.apply_affected(
+                    &database.snapshot,
+                    through,
+                    affected,
+                    scratch,
+                    policy,
+                    &work,
+                )
+                .map_err(Into::into)
+            }
+            .await;
+            match work.into_inner().into_failure() {
+                Some(error) => Err(crate::DerivedCheckpointError::Interrupted(error)),
+                None => result,
+            }
+        })
+        .await
     }
 
     // Shared verbatim with refusal-cut tests. All effects before the final

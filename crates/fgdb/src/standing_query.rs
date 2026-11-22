@@ -663,25 +663,84 @@ impl<V: Vfs + Clone> Database<V> {
         query.encode_checkpoint_bytes(cx, max_bytes)
     }
 
-    pub(crate) fn catch_up_or_none_standing_reachability(
-        &self,
+    pub(crate) async fn catch_up_or_none_standing_reachability(
+        &mut self,
+        commit_cx: &CommitCx,
         query_cx: &QueryCx,
         bytes: &[u8],
         watermark_seq: CommitSeq,
         relation: RelationId,
         policy: GqlQueryPolicy,
-    ) -> Result<Option<(recursive::State, u64)>, StandingQueryError> {
-        let delta_index = self.delta_index().map_err(StandingQueryError::Read)?;
-        let target_head = self.frontier().map_err(StandingQueryError::Read)?;
-        recursive::State::decode_and_catch_up(
+    ) -> Result<Option<(recursive::State, u64)>, crate::DerivedCheckpointError> {
+        use crate::{DeltaReplayError, DerivedCheckpointError};
+        query_cx
+            .checkpoint()
+            .map_err(DerivedCheckpointError::Interrupted)?;
+        let target_head = self.frontier().map_err(DerivedCheckpointError::Read)?;
+        let mut cursor = self.delta_replay(watermark_seq, target_head)?;
+        // The arrangement contains its own marker AND template anchor. Check
+        // it against the already authenticated Chronicle marker without
+        // reading a capsule or installing another delta history window.
+        let boundary = crate::empty_delta_window_at(commit_cx, &self.coordinator, watermark_seq)
+            .map_err(DeltaReplayError::from)?;
+        let Some(mut state) = recursive::State::decode_checkpoint(
             query_cx,
             bytes,
             watermark_seq,
             relation,
             policy,
-            delta_index,
-            target_head,
+            &boundary,
         )
+        .map_err(DerivedCheckpointError::Standing)?
+        else {
+            return Ok(None);
+        };
+        while !cursor.is_exhausted() {
+            // One cumulative work allowance admits every capsule pull, even
+            // for a tick whose selected relation has no changes. Keep this
+            // temporary callback/meter out of the suspension state.
+            {
+                let mut checkpoint = || {
+                    query_cx
+                        .checkpoint()
+                        .map_err(|_| StandingQueryFailure::Interrupted)
+                };
+                let mut meter = Meter {
+                    policy,
+                    stats: state.stats,
+                    checkpoint: &mut checkpoint,
+                };
+                meter
+                    .charge(ZSetEvent::Work)
+                    .map_err(StandingQueryError::Maintenance)
+                    .map_err(DerivedCheckpointError::Standing)?;
+                state.stats = meter.stats;
+            }
+            let batch = self
+                .next_delta_replay(commit_cx, &mut cursor)
+                .await?
+                .ok_or(DeltaReplayError::Gap {
+                    expected: CommitSeq(state.frontier.0 + 1),
+                })?;
+            query_cx
+                .checkpoint()
+                .map_err(DerivedCheckpointError::Interrupted)?;
+            if !state
+                .apply_checkpoint_successor(commit_cx, query_cx, &batch)
+                .map_err(DerivedCheckpointError::Standing)?
+            {
+                return Ok(None);
+            }
+        }
+        let boundary = crate::empty_delta_window_at(commit_cx, &self.coordinator, target_head)
+            .map_err(DeltaReplayError::from)?;
+        if !state
+            .verify_checkpoint_boundary(query_cx, &boundary)
+            .map_err(DerivedCheckpointError::Standing)?
+        {
+            return Ok(None);
+        }
+        Ok(Some((state, target_head.0 - watermark_seq.0)))
     }
 
     pub(crate) fn install_restored_standing_reachability(

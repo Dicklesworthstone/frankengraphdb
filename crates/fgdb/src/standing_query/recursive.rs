@@ -277,21 +277,19 @@ impl State {
         })
     }
 
-    /// Rehydrate a watermarked reachability state at `watermark_seq` and replay
-    /// `(watermark_seq..=target_head]` from `delta_index` without scanning
-    /// Strata blocks. Returns `Ok(None)` when checkpoint bytes, coordinates, or
-    /// delta anchors are malformed or incompatible (triggering `FG-INV-18`
-    /// discard + Chronicle rebuild), while propagating work/scratch/result/cancel
-    /// refusals as `Err`.
-    pub(crate) fn decode_and_catch_up(
+    /// Rehydrate at one authenticated Chronicle boundary without loading its
+    /// capsule or a history-sized index. The boundary checks BOTH the stored
+    /// marker and template digest, including a zero-tick restoration.
+    /// Malformed/incompatible derived state returns None; work, scratch,
+    /// result and cancellation refusals remain terminal.
+    pub(crate) fn decode_checkpoint(
         query_cx: &QueryCx,
         bytes: &[u8],
         watermark_seq: CommitSeq,
         relation: RelationId,
         policy: GqlQueryPolicy,
-        delta_index: &fgdb_delta_types::LocalDeltaBatchIndex,
-        target_head: CommitSeq,
-    ) -> Result<Option<(Self, u64)>, StandingQueryError> {
+        boundary: &fgdb_delta_types::LocalDeltaBatchIndex,
+    ) -> Result<Option<Self>, StandingQueryError> {
         query_cx
             .checkpoint()
             .map_err(StandingQueryError::Interrupted)?;
@@ -326,7 +324,7 @@ impl State {
                     }
                 }
             };
-            if input.frontier() != watermark_seq || watermark_seq.0 > target_head.0 {
+            if input.frontier() != watermark_seq || boundary.frontier() != watermark_seq {
                 return Ok(None);
             }
             result_bound(rows.len() as u128, policy).map_err(StandingQueryError::Maintenance)?;
@@ -341,70 +339,81 @@ impl State {
                 failure: None,
             };
 
-            if watermark_seq == target_head {
-                // Verify retained/retired anchor continuity even on a 0-commit catch-up.
-                let mut verify_cp = || {
-                    query_cx
-                        .checkpoint()
-                        .map_err(|_| StandingQueryFailure::Interrupted)
-                };
-                let mut verify_meter = Meter {
-                    policy,
-                    stats: StandingQueryStats::default(),
-                    checkpoint: &mut verify_cp,
-                };
-                match state
-                    .input
-                    .prepare_next(delta_index, LIMBS, &mut |event| verify_meter.charge(event))
-                {
-                    Ok(None) => return Ok(Some((state, 0))),
-                    Ok(Some(_)) => return Ok(None),
-                    Err(err) => match input_error(err) {
-                        StandingQueryFailure::InvalidDelta => return Ok(None),
-                        other => return Err(StandingQueryError::Maintenance(other)),
-                    },
-                }
+            if state.verify_checkpoint_boundary(query_cx, boundary)? {
+                Ok(Some(state))
+            } else {
+                Ok(None)
             }
+        })
+    }
 
-            let mut replayed = 0u64;
-            while state.frontier.0 < target_head.0 {
-                let next_seq = CommitSeq(state.frontier.0 + 1);
-                let Some(batch) = delta_index.get(next_seq) else {
-                    return Ok(None);
-                };
-                let mut tick_cp = || {
-                    query_cx
-                        .checkpoint()
-                        .map_err(|_| StandingQueryFailure::Interrupted)
-                };
-                let mut tick_meter = Meter {
-                    policy,
-                    stats: StandingQueryStats::default(),
-                    checkpoint: &mut tick_cp,
-                };
-                observe_batch(batch, &mut tick_meter).map_err(StandingQueryError::Maintenance)?;
-                let pending = match state
-                    .input
-                    .prepare_next(delta_index, LIMBS, &mut |event| tick_meter.charge(event))
-                {
-                    Ok(Some(pending)) => pending,
-                    Ok(None) => return Ok(None),
-                    Err(err) => match input_error(err) {
-                        StandingQueryFailure::InvalidDelta => return Ok(None),
-                        other => return Err(StandingQueryError::Maintenance(other)),
-                    },
-                };
-                if let Err(failure) = finish(&mut state.rows, pending, &mut tick_meter) {
-                    return match failure {
-                        StandingQueryFailure::InvalidDelta => Ok(None),
-                        other => Err(StandingQueryError::Maintenance(other)),
-                    };
+    /// Keep one cumulative restore allowance across decode and every replayed
+    /// tick. Only compact counters cross the caller's I/O suspension points;
+    /// no borrowed callback or tentative prepared guard survives an await.
+    pub(crate) fn apply_checkpoint_successor(
+        &mut self,
+        commit_cx: &CommitCx,
+        query_cx: &QueryCx,
+        batch: &LogicalDeltaBatch,
+    ) -> Result<bool, StandingQueryError> {
+        query_cx
+            .checkpoint()
+            .map_err(StandingQueryError::Interrupted)?;
+        query_cx.with_restriction(|| {
+            let mut checkpoint = || {
+                query_cx
+                    .checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy: self.policy,
+                stats: self.stats,
+                checkpoint: &mut checkpoint,
+            };
+            match self.maintain(commit_cx, batch, &mut meter) {
+                Ok(()) => {
+                    self.frontier = batch.commit_seq();
+                    self.stats = meter.stats;
+                    Ok(true)
                 }
-                state.frontier = next_seq;
-                state.stats = tick_meter.stats;
-                replayed += 1;
+                Err(StandingQueryFailure::InvalidDelta) => Ok(false),
+                Err(error) => Err(StandingQueryError::Maintenance(error)),
             }
-            Ok(Some((state, replayed)))
+        })
+    }
+
+    pub(crate) fn verify_checkpoint_boundary(
+        &mut self,
+        query_cx: &QueryCx,
+        boundary: &fgdb_delta_types::LocalDeltaBatchIndex,
+    ) -> Result<bool, StandingQueryError> {
+        query_cx
+            .checkpoint()
+            .map_err(StandingQueryError::Interrupted)?;
+        query_cx.with_restriction(|| {
+            let mut checkpoint = || {
+                query_cx
+                    .checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy: self.policy,
+                stats: self.stats,
+                checkpoint: &mut checkpoint,
+            };
+            let result = match self
+                .input
+                .prepare_next(boundary, LIMBS, &mut |event| meter.charge(event))
+            {
+                Ok(None) => Ok(true),
+                Ok(Some(_)) => Ok(false),
+                Err(error) => match input_error(error) {
+                    StandingQueryFailure::InvalidDelta => Ok(false),
+                    other => Err(StandingQueryError::Maintenance(other)),
+                },
+            };
+            self.stats = meter.stats;
+            result
         })
     }
 

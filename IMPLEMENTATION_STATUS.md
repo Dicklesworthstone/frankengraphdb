@@ -12,6 +12,42 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Streaming restoration of derived checkpoints — qualification pending
+
+Beacon and Ripple checkpoint restoration now consume authenticated Chronicle
+history one complete logical batch at a time. They preserve the database's lazy
+delta window and its materialized-history floor instead of loading the entire
+omitted suffix through `ensure_delta_window`.
+
+Beacon collects a bounded union of affected vertex IDs across the suffix and
+applies their final state once, preserving resident-index update ordering and
+using one cumulative catch-up work allowance. Ripple retains cumulative work
+and scratch accounting across checkpoint decode, boundary validation and every
+replayed tick. Its embedded marker and template digest are checked at the
+checkpoint and final boundaries, including a zero-tail restoration.
+
+Both consumers build private candidates and publish a handle only after the
+whole restoration succeeds. Cancellation, dropping a suspended future, quota
+refusal and later-capsule corruption leave existing handles and the pinned read
+basis intact. Authentication or I/O failures in authoritative replay are typed
+terminal errors; optional checkpoint corruption and explicit unavailable-history
+cases retain their permitted rebuild paths.
+
+Regression sources cover repeated vertex edits, unrelated and empty ticks,
+selected-edge additions and retractions, exact cumulative budget boundaries,
+Send futures, embedded-anchor mismatch, cancellation during a later capsule
+read, dropped futures, later-record corruption and clean retry. Pinned formatting
+and source review are complete; compilation, runtime assertions and full
+exact-tree qualification remain pending. The runtime evidence must not be
+inferred from these source assertions.
+
+This bounds the consumer's retained replay batches to one; the affected-ID set,
+Ripple arrangement, admitted snapshot and existing replay verification
+diagnostics still consume memory. It does not establish a whole-handle memory
+bound or an end-to-end O(delta) time bound. The broader
+`fgdb-rc1111-durable-watermarks-c1g98` and `fgdb-w6-delta-consumption-iyc`
+qualification remains open.
+
 ### Factorized join multiplicities through ordered projection — qualification pending
 
 The calibrated factorized FreeJoin strategy now visits complete bindings with
