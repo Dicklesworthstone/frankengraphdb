@@ -12,6 +12,39 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Selected edge-property buffered queries — qualification pending
+
+The single-edge compiler now exposes one complete field-demand proof:
+topology only, one exact edge-property key, or complete records. Repeated uses
+of the same key across filters, projections, hidden sort cells and aggregate
+inputs share the selected source. A second edge key, any endpoint property,
+joined/probed plan or unrecognized program retains complete-record admission.
+Boolean inputs include eager operands in unselected scalar branches.
+
+The buffered facade connects this proof to Strata's authenticated selected-key
+reader for ordinary, seeded, sorted and aggregate single-edge inputs. A distinct
+owned record carries only that edge field and both endpoints' same-cut labels
+and identities. It cannot escape as a complete property map. Self-loops share
+one endpoint owner; missing keys, true NULL, property removal, source failures,
+candidate/work limits, cancellation and independent output guards preserve their
+existing semantics.
+
+This reduces selected row and output reservation demand from unrelated payloads.
+It does not make cold opening or native base-image admission descriptor-only:
+selected sidecars still authenticate their containing bytes, and the existing
+whole-base validation/residency bounds remain. No benchmark speedup or complete
+larger-than-memory qualification is claimed.
+
+Compiler and storage regression sources cover exact full-width key identity,
+hidden demands, selected corruption, absent/NULL/removal semantics, historical
+endpoint labels, ownership, cancellation and work limits. Public regressions
+exercise pinned and compacted history in every direction, aggregate results,
+a 3 MiB remaining read allowance with large unrelated payloads, and complete
+fallback for additional required fields. These assertions, Rustfmt, compilation,
+Clippy, UBS and full exact-tree proof remain **UNRUN** because the executor is
+unavailable. The open `fgdb-w3-properties-gou` and `fgdb-w3-tier-r-0tj` need
+the recorded qualification and exact-ID Beads progress export when it returns.
+
 ### Boolean filters over topology-only buffered records — qualification pending
 
 The compiled vertex and single-edge scan plans now derive Boolean property

@@ -1038,6 +1038,32 @@ fn topology_skips_sidecar_faults_but_authenticates_topology_and_initial_admissio
                 Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
             ));
             drop(full);
+            for key in [P, PropertyKeyId(12)] {
+                let mut selected = view
+                    .edge_scan(&cx, CommitSeq(5))
+                    .unwrap()
+                    .into_join_scan();
+                assert!(matches!(
+                    selected
+                        .next_property_with_endpoints(&cx, None, key, &mut |_| Ok::<_, ()>(()))
+                        .await,
+                    Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                        BufferError::ChecksumMismatch
+                    )))
+                ));
+                assert!(selected.is_closed());
+                assert!(
+                    selected
+                        .next_with_endpoints(&cx, None, &mut |_| -> Result<(), ()> {
+                            panic!("a selected source failure closes every driver entry point")
+                        })
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                drop(selected);
+                assert_eq!(pool.used(), baseline);
+            }
             drop(view);
             assert_eq!(pool.used(), 0);
             assert!(
@@ -1578,6 +1604,34 @@ fn missing_endpoints_are_errors_only_for_visible_selected_edges() {
             assert!(scan.is_finished());
             drop(scan);
             assert_eq!(pool.used(), baseline);
+
+            for key in [P, PropertyKeyId(12)] {
+                let mut scan = view
+                    .edge_scan(&cx, CommitSeq(cut))
+                    .unwrap()
+                    .into_join_scan();
+                let mut failed = false;
+                loop {
+                    match scan
+                        .next_property_with_endpoints(&cx, relation, key, &mut |_| Ok::<_, ()>(()))
+                        .await
+                    {
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(BufferedScanError::Read(BufferedReadError::DanglingEndpoint)) => {
+                            failed = true;
+                            break;
+                        }
+                        other => panic!("unexpected selected-property endpoints {other:?}"),
+                    }
+                }
+                assert_eq!(failed, refuses, "property {key:?}, cut {cut}");
+                if failed {
+                    assert!(scan.is_closed());
+                }
+                drop(scan);
+                assert_eq!(pool.used(), baseline);
+            }
 
             // The topology-only count still proves both endpoint lifetimes.
             // It must refuse the same visible dangling edge as the complete
@@ -2176,6 +2230,34 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
             );
             drop(scan);
             assert_eq!(pool.used(), baseline);
+
+            let mut projected = view
+                .edge_scan(&cx, CommitSeq(cut))
+                .unwrap()
+                .into_join_scan();
+            let mut joined = Vec::new();
+            while let Some(candidate) = projected
+                .next_property_with_endpoints(&cx, Some(R), P, &mut |_| Ok::<_, ()>(()))
+                .await
+                .unwrap()
+            {
+                let row = candidate.row.unwrap();
+                assert_eq!(
+                    row.edge().properties().len(),
+                    usize::from(row.edge().value().is_some())
+                );
+                assert!(row.edge().properties().iter().all(|(key, _)| *key == P));
+                assert_eq!(row.source_vertex().vid(), row.edge().entry().src);
+                assert_eq!(row.target_vertex().vid(), row.edge().entry().dst);
+                joined.push((candidate.eid, row.edge().value().cloned()));
+            }
+            assert_eq!(
+                joined,
+                found,
+                "endpoint projection must preserve missing versus NULL"
+            );
+            drop(projected);
+            assert_eq!(pool.used(), baseline);
         }
 
         let mut complete = view.edge_scan(&cx, CommitSeq(1)).unwrap();
@@ -2232,5 +2314,276 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
         );
         drop(held);
         assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn selected_property_endpoint_images_share_historical_labels_and_owners() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut root = store.get_root(&commit, id).await.unwrap();
+        let mut changed = vertex(2, 4, None, 22);
+        changed.labels = vec![LabelId(10), LabelId(11)];
+        let patch = store
+            .put_patch(
+                &commit,
+                &encode_patch(&[vertex(2, 1, Some(4), 20), changed]).unwrap(),
+            )
+            .await
+            .unwrap();
+        root.vertex_patches.push(PatchRef {
+            patch_id: patch.0,
+            first_seq: CommitSeq(1),
+            last_seq: CommitSeq(4),
+        });
+        let id = store.put_root(&commit, &root).await.unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        for key in [P, PropertyKeyId(12)] {
+            for cut in 0..=5 {
+                let mut scan = view
+                    .edge_scan(&cx, CommitSeq(cut))
+                    .unwrap()
+                    .into_join_scan();
+                let mut admissions = Vec::new();
+                let mut rows = Vec::new();
+                while let Some(candidate) = scan
+                    .next_property_with_endpoints(&cx, None, key, &mut |event| {
+                        if let BufferedEdgeScanEvent::Identity(eid) = event {
+                            admissions.push(eid);
+                        }
+                        Ok::<_, ()>(())
+                    })
+                    .await
+                    .unwrap()
+                {
+                    let Some(row) = candidate.row else {
+                        continue;
+                    };
+                    let edge = row.edge();
+                    assert_eq!(candidate.eid, edge.entry().eid);
+                    assert_eq!(row.source_vertex().vid(), edge.entry().src);
+                    assert_eq!(row.target_vertex().vid(), edge.entry().dst);
+                    assert_eq!(
+                        core::ptr::eq(row.source_vertex(), row.target_vertex()),
+                        edge.entry().src == edge.entry().dst
+                    );
+                    for endpoint in [row.source_vertex(), row.target_vertex()] {
+                        let labels = if endpoint.vid() == VId(2) && cut >= 4 {
+                            vec![LabelId(10), LabelId(11)]
+                        } else {
+                            vec![LabelId(9)]
+                        };
+                        assert_eq!(endpoint.labels(), labels);
+                        assert!(endpoint.created_at() <= CommitSeq(cut));
+                        assert!(
+                            endpoint
+                                .retired_at()
+                                .is_none_or(|retired| CommitSeq(cut) < retired)
+                        );
+                    }
+                    rows.push((*edge.entry(), edge.properties().to_vec()));
+                }
+                assert_eq!(
+                    admissions,
+                    [0, 2, 4, 6, 8, 90, u128::MAX].map(EId),
+                    "candidate identity admission at {cut}, {key:?}"
+                );
+                let wanted: Vec<_> = expected(cut)
+                    .into_iter()
+                    .map(|row| {
+                        let properties = if key == P { row.props } else { Vec::new() };
+                        (row.entry, properties)
+                    })
+                    .collect();
+                assert_eq!(rows, wanted, "same-cut selected property {key:?} at {cut}");
+                drop(scan);
+                assert_eq!(pool.used(), baseline);
+            }
+        }
+
+        let mut scan = view
+            .edge_scan(&cx, CommitSeq(5))
+            .unwrap()
+            .into_join_scan();
+        let held = scan
+            .next_property_with_endpoints(&cx, Some(S), P, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        assert_eq!(held.edge().entry().eid, EId(0));
+        assert!(core::ptr::eq(held.source_vertex(), held.target_vertex()));
+        let retained = held.edge().charged_bytes() + held.source_vertex().charged_bytes();
+        assert!(retained > 0);
+        drop(scan);
+        drop(view);
+        assert_eq!(
+            pool.used(),
+            retained,
+            "the self-loop retains one endpoint owner"
+        );
+        assert_eq!(
+            held.edge().properties(),
+            [(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0)))]
+        );
+        assert_eq!(held.source_vertex().labels(), [LabelId(10), LabelId(11)]);
+        assert_eq!(
+            format!("{held:?}"),
+            "BufferedEdgePropertyEndpoints([REDACTED])"
+        );
+        drop(held);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let mut scan = view
+            .edge_scan(&cx, CommitSeq(5))
+            .unwrap()
+            .into_join_scan();
+        {
+            let mut observe = |_| Ok::<_, ()>(());
+            drop(scan.next_property_with_endpoints(&cx, None, P, &mut observe));
+        }
+        assert_eq!(scan.work_used(), 0);
+        assert!(!scan.is_closed());
+        let probe =
+            std::sync::Arc::new(fgdb_types::context::SimulationCheckpointProbe::new(Some(1)));
+        let interrupted = cx.with_checkpoint_probe(probe.clone());
+        assert!(matches!(
+            scan.next_property_with_endpoints(&interrupted, None, P, &mut |_| -> Result<(), ()> {
+                panic!("cancellation precedes the first selected source event")
+            })
+            .await,
+            Err(BufferedScanError::Read(_))
+        ));
+        assert_eq!(probe.calls(), 1);
+        assert!(scan.is_closed());
+        drop(scan);
+        assert_eq!(view.stats().misses, 0);
+        assert_eq!(pool.used(), baseline);
+
+        let mut total = 0;
+        let work = {
+            let mut scan = view
+                .edge_scan(&cx, CommitSeq(5))
+                .unwrap()
+                .into_join_scan();
+            while scan
+                .next_property_with_endpoints(&cx, None, P, &mut |_| {
+                    total += 1;
+                    Ok::<_, usize>(())
+                })
+                .await
+                .unwrap()
+                .is_some()
+            {}
+            scan.work_used()
+        };
+        assert!(total > 0 && work > 0);
+        assert_eq!(pool.used(), baseline);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        // Each comparison starts from the same admitted cold owner. Source
+        // work and control prefixes must not depend on an earlier scan's cache.
+        for stop in 0..total {
+            let mut view = store
+                .open_buffered_root(&cx, id, pool.clone(), limits())
+                .await
+                .unwrap();
+            let baseline = pool.used();
+            let mut scan = view
+                .edge_scan(&cx, CommitSeq(5))
+                .unwrap()
+                .into_join_scan();
+            let mut seen = 0;
+            loop {
+                match scan
+                    .next_property_with_endpoints(&cx, None, P, &mut |_| {
+                        let at = seen;
+                        seen += 1;
+                        if at == stop { Err(stop) } else { Ok(()) }
+                    })
+                    .await
+                {
+                    Ok(Some(_)) => {}
+                    Err(BufferedScanError::Control(at)) => {
+                        assert_eq!((at, seen), (stop, stop + 1));
+                        break;
+                    }
+                    other => panic!("expected endpoint refusal {stop}, got {other:?}"),
+                }
+            }
+            assert!(scan.is_closed());
+            assert!(
+                scan.next_topology_with_endpoints(&cx, None, &mut |_| -> Result<(), ()> {
+                    panic!("the selected-property failure closes every root mode")
+                })
+                .await
+                .unwrap()
+                .is_none()
+            );
+            drop(scan);
+            assert_eq!(pool.used(), baseline, "selected endpoint control {stop}");
+            drop(view);
+            assert_eq!(pool.used(), 0);
+        }
+
+        for limit in [work - 1, work] {
+            let mut view = store
+                .open_buffered_root(&cx, id, pool.clone(), limits())
+                .await
+                .unwrap();
+            let baseline = pool.used();
+            let mut root = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+            root.work.limit = limit;
+            let mut scan = root.into_join_scan();
+            let mut refused = false;
+            loop {
+                match scan
+                    .next_property_with_endpoints(&cx, None, P, &mut |_| Ok::<_, ()>(()))
+                    .await
+                {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(BufferedScanError::Read(BufferedReadError::Limit {
+                        resource: "buffered source work",
+                        requested,
+                        limit: found,
+                    })) => {
+                        assert_eq!((requested, found), (work, work - 1));
+                        refused = true;
+                        break;
+                    }
+                    other => panic!("unexpected selected endpoint work result {other:?}"),
+                }
+            }
+            assert_eq!(refused, limit < work);
+            if refused {
+                assert!(scan.is_closed());
+            }
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+        }
     });
 }

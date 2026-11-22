@@ -344,24 +344,50 @@ impl AsyncSeek for File {
     }
 }
 
+fn projection_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+    match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
+        (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+        _ => None,
+    }
+}
+
+fn selected_query(text: &str) -> PreparedGraphPattern<GraphValueRow> {
+    PreparedGraphText::prepare(text, projection_symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+}
+
 async fn count(
     view: &mut BufferedReadView<MemVfs>,
     cx: &QueryCx,
     argument: &str,
 ) -> Result<u64, NativeAggregateSpoolError> {
-    let parameters = GqlParameters::new();
-    let prepared = PreparedNativeRead::prepare(
+    let values = aggregate_cells(
+        view,
+        cx,
         &format!("MATCH (a)-[r:R]->(b) RETURN count({argument}) AS n"),
-        &parameters,
-        |kind, name| match (kind, name) {
-            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
-            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
-            _ => None,
-        },
     )
-    .unwrap()
-    .prepare_buffered_aggregate(&parameters)
-    .unwrap();
+    .await?;
+    let [GraphAggregateValue::Count(count)] = values.as_slice() else {
+        panic!("one count cell")
+    };
+    Ok(*count)
+}
+
+async fn aggregate_cells(
+    view: &mut BufferedReadView<MemVfs>,
+    cx: &QueryCx,
+    text: &str,
+) -> Result<Vec<GraphAggregateValue>, NativeAggregateSpoolError> {
+    let parameters = GqlParameters::new();
+    let prepared = PreparedNativeRead::prepare(text, &parameters, projection_symbols)
+        .unwrap()
+        .prepare_buffered_aggregate(&parameters)
+        .unwrap();
     let pool = MemoryPool::new(4 * 1024 * 1024, 0).unwrap();
     let limits = SpillLimits {
         max_file_bytes: 1024 * 1024,
@@ -398,14 +424,11 @@ async fn count(
         .await?;
     let mut reader = spool.reader(&mut destination, None);
     let row = reader.next_row(cx).await?.unwrap();
-    let [GraphAggregateValue::Count(count)] = row.values() else {
-        panic!("one count cell")
-    };
-    let count = *count;
+    let values = row.values().to_vec();
     drop(row);
     assert!(reader.next_row(cx).await?.is_none());
     assert_eq!(spool.row_stats().snapshot_records, 2);
-    Ok(count)
+    Ok(values)
 }
 
 #[test]
@@ -602,6 +625,225 @@ fn topology_candidates_retain_budgets_cancellation_and_output_ownership() {
                     GraphValue::Vertex(A),
                     GraphValue::Vertex(B)
                 ]
+            );
+            drop(held);
+            assert_eq!(memory.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn selected_edge_properties_preserve_history_orientation_labels_and_removal() {
+    let ((), report) = run_async_under_lab(0x6275_ef05, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let q = PropertyKeyId(2);
+        let (vfs, mut writer, _) = large_fixture(&contexts).await;
+        let mut add = WriteBatch::new(RELATION);
+        add.set_edge_property(EId(0), q, Some(CanonicalScalar::Int(9)));
+        add.set_edge_property(EId(u128::MAX), q, Some(CanonicalScalar::Int(11)));
+        assert_eq!(
+            writer.write(&contexts.commit(), add).await.unwrap(),
+            CommitSeq(3)
+        );
+        let memories = [memory(), memory()];
+        let mut pinned = Vec::new();
+        for (native, memory) in [false, true].into_iter().zip(&memories) {
+            pinned.push(open(&contexts, &vfs, memory, native.then(small_run_limits)).await);
+        }
+        let mut edit = WriteBatch::new(RELATION);
+        edit.set_edge_property(EId(0), q, Some(CanonicalScalar::Int(21)));
+        edit.set_edge_property(EId(u128::MAX), q, None);
+        edit.set_vertex_label(B, LabelId(1), false);
+        assert_eq!(
+            writer.write(&contexts.commit(), edit).await.unwrap(),
+            CommitSeq(4)
+        );
+        writer.compact(&contexts.commit()).await.unwrap();
+
+        for ((native, mut pinned), memory) in
+            [false, true].into_iter().zip(pinned).zip(&memories)
+        {
+            let mut current = open(&contexts, &vfs, memory, native.then(small_run_limits)).await;
+            for (view, frontier) in [(&mut pinned, 3), (&mut current, 4)] {
+                for cut in 0..=frontier {
+                    for direction in 0..3 {
+                        for labelled in [false, true] {
+                            let a = if labelled { "a:L" } else { "a" };
+                            let b = if labelled { "b:L" } else { "b" };
+                            let pattern = match direction {
+                                0 => format!("({a})-[r:R]->({b})"),
+                                1 => format!("({a})<-[r:R]-({b})"),
+                                _ => format!("({a})-[r:R]-({b})"),
+                            };
+                            let prepared =
+                                selected_query(&format!("MATCH {pattern} RETURN r,a,b,r.q"));
+                            let (rows, stats) =
+                                collect(view, &cx, &prepared, CommitSeq(cut)).await;
+                            let mut expected = Vec::new();
+                            if cut > 0 && !(labelled && cut >= 4) {
+                                for (eid, src, dst, value) in [
+                                    (EId(0), A, B, if cut >= 4 { 21 } else { 9 }),
+                                    (EId(u128::MAX), B, B, 11),
+                                ] {
+                                    let value = if cut < 3 || (eid == EId(u128::MAX) && cut >= 4) {
+                                        CanonicalScalar::Null
+                                    } else {
+                                        CanonicalScalar::Int(value)
+                                    };
+                                    let orientations = match direction {
+                                        0 => vec![(src, dst)],
+                                        1 => vec![(dst, src)],
+                                        _ if src == dst => vec![(src, dst)],
+                                        _ => vec![(src, dst), (dst, src)],
+                                    };
+                                    for (src, dst) in orientations {
+                                        expected.push(vec![
+                                            GraphValue::Edge(eid),
+                                            GraphValue::Vertex(src),
+                                            GraphValue::Vertex(dst),
+                                            GraphValue::Scalar(value.clone()),
+                                        ]);
+                                    }
+                                }
+                            }
+                            expected.sort();
+                            assert_eq!(
+                                rows, expected,
+                                "native {native}, cut {cut}, direction {direction}, labels {labelled}"
+                            );
+                            assert_eq!(stats.snapshot_records, 2);
+                        }
+                    }
+                }
+                let missing = selected_query(
+                    "MATCH (a)-[r:R]->(b) WHERE r.q IS NULL RETURN r,a,b,r.q",
+                );
+                let (rows, _) = collect(view, &cx, &missing, CommitSeq(frontier)).await;
+                if frontier == 3 {
+                    assert!(rows.is_empty());
+                } else {
+                    assert_eq!(
+                        rows,
+                        vec![vec![
+                            GraphValue::Edge(EId(u128::MAX)),
+                            GraphValue::Vertex(B),
+                            GraphValue::Vertex(B),
+                            GraphValue::Scalar(CanonicalScalar::Null),
+                        ]]
+                    );
+                }
+                assert_eq!(
+                    aggregate_cells(
+                        view,
+                        &cx,
+                        "MATCH (a)-[r:R]->(b) RETURN count(r.q) AS n,sum(r.q) AS total",
+                    )
+                    .await
+                    .unwrap(),
+                    if frontier == 3 {
+                        vec![GraphAggregateValue::Count(2), GraphAggregateValue::Integer(20)]
+                    } else {
+                        vec![GraphAggregateValue::Count(1), GraphAggregateValue::Integer(21)]
+                    }
+                );
+            }
+            drop(pinned);
+            drop(current);
+            assert_eq!(memory.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn selected_edge_property_queries_fit_without_unrelated_payloads_and_keep_output_guards() {
+    let ((), report) = run_async_under_lab(0x6275_ef06, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (vfs, mut writer, _) = large_fixture(&contexts).await;
+        let mut add = WriteBatch::new(RELATION);
+        add.set_edge_property(EId(0), PropertyKeyId(2), Some(CanonicalScalar::Int(9)));
+        add.set_edge_property(
+            EId(u128::MAX),
+            PropertyKeyId(2),
+            Some(CanonicalScalar::Int(11)),
+        );
+        assert_eq!(
+            writer.write(&contexts.commit(), add).await.unwrap(),
+            CommitSeq(3)
+        );
+        let columns = std::iter::once("r".to_owned())
+            .chain((1..32).map(|at| format!("r.q AS copy_{at}")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let prepared = selected_query(&format!(
+            "MATCH (a:L)-[r:R]->(b:L) WHERE r.q>=0 RETURN {columns}"
+        ));
+        for native in [false, true] {
+            let memory = memory();
+            let mut view = open(&contexts, &vfs, &memory, native.then(small_run_limits)).await;
+            let occupied = memory
+                .reserve(&cx, memory.available() - 3 * 1024 * 1024)
+                .unwrap();
+            let (rows, stats) = collect(&mut view, &cx, &prepared, CommitSeq(3)).await;
+            assert_eq!(stats.snapshot_records, 2);
+            assert_eq!(rows.len(), 2);
+            for (row, eid, value) in [(&rows[0], EId(0), 9), (&rows[1], EId(u128::MAX), 11)] {
+                assert_eq!(row[0], GraphValue::Edge(eid));
+                assert_eq!(
+                    row[1..],
+                    vec![GraphValue::Scalar(CanonicalScalar::Int(value)); 31]
+                );
+            }
+            // A second edge key or any endpoint property keeps complete
+            // records. Repeated selected columns cannot hide that demand.
+            for field in ["r.p", "a.p"] {
+                let required = selected_query(&format!(
+                    "MATCH (a)-[r:R]->(b) RETURN {columns},{field} AS required"
+                ));
+                let mut cursor = view
+                    .stream_graph_edges_governed(&cx, &required, native_run_policy(100))
+                    .unwrap();
+                let error = cursor.next().await.unwrap().unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        GqlQueryError::Source(EdgeScanError::Source(
+                            BufferedReadError::Memory(_)
+                                | BufferedReadError::Buffer(
+                                    fgdb_strata::tiered::buffer::BufferError::Memory(_)
+                                )
+                        ))
+                    ),
+                    "{field}: {error:?}"
+                );
+                assert_eq!(cursor.state(), EdgeScanState::Failed);
+                assert!(cursor.next().await.is_none());
+            }
+            drop(occupied);
+            let complete = selected_query(&format!(
+                "MATCH (a)-[r:R]->(b) RETURN {columns},r.p AS required"
+            ));
+            let (rows, _) = collect(&mut view, &cx, &complete, CommitSeq(3)).await;
+            assert_eq!(rows.len(), 2);
+            assert_eq!(
+                rows[0].last(),
+                Some(&GraphValue::Scalar(payload())),
+                "complete fallback still exposes its required payload"
+            );
+            let mut cursor = view
+                .stream_graph_edges_governed(&cx, &prepared, native_run_policy(100))
+                .unwrap();
+            let held = cursor.next().await.unwrap().unwrap();
+            drop(cursor);
+            drop(view);
+            assert!(memory.used() > 0, "selected output owns its independent guard");
+            assert_eq!(held.row().values()[0], GraphValue::Edge(EId(0)));
+            assert_eq!(
+                held.row().values()[1],
+                GraphValue::Scalar(CanonicalScalar::Int(9))
             );
             drop(held);
             assert_eq!(memory.used(), 0);

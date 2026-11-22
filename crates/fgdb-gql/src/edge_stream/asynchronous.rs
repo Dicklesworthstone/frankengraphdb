@@ -105,6 +105,12 @@ impl AsyncEdgeScanPlan {
         self.inner.requires_properties()
     }
 
+    /// Exact property projection proved for the complete local input program.
+    #[must_use]
+    pub fn property_demand(&self) -> EdgeScanPropertyDemand {
+        self.inner.property_demand()
+    }
+
     /// The checked root selector, for source-level descriptor pruning before
     /// heap admission or payload reads. This conveys no authorization; the
     /// source must still enforce its own visibility and capability boundary.

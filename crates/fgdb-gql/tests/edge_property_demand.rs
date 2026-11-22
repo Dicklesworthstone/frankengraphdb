@@ -3,7 +3,7 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern};
-use fgdb_gql::edge_stream::{AsyncEdgeScanPlan, EdgeScanPlan};
+use fgdb_gql::edge_stream::{AsyncEdgeScanPlan, EdgeScanPlan, EdgeScanPropertyDemand};
 use fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan;
 use fgdb_gql::{
     GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphText,
@@ -13,6 +13,9 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        (GraphSymbolKind::Property, "q") => {
+            Some(GraphSymbol::Property(PropertyKeyId((1_u64 << 40) | 1)))
+        }
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         _ => None,
     }
@@ -233,10 +236,148 @@ fn joined_and_probed_edge_plans_keep_complete_property_demand() {
         let ordinary =
             EdgeScanPlan::compile(query.plan()).unwrap_or_else(|error| panic!("{text}: {error:?}"));
         assert!(ordinary.requires_properties(), "{text}");
+        assert_eq!(
+            ordinary.property_demand(),
+            EdgeScanPropertyDemand::Complete,
+            "{text}"
+        );
         assert!(AsyncEdgeScanPlan::compile(query.plan()).is_err(), "{text}");
         assert!(
             AsyncEdgeScanPlan::compile_sort_input(query.plan()).is_err(),
             "{text}"
         );
+    }
+}
+
+#[test]
+fn selected_edge_demand_unifies_all_local_uses_without_aliasing_keys() {
+    use EdgeScanPropertyDemand::{Complete, EdgeProperty, Topology};
+    let p = EdgeProperty(PropertyKeyId(1));
+    let q = EdgeProperty(PropertyKeyId((1_u64 << 40) | 1));
+    for (text, expected) in [
+        ("MATCH (a)-[r:R]->(b) RETURN r,a,b", Topology),
+        ("MATCH (a)-[r:R]->(b) RETURN r,r.p", p),
+        ("MATCH (a)<-[r:R]-(b) RETURN r,r.p", p),
+        ("MATCH (a)-[r:R]-(b) RETURN r,a,r.p", p),
+        ("MATCH (a)-[r:R]->(b) RETURN r,r.q", q),
+        ("MATCH (a)-[r:R]->(b) RETURN r,r.p,r.p", p),
+        ("MATCH (a)-[r:R]->(b) WHERE id(r)>=0 RETURN r,r.p", p),
+        (
+            "MATCH p=(a)-[r:R]->(b) WHERE r.p>0 RETURN r,r.p,length(p)",
+            p,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE r.p>1 OR r.p<0 RETURN r,r.p",
+            p,
+        ),
+        ("MATCH (a)-[r:R]->(b) WHERE true OR r.p=1 RETURN r", p),
+        ("MATCH (a)-[r:R]->(b) RETURN r,r.p,r.q", Complete),
+        ("MATCH (a)-[r:R]->(b) WHERE r.q=1 RETURN r,r.p", Complete),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE false AND r.q=1 RETURN r,r.p",
+            Complete,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE coalesce(CASE WHEN true THEN 1 ELSE r.q END,0)=1 RETURN r,r.p",
+            Complete,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE true OR a.p=1 RETURN r,r.p",
+            Complete,
+        ),
+        ("MATCH (a)-[r:R]->(b) RETURN r,r.p,b.p", Complete),
+    ] {
+        let query = prepared(text);
+        let ordinary =
+            EdgeScanPlan::compile(query.plan()).unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let asynchronous = AsyncEdgeScanPlan::compile(query.plan())
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(ordinary.property_demand(), expected, "{text}");
+        assert_eq!(asynchronous.property_demand(), expected, "{text}");
+        assert_eq!(
+            ordinary.requires_properties(),
+            expected != Topology,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn selected_edge_demand_includes_private_sort_properties_before_limit_zero() {
+    use EdgeScanPropertyDemand::{Complete, EdgeProperty, Topology};
+    let p = EdgeProperty(PropertyKeyId(1));
+    for (text, expected) in [
+        ("MATCH (a)-[r:R]->(b) RETURN r ORDER BY r LIMIT 0", Topology),
+        ("MATCH (a)-[r:R]->(b) RETURN r ORDER BY r.p LIMIT 0", p),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN r.p AS value ORDER BY r LIMIT 0",
+            p,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE r.p>0 RETURN a ORDER BY r LIMIT 0",
+            p,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE r.q>0 RETURN r ORDER BY r.p LIMIT 0",
+            Complete,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN r,r.p ORDER BY a.p LIMIT 0",
+            Complete,
+        ),
+    ] {
+        let query = prepared(text);
+        let (input, tail) = AsyncEdgeScanPlan::compile_sort_input(query.plan())
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(input.property_demand(), expected, "{text}");
+        assert_eq!(tail.count(), Some(0));
+    }
+}
+
+#[test]
+fn selected_edge_aggregate_demand_covers_grouping_having_and_hidden_arguments() {
+    use EdgeScanPropertyDemand::{Complete, EdgeProperty, Topology};
+    let p = EdgeProperty(PropertyKeyId(1));
+    let q = EdgeProperty(PropertyKeyId((1_u64 << 40) | 1));
+    for (text, expected) in [
+        ("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS rows", Topology),
+        ("MATCH (a)-[r:R]->(b) RETURN COUNT(r.p) AS present", p),
+        ("MATCH (a)-[r:R]->(b) RETURN SUM(r.p) AS total", p),
+        ("MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total", p),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE r.p>0 RETURN SUM(r.p) AS total",
+            p,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS rows GROUP BY r.p",
+            p,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS rows GROUP BY a ORDER BY SUM(r.p+1) DESC LIMIT 0",
+            p,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS rows HAVING SUM(r.q)>0",
+            q,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN SUM(r.p) AS total HAVING SUM(r.q)>0",
+            Complete,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE true OR a.p=1 RETURN SUM(r.p) AS total",
+            Complete,
+        ),
+    ] {
+        let aggregate = PreparedGraphAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let AsyncSpillAggregatePlan::Edge(input) = AsyncSpillAggregatePlan::compile(&aggregate)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        else {
+            panic!("expected a single-edge aggregate input: {text}");
+        };
+        assert_eq!(input.property_demand(), expected, "{text}");
     }
 }

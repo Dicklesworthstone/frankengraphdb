@@ -74,6 +74,13 @@ impl BufferedEdgeProperty {
         self.0.props.first().map(|(_, value)| value)
     }
 
+    /// Borrow only the requested key, if present. This is not a complete
+    /// property map: the slice contains at most one entry, and a present NULL
+    /// remains distinct from the empty slice for a missing key.
+    pub fn properties(&self) -> &[(PropertyKeyId, CanonicalPropertyValue)] {
+        &self.0.props
+    }
+
     pub fn charged_bytes(&self) -> usize {
         self.0.charged_bytes()
     }
@@ -145,6 +152,36 @@ impl BufferedEdgeTopologyEndpoints {
 impl core::fmt::Debug for BufferedEdgeTopologyEndpoints {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("BufferedEdgeTopologyEndpoints([REDACTED])")
+    }
+}
+
+/// One selected edge property and both visible endpoint identities/labels at
+/// the cursor's cut. The distinct field types retain the projection boundary:
+/// neither the edge nor either endpoint is a complete stored property record.
+/// A self-loop shares its one endpoint owner.
+pub struct BufferedEdgePropertyEndpoints {
+    edge: BufferedEdgeProperty,
+    source: BufferedVertexTopology,
+    target: Option<BufferedVertexTopology>,
+}
+
+impl BufferedEdgePropertyEndpoints {
+    pub fn edge(&self) -> &BufferedEdgeProperty {
+        &self.edge
+    }
+
+    pub fn source_vertex(&self) -> &BufferedVertexTopology {
+        &self.source
+    }
+
+    pub fn target_vertex(&self) -> &BufferedVertexTopology {
+        self.target.as_ref().unwrap_or(&self.source)
+    }
+}
+
+impl core::fmt::Debug for BufferedEdgePropertyEndpoints {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BufferedEdgePropertyEndpoints([REDACTED])")
     }
 }
 
@@ -821,28 +858,9 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             .row
             .filter(|row| relation.is_none_or(|r| r == row.entry.relation))
         {
-            let source = self
-                .partition
-                .edge_scan_vertex_topology(cx, edge.entry.src, self.as_of, &mut self.work, observe)
-                .await?
-                .ok_or(BufferedReadError::DanglingEndpoint)?;
-            let target = if edge.entry.src == edge.entry.dst {
-                None
-            } else {
-                Some(
-                    self.partition
-                        .edge_scan_vertex_topology(
-                            cx,
-                            edge.entry.dst,
-                            self.as_of,
-                            &mut self.work,
-                            observe,
-                        )
-                        .await?
-                        .ok_or(BufferedReadError::DanglingEndpoint)?,
-                )
-            };
-            self.work.step(cx, observe)?;
+            let (source, target) = self
+                .resolve_topology_vertices(cx, &edge.entry, observe)
+                .await?;
             Some(BufferedEdgeTopologyEndpoints {
                 edge: BufferedEdgeTopology(edge),
                 source,
@@ -858,6 +876,91 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             eid: candidate.eid,
             row,
         }))
+    }
+
+    /// Resolve one selected edge property with same-cut endpoint identities
+    /// and labels. The returned images materialize only the requested edge
+    /// field and endpoint topology. Every selected sidecar remains authenticated,
+    /// including when the requested key is absent from that sidecar. Native
+    /// base-image admission keeps its existing complete validation and residency.
+    ///
+    /// Missing keys never fall back to older versions. Invisible or excluded
+    /// edges still retain candidate admission without reading endpoints. Any
+    /// source/control failure drops the complete root position, as with full
+    /// records and topology pulls.
+    pub async fn next_property_with_endpoints<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        relation: Option<RelationId>,
+        key: PropertyKeyId,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertyEndpoints>>, BufferedScanError<C>>
+    {
+        let Some(mut state) = self.state.take() else {
+            return Ok(None);
+        };
+        let Some(candidate) = self
+            .advance(&mut state, cx, EdgePropertyAccess::Property(key), observe)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let row = if let Some(edge) = candidate
+            .row
+            .filter(|row| relation.is_none_or(|r| r == row.entry.relation))
+        {
+            let (source, target) = self
+                .resolve_topology_vertices(cx, &edge.entry, observe)
+                .await?;
+            Some(BufferedEdgePropertyEndpoints {
+                edge: BufferedEdgeProperty(edge),
+                source,
+                target,
+            })
+        } else {
+            None
+        };
+        if state.has_more() {
+            self.state = Some(state);
+        }
+        Ok(Some(BufferedEdgeCandidate {
+            eid: candidate.eid,
+            row,
+        }))
+    }
+
+    // Both projected root modes prove the same endpoint lifetimes and labels.
+    // Keep each owner live through the final checkpoint; a failure drops both
+    // without exposing a partial record, and a self-loop owns only one image.
+    async fn resolve_topology_vertices<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        edge: &AdjacencyEntry,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<(BufferedVertexTopology, Option<BufferedVertexTopology>), BufferedScanError<C>> {
+        let source = self
+            .partition
+            .edge_scan_vertex_topology(cx, edge.src, self.as_of, &mut self.work, observe)
+            .await?
+            .ok_or(BufferedReadError::DanglingEndpoint)?;
+        let target = if edge.src == edge.dst {
+            None
+        } else {
+            Some(
+                self.partition
+                    .edge_scan_vertex_topology(
+                        cx,
+                        edge.dst,
+                        self.as_of,
+                        &mut self.work,
+                        observe,
+                    )
+                    .await?
+                    .ok_or(BufferedReadError::DanglingEndpoint)?,
+            )
+        };
+        self.work.step(cx, observe)?;
+        Ok((source, target))
     }
 
     // Root and independently positioned incidence reads share the SAME visible

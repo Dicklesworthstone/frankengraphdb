@@ -20,6 +20,12 @@ impl AsyncEdgeSpillAggregatePlan {
         self.input.requires_properties()
     }
 
+    /// Exact property projection proved for the complete local input program.
+    #[must_use]
+    pub fn property_demand(&self) -> EdgeScanPropertyDemand {
+        self.input.property_demand()
+    }
+
     /// The checked input selector, before aggregate occurrence evaluation.
     pub fn root_relation(&self) -> EdgeRelation {
         self.input.root_relation()

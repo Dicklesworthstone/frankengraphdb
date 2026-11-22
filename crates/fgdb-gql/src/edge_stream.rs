@@ -46,6 +46,30 @@ pub use crate::stream::{
     VertexScanRecord, VertexScanRow, VertexScanSourceError as EdgeScanSourceError,
 };
 
+/// Property fields observed by the complete compiled single-edge evaluator.
+/// This is a projection proof, not an authorization grant. Every variant still
+/// requires the edge topology and both endpoints' same-cut identities/labels.
+/// Unknown or multi-edge programs require complete records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeScanPropertyDemand {
+    /// No edge or endpoint property is read.
+    Topology,
+    /// Every property read names this key on the one captured edge.
+    EdgeProperty(PropertyKeyId),
+    /// Multiple edge keys, endpoint properties, or an unproved program.
+    Complete,
+}
+
+impl EdgeScanPropertyDemand {
+    fn with_edge_property(self, key: PropertyKeyId) -> Self {
+        match self {
+            Self::Topology => Self::EdgeProperty(key),
+            Self::EdgeProperty(previous) if previous == key => self,
+            Self::EdgeProperty(_) | Self::Complete => Self::Complete,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EdgeScanBuildError {
     /// First instruction outside this physical profile; never a data identity.
@@ -102,49 +126,71 @@ enum LocalOutput {
 
 impl EdgeScanPlan {
     /// Whether the complete compiled evaluator may inspect an edge or vertex
-    /// property. A false result permits a source to supply topology and labels
-    /// alone, while retaining its ordinary visibility, admission and controls.
-    /// Hidden ordering cells and aggregate inputs participate in this proof.
-    /// Boolean programs retain every eager vertex/edge property operand,
-    /// including inputs of unselected scalar branches. Joined/probed plans and
-    /// unrecognized instructions or projections never permit omission.
+    /// property. Hidden ordering cells and aggregate inputs participate.
     #[must_use]
     pub fn requires_properties(&self) -> bool {
-        if self.joined.is_some()
-            || self
-                .instructions
-                .iter()
-                .any(|instruction| match instruction {
-                    GlaOperator::Select { predicates, .. } => predicates
+        self.property_demand() != EdgeScanPropertyDemand::Topology
+    }
+
+    /// Prove the fields used by every local instruction and projection cell.
+    /// Boolean programs include all eager operands, even inputs of unselected
+    /// scalar branches. Repeated uses of one edge key share one selected field;
+    /// a second key, any endpoint property, joined/probed plan or unrecognized
+    /// instruction/projection retains complete-record admission.
+    ///
+    /// The proof never removes, evaluates or reorders an instruction. All path
+    /// captures in this local profile denote the same single physical edge.
+    #[must_use]
+    pub fn property_demand(&self) -> EdgeScanPropertyDemand {
+        use EdgeScanPropertyDemand::{Complete, Topology};
+
+        if self.joined.is_some() {
+            return Complete;
+        }
+        let mut demand = Topology;
+        for instruction in self.instructions.iter() {
+            match instruction {
+                GlaOperator::Select { predicates, .. } => {
+                    if predicates
                         .iter()
-                        .any(|predicate| !matches!(predicate, VertexPredicate::HasLabel(_))),
-                    GlaOperator::VertexIdentity { .. } | GlaOperator::CapturePath { .. } => false,
-                    GlaOperator::SelectBoolean { expression } => {
-                        expression.referenced_vertex_properties().next().is_some()
-                            || expression.referenced_edge_properties().next().is_some()
+                        .any(|predicate| !matches!(predicate, VertexPredicate::HasLabel(_)))
+                    {
+                        return Complete;
                     }
-                    _ => true,
-                })
-        {
-            return true;
+                }
+                GlaOperator::VertexIdentity { .. } | GlaOperator::CapturePath { .. } => {}
+                GlaOperator::SelectBoolean { expression } => {
+                    if expression.referenced_vertex_properties().next().is_some() {
+                        return Complete;
+                    }
+                    for (_, key) in expression.referenced_edge_properties() {
+                        demand = demand.with_edge_property(key);
+                    }
+                }
+                _ => return Complete,
+            }
         }
-        match self.projection.as_ref() {
-            GlaOperator::ProjectValues { columns } => columns.iter().any(|column| {
-                !matches!(
-                    column,
-                    ValueProjection::Vertex { .. }
-                        | ValueProjection::Path {
-                            function: GraphPathFunction::Value
-                                | GraphPathFunction::Length
-                                | GraphPathFunction::Nodes
-                                | GraphPathFunction::Edges
-                                | GraphPathFunction::Edge,
-                            ..
-                        }
-                )
-            }),
-            _ => true,
+        let GlaOperator::ProjectValues { columns } = self.projection.as_ref() else {
+            return Complete;
+        };
+        for column in columns {
+            match column {
+                ValueProjection::Vertex { .. }
+                | ValueProjection::Path {
+                    function: GraphPathFunction::Value
+                        | GraphPathFunction::Length
+                        | GraphPathFunction::Nodes
+                        | GraphPathFunction::Edges
+                        | GraphPathFunction::Edge,
+                    ..
+                } => {}
+                ValueProjection::EdgeProperty { key, .. } => {
+                    demand = demand.with_edge_property(*key);
+                }
+                _ => return Complete,
+            }
         }
+        demand
     }
 
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {

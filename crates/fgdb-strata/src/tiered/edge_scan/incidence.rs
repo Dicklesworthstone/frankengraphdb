@@ -289,6 +289,40 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         result
     }
 
+    /// Root counterpart of next_property_candidate_with with same-cut
+    /// endpoint topology. Independent incidence and vertex reads keep their
+    /// complete-record demand and share the same cumulative work allowance.
+    /// Error or a dropped polled future closes the whole driver.
+    pub async fn next_property_with_endpoints<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        relation: Option<RelationId>,
+        key: PropertyKeyId,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertyEndpoints>>, BufferedScanError<C>>
+    {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        self.continuation = None;
+        let used = &mut self.work;
+        let result = driver
+            .root
+            .next_property_with_endpoints(cx, relation, key, &mut |event| {
+                observe(event)?;
+                if event == BufferedEdgeScanEvent::Work {
+                    *used = used.saturating_add(1);
+                }
+                Ok(())
+            })
+            .await;
+        self.work = driver.root.work.used;
+        if result.is_ok() {
+            self.driver = Some(driver);
+        }
+        result
+    }
+
     /// The first historical incident EId strictly greater than `after`.
     /// Positions belong to the caller's traversal prefix, never to the root.
     /// Emit Identity exactly once before resolving the winning history, even

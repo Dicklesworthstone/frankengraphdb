@@ -14,8 +14,8 @@ use fgdb_gql::algebra::{
 };
 use fgdb_gql::edge_stream::{
     AsyncEdgeCandidate, AsyncEdgeScanCursor, AsyncEdgeScanEvent, AsyncEdgeScanPlan,
-    AsyncEdgeScanRecord, AsyncEdgeScanSource, EdgeScanError, EdgeScanRow, EdgeScanSourceError,
-    VertexScanRow,
+    AsyncEdgeScanRecord, AsyncEdgeScanSource, EdgeScanError, EdgeScanPropertyDemand, EdgeScanRow,
+    EdgeScanSourceError, VertexScanRow,
 };
 use fgdb_gql::spill_aggregate::{AsyncEdgeSpillAggregateCursor, AsyncEdgeSpillAggregatePlan};
 use fgdb_gql::stream::{AsyncVertexProbeCursor, AsyncVertexProbePlan, VertexScanError};
@@ -23,7 +23,7 @@ use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::store::BufferedScanError;
 use fgdb_strata::tiered::edge_scan::{
     BufferedEdgeCandidate, BufferedEdgeDirection, BufferedEdgeEndpoints, BufferedEdgeJoinScan,
-    BufferedEdgeScanEvent, BufferedEdgeTopologyEndpoints,
+    BufferedEdgePropertyEndpoints, BufferedEdgeScanEvent, BufferedEdgeTopologyEndpoints,
 };
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -45,6 +45,7 @@ struct Record {
 enum Image {
     Complete(BufferedEdgeEndpoints),
     Topology(BufferedEdgeTopologyEndpoints),
+    Property(BufferedEdgePropertyEndpoints),
 }
 
 impl From<BufferedEdgeEndpoints> for Image {
@@ -56,6 +57,12 @@ impl From<BufferedEdgeEndpoints> for Image {
 impl From<BufferedEdgeTopologyEndpoints> for Image {
     fn from(image: BufferedEdgeTopologyEndpoints) -> Self {
         Self::Topology(image)
+    }
+}
+
+impl From<BufferedEdgePropertyEndpoints> for Image {
+    fn from(image: BufferedEdgePropertyEndpoints) -> Self {
+        Self::Property(image)
     }
 }
 
@@ -78,6 +85,15 @@ impl AsyncEdgeScanRecord for Record {
                     target: edge.dst,
                     relation: edge.relation,
                     properties: &[],
+                }
+            }
+            Image::Property(image) => {
+                let edge = image.edge();
+                EdgeScanRow {
+                    source: edge.entry().src,
+                    target: edge.entry().dst,
+                    relation: edge.entry().relation,
+                    properties: edge.properties(),
                 }
             }
         }
@@ -114,6 +130,19 @@ impl AsyncEdgeScanRecord for Record {
                     properties: &[],
                 })
             }
+            Image::Property(image) => {
+                let row = if vid == image.edge().entry().src {
+                    image.source_vertex()
+                } else if vid == image.edge().entry().dst {
+                    image.target_vertex()
+                } else {
+                    return None;
+                };
+                Some(VertexScanRow {
+                    labels: row.labels(),
+                    properties: &[],
+                })
+            }
         }
     }
 }
@@ -122,7 +151,7 @@ struct Source<'view, 'q, V: Vfs> {
     scan: BufferedEdgeJoinScan<'view, V>,
     vertex_seeds: Option<BufferedVertexSeeds>,
     edge_seed_direction: Option<BufferedEdgeDirection>,
-    requires_properties: bool,
+    property_demand: EdgeScanPropertyDemand,
     cx: &'q QueryCx,
     pool: MemoryPool,
 }
@@ -205,12 +234,36 @@ impl<V: Vfs + Clone> AsyncEdgeScanSource for Source<'_, '_, V> {
         // An alternation reads every relation's candidates; the async cursor
         // admits only its members through `EdgeRelation::matches`.
         let relation = relation.one();
-        if !self.requires_properties {
+        if self.property_demand == EdgeScanPropertyDemand::Topology {
             let candidate = self
                 .cx
                 .with_restriction_async(self.scan.next_topology_with_endpoints(
                     self.cx,
                     relation,
+                    &mut |event| {
+                        control(match event {
+                            BufferedEdgeScanEvent::Work => AsyncEdgeScanEvent::Work,
+                            BufferedEdgeScanEvent::Identity(eid) => {
+                                AsyncEdgeScanEvent::Candidate(eid)
+                            }
+                        })
+                    },
+                ))
+                .erase_send()
+                .await
+                .map_err(|error| match error {
+                    BufferedScanError::Read(error) => EdgeScanSourceError::Source(error),
+                    BufferedScanError::Control(error) => EdgeScanSourceError::Control(error),
+                })?;
+            return self.admit_record(candidate);
+        }
+        if let EdgeScanPropertyDemand::EdgeProperty(key) = self.property_demand {
+            let candidate = self
+                .cx
+                .with_restriction_async(self.scan.next_property_with_endpoints(
+                    self.cx,
+                    relation,
+                    key,
                     &mut |event| {
                         control(match event {
                             BufferedEdgeScanEvent::Work => AsyncEdgeScanEvent::Work,
@@ -399,10 +452,13 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// When the compiled plan proves that no property is observed, the source
     /// retains edge topology and same-cut endpoint identities and labels only.
     /// Such reads skip independent edge-property sidecars and do not decode
-    /// endpoint properties. Selected native base images keep their existing
-    /// complete-image admission bounds. Property-dependent expressions retain
-    /// the complete-record source, including hidden ordering and aggregate input
-    /// cells; joins and probes remain conservative.
+    /// endpoint properties. A plan that reads one edge property key additionally
+    /// admits only that selected field; unrelated edge and endpoint properties
+    /// are not materialized. Missing keys remain NULL to the ordinary evaluator.
+    /// Hidden ordering and aggregate input cells participate in the proof.
+    /// Multiple edge keys, endpoint properties, joins, probes and unrecognized
+    /// programs retain complete records. Selected native base images keep their
+    /// existing complete-image admission bounds.
     ///
     /// The returned native async cursor owns its source privately. Its ordinary
     /// next/state/close/statistics API applies unchanged. Each output carries a
@@ -480,7 +536,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         EdgeQueryError,
     > {
         let (mut source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
-        source.requires_properties = plan.requires_properties();
+        source.property_demand = plan.property_demand();
         Ok(AsyncEdgeScanCursor::new(source, plan, policy, checkpoint))
     }
 
@@ -499,7 +555,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         EdgeQueryError,
     > {
         let (mut source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
-        source.requires_properties = plan.requires_properties();
+        source.property_demand = plan.property_demand();
         Ok(AsyncEdgeSpillAggregateCursor::new(
             source, plan, policy, checkpoint,
         ))
@@ -523,7 +579,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         EdgeQueryError,
     > {
         let (mut source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
-        source.requires_properties = plan.requires_properties();
+        source.property_demand = plan.property_demand();
         source.edge_seed_direction = Some(seed_direction(plan.root_direction()));
         source.vertex_seeds = Some(seeds);
         Ok(AsyncEdgeScanCursor::new(source, plan, policy, checkpoint))
@@ -563,7 +619,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             scan: scan.into_join_scan(),
             vertex_seeds: None,
             edge_seed_direction: None,
-            requires_properties: true,
+            property_demand: EdgeScanPropertyDemand::Complete,
             cx,
             pool,
         };
