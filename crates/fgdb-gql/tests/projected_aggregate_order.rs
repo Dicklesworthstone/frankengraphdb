@@ -1081,6 +1081,161 @@ fn collected_lazy_arms_preserve_exact_output_having_and_order() {
 }
 
 #[test]
+fn conditional_aggregate_membership_keeps_exact_values_with_rebound_lists() {
+    let lower = 9_007_199_254_740_992;
+    let values = data(&[
+        (1, Some(lower)),
+        (2, Some(lower + 1)),
+        (3, Some(lower)),
+        (3, Some(lower + 1)),
+        (4, Some(i64::MAX)),
+        (4, Some(i64::MAX)),
+        (5, None),
+    ]);
+    let integer = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    for pipeline in [false, true] {
+        let (head, value) = if pipeline {
+            ("MATCH (n) WITH n.g AS g,n.p AS p RETURN g AS k", "p")
+        } else {
+            ("MATCH (n) RETURN n.g AS k", "n.p")
+        };
+        let statement = format!(
+            "{head},coalesce(avg({value}),percentileDisc({value},0.5)) IN $members AS mean_member,\
+            coalesce(sum({value}),percentileDisc({value},0.5)) IN $members AS sum_member ORDER BY k"
+        );
+        let declarations = [("members", GqlParameterType::List)];
+        let native = (!pipeline).then(|| {
+            PreparedGraphAggregateText::prepare_with_parameter_types(
+                &statement,
+                &declarations,
+                catalog,
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+        });
+        let piped = pipeline.then(|| {
+            fgdb_gql::PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+                &statement,
+                &declarations,
+                catalog,
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+        });
+        for (members, expected) in [
+            (
+                vec![integer(lower)],
+                [Some(true), Some(false), Some(false), Some(false), None],
+            ),
+            (
+                vec![integer(lower + 1)],
+                [Some(false), Some(true), Some(false), Some(false), None],
+            ),
+            (
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                    integer(lower + 1),
+                ],
+                [None, Some(true), None, None, None],
+            ),
+            (Vec::new(), [Some(false); 5]),
+        ] {
+            let parameters = GqlParameters::new().with_list("members", members).unwrap();
+            let query = if let Some(template) = &native {
+                template.bind_parameters(&parameters)
+            } else {
+                piped.as_ref().unwrap().bind_parameters(&parameters)
+            }
+            .unwrap();
+            let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                .value;
+            assert_eq!(rows.len(), expected.len(), "{statement}");
+            for (at, (row, expected)) in rows.iter().zip(expected).enumerate() {
+                assert_eq!(bucket(row, 0), at as i64 + 1);
+                for result in &row.values()[1..] {
+                    assert_eq!(
+                        result.as_value().unwrap().as_scalar(),
+                        Some(&expected.map_or(CanonicalScalar::Null, CanonicalScalar::Bool)),
+                        "{statement}, group {}",
+                        at + 1,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn value_ordering_compares_wide_sums_and_fractional_means_without_narrowing() {
+    let lower = 9_007_199_254_740_992;
+    let values = data(&[
+        (1, Some(lower)),
+        (2, Some(lower + 1)),
+        (3, Some(lower)),
+        (3, Some(lower + 1)),
+        (4, Some(i64::MAX)),
+        (4, Some(i64::MAX)),
+        (5, None),
+    ]);
+    let integer = |value| GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+    let ordered = |comparison, left, right| GraphSetValue::Ordered {
+        comparison,
+        left: Box::new(left),
+        right: Box::new(right),
+    };
+    let query = native(0, None)
+        .with_output_projection(vec![
+            GraphSetProjection::new("k", GraphSetValue::Column(0)),
+            GraphSetProjection::new(
+                "wide_sum",
+                ordered(
+                    IntegerComparison::Greater,
+                    GraphSetValue::Column(1),
+                    integer(i64::MAX),
+                ),
+            ),
+            GraphSetProjection::new(
+                "mean_above_lower",
+                ordered(
+                    IntegerComparison::Greater,
+                    GraphSetValue::Column(2),
+                    integer(lower),
+                ),
+            ),
+            GraphSetProjection::new(
+                "mean_below_upper",
+                ordered(
+                    IntegerComparison::Less,
+                    GraphSetValue::Column(2),
+                    integer(lower + 1),
+                ),
+            ),
+        ])
+        .unwrap();
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+        .unwrap()
+        .value;
+    let expected = [
+        [Some(false), Some(false), Some(true)],
+        [Some(false), Some(true), Some(false)],
+        [Some(false), Some(true), Some(true)],
+        [Some(true), Some(true), Some(false)],
+        [None, None, None],
+    ];
+    assert_eq!(rows.len(), expected.len());
+    for (at, (row, expected)) in rows.iter().zip(expected).enumerate() {
+        assert_eq!(bucket(row, 0), at as i64 + 1);
+        for (result, expected) in row.values()[1..].iter().zip(expected) {
+            assert_eq!(
+                result.as_value().unwrap().as_scalar(),
+                Some(&expected.map_or(CanonicalScalar::Null, CanonicalScalar::Bool)),
+                "group {}",
+                at + 1,
+            );
+        }
+    }
+}
+
+#[test]
 fn rank_only_errors_remain_observable_on_zero_and_off_page_results() {
     let values = data(&[(1, Some(4)), (2, Some(8))]);
     for page in ["LIMIT 0", "LIMIT 1", "SKIP 2 LIMIT 1"] {

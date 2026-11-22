@@ -48,6 +48,62 @@ fn value_ref(value: &GraphValue) -> ValueRef<'_> {
     }
 }
 
+/// A comparison with at least one native aggregate number never turns that
+/// number into an ordinary graph scalar. Counts and sums can exceed i64, and
+/// an exact average can distinguish values that share a binary64 rounding.
+/// Graph-only comparisons keep their separate recursive value semantics.
+fn compare_native<E>(
+    comparison: IntegerComparison,
+    left: Cell<'_>,
+    right: Cell<'_>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<bool>, E> {
+    control(GlaExecutionEvent::Work)?;
+    for cell in [left, right] {
+        for _ in 0..cell.payload_units() {
+            control(GlaExecutionEvent::Work)?;
+        }
+    }
+    if left.is_null() || right.is_null() {
+        return Ok(None);
+    }
+    if let Some(order) = left.numeric_comparison(right) {
+        return Ok(Some(match comparison {
+            IntegerComparison::Equal => order.is_eq(),
+            IntegerComparison::NotEqual => order.is_ne(),
+            IntegerComparison::Less => order.is_lt(),
+            IntegerComparison::LessOrEqual => order.is_le(),
+            IntegerComparison::Greater => order.is_gt(),
+            IntegerComparison::GreaterOrEqual => order.is_ge(),
+        }));
+    }
+    Ok(if left.not_a_number() || right.not_a_number() {
+        comparison.across_domains()
+    } else {
+        // Decimal and a different numeric domain retain UNKNOWN until their
+        // scalar comparison contract supplies an exact common domain.
+        None
+    })
+}
+
+fn compare_values<E>(
+    comparison: IntegerComparison,
+    left: &GraphAggregateValue,
+    right: &GraphAggregateValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<bool>, E> {
+    match (left, right) {
+        (GraphAggregateValue::Value(left), GraphAggregateValue::Value(right)) => {
+            if comparison == IntegerComparison::Equal {
+                crate::set_ops::evaluate_equality(left, right, control)
+            } else {
+                crate::set_ops::evaluate_order(comparison, left, right, control)
+            }
+        }
+        _ => compare_native(comparison, result_cell(left), result_cell(right), control),
+    }
+}
+
 impl<'a> OutputValue<'a> {
     pub(super) fn cell(&self) -> Cell<'_> {
         match self {
@@ -355,13 +411,33 @@ fn expression<'g>(
         // any other non-list is an expression error.
         GraphSetValue::In { value, list } => {
             let value = expression(value, input, column, control)?.into_owned(control)?;
-            let value = graph_value(value, column)?;
             let list = expression(list, input, column, control)?;
             let truth = match list.cell() {
                 cell if cell.is_null() => None,
-                Cell::Value(ValueRef::List(members)) => {
-                    crate::set_ops::evaluate_membership(&value, members, control)?
-                }
+                Cell::Value(ValueRef::List(members)) => match &value {
+                    GraphAggregateValue::Value(value) => {
+                        crate::set_ops::evaluate_membership(value, members, control)?
+                    }
+                    _ => {
+                        let mut truth = Some(false);
+                        for member in members {
+                            // Keep every member governed after a match, just
+                            // as ordinary membership does. NULL dominates a
+                            // miss, while a later exact match dominates NULL.
+                            match compare_native(
+                                IntegerComparison::Equal,
+                                result_cell(&value),
+                                Cell::Value(value_ref(member)),
+                                control,
+                            )? {
+                                Some(true) => truth = Some(true),
+                                None if truth != Some(true) => truth = None,
+                                _ => {}
+                            }
+                        }
+                        truth
+                    }
+                },
                 _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
             };
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -454,53 +530,23 @@ fn expression<'g>(
         GraphSetValue::Equal { left, right } => {
             let left = expression(left, input, column, control)?.into_owned(control)?;
             let right = expression(right, input, column, control)?.into_owned(control)?;
-            let truth = if !matches!(left, GraphAggregateValue::Value(_))
-                || !matches!(right, GraphAggregateValue::Value(_))
-            {
-                // A simple CASE can reach this value-language comparison
-                // when a different arm contains a percentile. Its selector
-                // still owns the exact count, wide sum or average: narrowing
-                // to i64 or rounding to binary64 can change the selected arm.
-                let left = result_cell(&left);
-                let right = result_cell(&right);
-                control(GlaExecutionEvent::Work)?;
-                for cell in [left, right] {
-                    for _ in 0..cell.payload_units() {
-                        control(GlaExecutionEvent::Work)?;
-                    }
-                }
-                if left.is_null() || right.is_null() {
-                    None
-                } else if let Some(order) = left.numeric_comparison(right) {
-                    Some(order == Ordering::Equal)
-                } else if left.not_a_number() || right.not_a_number() {
-                    Some(false)
-                } else {
-                    // The scalar predicate law leaves a Decimal compared
-                    // with a different numeric domain UNKNOWN.
-                    None
-                }
-            } else {
-                let left = graph_value(left, column)?;
-                let right = graph_value(right, column)?;
-                crate::set_ops::evaluate_equality(&left, &right, control)?
-            };
+            let truth = compare_values(IntegerComparison::Equal, &left, &right, control)?;
             control(GlaExecutionEvent::ScratchEntry)?;
             OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
                 truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
             )))
         }
-        // A list ordering with the row evaluator's law.
+        // Composite values retain the row evaluator's ordering law. Native
+        // numbers keep their exact domain when a conditional or local routes
+        // the comparison through the value language.
         GraphSetValue::Ordered {
             comparison,
             left,
             right,
         } => {
             let left = expression(left, input, column, control)?.into_owned(control)?;
-            let left = graph_value(left, column)?;
             let right = expression(right, input, column, control)?.into_owned(control)?;
-            let right = graph_value(right, column)?;
-            let truth = crate::set_ops::evaluate_order(*comparison, &left, &right, control)?;
+            let truth = compare_values(*comparison, &left, &right, control)?;
             control(GlaExecutionEvent::ScratchEntry)?;
             OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
                 truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
@@ -1624,6 +1670,178 @@ mod incremental_row_tests {
                 CanonicalScalar::Bool(false),
             ]
         );
+    }
+
+    #[test]
+    fn native_membership_and_order_preserve_counts_wide_sums_and_exact_averages() {
+        let source = shape(&[], None);
+        let row = source
+            .incremental_row(
+                Vec::new(),
+                vec![
+                    GraphAggregateValue::Count(u64::MAX),
+                    GraphAggregateValue::Integer(2 * i128::from(i64::MAX)),
+                    GraphAggregateValue::Average(
+                        GraphExactAverage::new(9_007_199_254_740_993, 1).unwrap(),
+                    ),
+                ],
+            )
+            .unwrap();
+        let scalar = |value| GraphValue::Scalar(value);
+        let int = |value| scalar(CanonicalScalar::Int(value));
+        let float = |value| scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)));
+        let member = |column, members: Vec<GraphValue>| GraphSetValue::In {
+            value: Box::new(GraphSetValue::Column(column)),
+            list: Box::new(GraphSetValue::Value(GraphValue::List(
+                members.into_boxed_slice(),
+            ))),
+        };
+        let ordered = |comparison, left, right| GraphSetValue::Ordered {
+            comparison,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let value = |value| GraphSetValue::Value(value);
+        let null = || scalar(CanonicalScalar::Null);
+        let cases = [
+            (member(0, vec![]), Some(false)),
+            (member(0, vec![int(i64::MAX)]), Some(false)),
+            (
+                member(0, vec![float(18_446_744_073_709_551_616.0)]),
+                Some(false),
+            ),
+            (
+                member(1, vec![float(18_446_744_073_709_551_616.0)]),
+                Some(false),
+            ),
+            (member(2, vec![int(9_007_199_254_740_992)]), Some(false)),
+            (member(2, vec![int(9_007_199_254_740_993)]), Some(true)),
+            (
+                member(2, vec![null(), int(9_007_199_254_740_993)]),
+                Some(true),
+            ),
+            (
+                member(2, vec![int(9_007_199_254_740_993), null()]),
+                Some(true),
+            ),
+            (member(2, vec![null(), int(9_007_199_254_740_992)]), None),
+            (
+                member(0, vec![scalar(CanonicalScalar::Bool(true))]),
+                Some(false),
+            ),
+            (member(0, vec![GraphValue::Vertex(VId(1))]), Some(false)),
+            (
+                GraphSetValue::In {
+                    value: Box::new(GraphSetValue::Column(0)),
+                    list: Box::new(value(null())),
+                },
+                None,
+            ),
+            (
+                ordered(
+                    IntegerComparison::Greater,
+                    GraphSetValue::Column(0),
+                    GraphSetValue::Column(1),
+                ),
+                Some(true),
+            ),
+            (
+                ordered(
+                    IntegerComparison::Less,
+                    GraphSetValue::Column(1),
+                    value(float(18_446_744_073_709_551_616.0)),
+                ),
+                Some(true),
+            ),
+            (
+                ordered(
+                    IntegerComparison::Greater,
+                    GraphSetValue::Column(2),
+                    value(int(9_007_199_254_740_992)),
+                ),
+                Some(true),
+            ),
+            (
+                ordered(
+                    IntegerComparison::LessOrEqual,
+                    value(int(9_007_199_254_740_993)),
+                    GraphSetValue::Column(2),
+                ),
+                Some(true),
+            ),
+            (
+                ordered(
+                    IntegerComparison::GreaterOrEqual,
+                    GraphSetValue::Column(0),
+                    value(scalar(CanonicalScalar::Bool(false))),
+                ),
+                None,
+            ),
+            (
+                ordered(
+                    IntegerComparison::Less,
+                    value(null()),
+                    GraphSetValue::Column(1),
+                ),
+                None,
+            ),
+        ];
+        for (predicate, expected) in cases {
+            let query = source
+                .clone()
+                .with_output_projection(vec![crate::GraphSetProjection::new("v", predicate)])
+                .unwrap();
+            let result = query
+                .project_incremental_output(&row, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                result.values()[0].as_value().unwrap().as_scalar(),
+                Some(&expected.map_or(CanonicalScalar::Null, CanonicalScalar::Bool)),
+            );
+        }
+    }
+
+    #[test]
+    fn native_membership_keeps_every_checkpoint_after_a_match() {
+        let source = shape(&[], None);
+        let row = source.incremental_row(Vec::new(), values()).unwrap();
+        let predicate = GraphSetValue::In {
+            value: Box::new(GraphSetValue::Column(2)),
+            list: Box::new(GraphSetValue::Value(GraphValue::List(
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.5))),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                    GraphValue::Scalar(CanonicalScalar::Int(1)),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("late member").unwrap()),
+                ]
+                .into_boxed_slice(),
+            ))),
+        };
+        let query = source
+            .with_output_projection(vec![crate::GraphSetProjection::new("v", predicate)])
+            .unwrap();
+        let mut checkpoints = 0;
+        let result = query
+            .project_incremental_output(&row, &mut |_| {
+                checkpoints += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.values()[0].as_value().unwrap().as_scalar(),
+            Some(&CanonicalScalar::Bool(true)),
+        );
+        for stop in 1..=checkpoints {
+            let mut visited = 0;
+            let failure = query.project_incremental_output(&row, &mut |_| {
+                visited += 1;
+                if visited == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(failure, Err(GqlQueryError::Interrupted(at)) if at == stop));
+            assert_eq!(visited, stop);
+        }
     }
 
     #[test]
