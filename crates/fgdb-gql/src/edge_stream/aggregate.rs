@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, btree_map};
 mod spill;
 pub use spill::{EdgeSpillAggregateCursor, EdgeSpillAggregatePlan};
 pub(crate) mod pipeline;
-use pipeline::{InputPipeline, InputRows};
+use pipeline::{InputPipeline, InputRows, PipelineState};
 mod ordered_collection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,12 +79,13 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// arguments. Their lists are populated in that key order, not by sorting
 /// each argument independently. This resident support is work/scratch governed
 /// and can grow with matched occurrences even under a small result LIMIT.
-/// Single-source WITH chains of ALL scan-local projections, scopes, filters
+/// Single-source WITH chains of scan-local projections, scopes, filters
 /// and UNWIND execute occurrence by occurrence before numeric grouping. Nested
 /// UNWIND retains one evaluated list or range spine per level, not its output
 /// bag. Ordinal-
 /// dependent or additional graph-reading expressions remain outside this path.
-/// Intermediate DISTINCT, ORDER BY, pages,
+/// Intermediate DISTINCT retains complete tuple support per stage across
+/// roots and cooperative suspensions under the same meter. ORDER BY, pages,
 /// multi-source operators and COLLECT consumers are not admitted:
 /// their positional or support semantics cannot be erased by this fusion.
 /// Numeric-only and already ordered paths collect no intermediate match
@@ -195,6 +196,7 @@ struct Accumulation {
     groups: Groups,
     largest_key: usize,
     expanding: Option<InputRows>,
+    pipeline_state: PipelineState,
 }
 
 /// Global empty input yields one zero/null row; grouped empty input yields none.
@@ -311,12 +313,18 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                 groups,
                 largest_key: 0,
                 expanding: None,
+                pipeline_state: match &self.pipeline {
+                    Some(pipeline) => pipeline
+                        .new_state(&mut |event| self.input.meter.event(event).map_err(lift))?,
+                    None => PipelineState::default(),
+                },
             });
         }
         let Accumulation {
             groups,
             largest_key,
             expanding,
+            pipeline_state,
         } = self
             .accumulating
             .as_mut()
@@ -327,7 +335,8 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                 match rows.advance_bounded(
                     self.pipeline
                         .as_ref()
-                        .expect("expansion has a checked pipeline"),
+                        .expect("active input has a checked pipeline"),
+                    pipeline_state,
                     remaining,
                     &mut |event| meter.event(event).map_err(lift),
                 )? {
@@ -349,7 +358,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                 // Expanded occurrences retain the same source admission and
                 // meter, and each reaches grouping only after all its stages.
                 if let Some(pipeline) = &self.pipeline {
-                    if pipeline.expands() {
+                    if pipeline.needs_cursor() {
                         *expanding = Some(pipeline.start(row));
                         continue;
                     }

@@ -344,11 +344,23 @@ fn thousands_of_with_occurrences_share_one_summary_and_intermediate_pages_still_
         );
         assert!(stream.next().is_none());
         assert_eq!(stream.row_stats().result_rows, 1);
-        for clause in [
-            "DISTINCT r.p AS p",
-            "r.p AS p LIMIT 0",
-            "r.p AS p ORDER BY p",
-        ] {
+        let mut distinct = db
+            .query_aggregate_stream(
+                &cx,
+                "MATCH (a)-[r:R]->(b) WITH DISTINCT r.p AS p RETURN COUNT(*) AS n,SUM(p) AS total",
+                &GqlParameters::new(),
+                symbols(),
+                GqlQueryPolicy::new(4096, 1, 10_000_000, 10_000_000),
+            )
+            .unwrap();
+        assert_eq!(
+            drain(&mut distinct),
+            vec![vec![
+                GraphAggregateValue::Count(1),
+                GraphAggregateValue::Integer(i128::from(i64::MAX / 2)),
+            ]]
+        );
+        for clause in ["r.p AS p LIMIT 0", "r.p AS p ORDER BY p"] {
             let statement = format!("MATCH (a)-[r:R]->(b) WITH {clause} RETURN COUNT(*) AS n");
             assert!(
                 db.query_aggregate_stream(
@@ -446,6 +458,190 @@ fn vertex_with_dispatch_rebinds_and_keeps_its_pinned_generation() {
                 .stream_aggregate(&db, &cx, &GqlParameters::new(), wide())
                 .is_err()
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_intermediate_distinct_preserves_stage_bags_and_the_opened_snapshot() {
+    let ((), report) = run_async_under_lab(0x5749_544c, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut properties = WriteBatch::new(R);
+        for (id, value) in [(START, 3), (VId(1), 1), (END, 3)] {
+            properties.set_vertex_property(id, P, Some(CanonicalScalar::Int(value)));
+        }
+        let basis = db.write(&commit, properties).await.unwrap();
+        let args = GqlParameters::new();
+        let mut opened = Vec::new();
+        for (prefix, kind, count, nonnull, total) in [
+            ("MATCH (n) WITH n.p AS p", ScanKind::Vertex, 3, 2, 4),
+            (
+                "MATCH (a)-[r:R]->(b) WITH r.p AS p",
+                ScanKind::Edge,
+                4,
+                3,
+                6,
+            ),
+            (
+                "MATCH (a)-[r:R]->(x)-[s:R]->(b) WITH r.p AS p",
+                ScanKind::Edge,
+                2,
+                1,
+                3,
+            ),
+        ] {
+            for (suffix, multiple) in [
+                (
+                    "WITH DISTINCT p RETURN COUNT(*) AS n,COUNT(p) AS nonnull,SUM(p) AS total",
+                    1,
+                ),
+                (
+                    "WITH DISTINCT p UNWIND [p,p] AS x RETURN COUNT(*) AS n,COUNT(x) AS nonnull,SUM(x) AS total",
+                    2,
+                ),
+                (
+                    "UNWIND [0,1] AS tag WITH DISTINCT p,tag WITH p AS value RETURN COUNT(*) AS n,COUNT(value) AS nonnull,SUM(value) AS total",
+                    2,
+                ),
+                (
+                    "WITH DISTINCT p UNWIND [p,p] AS x WITH DISTINCT x RETURN COUNT(*) AS n,COUNT(x) AS nonnull,SUM(x) AS total",
+                    1,
+                ),
+            ] {
+                let statement = format!("{prefix} {suffix}");
+                let prepared = PreparedNativeRead::prepare(&statement, &args, symbols()).unwrap();
+                let expected = vec![vec![
+                    GraphAggregateValue::Count(count * multiple),
+                    GraphAggregateValue::Count(nonnull * multiple),
+                    GraphAggregateValue::Integer(total * i128::from(multiple)),
+                ]];
+                let QueryResult::Rows { columns, rows } =
+                    prepared.execute(&db, &cx, &args, wide()).unwrap()
+                else {
+                    panic!("aggregate rows");
+                };
+                assert_eq!(rows, expected, "{statement}");
+                let stream = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+                assert_eq!(stream.kind(), kind);
+                assert_eq!(stream.columns(), columns);
+                assert_eq!(stream.row_stats().snapshot_records, 0);
+                opened.push((statement, expected, stream));
+            }
+            let statement = format!(
+                "{prefix} WITH DISTINCT p UNWIND [p,p] AS x \
+                RETURN x AS bucket,COUNT(*) AS n GROUP BY x HAVING n=2 ORDER BY bucket DESC SKIP 1 LIMIT 1"
+            );
+            let prepared = PreparedNativeRead::prepare(&statement, &args, symbols()).unwrap();
+            let QueryResult::Rows { rows, .. } = prepared.execute(&db, &cx, &args, wide()).unwrap()
+            else {
+                panic!("grouped aggregate rows");
+            };
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][1], GraphAggregateValue::Count(2));
+            let mut stream = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+            assert_eq!(drain(&mut stream), rows, "{statement}");
+        }
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(END, P, Some(CanonicalScalar::Int(5)));
+        edit.set_edge_property(EId(11), P, Some(CanonicalScalar::Int(9)));
+        db.write(&commit, edit).await.unwrap();
+        for (statement, expected, mut stream) in opened {
+            assert_eq!(drain(&mut stream), expected, "pinned {statement}");
+            assert_eq!(stream.snapshot_seq(), basis);
+            assert!(stream.next().is_none());
+        }
+        for (prefix, count, nonnull, total) in [
+            ("MATCH (n) WITH n.p AS p", 4, 3, 9),
+            ("MATCH (a)-[r:R]->(b) WITH r.p AS p", 5, 4, 15),
+        ] {
+            let statement = format!(
+                "{prefix} WITH DISTINCT p RETURN COUNT(*) AS n,COUNT(p) AS nonnull,SUM(p) AS total"
+            );
+            let mut stream = db
+                .query_aggregate_stream(&cx, &statement, &args, symbols(), wide())
+                .unwrap();
+            assert_eq!(
+                drain(&mut stream),
+                vec![vec![
+                    GraphAggregateValue::Count(count),
+                    GraphAggregateValue::Count(nonnull),
+                    GraphAggregateValue::Integer(total),
+                ]]
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_intermediate_distinct_keeps_recursive_budgets_and_late_projection_errors() {
+    let ((), report) = run_async_under_lab(0x5749_544d, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        let statement = "MATCH (a)-[r:R]->(b) WITH r.p AS p UNWIND [0,1] AS tag \
+            WITH DISTINCT {p:p,tag:tag,members:[p,NULL]} AS value WITH DISTINCT value RETURN COUNT(*) AS n";
+        let prepared = PreparedNativeRead::prepare(statement, &args, symbols()).unwrap();
+        let mut full = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+        let expected = vec![vec![GraphAggregateValue::Count(8)]];
+        assert_eq!(drain(&mut full), expected);
+        let rows = full.row_stats();
+        let stats = full.evaluator_stats();
+        let exact = GqlQueryPolicy::new(
+            rows.snapshot_records,
+            rows.result_rows,
+            stats.work_units,
+            stats.scratch_entries,
+        );
+        assert_eq!(
+            drain(&mut prepared.stream_aggregate(&db, &cx, &args, exact).unwrap()),
+            expected
+        );
+        for limited in [
+            GqlQueryPolicy::new(rows.snapshot_records - 1, u64::MAX, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(u64::MAX, rows.result_rows - 1, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, stats.work_units - 1, u64::MAX),
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, stats.scratch_entries - 1),
+        ] {
+            let mut stream = prepared.stream_aggregate(&db, &cx, &args, limited).unwrap();
+            assert!(matches!(stream.next(), Some(Err(_))));
+            assert_eq!(stream.state(), VertexScanState::Failed);
+            assert_eq!(stream.row_stats().result_rows, 0);
+            assert!(stream.next().is_none());
+        }
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(END, P, Some(CanonicalScalar::Int(0)));
+        edit.add_edge(EId(99), START, END, vec![(P, CanonicalScalar::Int(0))]);
+        db.write(&commit, edit).await.unwrap();
+        for prefix in [
+            "MATCH (n) WITH n.p AS p",
+            "MATCH (a)-[r:R]->(b) WITH r.p AS p",
+        ] {
+            for page in [" LIMIT 0", " LIMIT 1"] {
+                let statement = format!(
+                    "{prefix} WITH DISTINCT 0 AS same,12/p AS unused WITH same RETURN COUNT(*) AS n{page}"
+                );
+                let prepared = PreparedNativeRead::prepare(&statement, &args, symbols()).unwrap();
+                assert!(prepared.execute(&db, &cx, &args, wide()).is_err());
+                let mut stream = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+                assert!(matches!(
+                    stream.next(),
+                    Some(Err(GqlQueryError::Source(
+                        GraphAggregateError::InputRelation(_)
+                    )))
+                ));
+                assert_eq!(stream.row_stats().result_rows, 0);
+                assert_eq!(stream.state(), VertexScanState::Failed);
+                assert!(stream.next().is_none());
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

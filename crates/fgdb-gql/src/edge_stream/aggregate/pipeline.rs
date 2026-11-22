@@ -1,9 +1,10 @@
-//! Row-local relational input between one admitted graph scan and grouping.
+//! Scan-local relational input between one admitted graph scan and grouping.
 //!
 //! Preparation walks the checked relational algebra once, retaining its exact
-//! ALL projections, filters and scan-local UNWINDs in execution order. Runtime
-//! delegates to the existing projection, predicate and expansion kernels; it
-//! does not interpret text, read another graph, or materialize a relation. No
+//! projections, DISTINCT stages, filters and scan-local UNWINDs in execution
+//! order. Runtime delegates to the existing projection, predicate and expansion kernels; it
+//! retains complete DISTINCT support without materializing an occurrence bag.
+//! It does not interpret text or read another graph. No
 //! order-sensitive operator may be stripped to get at its first graph leaf.
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern};
@@ -13,23 +14,90 @@ use crate::{
     GraphSetColumnType, GraphSetExecutionError, GraphSetPredicateOp, GraphSetProjection,
     GraphSetQuantifier, GraphSetValue, PreparedGraphAggregate, PreparedGraphSet,
 };
+use std::collections::BTreeSet;
 
 #[derive(Clone)]
 enum Stage {
     Project(Vec<GraphSetProjection>),
+    Distinct(usize),
     Filter(Vec<GraphSetPredicateOp>),
     Unwind(GraphSetValue),
 }
 
 /// Private input program for order-independent aggregate consumers. Relational
 /// projections normally canonicalize their complete output. Eliding that sort
-/// is legal here only because there are no pages/DISTINCT/order-sensitive
-/// consumers between the source and the final exact groups. COLLECT is refused
-/// by the physical aggregate compiler, including when its input is empty.
+/// is legal here only because there are no pages or order-sensitive consumers
+/// between the source and the final exact groups. DISTINCT retains whole-row
+/// equality support at its original stage. COLLECT is refused by the physical
+/// aggregate compiler, including when its input is empty.
 #[derive(Clone)]
 pub(crate) struct InputPipeline {
     stages: Vec<Stage>,
     expands: bool,
+    distinct: usize,
+}
+
+#[derive(Default)]
+struct DistinctRows {
+    rows: BTreeSet<GraphValueRow>,
+    max_payload: usize,
+}
+
+/// One support owner for the complete source, not for an individual root or
+/// UNWIND spine. Each DISTINCT stage has independent canonical tuple support.
+/// The accumulator drops it on exhaustion, close or failure; Pending retains
+/// it unchanged. NULL is an ordinary row cell, unlike argument COUNT DISTINCT.
+#[derive(Default)]
+pub(crate) struct PipelineState {
+    distinct: Vec<DistinctRows>,
+}
+
+impl PipelineState {
+    fn admit<E>(
+        &mut self,
+        stage: usize,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let support = &mut self.distinct[stage];
+        let mut units = 0_usize;
+        for value in row.values() {
+            control(GlaExecutionEvent::Work)?;
+            units = units
+                .saturating_add(value.payload_units())
+                .saturating_add(1);
+        }
+        let largest = support.max_payload.max(units);
+        // The same conservative logical lookup-and-insertion reservation as
+        // aggregate DISTINCT, covering complete recursive native values. This
+        // is not an exact allocator or comparison-count claim. No digest or
+        // scalar coercion substitutes for the canonical tuple's equality.
+        let levels = support.rows.len().saturating_add(1).ilog2() as usize + 1;
+        for _ in 0..levels
+            .saturating_mul(24)
+            .saturating_mul(largest.saturating_add(1))
+        {
+            control(GlaExecutionEvent::Work)?;
+        }
+        if support.rows.contains(row) {
+            return Ok(false);
+        }
+        // Reserve the membership entry and row before any retained copy.
+        // The shared copier admits every nested cell and payload; a refusal
+        // leaves the support unchanged. No fallible work follows insertion.
+        control(GlaExecutionEvent::ScratchEntry)?;
+        control(GlaExecutionEvent::ScratchEntry)?;
+        let mut values = Vec::new();
+        for value in row.values() {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            values.push(value.copy_with_control(control)?);
+        }
+        support
+            .rows
+            .insert(GraphValueRow::from_owned_values(values));
+        support.max_payload = largest;
+        Ok(true)
+    }
 }
 
 /// One admitted source binding and a depth-first expansion spine. Each UNWIND
@@ -52,10 +120,10 @@ impl InputPipeline {
         Self::prepare_output(aggregate, false, false)
     }
 
-    /// Resident reducers own a resumable expansion spine. The synchronous
-    /// external owner still consumes a one-row transformation and therefore
-    /// keeps its old fanout refusal; its complete relational spill path owns
-    /// UNWIND separately. Never hand that one-row consumer an expanding plan.
+    /// Resident reducers own a resumable expansion spine and DISTINCT support
+    /// across all source roots. The synchronous external owner still consumes
+    /// a stateless one-row transformation and therefore keeps both refusals;
+    /// its complete relational spill path owns those operators separately.
     pub(crate) fn prepare_expanding(
         aggregate: &PreparedGraphAggregate,
     ) -> Option<(PreparedGraphAggregate, Option<Self>)> {
@@ -74,7 +142,7 @@ impl InputPipeline {
     fn prepare_output(
         aggregate: &PreparedGraphAggregate,
         element_reads: bool,
-        expanding: bool,
+        resumable: bool,
     ) -> Option<(PreparedGraphAggregate, Option<Self>)> {
         if !element_reads && aggregate.computed_order_requires_element_reads() {
             return None;
@@ -104,7 +172,7 @@ impl InputPipeline {
             return None;
         }
         let pipeline = Self::compile(relation, aggregate.input_pattern())?;
-        if pipeline.expands && !expanding {
+        if pipeline.needs_cursor() && !resumable {
             return None;
         }
         Some((aggregate.prepare_complete_group_output()?, Some(pipeline)))
@@ -117,6 +185,7 @@ impl InputPipeline {
         let mut current = relation;
         let mut stages = Vec::new();
         let mut expands = false;
+        let mut distinct = 0;
         // Every accessor below preserves its complete child and refuses this
         // node's ordering/page, including LIMIT 0. PreparedGraphSet's depth
         // bound also bounds this compilation and the retained program.
@@ -128,22 +197,31 @@ impl InputPipeline {
                     return None;
                 }
                 stages.reverse();
-                return Some(Self { stages, expands });
+                return Some(Self {
+                    stages,
+                    expands,
+                    distinct,
+                });
             }
             if let Some(child) = current.incremental_scope() {
                 current = child;
             } else if let Some((child, projection, quantifier)) = current.incremental_projection() {
-                if quantifier != GraphSetQuantifier::All
-                    || !projection
-                        .iter()
-                        .map(GraphSetProjection::value)
-                        .all(GraphSetValue::is_scan_local)
+                if !projection
+                    .iter()
+                    .map(GraphSetProjection::value)
+                    .all(GraphSetValue::is_scan_local)
                 {
                     // rand() depends on each relational stage's canonical
                     // input ordinal, not physical graph order. MapGet may need
                     // a scoped element reader. Neither is a row-only scalar
                     // program; even a dead branch must not erase its contract.
                     return None;
+                }
+                if quantifier == GraphSetQuantifier::Distinct {
+                    // Compilation walks toward the source, then reverses the
+                    // stages. Projection must execute before its DISTINCT.
+                    stages.push(Stage::Distinct(distinct));
+                    distinct += 1;
                 }
                 stages.push(Stage::Project(projection.to_vec()));
                 current = child;
@@ -165,8 +243,20 @@ impl InputPipeline {
         }
     }
 
-    pub(crate) fn expands(&self) -> bool {
-        self.expands
+    pub(crate) fn needs_cursor(&self) -> bool {
+        self.expands || self.distinct != 0
+    }
+
+    pub(crate) fn new_state<E>(
+        &self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<PipelineState, E> {
+        let mut state = PipelineState::default();
+        for _ in 0..self.distinct {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            state.distinct.push(DistinctRows::default());
+        }
+        Ok(state)
     }
 
     /// Move the already admitted source projection into the private driver.
@@ -197,7 +287,7 @@ impl InputPipeline {
         // Only prepare()/prepare_with_element_reads() feed this one-row API.
         // Refuse defensively instead of dropping expanded output if a future
         // caller bypasses that physical admission.
-        if self.expands {
+        if self.needs_cursor() {
             return Err(GqlQueryError::Source(
                 GraphAggregateError::InvalidReductionInput,
             ));
@@ -226,7 +316,9 @@ impl InputPipeline {
                         return Ok(None);
                     }
                 }
-                Stage::Unwind(_) => unreachable!("nonexpanding pipeline checked above"),
+                Stage::Distinct(_) | Stage::Unwind(_) => {
+                    unreachable!("stateless pipeline checked above")
+                }
             }
         }
         Ok(Some(row))
@@ -242,6 +334,7 @@ impl InputRows {
     pub(crate) fn advance_bounded<E, C>(
         &mut self,
         pipeline: &InputPipeline,
+        state: &mut PipelineState,
         remaining: &mut usize,
         control: &mut impl FnMut(
             GlaExecutionEvent,
@@ -276,6 +369,11 @@ impl InputRows {
                             },
                         )?;
                         self.current = Some((at + 1, row));
+                    }
+                    Stage::Distinct(stage) => {
+                        if state.admit(*stage, &row, control)? {
+                            self.current = Some((at + 1, row));
+                        }
                     }
                     Stage::Filter(predicate) => {
                         if GraphSetPredicateOp::evaluate_row_with_control(predicate, &row, control)?

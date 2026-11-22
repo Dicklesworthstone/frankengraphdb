@@ -12,6 +12,33 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Intermediate DISTINCT in resident aggregate streams — qualification pending
+
+Vertex and edge aggregate cursors now admit scan-local WITH DISTINCT stages
+before reduction, including multiple stages separated by UNWIND. Each stage
+retains its own set of complete native tuples across source roots and cooperative
+suspensions. NULL cells remain part of tuple equality; lists, maps and columns
+discarded by a later projection remain part of the DISTINCT key. The complete
+projection evaluates before membership, so duplicate elimination cannot hide an
+expression error. Subsequent UNWIND stages retain their own bag multiplicity.
+
+Support comparisons and retained recursive copies share the cursor's cumulative
+work/scratch meter. Exhaustion, close and failure release support. This is a
+resident, budget-governed implementation; the stateless spill/async adapter still
+refuses these stages. Intermediate ordering/pages, graph-reading or ordinal-
+dependent expressions and order-sensitive COLLECT keep their prior admission.
+
+Regression sources cover both cursor families, batch parity and literal
+answers, repeated stages, complete native tuples, grouped output, pinned native
+views, cooperative resume, close/cancel cleanup, late errors under LIMIT 0/1,
+and exact/insufficient quotas. Pinned changed-source formatting and whitespace
+checks pass. Static-only UBS exited 1 on the existing test-only source-bypass
+panic; no new production critical finding was identified. Runtime and exact-tree
+qualification remain open under `fgdb-w5-executor-olp`.
+The pinned single-job compiler attempt exited 101
+because rustc was killed by SIGKILL while compiling the unchanged asupersync
+dependency, before first-party compilation or runtime assertions.
+
 ### Streamed conflict validation and schema allocation — qualification pending
 
 Prepared writes and strict transaction completion now authenticate omitted

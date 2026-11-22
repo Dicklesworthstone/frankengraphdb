@@ -20,7 +20,7 @@ pub use spill::{VertexSpillAggregateCursor, VertexSpillAggregatePlan};
 
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow, ValueProjection};
-use crate::edge_stream::aggregate::pipeline::{InputPipeline, InputRows};
+use crate::edge_stream::aggregate::pipeline::{InputPipeline, InputRows, PipelineState};
 use crate::{
     GraphAggregateError, GraphAggregateFunction, GraphAggregateRow, GraphAggregateValue,
     GraphExactAverage, PreparedGraphAggregate,
@@ -65,11 +65,13 @@ impl core::error::Error for VertexAggregateBuildError {
 /// Computed collection inputs must also satisfy the ordinary row-stream order
 /// proof: their batch child sorts rows before evaluating expressions. A child
 /// with a different order refuses rather than silently reordering a list.
-/// Single-source WITH chains of ALL scan-local projections, scopes, filters and
+/// Single-source WITH chains of scan-local projections, scopes, filters and
 /// UNWIND run on one admitted source record at a time, before grouping. Nested
 /// expansions retain their evaluated lists or range spines, not the output bag.
-/// The same checked pipeline as edge aggregation refuses intermediate DISTINCT,
-/// order, pages, additional graph readers, ordinal-dependent expressions and COLLECT.
+/// Intermediate DISTINCT retains complete tuple support per stage across roots
+/// and cooperative suspensions under the same meter. The checked pipeline
+/// refuses intermediate order, pages, additional graph readers,
+/// ordinal-dependent expressions and COLLECT.
 /// Group keys and arguments address its final schema, not the source columns.
 /// Argument DISTINCT and output DISTINCT remain
 /// separate stages on opposite sides of aggregation. Collections are metered
@@ -189,6 +191,7 @@ struct Accumulation {
     last: Option<VId>,
     largest_computed_key: usize,
     expanding: Option<InputRows>,
+    pipeline_state: PipelineState,
 }
 
 /// The first demand consumes the source; subsequent demands move completed
@@ -303,6 +306,11 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 last: None,
                 largest_computed_key: 0,
                 expanding: None,
+                pipeline_state: match &self.plan.pipeline {
+                    Some(pipeline) => pipeline
+                        .new_state(&mut |event| meter.event(input_event(event)).map_err(lift))?,
+                    None => PipelineState::default(),
+                },
             });
         }
         let Accumulation {
@@ -310,6 +318,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             last,
             largest_computed_key,
             expanding,
+            pipeline_state,
         } = self
             .accumulating
             .as_mut()
@@ -328,7 +337,8 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         self.plan
                             .pipeline
                             .as_ref()
-                            .expect("expansion has a checked pipeline"),
+                            .expect("active input has a checked pipeline"),
+                        pipeline_state,
                         remaining,
                         &mut |event| meter.event(input_event(event)).map_err(lift),
                     )? {
@@ -406,7 +416,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         &mut |event| meter.event(event).map_err(lift),
                     )?;
                     let projected = if let Some(pipeline) = &self.plan.pipeline {
-                        if pipeline.expands() {
+                        if pipeline.needs_cursor() {
                             *expanding = Some(pipeline.start(input));
                             continue;
                         }

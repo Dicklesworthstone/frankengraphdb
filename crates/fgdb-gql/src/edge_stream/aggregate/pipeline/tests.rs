@@ -287,7 +287,6 @@ fn hidden_expression_and_late_source_errors_cannot_be_erased_by_filters_or_limit
 #[test]
 fn admission_keeps_every_intermediate_barrier_and_collection_order_contract() {
     for text in [
-        "MATCH (a)-[r:R]->(b) WITH DISTINCT r.p AS p RETURN COUNT(*) AS n",
         "MATCH (a)-[r:R]->(b) WITH r.p AS p LIMIT 0 RETURN COUNT(*) AS n",
         "MATCH (a)-[r:R]->(b) WITH r.p AS p SKIP 1 RETURN COUNT(*) AS n",
         "MATCH (a)-[r:R]->(b) WITH r.p AS p ORDER BY p RETURN COUNT(*) AS n",
@@ -999,7 +998,6 @@ fn vertex_with_filters_errors_empty_groups_and_input_barriers_keep_their_contrac
     assert_eq!(stream.row_stats().result_rows, 0);
     assert!(stream.next().is_none());
     for text in [
-        "MATCH (n) WITH DISTINCT n.p AS p RETURN COUNT(*) AS n",
         "MATCH (n) WITH n.p AS p LIMIT 0 RETURN COUNT(*) AS n",
         "MATCH (n) WITH n.p AS p SKIP 1 RETURN COUNT(*) AS n",
         "MATCH (n) WITH n.p AS p ORDER BY p RETURN COUNT(*) AS n",
@@ -1287,7 +1285,6 @@ fn expanding_admission_keeps_order_barriers_and_reader_or_ordinal_effects() {
         "MATCH (a)-[r:R]->(b) WITH r.p AS p",
     ] {
         for suffix in [
-            "UNWIND [p] AS x WITH DISTINCT x RETURN COUNT(*) AS n",
             "UNWIND [p] AS x WITH x ORDER BY x RETURN COUNT(*) AS n",
             "UNWIND [p] AS x WITH x LIMIT 0 RETURN COUNT(*) AS n",
             "UNWIND [p] AS x RETURN COLLECT(x) AS xs",
@@ -1525,4 +1522,370 @@ fn a_single_source_expansion_yields_resumes_and_releases_without_materializing_i
     stream.close();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert!(stream.next().is_none());
+}
+
+#[test]
+fn intermediate_distinct_keeps_complete_tuples_across_roots_and_unwind_stages() {
+    let values: Vec<_> = [None, Some(1), Some(2), Some(1)]
+        .into_iter()
+        .cycle()
+        .take(160)
+        .collect();
+    for prefix in [
+        "MATCH (n) WITH n.p AS p",
+        "MATCH (a)-[r:R]->(b) WITH r.p AS p",
+    ] {
+        for (suffix, count, nonnull, total) in [
+            (
+                "WITH DISTINCT p RETURN COUNT(*) AS n,COUNT(p) AS nonnull,SUM(p) AS total",
+                3,
+                2,
+                3,
+            ),
+            (
+                "WITH DISTINCT p WITH DISTINCT p AS value RETURN COUNT(*) AS n,COUNT(value) AS nonnull,SUM(value) AS total",
+                3,
+                2,
+                3,
+            ),
+            (
+                "WITH DISTINCT p UNWIND [p,p] AS x RETURN COUNT(*) AS n,COUNT(x) AS nonnull,SUM(x) AS total",
+                6,
+                4,
+                6,
+            ),
+            (
+                "UNWIND [p,p] AS x WITH DISTINCT p,x WITH DISTINCT x AS value RETURN COUNT(*) AS n,COUNT(value) AS nonnull,SUM(value) AS total",
+                3,
+                2,
+                3,
+            ),
+            (
+                // The discarded tag still belongs to the DISTINCT tuple.
+                "UNWIND [0,1] AS tag WITH DISTINCT p,tag WITH p AS value RETURN COUNT(*) AS n,COUNT(value) AS nonnull,SUM(value) AS total",
+                6,
+                4,
+                6,
+            ),
+        ] {
+            let query = prepare(&format!("{prefix} {suffix}"));
+            let source = Source::new(&values);
+            let (expected, actual) = if prefix.starts_with("MATCH (n)") {
+                let expected = eager_vertex(&query, &source);
+                let actual = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                (expected, actual)
+            } else {
+                let expected = eager(&query, &source);
+                let actual = cursor(&query, source, wide(), || Ok::<_, ()>(()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                (expected, actual)
+            };
+            assert_eq!(actual, expected, "{prefix} {suffix}");
+            assert_eq!(actual.len(), 1);
+            assert_eq!(
+                actual[0].values(),
+                &[
+                    GraphAggregateValue::Count(count),
+                    GraphAggregateValue::Count(nonnull),
+                    GraphAggregateValue::Integer(total),
+                ],
+                "{prefix} {suffix}"
+            );
+        }
+        for suffix in [
+            "WITH DISTINCT {key:p,members:[p,NULL]} AS value RETURN COUNT(*) AS n,COUNT(value) AS nonnull",
+            "WITH DISTINCT p UNWIND [p,p] AS x RETURN x AS bucket,COUNT(*) AS n GROUP BY x HAVING n=2 ORDER BY bucket DESC SKIP 1 LIMIT 1",
+        ] {
+            let query = prepare(&format!("{prefix} {suffix}"));
+            let source = Source::new(&values);
+            let (expected, actual) = if prefix.starts_with("MATCH (n)") {
+                let expected = eager_vertex(&query, &source);
+                let actual = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                (expected, actual)
+            } else {
+                let expected = eager(&query, &source);
+                let actual = cursor(&query, source, wide(), || Ok::<_, ()>(()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                (expected, actual)
+            };
+            assert_eq!(actual, expected, "{prefix} {suffix}");
+            assert_eq!(actual.len(), 1);
+            if suffix.contains("members") {
+                assert_eq!(
+                    actual[0].values(),
+                    &[GraphAggregateValue::Count(3), GraphAggregateValue::Count(3)]
+                );
+            } else {
+                assert_eq!(actual[0].values(), &[GraphAggregateValue::Count(2)]);
+            }
+        }
+    }
+}
+
+#[test]
+fn intermediate_distinct_support_survives_pending_and_releases_on_close_or_cancel() {
+    macro_rules! check {
+        ($cursor:ident, $state:ident, $prefix:literal) => {{
+            let query = prepare(concat!(
+                $prefix,
+                " WITH DISTINCT p UNWIND [p,p] AS x WITH DISTINCT x ",
+                "RETURN COUNT(*) AS n,SUM(x) AS total"
+            ));
+            let values: Vec<_> = [None, Some(1), Some(2), Some(1)]
+                .into_iter()
+                .cycle()
+                .take(512)
+                .collect();
+            let mut sync = $cursor(&query, Source::new(&values), wide(), || Ok::<_, ()>(()));
+            let expected = sync.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(
+                expected[0].values(),
+                &[
+                    GraphAggregateValue::Count(3),
+                    GraphAggregateValue::Integer(3)
+                ]
+            );
+            let source = Source::new(&values);
+            let drops = source.drops.clone();
+            let mut stream = $cursor(&query, source, wide(), || Ok::<_, ()>(()));
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(stream.poll_next(&mut context).is_pending());
+            assert_eq!(stream.row_stats().result_rows, 0);
+            assert!(stream.row_stats().snapshot_records < 512);
+            let row = loop {
+                if let std::task::Poll::Ready(row) = stream.poll_next(&mut context) {
+                    break row.unwrap().unwrap();
+                }
+            };
+            assert_eq!(vec![row], expected);
+            assert_eq!(stream.row_stats(), sync.row_stats());
+            assert_eq!(stream.evaluator_stats(), sync.evaluator_stats());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(stream.next().is_none());
+
+            let source = Source::new(&values);
+            let drops = source.drops.clone();
+            let mut closed = $cursor(&query, source, wide(), || Ok::<_, ()>(()));
+            assert!(closed.poll_next(&mut context).is_pending());
+            let rows = closed.row_stats();
+            let stats = closed.evaluator_stats();
+            closed.close();
+            assert_eq!(closed.state(), $state::Closed);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(closed.next().is_none());
+            assert_eq!(closed.row_stats(), rows);
+            assert_eq!(closed.evaluator_stats(), stats);
+
+            let source = Source::new(&values);
+            let drops = source.drops.clone();
+            let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let signal = interrupted.clone();
+            let mut cancelled = $cursor(&query, source, wide(), move || {
+                if signal.load(Ordering::SeqCst) {
+                    Err("cancelled")
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(cancelled.poll_next(&mut context).is_pending());
+            interrupted.store(true, Ordering::SeqCst);
+            assert!(matches!(
+                cancelled.poll_next(&mut context),
+                std::task::Poll::Ready(Some(Err(GqlQueryError::Interrupted("cancelled"))))
+            ));
+            assert_eq!(cancelled.state(), $state::Failed);
+            assert_eq!(cancelled.row_stats().result_rows, 0);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(cancelled.next().is_none());
+        }};
+    }
+    check!(vertex_cursor, VertexScanState, "MATCH (n) WITH n.p AS p");
+    check!(cursor, EdgeScanState, "MATCH (a)-[r:R]->(b) WITH r.p AS p");
+}
+
+#[test]
+fn intermediate_distinct_keeps_complete_projection_and_late_source_errors_before_pages() {
+    macro_rules! check {
+        ($cursor:ident, $state:ident, $prefix:literal) => {{
+            for page in ["", " LIMIT 0", " LIMIT 1"] {
+                let query = prepare(&format!(
+                    "{} WITH DISTINCT 0 AS same,12/p AS unused WITH same RETURN COUNT(*) AS n{page}",
+                    $prefix
+                ));
+                let mut stream = $cursor(
+                    &query,
+                    Source::new(&[Some(1), Some(1), Some(0)]),
+                    wide(),
+                    || Ok::<_, ()>(()),
+                );
+                assert!(matches!(
+                    stream.next(),
+                    Some(Err(GqlQueryError::Source(
+                        GraphAggregateError::InputRelation(GraphSetExecutionError::Projection {
+                            row: 0,
+                            ..
+                        })
+                    )))
+                ));
+                assert_eq!(stream.row_stats().result_rows, 0);
+                assert_eq!(stream.state(), $state::Failed);
+                assert!(stream.next().is_none());
+            }
+            let query = prepare(concat!(
+                $prefix,
+                " WITH DISTINCT p WHERE FALSE RETURN COUNT(*) AS n LIMIT 0"
+            ));
+            let mut source = Source::new(&vec![Some(1); 129]);
+            source.fault = Some(EId(128));
+            let drops = source.drops.clone();
+            let mut stream = $cursor(&query, source, wide(), || Ok::<_, ()>(()));
+            assert!(matches!(
+                stream.next(),
+                Some(Err(GqlQueryError::Source(GraphAggregateError::Source(_))))
+            ));
+            assert_eq!(stream.row_stats().result_rows, 0);
+            assert_eq!(stream.state(), $state::Failed);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(stream.next().is_none());
+
+            let query = prepare(concat!(
+                $prefix,
+                " WITH DISTINCT p WHERE p>0 WITH 12/p AS value RETURN COUNT(*) AS n,SUM(value) AS total"
+            ));
+            let mut stream = $cursor(
+                &query,
+                Source::new(&[Some(0), Some(1), Some(1), None]),
+                wide(),
+                || Ok::<_, ()>(()),
+            );
+            let row = stream.next().unwrap().unwrap();
+            assert_eq!(
+                row.values(),
+                &[GraphAggregateValue::Count(1), GraphAggregateValue::Integer(12)]
+            );
+            assert!(stream.next().is_none());
+            let empty = $cursor(&query, Source::new(&[]), wide(), || Ok::<_, ()>(()))
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(empty.values()[0].as_count(), Some(0));
+            assert!(empty.values()[1].is_null());
+        }};
+    }
+    check!(vertex_cursor, VertexScanState, "MATCH (n) WITH n.p AS p");
+    check!(cursor, EdgeScanState, "MATCH (a)-[r:R]->(b) WITH r.p AS p");
+}
+
+#[test]
+fn intermediate_distinct_recursive_support_shares_exact_budgets_and_cancellation() {
+    macro_rules! check {
+        ($cursor:ident, $state:ident, $prefix:literal) => {{
+            let query = prepare(concat!(
+                $prefix,
+                " WITH DISTINCT {key:p,members:[p,NULL]} AS value WITH DISTINCT value ",
+                "RETURN COUNT(*) AS n"
+            ));
+            let values = [None, Some(1), Some(1)];
+            let mut calls = 0;
+            let mut full = $cursor(&query, Source::new(&values), wide(), || {
+                calls += 1;
+                Ok::<_, usize>(())
+            });
+            let expected = full.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(expected[0].values(), &[GraphAggregateValue::Count(2)]);
+            let rows = full.row_stats();
+            let stats = full.evaluator_stats();
+            drop(full);
+            for stop in 1..=calls {
+                let source = Source::new(&values);
+                let drops = source.drops.clone();
+                let mut at = 0;
+                let mut stream = $cursor(&query, source, wide(), || {
+                    at += 1;
+                    if at == stop { Err(stop) } else { Ok(()) }
+                });
+                let mut delivered = Vec::new();
+                loop {
+                    match stream.next() {
+                        Some(Ok(row)) => delivered.push(row),
+                        Some(Err(GqlQueryError::Interrupted(value))) => {
+                            assert_eq!(value, stop);
+                            break;
+                        }
+                        other => panic!("missed DISTINCT cancellation {stop}: {other:?}"),
+                    }
+                }
+                assert!(expected.starts_with(&delivered));
+                assert_eq!(stream.state(), $state::Failed);
+                assert!(stream.next().is_none());
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                drop(stream);
+                assert_eq!(at, stop);
+            }
+            let exact = GqlQueryPolicy::new(
+                rows.snapshot_records,
+                rows.result_rows,
+                stats.work_units,
+                stats.scratch_entries,
+            );
+            assert_eq!(
+                $cursor(&query, Source::new(&values), exact, || Ok::<_, ()>(()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                expected
+            );
+            for policy in [
+                GqlQueryPolicy::new(rows.snapshot_records - 1, u64::MAX, u64::MAX, u64::MAX),
+                GqlQueryPolicy::new(u64::MAX, rows.result_rows - 1, u64::MAX, u64::MAX),
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, stats.work_units - 1, u64::MAX),
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, stats.scratch_entries - 1),
+            ] {
+                let mut stream = $cursor(&query, Source::new(&values), policy, || Ok::<_, ()>(()));
+                assert!(stream.by_ref().collect::<Result<Vec<_>, _>>().is_err());
+                assert_eq!(stream.state(), $state::Failed);
+                assert!(stream.next().is_none());
+            }
+        }};
+    }
+    check!(vertex_cursor, VertexScanState, "MATCH (n) WITH n.p AS p");
+    check!(cursor, EdgeScanState, "MATCH (a)-[r:R]->(b) WITH r.p AS p");
+}
+
+#[test]
+fn intermediate_distinct_keeps_spill_and_order_sensitive_admission_boundaries() {
+    for prefix in [
+        "MATCH (n) WITH n.p AS p",
+        "MATCH (a)-[r:R]->(b) WITH r.p AS p",
+    ] {
+        let query = prepare(&format!("{prefix} WITH DISTINCT p RETURN COUNT(*) AS n"));
+        assert!(InputPipeline::prepare_expanding(&query).is_some());
+        assert!(InputPipeline::prepare(&query).is_none());
+        assert!(InputPipeline::prepare_with_element_reads(&query).is_none());
+        assert!(crate::spill_aggregate::SpillAggregatePlan::compile(&query).is_err());
+        assert!(
+            crate::spill_aggregate::SpillAggregatePlan::compile_with_element_reads(&query).is_err()
+        );
+        for suffix in [
+            "WITH DISTINCT p ORDER BY p RETURN COUNT(*) AS n",
+            "WITH DISTINCT p LIMIT 0 RETURN COUNT(*) AS n",
+            "WITH DISTINCT p SKIP 1 RETURN COUNT(*) AS n",
+            "WITH DISTINCT p RETURN COLLECT(p) AS xs",
+            "WITH DISTINCT p,CASE WHEN TRUE THEN 1 ELSE rand() END AS draw RETURN COUNT(*) AS n",
+        ] {
+            let query = prepare(&format!("{prefix} {suffix}"));
+            if prefix.starts_with("MATCH (n)") {
+                assert!(VertexAggregatePlan::compile(&query).is_err(), "{suffix}");
+            } else {
+                assert!(EdgeAggregatePlan::compile(&query).is_err(), "{suffix}");
+            }
+        }
+    }
+    let query = prepare("MATCH (n) WITH DISTINCT n AS v WITH v.p AS p RETURN COUNT(*) AS n");
+    assert!(VertexAggregatePlan::compile(&query).is_err());
 }
