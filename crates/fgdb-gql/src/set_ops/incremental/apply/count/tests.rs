@@ -1242,6 +1242,8 @@ fn native_filtered_counts_accept_imported_thresholds_and_static_property_sources
         "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (a)-[:R]->(b:L) WHERE threshold > 1 AND b <> a RETURN count(*) AS degree } RETURN a,degree",
         "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (b:L {p:1}) WHERE threshold > 1 AND b <> a RETURN count(DISTINCT b) AS degree } RETURN a,degree",
         "MATCH (a:L) WITH a,a.p AS threshold CALL (threshold) { MATCH (b:L) WHERE threshold IS NULL OR threshold > 1 RETURN count(threshold) AS degree } RETURN a,degree",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b RETURN count(*) AS degree } RETURN a,degree",
+        "MATCH (a:L) WITH a RETURN a,COUNT { MATCH (a)-[:R]->(b) RETURN DISTINCT b } AS degree",
     ] {
         let query = PreparedGraphSetText::prepare(text, symbols)
             .unwrap()
@@ -1305,7 +1307,7 @@ fn filtered_counts_keep_conditional_source_effects_and_real_pages_refused() {
         "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (b:L) WHERE b.p > threshold RETURN count(*) AS degree } RETURN a,degree",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN count(b.p) AS degree } RETURN a,degree",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH b LIMIT 1 RETURN count(*) AS degree } RETURN a,degree",
-        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b RETURN count(*) AS degree } RETURN a,degree",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b LIMIT 1 RETURN count(*) AS degree } RETURN a,degree",
     ] {
         let query = PreparedGraphSetText::prepare(text, symbols)
             .unwrap()
@@ -1607,9 +1609,9 @@ fn scalar_recipe_accepts_native_calls_and_keeps_conditional_effect_refusals() {
         "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (b:L) WHERE b.p > threshold RETURN sum(id(b)) AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN avg(b.p) AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH b LIMIT 1 RETURN min(b) AS total } RETURN a,total",
-        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b RETURN max(b) AS total } RETURN a,total",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b LIMIT 1 RETURN max(b) AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN b,sum(1) AS total } RETURN a,total",
-        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN sum(1) AS total,avg(1) AS mean } RETURN a,total,mean",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN sum(1) AS total,collect(b) AS values } RETURN a,total,values",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN sum(1)+1 AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN collect(b) AS total } RETURN a,total",
     ] {
@@ -1618,5 +1620,364 @@ fn scalar_recipe_accepts_native_calls_and_keeps_conditional_effect_refusals() {
             .bind_parameters(&GqlParameters::new())
             .unwrap();
         assert!(!has_filtered_aggregate(&query), "{text}");
+    }
+}
+
+fn mixed_summary(profile: usize) -> PreparedGraphSet {
+    let arguments = arguments(vec![
+        GraphSetColumnType::Stored,
+        GraphSetColumnType::Vertex,
+        GraphSetColumnType::Vertex,
+    ]);
+    let right = right();
+    let on = RowJoinSpec::cross(arguments.column_types(), right.column_types())
+        .unwrap()
+        .with_predicate(&[
+            GraphSetPredicateOp::Compare {
+                left: GraphSetOperand::Column(4),
+                comparison: IntegerComparison::NotEqual,
+                right: GraphSetOperand::Column(1),
+            },
+            GraphSetPredicateOp::IsNull {
+                operand: GraphSetOperand::Column(1),
+                is_null: true,
+            },
+            GraphSetPredicateOp::Or,
+        ])
+        .unwrap();
+    let value = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::IdentityColumn {
+                column: 4,
+                text: false,
+            },
+            GraphIntegerOp::Column(0),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Add),
+        ])
+        .unwrap(),
+    );
+    let mut body = arguments
+        .join(right, on)
+        .unwrap()
+        .filter(&[
+            GraphSetPredicateOp::Compare {
+                left: GraphSetOperand::Column(0),
+                comparison: IntegerComparison::Greater,
+                right: GraphSetOperand::Literal(
+                    crate::GqlScalarParameter::new(CanonicalScalar::Int(2)).unwrap(),
+                ),
+            },
+            GraphSetPredicateOp::IsNull {
+                operand: GraphSetOperand::Column(0),
+                is_null: true,
+            },
+            GraphSetPredicateOp::Or,
+        ])
+        .unwrap()
+        .project(
+            vec![
+                GraphSetProjection::new("candidate", GraphSetValue::Column(4)),
+                GraphSetProjection::new("value", value),
+                GraphSetProjection::new("witness", GraphSetValue::Column(3)),
+            ],
+            if profile == 0 {
+                GraphSetQuantifier::All
+            } else {
+                GraphSetQuantifier::Distinct
+            },
+        )
+        .unwrap()
+        .project(
+            vec![
+                GraphSetProjection::new("candidate", GraphSetValue::Column(0)),
+                GraphSetProjection::new("value", GraphSetValue::Column(1)),
+            ],
+            if profile == 2 {
+                GraphSetQuantifier::Distinct
+            } else {
+                GraphSetQuantifier::All
+            },
+        )
+        .unwrap();
+    if profile == 2 {
+        body = body
+            .filter(&[
+                GraphSetPredicateOp::Compare {
+                    left: GraphSetOperand::Column(1),
+                    comparison: IntegerComparison::NotEqual,
+                    right: GraphSetOperand::Literal(
+                        crate::GqlScalarParameter::new(CanonicalScalar::Int(11)).unwrap(),
+                    ),
+                },
+                GraphSetPredicateOp::IsNull {
+                    operand: GraphSetOperand::Column(1),
+                    is_null: true,
+                },
+                GraphSetPredicateOp::Or,
+            ])
+            .unwrap();
+    }
+    let summary = body
+        .group_by(
+            &[],
+            &[
+                GraphAggregate::count_rows("occurrences"),
+                GraphAggregate::count("nonnull", 1),
+                GraphAggregate::count_distinct("unique_values", 1),
+                GraphAggregate::sum_int("total", 1),
+                GraphAggregate::sum_int_distinct("unique_total", 1),
+                GraphAggregate::average_int("mean", 1),
+                GraphAggregate::average_int_distinct("unique_mean", 1),
+                GraphAggregate::min("least", 0),
+                GraphAggregate::max("greatest", 0),
+            ],
+        )
+        .unwrap();
+    // Complete multi-column aliases are transparent; every summary remains
+    // in order and must be converted even if a later public stage hides it.
+    let aliases = (0..summary.column_types().len())
+        .map(|column| {
+            GraphSetProjection::new(format!("metric{column}"), GraphSetValue::Column(column))
+        })
+        .collect();
+    outer()
+        .apply(
+            summary.project(aliases, GraphSetQuantifier::All).unwrap(),
+            vec![0, 2, 2],
+        )
+        .unwrap()
+}
+
+fn mixed_oracle(left: &ZSet<GraphValueRow>, right: &ZSet<GraphValueRow>, profile: usize) -> Bag {
+    let mut output = Bag::new();
+    for (outer, multiplicity) in left.iter() {
+        let score = &outer.values()[0];
+        let other = &outer.values()[2];
+        let mut body = BTreeMap::<(GraphValue, GraphValue), i128>::new();
+        if score.is_null() || score == &scalar(Some(3)) {
+            for (inner, weight) in right.iter() {
+                let candidate = &inner.values()[1];
+                if other.is_null() || (!candidate.is_null() && candidate != other) {
+                    let value = if score == &scalar(Some(3))
+                        && let GraphValue::Vertex(VId(id)) = candidate
+                    {
+                        scalar(Some(i64::try_from(*id).unwrap() + 3))
+                    } else {
+                        scalar(None)
+                    };
+                    // The first DISTINCT keeps the independent source witness,
+                    // so each original source tuple contributes exactly once.
+                    let weight = if profile == 0 {
+                        weight.to_i128().unwrap()
+                    } else {
+                        1
+                    };
+                    *body.entry((candidate.clone(), value)).or_default() += weight;
+                }
+            }
+        }
+        if profile == 2 {
+            for weight in body.values_mut() {
+                *weight = 1;
+            }
+            body.retain(|(_, value), _| value != &scalar(Some(11)));
+        }
+        let count: i128 = body.values().sum();
+        let mut support = BTreeMap::<i64, i128>::new();
+        let mut extrema = BTreeSet::new();
+        for ((candidate, value), weight) in &body {
+            if let GraphValue::Scalar(CanonicalScalar::Int(value)) = value {
+                *support.entry(*value).or_default() += *weight;
+            }
+            if !candidate.is_null() {
+                extrema.insert(candidate.clone());
+            }
+        }
+        let nonnull: i128 = support.values().sum();
+        let mut cells = outer.values().to_vec();
+        cells.extend([
+            scalar(Some(i64::try_from(count).unwrap())),
+            scalar(Some(i64::try_from(nonnull).unwrap())),
+            scalar(Some(i64::try_from(support.len()).unwrap())),
+        ]);
+        if support.is_empty() {
+            cells.extend((0..4).map(|_| scalar(None)));
+        } else {
+            let sum: i128 = support
+                .iter()
+                .map(|(&value, &weight)| i128::from(value) * weight)
+                .sum();
+            let unique_sum: i128 = support.keys().map(|&value| i128::from(value)).sum();
+            cells.extend([
+                scalar(Some(i64::try_from(sum).unwrap())),
+                scalar(Some(i64::try_from(unique_sum).unwrap())),
+                GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
+                    sum as f64 / nonnull as f64,
+                ))),
+                GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
+                    unique_sum as f64 / support.len() as f64,
+                ))),
+            ]);
+        }
+        cells.push(extrema.first().cloned().unwrap_or_else(|| scalar(None)));
+        cells.push(extrema.last().cloned().unwrap_or_else(|| scalar(None)));
+        output.insert(row(cells), multiplicity.to_i128().unwrap());
+    }
+    output
+}
+
+#[test]
+fn mixed_summary_tuples_match_768_weighted_transitions_through_distinct_barriers() {
+    for profile in 0..3 {
+        let query = mixed_summary(profile);
+        let recipe = query
+            .incremental_filtered_aggregate_with_control(&mut allow)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recipe.group.aggregate_specs().len(), 9);
+        assert_eq!(
+            recipe
+                .body
+                .iter()
+                .filter(|stage| stage.quantifier() == GraphSetQuantifier::Distinct)
+                .count(),
+            profile
+        );
+        let SetNode::Apply { right, .. } = &query.node else {
+            unreachable!()
+        };
+        assert!(count_summary(right, &mut allow).unwrap().is_none());
+        assert!(
+            query
+                .incremental_apply_count_with_control(&mut allow)
+                .unwrap()
+                .is_none()
+        );
+        for before in 0..16 {
+            for after in 0..16 {
+                let old_left = filtered_left(before & 3);
+                let old_right = filtered_right(before >> 2);
+                let next_left = filtered_left(after & 3);
+                let next_right = filtered_right(after >> 2);
+                let old = mixed_oracle(&old_left, &old_right, profile);
+                let next = mixed_oracle(&next_left, &next_right, profile);
+                let mut circuit = FilteredCircuit::new(&query);
+                circuit.tick(&old_left, &old_right).unwrap();
+                assert_eq!(
+                    plain(circuit.rows()),
+                    old,
+                    "profile {profile}, before {before}"
+                );
+                let delta = circuit
+                    .tick(
+                        &difference(&next_left, &old_left),
+                        &difference(&next_right, &old_right),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    plain(circuit.rows()),
+                    next,
+                    "profile {profile}, after {after}"
+                );
+                assert_eq!(
+                    delta,
+                    bag(next
+                        .into_iter()
+                        .chain(old.into_iter().map(|(row, weight)| (row, -weight))))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_summary_recipe_keeps_complete_input_schema_and_each_cancellation_point() {
+    let query = mixed_summary(2);
+    let original = query.canonical_bytes();
+    let mut calls = 0;
+    let recipe = query
+        .incremental_filtered_aggregate_with_control(&mut |_| {
+            calls += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap()
+        .unwrap();
+    let mut input = recipe
+        .left
+        .clone()
+        .project_incremental_spec(&recipe.outer)
+        .unwrap()
+        .project_incremental_spec(&recipe.arguments)
+        .unwrap()
+        .join(recipe.right.clone(), recipe.join.clone())
+        .unwrap();
+    for stage in &recipe.body {
+        input = input.project_incremental_spec(stage).unwrap();
+    }
+    assert_eq!(recipe.group.input(), &input);
+    assert_eq!(
+        recipe.output.last().unwrap().column_types(),
+        query.column_types()
+    );
+    assert_eq!(
+        recipe.output.last().unwrap().columns().collect::<Vec<_>>(),
+        query
+            .columns()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+    for stop in 1..=calls {
+        let mut seen = 0;
+        let result = query.incremental_filtered_aggregate_with_control(&mut |_| {
+            seen += 1;
+            if seen == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(at) if at == stop));
+        assert_eq!(seen, stop);
+        assert_eq!(query.canonical_bytes(), original);
+    }
+}
+
+#[test]
+fn mixed_summary_calls_accept_complete_aliases_and_keep_partial_output_transforms_refused() {
+    for text in [
+        "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b) RETURN count(*) AS n,sum(id(b)) AS total,avg(id(b)) AS mean,min(b) AS least } RETURN a,n,total,mean,least",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b RETURN count(*) AS n,max(b) AS greatest } RETURN a,n,greatest",
+        "MATCH (a:L) WITH a,a.p AS score CALL (a,score) { MATCH (a)-[:R]->(b) WITH DISTINCT b,score WITH DISTINCT id(b)+score AS value WHERE value IS NULL OR value > 0 RETURN count(*) AS n,sum(value) AS total,avg(value) AS mean } RETURN a,n,total,mean",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(has_filtered_aggregate(&query), "{text}");
+    }
+    for positions in [vec![0], (0..9).rev().collect()] {
+        let SetNode::Apply {
+            left,
+            right,
+            imports,
+            ..
+        } = mixed_summary(0).node
+        else {
+            unreachable!()
+        };
+        let projection = positions
+            .into_iter()
+            .enumerate()
+            .map(|(out, column)| {
+                GraphSetProjection::new(format!("export{out}"), GraphSetValue::Column(column))
+            })
+            .collect();
+        let body = (*right)
+            .project(projection, GraphSetQuantifier::All)
+            .unwrap();
+        let query = (*left).apply(body, imports).unwrap();
+        assert!(
+            query
+                .incremental_filtered_aggregate_with_control(&mut allow)
+                .unwrap()
+                .is_none()
+        );
     }
 }

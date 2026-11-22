@@ -77,12 +77,14 @@ exact-tree qualification remain open under the broader `fgdb-agp1o`,
 retention, not total handle memory: current catalogs, snapshots, dependency sets
 and the existing verification diagnostics remain owned.
 
-### Maintained correlated scalar aggregates — qualification pending
+### Maintained correlated aggregate tuples — qualification pending
 
-Reader-free correlated scalar summaries now admit integer SUM and AVG,
-including DISTINCT, plus typed MIN and MAX. The compiler retains the exact
-ordered body filters and projections, forms distinct NULL-safe invocation
-keys, groups the actual complete shared source, and restores every original
+Reader-free correlated global summaries now admit a complete tuple of COUNT,
+integer SUM and AVG, including argument DISTINCT, plus typed MIN and MAX.
+The compiler retains the exact ordered body filters and projections, including
+multiple relational DISTINCT stages. Each DISTINCT key includes the private
+invocation identity even when the public projection drops imported columns.
+The circuit groups the actual complete shared source and restores every original
 outer occurrence. Duplicate outer arguments cannot multiply an aggregate.
 The existing native grouping owner maintains weighted support and retractions;
 updates do not re-execute each correlated query.
@@ -90,9 +92,10 @@ updates do not re-execute each correlated query.
 Only COUNT receives integer zero-fill. Empty and all-NULL non-COUNT summaries
 retain NULL, AVG retains its native float result, and extrema retain their
 original value domains. The optimized COUNT and collected-count recipes remain
-COUNT-only. Unsupported reader effects, per-invocation pages, relational
-DISTINCT, grouped/multiple summaries and transformed aggregate outputs retain
-their conservative refusal.
+COUNT-only. Every aggregate output is converted before publication, including
+values hidden by a later public projection or LIMIT 0. Unsupported reader
+effects, per-invocation pages, grouped summaries and transformed aggregate
+outputs retain their conservative refusal.
 
 Regression sources include 1,536 independently calculated weighted transitions
 across six aggregate variants, nullable and duplicate invocations, simultaneous
@@ -103,15 +106,24 @@ exercise private-witness versus public-row quotas, every registration/rebuild
 checkpoint, dormant errors, invalid numeric inputs and checked SUM output
 overflow without partial group publication.
 
-All nine changed Rust files pass individual pinned Rustfmt and whitespace
-checks. Independent source review found no remaining blocker. Limited static
-UBS exited 0 with no critical findings; the introduced production notices are
-the intentional API re-export and the existing bounded, charged private-name
-search generalized for aggregates. Test notices cover assertions, fixture
-copies/strings and a positive-denominator oracle calculation. AST rules were
-unavailable and Cargo phases excluded. Compilation, runtime assertions, Clippy
-and full exact-tree qualification remain **UNRUN** under the unavailable stable
-build lane. No full incremental-query coverage or W6 completion is claimed;
+The tuple extension adds 768 independently calculated weighted transitions
+over nine mixed outputs, complete aliases, two ordered DISTINCT barriers,
+nullable/repeated imports and cancellation at each construction checkpoint.
+Native regression sources cover simultaneous argument/witness/property changes,
+first/last duplicate retraction, full delivered deltas, rebuild, private-witness
+versus final-row quotas and atomic registration refusal. A valid COUNT preceding
+an overflowing SUM must not publish a prefix even when SUM is hidden or LIMIT 0
+suppresses the final rows. Relational DISTINCT inside COUNT bodies now shares
+the maintained path.
+
+All three Rust files in the tuple extension pass individual pinned Rustfmt and
+whitespace checks. Independent source review found no remaining blocker.
+Static-only UBS exited 0 with no critical findings; its AST rule pack was
+unavailable and Cargo phases were excluded. These are limited static checks.
+Compilation, runtime assertions, Clippy and full exact-tree qualification remain
+**UNRUN**: pinned tools and locked dependencies are available, but shared memory
+headroom fell below the bounded compiler-start threshold. No full
+incremental-query coverage or W6 completion is claimed;
 `fgdb-w6-zset-circuits-kjv` and `fgdb-epic-w6-65w` remain open.
 
 ### Selected vertex-property buffered queries — qualification pending

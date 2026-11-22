@@ -43,6 +43,10 @@ const CALL_DISTINCT_EDGES: &str = concat!(
     "CALL (a) { MATCH (a)-[r:R]->(b:M) RETURN count(DISTINCT r) AS degree } ",
     "RETURN token,a,degree"
 );
+const COUNT_DISTINCT_BODY: &str = concat!(
+    "MATCH (a:L) UNWIND [7,7] AS token WITH token,a ",
+    "RETURN token,a,COUNT { MATCH (a)-[:R]->(b:M) RETURN DISTINCT b } AS degree"
+);
 const COUNT_FILTER: &str = concat!(
     "MATCH (a:L) UNWIND [7,7] AS token WITH token,a ",
     "WHERE COUNT { MATCH (a)-[:R]->(b:M) } >= 2 RETURN token,a"
@@ -363,12 +367,13 @@ fn native_count_and_call_summarize_parallel_witnesses_once_per_outer_occurrence(
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-fn expected_value_counts(counts: &[(u128, i64, i64)]) -> [Bag; 3] {
-    let mut expected = [Bag::new(), Bag::new(), Bag::new()];
+fn expected_value_counts(counts: &[(u128, i64, i64)]) -> [Bag; 4] {
+    let mut expected = [Bag::new(), Bag::new(), Bag::new(), Bag::new()];
     for &(owner, occurrences, neighbors) in counts {
-        for (output, count) in expected
-            .iter_mut()
-            .zip([occurrences, neighbors, occurrences])
+        for (output, count) in
+            expected
+                .iter_mut()
+                .zip([occurrences, neighbors, occurrences, neighbors])
         {
             output.insert(
                 row(vec![integer(7), vertex(Some(owner)), integer(count)]),
@@ -393,6 +398,7 @@ fn native_value_counts_distinguish_parallel_edges_and_last_neighbor_support() {
             CALL_VALUE_COUNT,
             CALL_DISTINCT_NEIGHBORS,
             CALL_DISTINCT_EDGES,
+            COUNT_DISTINCT_BODY,
         ] {
             let prepared = PreparedNativeRead::prepare(text, &parameters, symbols).unwrap();
             let (nodes, _) = prepared.subscription_footprint(&cx, &parameters).unwrap();
@@ -401,7 +407,15 @@ fn native_value_counts_distinguish_parallel_edges_and_last_neighbor_support() {
                 .register_standing_native(&cx, text, &parameters, symbols, policy())
                 .unwrap();
             assert!(u64::try_from(db.standing_queries.len() - first).unwrap() <= nodes);
-            assert_count_circuit(&db.standing_queries[first..]);
+            if text == COUNT_DISTINCT_BODY {
+                assert!(
+                    db.standing_queries[first..]
+                        .iter()
+                        .any(|query| matches!(query, StandingQuery::Group(_)))
+                );
+            } else {
+                assert_count_circuit(&db.standing_queries[first..]);
+            }
             queries.push((text, bind(text), handle));
         }
         let mut expected = expected_value_counts(&[(1, 2, 1), (3, 1, 1), (5, 0, 0)]);
@@ -884,10 +898,6 @@ fn unsupported_count_body_sources_refuse_even_under_empty_outer() {
             concat!(
                 "MATCH (a:L) WITH a RETURN COUNT { ",
                 "MATCH (a)-[:R]->(b) RETURN b LIMIT 1 } AS degree"
-            ),
-            concat!(
-                "MATCH (a:L) WITH a RETURN COUNT { ",
-                "MATCH (a)-[:R]->(b) RETURN DISTINCT b } AS degree"
             ),
             concat!(
                 "MATCH (a:L) WITH a RETURN COUNT { ",
@@ -1510,9 +1520,10 @@ fn filtered_scalar_aggregate_witnesses_preserve_final_quota_and_budget_atomicity
         let four = GqlQueryPolicy::new(1_000, 4, 50_000_000, 50_000_000);
         let value = scalar_summaries(256, 4, 4.0, 4.0, 4, 4);
         let nulls = null_summaries();
-        let expected = scalar_aggregate_bags(&[(1, [value.clone(), value, nulls.clone()])]);
+        let mut expected =
+            scalar_aggregate_bags(&[(1, [value.clone(), value, nulls.clone()])]).to_vec();
         let mut queries = Vec::new();
-        for (index, aggregate) in [
+        let mut statements: Vec<_> = [
             "sum(value)",
             "sum(DISTINCT value)",
             "avg(value)",
@@ -1521,9 +1532,18 @@ fn filtered_scalar_aggregate_witnesses_preserve_final_quota_and_budget_atomicity
             "max(value)",
         ]
         .into_iter()
-        .enumerate()
-        {
-            let text = scalar_aggregates_text(aggregate);
+        .map(scalar_aggregates_text)
+        .collect();
+        for profile in 0..3 {
+            let value = if profile == 2 {
+                mixed_values([1, 1, 1], Some((4, 4, 4.0, 4.0)), [Some(2), Some(2)])
+            } else {
+                mixed_values([64, 64, 1], Some((256, 4, 4.0, 4.0)), [Some(2), Some(2)])
+            };
+            expected.push(mixed_bag(&[(1, [value.clone(), value, mixed_empty()])]));
+            statements.push(mixed_aggregates_text(profile));
+        }
+        for (index, text) in statements.into_iter().enumerate() {
             let query = bind(&text);
             let handle = db
                 .register_standing_native(&cx, &text, &GqlParameters::new(), symbols, four)
@@ -1557,7 +1577,14 @@ fn filtered_scalar_aggregate_witnesses_preserve_final_quota_and_budget_atomicity
         let mut change = WriteBatch::new(R);
         change.set_vertex_property(VId(2), SELECTED, None);
         db.write(&commit, change).await.unwrap();
-        let empty = scalar_aggregate_bags(&[(1, [nulls.clone(), nulls.clone(), nulls])]);
+        let mut empty =
+            scalar_aggregate_bags(&[(1, [nulls.clone(), nulls.clone(), nulls])]).to_vec();
+        for _ in 0..3 {
+            empty.push(mixed_bag(&[(
+                1,
+                [mixed_empty(), mixed_empty(), mixed_empty()],
+            )]));
+        }
         for (((text, query, handle), before), after) in queries.iter().zip(&expected).zip(&empty) {
             check(&db, &cx, text, query, handle, after, four);
             check_delta(&db, &cx, handle, from, before, after);
@@ -1567,7 +1594,7 @@ fn filtered_scalar_aggregate_witnesses_preserve_final_quota_and_budget_atomicity
 }
 
 #[test]
-fn filtered_sum_keeps_dormant_errors_private_and_failed_conversion_retryable() {
+fn filtered_summary_tuple_keeps_dormant_errors_private_and_failed_conversion_retryable() {
     let ((), report) = run_async_under_lab(0x7361_7013, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
@@ -1581,8 +1608,8 @@ fn filtered_sum_keeps_dormant_errors_private_and_failed_conversion_retryable() {
         db.write(&commit, initial).await.unwrap();
         let text = concat!(
             "MATCH (a:L) WITH a,a.p AS value ",
-            "CALL (a,value) { MATCH (a)-[:R]->(b:M) RETURN sum(value) AS total } ",
-            "RETURN a,total"
+            "CALL (a,value) { MATCH (a)-[:R]->(b:M) RETURN count(*) AS occurrences,sum(value) AS total } ",
+            "RETURN a,occurrences,total"
         );
         let query = bind(text);
         let first = db.standing_queries.len();
@@ -1615,7 +1642,17 @@ fn filtered_sum_keeps_dormant_errors_private_and_failed_conversion_retryable() {
         assert_eq!(sets::rows(&db.standing_queries[group]).unwrap(), &old_rows);
         assert!(db.standing_native_query(&cx, &handle, policy()).is_err());
         let before = saved(&db.standing_queries);
-        for candidate in [text.to_owned(), format!("{text} ORDER BY total LIMIT 0")] {
+        let hidden_sum = concat!(
+            "MATCH (a:L) WITH a,a.p AS value ",
+            "CALL (a,value) { MATCH (a)-[:R]->(b:M) RETURN count(*) AS occurrences,sum(value) AS total } ",
+            "RETURN a,occurrences"
+        );
+        for candidate in [
+            text.to_owned(),
+            format!("{text} ORDER BY total LIMIT 0"),
+            hidden_sum.to_owned(),
+            format!("{hidden_sum} LIMIT 0"),
+        ] {
             assert!(
                 db.execute_graph_set_governed(&cx, &bind(&candidate), policy())
                     .is_err()
@@ -1643,7 +1680,7 @@ fn filtered_sum_keeps_dormant_errors_private_and_failed_conversion_retryable() {
         );
         assert_eq!(saved(&db.standing_queries), before);
         db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
-        let two = bag([(row(vec![vertex(Some(1)), integer(2)]), 1)]);
+        let two = bag([(row(vec![vertex(Some(1)), integer(2), integer(2)]), 1)]);
         check(&db, &cx, text, &query, &handle, &two, policy());
         let mut invalid = WriteBatch::new(R);
         invalid.set_vertex_property(
@@ -1664,8 +1701,248 @@ fn filtered_sum_keeps_dormant_errors_private_and_failed_conversion_retryable() {
         repair.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(0)));
         db.write(&commit, repair).await.unwrap();
         db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
-        let zero = bag([(row(vec![vertex(Some(1)), integer(0)]), 1)]);
+        let zero = bag([(row(vec![vertex(Some(1)), integer(2), integer(0)]), 1)]);
         check(&db, &cx, text, &query, &handle, &zero, policy());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn mixed_aggregates_text(profile: usize) -> String {
+    let stages = match profile {
+        0 => "WITH b,score+id(b) AS value ",
+        1 => "WITH DISTINCT b,r,score WITH b,score+id(b) AS value ",
+        2 => {
+            "WITH DISTINCT b,r,score WITH b,score+id(b) AS value WITH DISTINCT b,value WHERE value IS NULL OR value <> 8 "
+        }
+        _ => unreachable!(),
+    };
+    format!(
+        "MATCH (a:L) UNWIND [NULL,1,3,3] AS floor \
+         WITH a,a.p AS score,toInteger(floor) AS floor \
+         CALL (a,score,floor) {{ MATCH (a)-[r:R]->(b:M {{selected:1}}) \
+         WHERE (floor IS NULL OR score >= floor) AND b <> a \
+         {stages}RETURN count(*) AS occurrences,count(value) AS nonnull, \
+         count(DISTINCT value) AS unique_values,sum(value) AS total, \
+         sum(DISTINCT value) AS unique_total,avg(value) AS mean, \
+         avg(DISTINCT value) AS unique_mean,min(b) AS least,max(b) AS greatest }} \
+         RETURN a,floor,occurrences,nonnull,unique_values,total,unique_total,mean,unique_mean,least,greatest"
+    )
+}
+
+// Format independently stated fixture results; no production aggregate kernel
+// or query execution participates in the expected values.
+fn mixed_values(
+    counts: [i64; 3],
+    numeric: Option<(i64, i64, f64, f64)>,
+    extrema: [Option<u128>; 2],
+) -> Vec<GraphValue> {
+    let mut values: Vec<_> = counts.into_iter().map(integer).collect();
+    if let Some((sum, distinct_sum, mean, distinct_mean)) = numeric {
+        values.extend([
+            integer(sum),
+            integer(distinct_sum),
+            floating(mean),
+            floating(distinct_mean),
+        ]);
+    } else {
+        values.extend((0..4).map(|_| vertex(None)));
+    }
+    values.extend(extrema.into_iter().map(vertex));
+    values
+}
+
+fn mixed_empty() -> Vec<GraphValue> {
+    mixed_values([0, 0, 0], None, [None, None])
+}
+
+fn mixed_bag(entries: &[(u128, [Vec<GraphValue>; 3])]) -> Bag {
+    let mut result = Bag::new();
+    for (owner, summaries) in entries {
+        for ((floor, multiplicity), summary) in [(None, 1), (Some(1), 1), (Some(3), 2)]
+            .into_iter()
+            .zip(summaries)
+        {
+            let mut cells = vec![
+                vertex(Some(*owner)),
+                floor.map_or_else(|| vertex(None), integer),
+            ];
+            cells.extend(summary.iter().cloned());
+            result.insert(row(cells), multiplicity);
+        }
+    }
+    result
+}
+
+#[test]
+fn mixed_aggregate_tuples_maintain_distinct_body_support_and_complete_deltas() {
+    let ((), report) = run_async_under_lab(0x7361_7014, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xf7)).await.unwrap();
+        let mut initial = WriteBatch::new(R);
+        for (id, labels, props) in [
+            (
+                1,
+                vec![L, M],
+                vec![
+                    (P, CanonicalScalar::Int(2)),
+                    (SELECTED, CanonicalScalar::Int(1)),
+                ],
+            ),
+            (2, vec![M], vec![(SELECTED, CanonicalScalar::Int(1))]),
+            (3, vec![L], vec![(P, CanonicalScalar::Int(1))]),
+            (4, vec![M], vec![(SELECTED, CanonicalScalar::Int(1))]),
+            (5, vec![L], vec![]),
+            (6, vec![M], vec![(SELECTED, CanonicalScalar::Int(0))]),
+        ] {
+            initial.create_vertex(VId(id), labels, props);
+        }
+        for (id, src, dst) in [
+            (11, 1, 2),
+            (12, 1, 2),
+            (13, 1, 4),
+            (14, 1, 1),
+            (15, 3, 4),
+            (16, 5, 2),
+            (17, 1, 6),
+        ] {
+            initial.add_edge(EId(id), VId(src), VId(dst), vec![]);
+        }
+        db.write(&commit, initial).await.unwrap();
+        let mut queries = Vec::new();
+        for profile in 0..3 {
+            let text = mixed_aggregates_text(profile);
+            let parameters = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(&text, &parameters, symbols).unwrap();
+            let (nodes, _) = prepared.subscription_footprint(&cx, &parameters).unwrap();
+            let first = db.standing_queries.len();
+            let handle = prepared
+                .register_standing(&mut db, &cx, &parameters, policy())
+                .unwrap();
+            assert!(nodes >= u64::try_from(db.standing_queries.len() - first).unwrap());
+            assert_eq!(
+                db.standing_queries[first..]
+                    .iter()
+                    .filter(|query| matches!(query, StandingQuery::Group(_)))
+                    .count(),
+                1
+            );
+            queries.push((text.clone(), bind(&text), handle));
+        }
+        let three = mixed_values([1, 1, 1], Some((5, 5, 5.0, 5.0)), [Some(4), Some(4)]);
+        let all_null = mixed_values([1, 0, 0], None, [Some(2), Some(2)]);
+        let mut expected: Vec<_> = (0..3)
+            .map(|profile| {
+                let one = if profile == 2 {
+                    mixed_values([2, 2, 2], Some((10, 10, 5.0, 5.0)), [Some(2), Some(4)])
+                } else {
+                    mixed_values(
+                        [3, 3, 2],
+                        Some((14, 10, 14.0 / 3.0, 5.0)),
+                        [Some(2), Some(4)],
+                    )
+                };
+                mixed_bag(&[
+                    (1, [one.clone(), one, mixed_empty()]),
+                    (3, [three.clone(), three.clone(), mixed_empty()]),
+                    (5, [all_null.clone(), mixed_empty(), mixed_empty()]),
+                ])
+            })
+            .collect();
+        for ((text, query, handle), rows) in queries.iter().zip(&expected) {
+            check(&db, &cx, text, query, handle, rows, policy());
+        }
+        for phase in 0..7 {
+            let from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(R);
+            match phase {
+                0 => {
+                    change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(4)));
+                    change.delete_edge(EId(11));
+                }
+                1 => {
+                    change.delete_edge(EId(13));
+                    change.set_vertex_property(VId(4), SELECTED, None);
+                }
+                2 => {
+                    change.set_vertex_property(VId(4), SELECTED, Some(CanonicalScalar::Int(1)));
+                    change.add_edge(EId(21), VId(1), VId(4), vec![]);
+                    change.delete_edge(EId(12));
+                }
+                3 => {
+                    change.delete_edge(EId(21));
+                    change.delete_edge(EId(16));
+                }
+                4 => {
+                    change.add_edge(EId(22), VId(1), VId(2), vec![]);
+                    change.add_edge(EId(23), VId(1), VId(2), vec![]);
+                }
+                5 => {
+                    change.delete_edge(EId(22));
+                }
+                6 => {
+                    change.delete_edge(EId(23));
+                }
+                _ => unreachable!(),
+            }
+            db.write(&commit, change).await.unwrap();
+            let next: Vec<_> = (0..3)
+                .map(|profile| {
+                    let one = if profile == 2 {
+                        match phase {
+                            0 | 1 | 4 | 5 => {
+                                mixed_values([1, 1, 1], Some((6, 6, 6.0, 6.0)), [Some(2), Some(2)])
+                            }
+                            _ => mixed_empty(),
+                        }
+                    } else {
+                        match phase {
+                            0 => mixed_values(
+                                [2, 2, 2],
+                                Some((14, 14, 7.0, 7.0)),
+                                [Some(2), Some(4)],
+                            ),
+                            1 | 5 => {
+                                mixed_values([1, 1, 1], Some((6, 6, 6.0, 6.0)), [Some(2), Some(2)])
+                            }
+                            2 => {
+                                mixed_values([1, 1, 1], Some((8, 8, 8.0, 8.0)), [Some(4), Some(4)])
+                            }
+                            4 => {
+                                mixed_values([2, 2, 1], Some((12, 6, 6.0, 6.0)), [Some(2), Some(2)])
+                            }
+                            _ => mixed_empty(),
+                        }
+                    };
+                    let three = if phase == 1 {
+                        mixed_empty()
+                    } else {
+                        three.clone()
+                    };
+                    let five = if phase < 3 {
+                        all_null.clone()
+                    } else {
+                        mixed_empty()
+                    };
+                    mixed_bag(&[
+                        (1, [one.clone(), one.clone(), one]),
+                        (3, [three.clone(), three, mixed_empty()]),
+                        (5, [five, mixed_empty(), mixed_empty()]),
+                    ])
+                })
+                .collect();
+            for (((text, query, handle), before), after) in queries.iter().zip(&expected).zip(&next)
+            {
+                check(&db, &cx, text, query, handle, after, policy());
+                check_delta(&db, &cx, handle, from, before, after);
+            }
+            expected = next;
+        }
+        for ((text, query, handle), rows) in queries.iter().zip(&expected) {
+            db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+            check(&db, &cx, text, query, handle, rows, policy());
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

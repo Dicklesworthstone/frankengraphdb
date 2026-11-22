@@ -28,11 +28,12 @@ pub struct MaintainedCountJoin<'a> {
     pub output: Vec<RowProjectionSpec>,
 }
 
-/// Per-invocation scalar aggregates through the existing native row operators.
+/// Per-invocation global aggregate tuples through the existing native row operators.
 ///
 /// Project the original left bag through outer, then DISTINCT its arguments.
 /// Join those arguments with the complete right source and apply body in
-/// order. Group by the private invocation key, Left-join through restore to
+/// order, including each relational DISTINCT with its invocation key retained.
+/// Group by that private key, Left-join through restore to
 /// the ORIGINAL keyed outer bag, and apply output for public names and COUNT's
 /// zero-fill. Other aggregates retain their native empty/NULL and value domains.
 /// The host must share sources and publish all stages atomically.
@@ -80,7 +81,15 @@ fn scalar_summary<'a, E>(
             projection,
             quantifier: GraphSetQuantifier::All,
             ..
-        } if projection.len() == 1 && matches!(projection[0].value(), GraphSetValue::Column(0)) => {
+        } if projection.len() == input.types.len() => {
+            // Only complete identity aliases are transparent. Other projections
+            // need their own ordered output stage after all conversions.
+            for (column, cell) in projection.iter().enumerate() {
+                control(GlaExecutionEvent::Work)?;
+                if !matches!(cell.value(), GraphSetValue::Column(input) if *input == column) {
+                    return Ok(None);
+                }
+            }
             scalar_summary(input, control)
         }
         SetNode::Aggregate(summary) => {
@@ -91,29 +100,32 @@ fn scalar_summary<'a, E>(
                 || summary.has_computed_ordering()
                 || summary.incremental_result_window() != (0, None)
                 || !summary.supports_incremental_maintenance_with_having()
-                || query.types.len() != 1
             {
                 return Ok(None);
             }
-            let mut specs = summary.aggregate_specs();
-            control(GlaExecutionEvent::Work)?;
-            if !matches!(
-                specs.next(),
-                Some((GraphAggregateFunction::CountRows, None))
-                    | Some((
-                        GraphAggregateFunction::Count
-                            | GraphAggregateFunction::CountDistinct
-                            | GraphAggregateFunction::SumInt
-                            | GraphAggregateFunction::SumIntDistinct
-                            | GraphAggregateFunction::AverageInt
-                            | GraphAggregateFunction::AverageIntDistinct
-                            | GraphAggregateFunction::Min
-                            | GraphAggregateFunction::Max,
-                        Some(_),
-                    ))
-            ) || specs.next().is_some()
-            {
+            let specs = summary.aggregate_specs();
+            if specs.len() == 0 || specs.len() != query.types.len() {
                 return Ok(None);
+            }
+            for spec in specs {
+                control(GlaExecutionEvent::Work)?;
+                if !matches!(
+                    spec,
+                    (GraphAggregateFunction::CountRows, None)
+                        | (
+                            GraphAggregateFunction::Count
+                                | GraphAggregateFunction::CountDistinct
+                                | GraphAggregateFunction::SumInt
+                                | GraphAggregateFunction::SumIntDistinct
+                                | GraphAggregateFunction::AverageInt
+                                | GraphAggregateFunction::AverageIntDistinct
+                                | GraphAggregateFunction::Min
+                                | GraphAggregateFunction::Max,
+                            Some(_),
+                        )
+                ) {
+                    return Ok(None);
+                }
             }
             Ok(Some(summary))
         }
@@ -130,38 +142,44 @@ fn count_summary<'a, E>(
     let Some(summary) = scalar_summary(query, control)? else {
         return Ok(None);
     };
-    Ok(matches!(
-        summary.aggregate_specs().next(),
+    let mut specs = summary.aggregate_specs();
+    if !matches!(
+        specs.next(),
         Some((GraphAggregateFunction::CountRows, None))
             | Some((
                 GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct,
                 Some(_),
             ))
-    )
-    .then_some(summary))
+    ) || specs.next().is_some()
+    {
+        return Ok(None);
+    }
+    Ok(Some(summary))
 }
 
 impl PreparedGraphSet {
-    /// Prove a reader-free scalar aggregate with exact invocation identity.
+    /// Prove a reader-free global aggregate tuple with exact invocation identity.
     ///
     /// This fallback retains every ordered body projection and filter rather
     /// than tracing an aggregate argument through discarded computation. It
-    /// admits COUNT, integer SUM/AVG (including DISTINCT), and typed MIN/MAX,
-    /// including imported values. The independent RHS keeps the conditional
-    /// source-effect proof: no property reader or uninvoked fallible source is
+    /// admits any nonempty tuple of COUNT, integer SUM/AVG (including argument
+    /// DISTINCT), and typed MIN/MAX, including imported values. Relational
+    /// DISTINCT retains the private invocation key at every body barrier.
+    /// The independent RHS keeps the conditional source-effect proof: no
+    /// property reader or uninvoked fallible source is
     /// moved into eager maintenance.
     ///
     /// Argument tuples use the existing NULL-safe canonical key proof.
     /// DISTINCT arguments prevent duplicate outer occurrences from multiplying
-    /// the aggregate; the final Left restoration preserves those occurrences.
-    /// Empty bodies produce zero for COUNT and NULL for other aggregates. NULL
-    /// is an invocation value, not a missing invocation. Body evaluation
-    /// happens only for active argument tuples,
-    /// and native grouping owns NULL/distinct support, checked output conversion
+    /// aggregates; the final Left restoration preserves those occurrences.
+    /// Empty bodies produce zero for each COUNT and NULL for other aggregates.
+    /// NULL is an invocation value, not a missing invocation. Body evaluation
+    /// happens only for active argument tuples, and native grouping owns
+    /// NULL/distinct support, checked output conversion
     /// and retractions. AVG and extrema retain their native output domains.
     ///
-    /// Pages, relational DISTINCT, grouped/multiple summaries, unsupported key
-    /// domains and reader/ordinal effects retain their conservative refusal.
+    /// Pages, grouped/transformed summaries, unsupported key domains and
+    /// reader/ordinal effects retain their conservative refusal.
     /// The optimized existing source-restriction recipe remains preferred.
     pub fn incremental_filtered_aggregate_with_control<E>(
         &self,
@@ -187,7 +205,7 @@ impl PreparedGraphSet {
         let Some(base) = body(
             summary.input(),
             imports.is_empty(),
-            false,
+            true,
             &mut stages,
             control,
         )?
@@ -276,11 +294,17 @@ impl PreparedGraphSet {
             control(GlaExecutionEvent::Work)?;
             let step = match stage {
                 Stage::Project(query, cells) => {
+                    let SetNode::Project { quantifier, .. } = &query.node else {
+                        return Ok(None);
+                    };
                     charge(cells.len() + key_width, control)?;
                     let mut values: Vec<_> =
                         cells.iter().map(|cell| cell.value().clone()).collect();
                     values.extend((width..width + key_width).map(GraphSetValue::Column));
-                    let Some(step) = project(&types, values, control)? else {
+                    // DISTINCT is local to one argument tuple, even when a
+                    // projection discards every imported public column.
+                    let Some(step) = distinct::projection(&types, values, *quantifier, control)?
+                    else {
                         return Ok(None);
                     };
                     if step.column_types().get(..cells.len()) != Some(query.types.as_slice()) {
@@ -324,66 +348,68 @@ impl PreparedGraphSet {
             };
             active = next;
         }
-        let Some((function, argument)) = summary.aggregate_specs().next() else {
-            return Ok(None);
-        };
-        let is_count = matches!(
-            function,
-            GraphAggregateFunction::CountRows
-                | GraphAggregateFunction::Count
-                | GraphAggregateFunction::CountDistinct
-        );
-        // Preserve the existing COUNT circuit's private definition names.
-        let prefix = if is_count {
-            "__fg_count"
-        } else {
-            "__fg_aggregate"
-        };
-        let mut aggregate_name = None;
-        for suffix in 0..=active.columns.len() {
-            charge(1 + active.columns.len(), control)?;
-            let candidate = format!("{prefix}_{suffix}");
-            if !active.columns.contains(&candidate) {
-                aggregate_name = Some(candidate);
-                break;
+        // Build names before the borrowed aggregate descriptors. Every output
+        // is retained in declaration order, including otherwise unused values.
+        let mut aggregate_names = Vec::new();
+        for (function, _) in summary.aggregate_specs() {
+            let prefix = if matches!(
+                function,
+                GraphAggregateFunction::CountRows
+                    | GraphAggregateFunction::Count
+                    | GraphAggregateFunction::CountDistinct
+            ) {
+                "__fg_count"
+            } else {
+                "__fg_aggregate"
+            };
+            let occupied = active.columns.len() + aggregate_names.len();
+            let mut name = None;
+            for suffix in 0..=occupied {
+                charge(1 + occupied, control)?;
+                let candidate = format!("{prefix}_{suffix}");
+                if !active.columns.contains(&candidate) && !aggregate_names.contains(&candidate) {
+                    name = Some(candidate);
+                    break;
+                }
             }
+            let Some(name) = name else {
+                return Ok(None);
+            };
+            aggregate_names.push(name);
         }
-        let Some(aggregate_name) = aggregate_name else {
-            return Ok(None);
-        };
-        let aggregate = match (function, argument) {
-            (GraphAggregateFunction::CountRows, None) => {
-                GraphAggregate::count_rows(&aggregate_name)
-            }
-            (GraphAggregateFunction::Count, Some(column)) => {
-                GraphAggregate::count(&aggregate_name, column)
-            }
-            (GraphAggregateFunction::CountDistinct, Some(column)) => {
-                GraphAggregate::count_distinct(&aggregate_name, column)
-            }
-            (GraphAggregateFunction::SumInt, Some(column)) => {
-                GraphAggregate::sum_int(&aggregate_name, column)
-            }
-            (GraphAggregateFunction::SumIntDistinct, Some(column)) => {
-                GraphAggregate::sum_int_distinct(&aggregate_name, column)
-            }
-            (GraphAggregateFunction::AverageInt, Some(column)) => {
-                GraphAggregate::average_int(&aggregate_name, column)
-            }
-            (GraphAggregateFunction::AverageIntDistinct, Some(column)) => {
-                GraphAggregate::average_int_distinct(&aggregate_name, column)
-            }
-            (GraphAggregateFunction::Min, Some(column)) => {
-                GraphAggregate::min(&aggregate_name, column)
-            }
-            (GraphAggregateFunction::Max, Some(column)) => {
-                GraphAggregate::max(&aggregate_name, column)
-            }
-            _ => return Ok(None),
-        };
+        let mut aggregates = Vec::new();
+        for ((function, argument), name) in summary.aggregate_specs().zip(&aggregate_names) {
+            charge(1, control)?;
+            let name = name.as_str();
+            let aggregate = match (function, argument) {
+                (GraphAggregateFunction::CountRows, None) => GraphAggregate::count_rows(name),
+                (GraphAggregateFunction::Count, Some(column)) => {
+                    GraphAggregate::count(name, column)
+                }
+                (GraphAggregateFunction::CountDistinct, Some(column)) => {
+                    GraphAggregate::count_distinct(name, column)
+                }
+                (GraphAggregateFunction::SumInt, Some(column)) => {
+                    GraphAggregate::sum_int(name, column)
+                }
+                (GraphAggregateFunction::SumIntDistinct, Some(column)) => {
+                    GraphAggregate::sum_int_distinct(name, column)
+                }
+                (GraphAggregateFunction::AverageInt, Some(column)) => {
+                    GraphAggregate::average_int(name, column)
+                }
+                (GraphAggregateFunction::AverageIntDistinct, Some(column)) => {
+                    GraphAggregate::average_int_distinct(name, column)
+                }
+                (GraphAggregateFunction::Min, Some(column)) => GraphAggregate::min(name, column),
+                (GraphAggregateFunction::Max, Some(column)) => GraphAggregate::max(name, column),
+                _ => return Ok(None),
+            };
+            aggregates.push(aggregate);
+        }
         charge(key_width, control)?;
         let keys: Vec<_> = (width..width + key_width).collect();
-        let Ok(grouped) = active.group_by(&keys, &[aggregate]) else {
+        let Ok(grouped) = active.group_by(&keys, &aggregates) else {
             return Ok(None);
         };
         let PreparedGraphSet {
@@ -404,24 +430,33 @@ impl PreparedGraphSet {
             return Ok(None);
         };
         let restore = restore.with_kind(RowJoinKind::Left);
-        let aggregate_column = outer.column_types().len() + key_width;
-        let restored = if is_count {
-            let Ok(zero_filled) = GraphIntegerExpression::prepare(&[
-                GraphIntegerOp::Column(aggregate_column),
-                GraphIntegerOp::Literal(Some(0)),
-                GraphIntegerOp::Coalesce,
-            ]) else {
-                return Ok(None);
-            };
-            GraphSetValue::Integer(zero_filled)
-        } else {
-            // Preserve the native NULL, Float average, or typed extremum.
-            // Group output conversion is already checked before restoration.
-            GraphSetValue::Column(aggregate_column)
-        };
-        charge(left_width + 4, control)?;
+        let aggregate_start = outer.column_types().len() + key_width;
+        charge(left_width, control)?;
         let mut values: Vec<_> = (0..left_width).map(GraphSetValue::Column).collect();
-        values.push(restored);
+        for (column, (function, _)) in summary.aggregate_specs().enumerate() {
+            charge(4, control)?;
+            let aggregate_column = aggregate_start + column;
+            let restored = if matches!(
+                function,
+                GraphAggregateFunction::CountRows
+                    | GraphAggregateFunction::Count
+                    | GraphAggregateFunction::CountDistinct
+            ) {
+                let Ok(zero_filled) = GraphIntegerExpression::prepare(&[
+                    GraphIntegerOp::Column(aggregate_column),
+                    GraphIntegerOp::Literal(Some(0)),
+                    GraphIntegerOp::Coalesce,
+                ]) else {
+                    return Ok(None);
+                };
+                GraphSetValue::Integer(zero_filled)
+            } else {
+                // Preserve the native NULL, Float average, or typed extremum.
+                // All group outputs are checked before restoring any of them.
+                GraphSetValue::Column(aggregate_column)
+            };
+            values.push(restored);
+        }
         let types: Vec<_> = restore.column_types().collect();
         let Some(public) = project(&types, values, control)? else {
             return Ok(None);
