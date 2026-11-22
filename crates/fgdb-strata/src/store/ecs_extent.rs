@@ -43,7 +43,7 @@ use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, GraphId, StorageReadCx};
 
 mod admitted;
-pub(super) use admitted::{read_admitted_object, read_admitted_range};
+pub(super) use admitted::{read_admitted_object, read_admitted_object_owned, read_admitted_range};
 
 /// Magic prefix of an encoded Strata authenticated extent envelope (`FGEC`).
 pub const EXTENT_MAGIC: [u8; 4] = *b"FGEC";

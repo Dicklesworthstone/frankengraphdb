@@ -3,7 +3,7 @@
 //! writer configuration, determines every allocation bound.
 
 use super::*;
-use crate::tiered::memory::{MemoryError, MemoryPool};
+use crate::tiered::memory::{MemoryCharge, MemoryError, MemoryPool};
 use asupersync::raptorq::systematic::SystematicParams;
 
 #[cfg(test)]
@@ -75,8 +75,41 @@ pub(crate) async fn read_admitted_object<F: VfsFile>(
         object_id,
         Selection::Object { limit },
         pool,
+        None,
     )
     .await
+}
+
+/// Retain actual plaintext capacity beyond the I/O future. Unlike callers
+/// with a pre-reserved output workspace, a run decoder does not know its
+/// demand until the authenticated extent header is available.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn read_admitted_object_owned<F: VfsFile>(
+    cx: &impl StorageReadCx,
+    file: F,
+    config: &StrataEcsConfig,
+    namespace: DatabaseSecurityNamespaceId,
+    kind: ExtentObjectKind,
+    object_id: ObjectId,
+    limit: u64,
+    pool: &MemoryPool,
+) -> Result<(Vec<u8>, MemoryCharge), Result<ExtentError, std::io::Error>> {
+    let mut charge = pool
+        .reserve(cx, 0)
+        .map_err(|error| Ok(ExtentError::Memory(error)))?;
+    let bytes = read(
+        cx,
+        file,
+        config,
+        namespace,
+        kind,
+        object_id,
+        Selection::Object { limit },
+        pool,
+        Some(&mut charge),
+    )
+    .await?;
+    Ok((bytes, charge))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -100,6 +133,7 @@ pub(crate) async fn read_admitted_range<F: VfsFile>(
         object_id,
         Selection::Range { offset, len },
         pool,
+        None,
     )
     .await
 }
@@ -114,6 +148,7 @@ async fn read<F: VfsFile>(
     object_id: ObjectId,
     selection: Selection,
     pool: &MemoryPool,
+    mut output_charge: Option<&mut MemoryCharge>,
 ) -> Result<Vec<u8>, Result<ExtentError, std::io::Error>> {
     let coords = coord_transcript(config, namespace, kind, object_id);
     let frame_key = object_subkey("fgdb:strata-ecs:frame-key:v1", config, &coords);
@@ -143,7 +178,12 @@ async fn read<F: VfsFile>(
         if !full && len == 0 {
             return Ok(Vec::new());
         }
-        // The caller already owns returned plaintext capacity; this additional
+        if let Some(charge) = output_charge.as_deref_mut() {
+            charge
+                .grow(cx, len)
+                .map_err(|error| Ok(ExtentError::Memory(error)))?;
+        }
+        // The caller now owns returned plaintext capacity; this additional
         // charge covers its coexistence with frame plaintext/AEAD scratch and
         // the full object's Merkle leaves until the transfer completes.
         let leaves_count = if full { geom.frame_count } else { 0 };
@@ -162,7 +202,19 @@ async fn read<F: VfsFile>(
         } else {
             usize::try_from((end - 1) / geom.frame_bytes as u64).map_err(|_| Ok(overflow()))?
         };
-        let mut out = Vec::with_capacity(len);
+        let mut out = Vec::new();
+        out.try_reserve_exact(len).map_err(|_| {
+            Ok(ExtentError::Memory(MemoryError::AllocationFailed {
+                requested: len,
+            }))
+        })?;
+        if out.capacity() > len {
+            if let Some(charge) = output_charge.as_deref_mut() {
+                charge
+                    .grow(cx, out.capacity() - len)
+                    .map_err(|error| Ok(ExtentError::Memory(error)))?;
+            }
+        }
         let mut leaves = Vec::with_capacity(leaves_count);
         for ordinal in first..=last {
             let raw = read_exact_or_short(

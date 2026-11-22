@@ -905,8 +905,9 @@ impl<V: Vfs> BufferedPartition<V> {
 
     /// Opt into native typed-edge scans and join/probe incidence requests from
     /// durable relation runs plus their complete post-seal histories. The first
-    /// demanded source admits the configured decode capacity, retained suffix
-    /// blocks and compact identity locator through this reader's source pool.
+    /// demanded source admits a decode bound from authenticated run contents,
+    /// retained suffix blocks and a compact identity locator through this
+    /// reader's source pool.
     /// No image is loaded by this setter or by constructing an unpolled cursor.
     /// A join driver retains at most one independent incident
     /// relation beside its root source, with both charged to the same pool.

@@ -606,8 +606,8 @@ fn native_run_limits() -> SealedLimits {
 }
 
 fn native_run_policy(records: u64) -> GqlQueryPolicy {
-    // Run decoding admits its declared capacities as well as actual directory
-    // construction. This does not assume the Tier-D source's work total.
+    // Run decoding admits authenticated actual bytes and populations as well
+    // as directory construction, independently of Tier-D's work total.
     GqlQueryPolicy::new(records, 100, 1_000_000, 1_000_000)
 }
 
@@ -992,6 +992,164 @@ fn selected_native_runs_supply_match_rows_and_corruption_never_falls_back() {
         );
         drop(view);
         assert_eq!(memory.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_runs_with_generous_ceilings_fit_actual_memory_and_work_for_raw_and_ecs_history() {
+    let ((), report) = run_async_under_lab(0x6275_ec50, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        for coded in [false, true] {
+            let database_keys = if coded {
+                keys().with_default_strata_ecs()
+            } else {
+                keys()
+            };
+            let vfs = MemVfs::new().unwrap();
+            let mut db = Database::create_with_vfs(
+                &commit,
+                vfs.clone(),
+                vfs.database_dir(),
+                database_keys.clone(),
+            )
+            .await
+            .unwrap();
+            let mut first = WriteBatch::new(RELATION);
+            for vid in 1..=3 {
+                first.create_vertex(
+                    VId(vid),
+                    vec![],
+                    vec![(PROPERTY, CanonicalScalar::Int(vid as i64))],
+                );
+            }
+            for (eid, src, dst, property) in [(101, 1, 2, 7), (104, 2, 3, 10)] {
+                first.add_edge(
+                    EId(eid),
+                    VId(src),
+                    VId(dst),
+                    vec![(PROPERTY, CanonicalScalar::Int(property))],
+                );
+            }
+            assert_eq!(db.write(&commit, first).await.unwrap(), CommitSeq(1));
+            db.seal_relation(
+                &commit,
+                &cx,
+                RELATION,
+                CommitSeq(0),
+                native_run_limits(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+
+            for carried in [false, true] {
+                if carried {
+                    let mut suffix = WriteBatch::new(RELATION);
+                    suffix.set_edge_property(EId(101), PROPERTY, Some(CanonicalScalar::Int(17)));
+                    suffix.delete_edge(EId(104));
+                    suffix.add_edge(
+                        EId(105),
+                        VId(1),
+                        VId(3),
+                        vec![(PROPERTY, CanonicalScalar::Int(20))],
+                    );
+                    assert_eq!(db.write(&commit, suffix).await.unwrap(), CommitSeq(2));
+                }
+                let publication = if carried { 2 } else { 1 };
+                let identities = if carried { 3 } else { 2 };
+                let mut previous_counters = None;
+                for run_limits in [native_run_limits(), SealedLimits::default()] {
+                    // The default format ceilings describe much larger runs
+                    // than this owner can hold or inspect. Only actual bytes
+                    // and authenticated populations belong to this query.
+                    let memory = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+                    let mut source_limits = limits();
+                    source_limits.max_source_bytes = 16 * 1024 * 1024;
+                    source_limits.max_work = 1_000_000;
+                    let mut view = Database::open_buffered_read_view_with_vfs(
+                        &commit,
+                        vfs.clone(),
+                        vfs.database_dir(),
+                        database_keys.clone(),
+                        memory.clone(),
+                        source_limits,
+                    )
+                    .await
+                    .unwrap();
+                    view.set_native_run_limits(&cx, Some(run_limits)).unwrap();
+                    let baseline = memory.used();
+                    let mut counters = Vec::new();
+                    for cut in 0..=publication {
+                        for direction in 0..3 {
+                            let plan = native_run_query(direction, ":R", "");
+                            let mut cursor = view
+                                .stream_graph_edges_governed_at(
+                                    &cx,
+                                    &plan,
+                                    CommitSeq(cut),
+                                    native_run_policy(identities),
+                                )
+                                .unwrap();
+                            let mut actual = Vec::new();
+                            while let Some(row) = cursor.next().await {
+                                actual.push(row.unwrap().values().to_vec());
+                                assert!(memory.used() <= memory.limit());
+                            }
+                            let mut expected = Vec::new();
+                            let before = [(101, 1, 2, 7), (104, 2, 3, 10)];
+                            let after = [(101, 1, 2, 17), (105, 1, 3, 20)];
+                            let rows = if cut == 0 {
+                                &[][..]
+                            } else if cut == 1 {
+                                &before[..]
+                            } else {
+                                &after[..]
+                            };
+                            for &(eid, src, dst, property) in rows {
+                                let orientations = match direction {
+                                    0 => vec![(src, dst)],
+                                    1 => vec![(dst, src)],
+                                    _ => vec![(src, dst), (dst, src)],
+                                };
+                                for (src, dst) in orientations {
+                                    expected.push(vec![
+                                        GraphValue::Edge(EId(eid)),
+                                        GraphValue::Vertex(VId(src)),
+                                        GraphValue::Vertex(VId(dst)),
+                                        GraphValue::Scalar(CanonicalScalar::Int(property)),
+                                        GraphValue::Scalar(CanonicalScalar::Int(src as i64)),
+                                        GraphValue::Scalar(CanonicalScalar::Int(dst as i64)),
+                                    ]);
+                                }
+                            }
+                            assert_eq!(
+                                actual, expected,
+                                "coded={coded}, carried={carried}, cut={cut}, direction={direction}"
+                            );
+                            assert_eq!(cursor.row_stats().snapshot_records, identities);
+                            assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
+                            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                            assert!(cursor.next().await.is_none());
+                            counters.push((cursor.row_stats(), cursor.evaluator_stats()));
+                            drop(cursor);
+                            assert_eq!(memory.used(), baseline);
+                        }
+                    }
+                    if let Some(previous) = previous_counters {
+                        assert_eq!(
+                            counters, previous,
+                            "unused ceilings must not alter execution counters"
+                        );
+                    }
+                    previous_counters = Some(counters);
+                    drop(view);
+                    assert_eq!(memory.used(), 0);
+                }
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

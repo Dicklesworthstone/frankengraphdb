@@ -12,6 +12,38 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Authenticated durable-run admission from actual contents — qualification pending
+
+Buffered native reads now retain the actual encoded object capacity while
+authenticating a durable relation run, then admit a conservative decoder bound
+from its authenticated byte length and incidence population. Configured run
+ceilings still reject oversized input, but their full capacity is no longer
+charged up front. Property decoding retains a conservative embedded-image byte
+bound. This permits small runs under ordinary query allowances even when the
+configured format ceilings admit much larger runs.
+
+The same ownership extends through raw loose files, encrypted extents and
+uncached physical pack ranges. Corrupt copies may use the existing authenticated
+copy retry; cancellation, query-budget and memory refusals remain terminal.
+Complete and carried runs retain their root/snapshot binding and suffix proof.
+The complete base image is still decoded and retained; descriptor-only cold
+opening and paged base scans remain unfinished larger-than-memory work.
+
+Regression sources cover authenticated malformed counts, incoming/forward row
+asymmetry, original refusal errors, cached-pack bypass and dropped-proof refunds.
+A public raw/encrypted query matrix compares narrow and generous ceilings across
+history cuts, carried suffixes and all directions under the same 16 MiB owner.
+Pinned changed-source formatting and whitespace checks pass. Runtime and
+exact-tree qualification remain pending; the broader
+`fgdb-rc1111-persistent-tier-r-7hsan` and `fgdb-teypc` remain open.
+
+Static-only UBS covered all fifteen changed Rust files in these storage and
+OPTIONAL MATCH increments. It exited 1 on an existing authorization-test
+comparison of a public budget dimension, falsely classified as a secret
+comparison. Review found no introduced production-code finding; added-line
+findings concern test assertions and fixture operations. Cargo and Clippy
+were excluded from that scan, so it supplies no compiler or runtime verdict.
+
 ### Clause-local OPTIONAL MATCH expression predicates — qualification pending
 
 The native read compiler now routes a top-level OPTIONAL MATCH's expression

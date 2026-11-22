@@ -2024,6 +2024,137 @@ impl<V: Vfs> BlockStore<V> {
             .await
     }
 
+    /// The same authenticated-copy selection with actual encoded-output
+    /// capacity retained until the decoder consumes it. Intended for decoders
+    /// whose own image allowance can only be known after frame authentication.
+    #[allow(clippy::too_many_arguments)]
+    async fn read_object_proven_owned<T, Proof, Proven>(
+        &self,
+        cx: &impl StorageReadCx,
+        kind: StoredObjectKind,
+        id: ObjectId,
+        limit: u64,
+        pool: &crate::tiered::memory::MemoryPool,
+        proof: Proof,
+    ) -> Result<T, StoreError>
+    where
+        Proof: FnMut(Vec<u8>) -> Proven,
+        Proven: Future<Output = Result<T, StoreError>>,
+    {
+        self.read_object_selected_owned(cx, kind, id, limit, proof, |_| true, Some(pool))
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prove_object_candidate<T, Proof, Proven>(
+        &self,
+        cx: &impl StorageReadCx,
+        kind: StoredObjectKind,
+        id: ObjectId,
+        limit: u64,
+        location: Option<pack::Location>,
+        pool: Option<&crate::tiered::memory::MemoryPool>,
+        proof: &mut Proof,
+    ) -> Result<T, StoreError>
+    where
+        Proof: FnMut(Vec<u8>) -> Proven,
+        Proven: Future<Output = Result<T, StoreError>>,
+    {
+        let Some(pool) = pool else {
+            let bytes = match location {
+                Some(location) => self.read_pack_location(cx, location, limit).await?,
+                None => self.read_loose(cx, kind, id, limit).await?,
+            };
+            return proof(bytes).await;
+        };
+        let memory_error = |error| StoreError::Extent(ExtentError::Memory(error));
+        // Declare the owner before the bytes: proof's future consumes and
+        // destroys its encoded input before this reservation is refunded.
+        let mut charge;
+        let bytes = if let Some(location) = location {
+            ensure_size_within_limit(location.len(), limit)?;
+            let length = usize::try_from(location.len())
+                .map_err(|_| memory_error(crate::tiered::memory::MemoryError::SizeOverflow))?;
+            charge = pool.reserve(cx, length).map_err(memory_error)?;
+            self.packs
+                .read_uncached(cx, &self.vfs, location, limit, Some(pool))
+                .await?
+        } else {
+            let file = cx
+                .with_restriction_async(self.vfs.open_read(&self.path(id)))
+                .await?;
+            if let Some(config) = &self.ecs_coding {
+                let owned = ecs_extent::read_admitted_object_owned(
+                    cx,
+                    file,
+                    config,
+                    self.namespace,
+                    kind.extent_kind(),
+                    id,
+                    limit,
+                    pool,
+                )
+                .await
+                .map_err(|error| match error {
+                    Ok(ExtentError::PlaintextTooLarge { limit, observed }) => {
+                        StoreError::ObjectTooLarge { limit, observed }
+                    }
+                    Ok(error) => StoreError::Extent(error),
+                    Err(error) => StoreError::Io(error),
+                })?;
+                charge = owned.1;
+                owned.0
+            } else {
+                let mut file = file;
+                let observed = cx.with_restriction_async(file.metadata()).await?.len();
+                ensure_size_within_limit(observed, limit)?;
+                let length = usize::try_from(observed)
+                    .map_err(|_| memory_error(crate::tiered::memory::MemoryError::SizeOverflow))?;
+                let mut owner = pool.reserve(cx, length).map_err(memory_error)?;
+                let mut bytes = Vec::new();
+                bytes.try_reserve_exact(length).map_err(|_| {
+                    memory_error(crate::tiered::memory::MemoryError::AllocationFailed {
+                        requested: length,
+                    })
+                })?;
+                if bytes.capacity() > length {
+                    owner
+                        .grow(cx, bytes.capacity() - length)
+                        .map_err(memory_error)?;
+                }
+                bytes.resize(length, 0);
+                cx.with_restriction_async(async {
+                    file.read_exact(&mut bytes).await?;
+                    // Metadata controls capacity, never content authority. A
+                    // growing inode cannot escape the admitted length, and an
+                    // early EOF refuses through read_exact above.
+                    let mut extra = [0_u8; 1];
+                    if file.read(&mut extra).await? != 0 {
+                        return Err(StoreError::ObjectTooLarge {
+                            limit: observed,
+                            observed: observed.saturating_add(1),
+                        });
+                    }
+                    Ok(())
+                })
+                .await?;
+                if ecs_extent::is_encoded_extent(&bytes) {
+                    return Err(StoreError::Extent(ExtentError::AuthenticationFailed));
+                }
+                charge = owner;
+                bytes
+            }
+        };
+        if bytes.capacity() > charge.bytes() {
+            charge
+                .grow(cx, bytes.capacity() - charge.bytes())
+                .map_err(memory_error)?;
+        }
+        let result = proof(bytes).await;
+        drop(charge);
+        result
+    }
+
     // Buffered extents use the already-admitted checksum as their selector.
     // If every candidate fails that check, return the original bytes so the
     // buffer's own completion reports its existing ChecksumMismatch class.
@@ -2033,17 +2164,40 @@ impl<V: Vfs> BlockStore<V> {
         kind: StoredObjectKind,
         id: ObjectId,
         limit: u64,
-        mut proof: Proof,
+        proof: Proof,
         accepts: impl Fn(&T) -> bool,
     ) -> Result<T, StoreError>
     where
         Proof: FnMut(Vec<u8>) -> Proven,
         Proven: Future<Output = Result<T, StoreError>>,
     {
-        let first = match self.read_object_bytes(cx, kind, id, limit).await {
-            Ok(bytes) => proof(bytes).await,
-            Err(error) => Err(error),
+        self.read_object_selected_owned(cx, kind, id, limit, proof, accepts, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn read_object_selected_owned<T, Proof, Proven>(
+        &self,
+        cx: &impl StorageReadCx,
+        kind: StoredObjectKind,
+        id: ObjectId,
+        limit: u64,
+        mut proof: Proof,
+        accepts: impl Fn(&T) -> bool,
+        pool: Option<&crate::tiered::memory::MemoryPool>,
+    ) -> Result<T, StoreError>
+    where
+        Proof: FnMut(Vec<u8>) -> Proven,
+        Proven: Future<Output = Result<T, StoreError>>,
+    {
+        let location = match self.packs.locate(id) {
+            pack::Located::None => None,
+            pack::Located::One(location) => Some(location),
+            pack::Located::Several(copies) => Some(copies[0]),
         };
+        let first = self
+            .prove_object_candidate(cx, kind, id, limit, location, pool, &mut proof)
+            .await;
         let original = match first {
             Ok(value) if accepts(&value) => return Ok(value),
             Err(error) if read_interrupted(&error) => return Err(error),
@@ -2075,10 +2229,9 @@ impl<V: Vfs> BlockStore<V> {
                 pack::Located::Several(copies) => copies,
             };
             for location in copies {
-                let candidate = match self.read_pack_location(cx, location, limit).await {
-                    Ok(bytes) => proof(bytes).await,
-                    Err(error) => Err(error),
-                };
+                let candidate = self
+                    .prove_object_candidate(cx, kind, id, limit, Some(location), pool, &mut proof)
+                    .await;
                 match candidate {
                     Ok(value) if accepts(&value) => return Ok(value),
                     Err(error) if read_interrupted(&error) => return Err(error),
@@ -2086,10 +2239,9 @@ impl<V: Vfs> BlockStore<V> {
                 }
             }
             if !refreshed {
-                let loose = match self.read_loose(cx, kind, id, limit).await {
-                    Ok(bytes) => proof(bytes).await,
-                    Err(error) => Err(error),
-                };
+                let loose = self
+                    .prove_object_candidate(cx, kind, id, limit, None, pool, &mut proof)
+                    .await;
                 match loose {
                     Ok(value) if accepts(&value) => return Ok(value),
                     Err(error) if read_interrupted(&error) => return Err(error),
@@ -5939,6 +6091,139 @@ mod durability_tests {
             assert_eq!(reopened.get_bytes(&cx, version).await.unwrap(), plain);
             assert_eq!(larger.used(), 0);
         });
+    }
+
+    #[test]
+    fn owned_packed_reads_charge_actual_bytes_through_proof_and_bypass_cached_payloads() {
+        use super::{ExtentError, ExtentObjectKind, StoredObjectKind, StrataEcsConfig, pack};
+        use crate::tiered::memory::MemoryPool;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::Poll;
+
+        for coded in [false, true] {
+            let dir = scratch_dir(if coded {
+                "owned-coded-pack"
+            } else {
+                "owned-raw-pack"
+            });
+            under_lab(0xec5_9e02 + u64::from(coded), move |cx| async move {
+                let config = coded.then(|| StrataEcsConfig::new([0x78; 32]));
+                let store = BlockStore::open_with_vfs_and_ecs(
+                    &cx,
+                    UnixVfs::new(),
+                    &dir,
+                    K_OID,
+                    NAMESPACE,
+                    config,
+                )
+                .await
+                .unwrap();
+                let plain = b"query-owned packed object";
+                let id = super::block_id(&K_OID, NAMESPACE, plain);
+                let packed = pack::encode(&[(id, plain.as_slice())]);
+                let pack_id = ObjectId(fgdb_crypto::blake3::hash(&packed).0);
+                let disk = store
+                    .encode_disk_bytes(ExtentObjectKind::Pack, pack_id, &packed)
+                    .unwrap();
+                std::fs::create_dir_all(store.packs.dir()).unwrap();
+                let path = store.packs.dir().join(pack::name(&packed));
+                std::fs::write(&path, disk).unwrap();
+                store.packs.published(path.clone(), &packed);
+                let version = DeltaBlockVersion(id);
+
+                // An ordinary reader is still allowed to populate and use the
+                // shared pack cache. Bounded owners must use physical ranges.
+                assert_eq!(store.get_bytes(&cx, version).await.unwrap(), plain);
+                let pool = MemoryPool::new(2 * 1024 * 1024, 0).unwrap();
+                store
+                    .read_object_proven_owned(
+                        &cx,
+                        StoredObjectKind::Block,
+                        id,
+                        MAX_STORED_OBJECT_BYTES,
+                        &pool,
+                        |bytes| {
+                            assert_eq!(bytes, plain);
+                            assert_eq!(pool.used(), bytes.capacity());
+                            std::future::ready(Ok(()))
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(pool.used(), 0);
+
+                let too_small = MemoryPool::new(plain.len() - 1, 0).unwrap();
+                let entered = AtomicBool::new(false);
+                assert!(matches!(
+                    store
+                        .read_object_proven_owned(
+                            &cx,
+                            StoredObjectKind::Block,
+                            id,
+                            MAX_STORED_OBJECT_BYTES,
+                            &too_small,
+                            |_| {
+                                entered.store(true, Ordering::SeqCst);
+                                std::future::ready(Ok(()))
+                            },
+                        )
+                        .await,
+                    Err(StoreError::Extent(ExtentError::Memory(_)))
+                ));
+                assert!(!entered.load(Ordering::SeqCst));
+                assert_eq!(too_small.used(), 0);
+
+                // Dropping a pending proof must destroy the encoded payload
+                // before refunding its owner, even when no decoder completes.
+                let entered = AtomicBool::new(false);
+                let mut pending = Box::pin(store.read_object_proven_owned(
+                    &cx,
+                    StoredObjectKind::Block,
+                    id,
+                    MAX_STORED_OBJECT_BYTES,
+                    &pool,
+                    |bytes| async {
+                        let retained = bytes;
+                        entered.store(true, Ordering::SeqCst);
+                        let result = std::future::pending::<Result<(), StoreError>>().await;
+                        drop(retained);
+                        result
+                    },
+                ));
+                std::future::poll_fn(|task| {
+                    assert!(pending.as_mut().poll(task).is_pending());
+                    if entered.load(Ordering::SeqCst) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                assert_eq!(pool.used(), plain.len());
+                drop(pending);
+                assert_eq!(pool.used(), 0);
+
+                std::fs::write(&path, b"damaged physical pack").unwrap();
+                assert_eq!(store.get_bytes(&cx, version).await.unwrap(), plain);
+                assert!(
+                    store
+                        .read_object_proven_owned(
+                            &cx,
+                            StoredObjectKind::Block,
+                            id,
+                            MAX_STORED_OBJECT_BYTES,
+                            &pool,
+                            |bytes| {
+                                assert_eq!(bytes, plain);
+                                std::future::ready(Ok(()))
+                            },
+                        )
+                        .await
+                        .is_err()
+                );
+                assert_eq!(pool.used(), 0);
+            });
+        }
     }
 
     #[test]

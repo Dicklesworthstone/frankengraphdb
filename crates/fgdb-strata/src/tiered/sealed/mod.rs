@@ -27,11 +27,11 @@
 
 mod buffered;
 mod durable;
-pub(crate) use durable::read_adj_run;
 pub use durable::{
     ADJ_RUN_OBJECT_KIND, AdjRunError, AdjRunHeader, AdjRunSegment, AdjRunSegmentVersion, FORMAT_V2,
     MAX_ADJ_RUN_BYTES, adj_run_id,
 };
+pub(crate) use durable::{AdjRunReadAdmission, read_adj_run, read_adj_run_admitted};
 mod image;
 mod incoming;
 pub use incoming::{

@@ -9,8 +9,9 @@ use crate::root::{
     runs::{AdjRunRef, decode_root_runs, encode_root_runs_with_source},
 };
 use crate::tiered::sealed::{
-    AdjRunError, AdjRunSegment, AdjRunSegmentVersion, MAX_ADJ_RUN_BYTES, SealedDeltaOverlay,
-    SealedError, SealedLimits, SealedScope, adj_run_id, read_adj_run,
+    AdjRunError, AdjRunReadAdmission, AdjRunSegment, AdjRunSegmentVersion, MAX_ADJ_RUN_BYTES,
+    SealedDeltaOverlay, SealedError, SealedLimits, SealedScope, adj_run_id, read_adj_run,
+    read_adj_run_admitted,
 };
 use asupersync::fs::Vfs;
 use fgdb_crypto::Digest;
@@ -332,6 +333,102 @@ impl<V: Vfs> BlockStore<V> {
             .await?;
         run.bind_envelope(root, base_publication, verified_through);
         Ok(Some((run, verified_through)))
+    }
+
+    /// Native buffered readers retain actual encoded capacity through proof,
+    /// then admit only the authenticated run's decoder demand. The same root
+    /// binding covers both a complete run and a carried run requiring a suffix;
+    /// the caller must still prove that suffix before using the latter.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn get_published_adj_run_admitted<A: AdjRunReadAdmission>(
+        &self,
+        cx: &QueryCx,
+        root: PartitionRootVersion,
+        relation: RelationId,
+        as_of: CommitSeq,
+        limits: SealedLimits,
+        max_root_bytes: usize,
+        pool: &crate::tiered::memory::MemoryPool,
+        admit: &mut A,
+        map_error: fn(StoreError) -> A::Error,
+    ) -> Result<Option<(AdjRunSegment, A::Owner)>, A::Error> {
+        cx.checkpoint()
+            .map_err(|error| malformed(SealedError::Interrupted(error).into()))
+            .map_err(map_error)?;
+        let bytes = self
+            .read_metadata_bytes(
+                cx,
+                root.0,
+                StoredObjectKind::Root,
+                max_root_bytes.min(crate::root::MAX_ENCODED_ROOT_BYTES) as u64,
+            )
+            .await
+            .map_err(map_error)?;
+        let Some(attached) = decode_root_runs(&bytes)
+            .map_err(StoreError::MalformedRoot)
+            .map_err(map_error)?
+        else {
+            crate::root::decode_root_frame(&bytes)
+                .map_err(StoreError::MalformedRoot)
+                .map_err(map_error)?;
+            self.note_root_run_presence(root, false);
+            return Ok(None);
+        };
+        self.note_root_run_presence(root, true);
+        let Some(reference) = attached.runs.iter().find(|run| run.relation == relation) else {
+            return Ok(None);
+        };
+        let (graph, branch, partition, publication) =
+            coordinate(attached.base_frame).map_err(map_error)?;
+        if as_of > publication {
+            return Err(map_error(malformed(AdjRunError::ScopeMismatch)));
+        }
+        if as_of < reference.floor {
+            return Ok(None);
+        }
+        let base_root =
+            crate::root::root_id(self.k_oid.expose(), self.namespace, attached.base_frame);
+        let scope = SealedScope {
+            source_root: PartitionRootVersion(reference.resolved_source_root(base_root)),
+            graph,
+            branch,
+            partition,
+            floor: reference.floor,
+            publication: reference.resolved_publication(publication),
+        };
+        let id = reference.run;
+        let verified_through = reference.resolved_verified_through(publication);
+        let (mut run, owner) = self
+            .read_object_proven_owned(
+                cx,
+                StoredObjectKind::AdjRun,
+                id,
+                limits.max_image_bytes.min(MAX_ADJ_RUN_BYTES) as u64,
+                pool,
+                |bytes| {
+                    // A nested admission error is terminal success for the
+                    // physical-copy selector; it may never buy another try.
+                    std::future::ready(
+                        read_adj_run_admitted(
+                            cx,
+                            id,
+                            scope,
+                            relation,
+                            self.k_oid.expose(),
+                            self.namespace,
+                            &bytes,
+                            limits,
+                            self.decode_resolver(),
+                            admit,
+                        )
+                        .map_err(malformed),
+                    )
+                },
+            )
+            .await
+            .map_err(map_error)??;
+        run.bind_envelope(root, publication, verified_through);
+        Ok(Some((run, owner)))
     }
 
     /// Open a post-seal [`SealedDeltaOverlay`] combining a carried [`AdjRunSegment`]

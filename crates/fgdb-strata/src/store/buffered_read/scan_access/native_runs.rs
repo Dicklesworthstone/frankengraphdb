@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::tiered::sealed::{
-    AdjRunSegment, MAX_ADJ_RUN_BYTES, SealedAnchor, SealedError, SealedLimits,
+    AdjRunReadAdmission, AdjRunSegment, MAX_ADJ_RUN_BYTES, SealedAnchor, SealedError, SealedLimits,
 };
 
 /// Complete post-horizon topology from one admitted pinned root. Only this
@@ -154,6 +154,45 @@ pub(crate) fn decode_capacity(limits: SealedLimits) -> Result<usize, BufferedRea
         .ok_or(BufferedReadError::SizeOverflow)
 }
 
+struct RunAdmission<'a, O> {
+    cx: &'a QueryCx,
+    buffer: &'a mut ExtentBuffer,
+    work: &'a mut EdgeScanWork,
+    observe: &'a mut O,
+}
+
+impl<C, O> AdjRunReadAdmission for RunAdmission<'_, O>
+where
+    O: FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+{
+    type Error = BufferedScanError<C>;
+    type Owner = MemoryCharge;
+
+    fn encoded(&mut self, bytes: usize) -> Result<(), Self::Error> {
+        // The actual input is already pool-owned. Admit its scalable hashing
+        // and framing work before interpreting any untrusted field.
+        for _ in 0..bytes {
+            self.work.step(self.cx, self.observe)?;
+        }
+        Ok(())
+    }
+
+    fn decoded(&mut self, limits: SealedLimits) -> Result<MemoryCharge, Self::Error> {
+        let units = limits
+            .max_incidences
+            .checked_mul(32)
+            .and_then(|units| units.checked_add(limits.max_property_bytes))
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        for _ in 0..units {
+            self.work.step(self.cx, self.observe)?;
+        }
+        self.buffer
+            .reserve_scratch(self.cx, decode_capacity(limits)?)
+            .map_err(BufferedReadError::from)
+            .map_err(BufferedScanError::from)
+    }
+}
+
 impl<V: Vfs> BufferedPartition<V> {
     /// Only a floor-zero base plus its complete admitted suffix can replace
     /// the native historical candidate domain. A query below the frontier
@@ -202,9 +241,13 @@ impl<V: Vfs> BufferedPartition<V> {
         Ok(None)
     }
 
-    /// Pre-admit the entire decoder profile before reading one FGRN byte.
-    /// Work is a conservative capacity debit; actual locator comparisons and
-    /// endpoint reads still spend the same cumulative source allowance.
+    /// Retain actual encoded capacity while authenticating FGRN, then reserve
+    /// the authenticated image's conservative decoder demand before allocating
+    /// any columns or properties. Configured ceilings remain refusal limits;
+    /// their full run capacity is no longer charged up front. Decoder demand
+    /// is bounded by authenticated bytes and counts, including a conservative
+    /// image-byte bound for properties. Actual locator comparisons and
+    /// endpoint reads spend the same cumulative allowance.
     pub(crate) async fn native_run<C: Send>(
         &mut self,
         cx: &QueryCx,
@@ -214,15 +257,6 @@ impl<V: Vfs> BufferedPartition<V> {
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<(AdjRunSegment, MemoryCharge, Option<NativeRunSuffix>), BufferedScanError<C>> {
         let limits = normalized(limits);
-        let units = limits
-            .max_image_bytes
-            .checked_add(limits.max_property_bytes)
-            .and_then(|units| limits.max_incidences.checked_mul(32)?.checked_add(units))
-            .ok_or(BufferedReadError::SizeOverflow)?;
-        for _ in 0..units {
-            work.step(cx, observe)?;
-        }
-        let charge = self.reserve_scan_bytes(cx, decode_capacity(limits)?)?;
         let root_bytes = self
             .limits
             .max_root_bytes
@@ -234,37 +268,32 @@ impl<V: Vfs> BufferedPartition<V> {
                 .ok_or(BufferedReadError::SizeOverflow)?,
         )?;
         work.step(cx, observe)?;
-        let complete = self
-            .store
-            .get_published_adj_run(
+        let pool = self.pool().clone();
+        let loaded = {
+            let mut admission = RunAdmission {
                 cx,
-                self.root_id,
-                relation,
-                self.root.published_at,
-                limits,
-                root_bytes,
-            )
-            .await
-            .map_err(BufferedReadError::from)?;
-        let run = match complete {
-            Some(run) => run,
-            None => {
-                work.step(cx, observe)?;
-                self.store
-                    .get_published_adj_run_post_seal(
-                        cx,
-                        self.root_id,
-                        relation,
-                        self.root.published_at,
-                        limits,
-                        root_bytes,
-                    )
-                    .await
-                    .map_err(BufferedReadError::from)?
-                    .ok_or_else(invalid_run_source)?
-                    .0
-            }
+                buffer: &mut self.buffer,
+                work,
+                observe,
+            };
+            self.store
+                .get_published_adj_run_admitted(
+                    cx,
+                    self.root_id,
+                    relation,
+                    self.root.published_at,
+                    limits,
+                    root_bytes,
+                    &pool,
+                    &mut admission,
+                    |error| BufferedReadError::from(error).into(),
+                )
+                .await?
+                .ok_or_else(invalid_run_source)?
         };
+        // This declaration order protects validation and suffix failures too.
+        let charge = loaded.1;
+        let run = loaded.0;
         let anchor = run.partition().anchor();
         if anchor.scope().floor != CommitSeq(0)
             || anchor.relation() != Some(relation)

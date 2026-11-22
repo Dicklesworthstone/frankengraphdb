@@ -133,6 +133,321 @@ fn collect(cx: &QueryCx, source: &SealedPartition, src: VId, seq: u64) -> Rows {
     rows
 }
 
+#[derive(Default)]
+struct DecodeAdmission {
+    encoded: Vec<usize>,
+    profiles: Vec<SealedLimits>,
+    live_owners: Arc<std::sync::atomic::AtomicUsize>,
+    reject_encoded: bool,
+    reject_decoded: bool,
+}
+
+struct DecodeOwner(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for DecodeOwner {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl AdjRunReadAdmission for DecodeAdmission {
+    type Error = &'static str;
+    type Owner = DecodeOwner;
+
+    fn encoded(&mut self, bytes: usize) -> Result<(), Self::Error> {
+        self.encoded.push(bytes);
+        if self.reject_encoded {
+            Err("encoded admission")
+        } else {
+            Ok(())
+        }
+    }
+
+    fn decoded(&mut self, limits: SealedLimits) -> Result<DecodeOwner, Self::Error> {
+        self.profiles.push(limits);
+        if self.reject_decoded {
+            return Err("decoded admission");
+        }
+        self.live_owners
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(DecodeOwner(Arc::clone(&self.live_owners)))
+    }
+}
+
+fn admitted(
+    cx: &QueryCx,
+    segment: &AdjRunSegment,
+    bytes: &[u8],
+    limits: SealedLimits,
+    admission: &mut DecodeAdmission,
+) -> Result<Result<(AdjRunSegment, DecodeOwner), &'static str>, AdjRunError> {
+    read_adj_run_admitted(
+        cx,
+        adj_run_id(&KEY, NAMESPACE, bytes),
+        segment.header.scope,
+        RELATION,
+        &KEY,
+        NAMESPACE,
+        bytes,
+        limits,
+        None,
+        admission,
+    )
+}
+
+#[test]
+fn authenticated_run_admission_uses_actual_shape_under_generous_ceilings() {
+    run(0xf6_7210, |cx| {
+        let (partition, origins, rows) = source(false);
+        let segment =
+            AdjRunSegment::from_sealed(&cx, &partition, &origins, SealedLimits::default()).unwrap();
+        for dual_face in [false, true] {
+            let bytes = if dual_face {
+                segment.encode_dual_face(&cx, SealedLimits::default())
+            } else {
+                segment.encode(&cx, SealedLimits::default())
+            }
+            .unwrap();
+            let mut previous = None;
+            for limits in [
+                SealedLimits::default(),
+                SealedLimits {
+                    max_rows: 14,
+                    max_incidences: 14,
+                    max_image_bytes: bytes.len(),
+                    max_property_bytes: bytes.len(),
+                },
+            ] {
+                let mut admission = DecodeAdmission::default();
+                let (reopened, owner) = admitted(&cx, &segment, &bytes, limits, &mut admission)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(admission.encoded, [bytes.len()]);
+                assert_eq!(admission.profiles.len(), 1);
+                let actual = admission.profiles[0];
+                assert_eq!(actual.max_rows, 14);
+                assert_eq!(actual.max_incidences, 14);
+                assert_eq!(actual.max_image_bytes, bytes.len());
+                assert!(actual.max_property_bytes < bytes.len());
+                if let Some(previous) = previous {
+                    assert_eq!(actual, previous, "unused ceilings must not alter demand");
+                }
+                previous = Some(actual);
+                assert_eq!(reopened.header(), segment.header());
+                for seq in 0..=4 {
+                    let expected: Rows = rows
+                        .iter()
+                        .filter(|(entry, _)| {
+                            entry.src == VId(1)
+                                && entry.created_at.0 <= seq
+                                && entry.retired_at.is_none_or(|end| seq < end.0)
+                        })
+                        .cloned()
+                        .collect();
+                    assert_eq!(collect(&cx, reopened.partition(), VId(1), seq), expected);
+                }
+                assert_eq!(
+                    admission
+                        .live_owners
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    1
+                );
+                drop(reopened);
+                drop(owner);
+                assert_eq!(
+                    admission
+                        .live_owners
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    0
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn forged_run_framing_refuses_before_decoder_admission_and_failed_images_release_the_owner() {
+    run(0xf6_7211, |cx| {
+        let (partition, origins, _) = source(false);
+        let segment =
+            AdjRunSegment::from_sealed(&cx, &partition, &origins, SealedLimits::default()).unwrap();
+        let bytes = segment.encode(&cx, SealedLimits::default()).unwrap();
+        // Literal offsets in the existing FGRN-v1 scalar frame: incidence
+        // count, origin count, and embedded image length. Each candidate has
+        // a valid checksum and object ID, so these exercise shape admission.
+        for (offset, value) in [(109, u32::MAX), (113, 15), (245, u32::MAX)] {
+            let mut forged = bytes.clone();
+            forged[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            resign(&cx, &mut forged);
+            let mut admission = DecodeAdmission::default();
+            assert!(
+                admitted(
+                    &cx,
+                    &segment,
+                    &forged,
+                    SealedLimits::default(),
+                    &mut admission
+                )
+                .is_err()
+            );
+            assert_eq!(admission.encoded, [forged.len()]);
+            assert!(admission.profiles.is_empty());
+            assert_eq!(
+                admission
+                    .live_owners
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+        }
+
+        // A valid outer frame cannot use a forged inner count to exceed the
+        // authenticated outer population. Re-sign both integrity layers so
+        // the independent inner decoder must enforce the narrowed ceiling.
+        let mut forged = bytes.clone();
+        let image_len = u32::from_le_bytes(forged[245..249].try_into().unwrap()) as usize;
+        forged[272..276].copy_from_slice(&15_u32.to_le_bytes());
+        let mut fingerprint = super::super::fingerprint_hasher();
+        fingerprint.update(&forged[262..262 + image_len]);
+        forged[213..245].copy_from_slice(&fingerprint.finalize().0);
+        resign(&cx, &mut forged);
+        let mut admission = DecodeAdmission::default();
+        assert!(matches!(
+            admitted(
+                &cx,
+                &segment,
+                &forged,
+                SealedLimits::default(),
+                &mut admission
+            ),
+            Err(AdjRunError::Sealed(SealedError::Limit {
+                resource: "incidences",
+                requested: 15,
+                limit: 14,
+            }))
+        ));
+        assert_eq!(admission.profiles.len(), 1);
+        assert_eq!(
+            admission
+                .live_owners
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
+        let mut admission = DecodeAdmission::default();
+        let limits = SealedLimits {
+            max_property_bytes: 0,
+            ..SealedLimits::default()
+        };
+        assert!(matches!(
+            admitted(&cx, &segment, &bytes, limits, &mut admission),
+            Err(AdjRunError::Sealed(SealedError::Limit {
+                resource: "property bytes",
+                ..
+            }))
+        ));
+        assert_eq!(
+            admission
+                .live_owners
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    });
+}
+
+#[test]
+fn run_owner_refusals_precede_decode_and_keep_their_original_error() {
+    run(0xf6_7212, |cx| {
+        let (partition, origins, _) = source(false);
+        let segment =
+            AdjRunSegment::from_sealed(&cx, &partition, &origins, SealedLimits::default()).unwrap();
+        let mut bytes = segment.encode(&cx, SealedLimits::default()).unwrap();
+        bytes[262] ^= 1; // Invalid embedded image, still a well-framed run.
+        resign(&cx, &mut bytes);
+        for stage in [0, 1] {
+            let mut admission = DecodeAdmission {
+                reject_encoded: stage == 0,
+                reject_decoded: stage == 1,
+                ..DecodeAdmission::default()
+            };
+            assert!(matches!(
+                admitted(&cx, &segment, &bytes, SealedLimits::default(), &mut admission),
+                Ok(Err(error)) if error == if stage == 0 { "encoded admission" } else { "decoded admission" }
+            ));
+            assert_eq!(admission.profiles.len(), stage);
+            assert_eq!(
+                admission
+                    .live_owners
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+        }
+    });
+}
+
+#[test]
+fn actual_run_admission_keeps_many_incoming_descriptors_for_one_forward_row() {
+    run(0xf6_7213, |cx| {
+        let (template, _, _) = source(false);
+        let mut rows = Vec::new();
+        let mut origins = BTreeMap::new();
+        for id in 10..22 {
+            let eid = EId(id);
+            rows.push((
+                AdjacencyEntry {
+                    src: VId(1),
+                    relation: RELATION,
+                    dst: VId(id),
+                    eid,
+                    created_at: CommitSeq(1),
+                    retired_at: None,
+                },
+                Vec::new(),
+            ));
+            origins.insert(eid, OriginBirthOrder::new(CommitSeq(1), id as u64, 0, eid));
+        }
+        let limits = SealedLimits::default();
+        let image = super::super::image::build_retained(rows, limits, &mut || Ok(())).unwrap();
+        let partition = SealedPartition::finish_scoped(
+            template.anchor.scope,
+            Some(RELATION),
+            image,
+            limits,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let segment = AdjRunSegment::from_sealed(&cx, &partition, &origins, limits).unwrap();
+        let bytes = segment.encode_dual_face(&cx, limits).unwrap();
+        let mut admission = DecodeAdmission::default();
+        let (reopened, owner) = admitted(&cx, &segment, &bytes, limits, &mut admission)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.header().row_count, 1);
+        assert_eq!(admission.profiles[0].max_rows, 12);
+        let incoming = reopened
+            .partition()
+            .incoming_index(&cx, super::super::IncomingIndexLimits::default())
+            .unwrap();
+        for id in 10..22 {
+            let mut cursor = incoming.row(&cx, VId(id), RELATION, CommitSeq(1)).unwrap();
+            let edge = cursor.next(&cx).unwrap().unwrap();
+            assert_eq!(
+                (edge.entry.eid, edge.entry.src, edge.entry.dst),
+                (EId(id), VId(1), VId(id))
+            );
+            assert!(cursor.next(&cx).unwrap().is_none());
+        }
+        drop(incoming);
+        drop(reopened);
+        drop(owner);
+        assert_eq!(
+            admission
+                .live_owners
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    });
+}
+
 #[test]
 fn empty_scoped_run_matches_the_literal_v1_golden_and_proves_only_its_relation() {
     run(0xf6_7200, |cx| {

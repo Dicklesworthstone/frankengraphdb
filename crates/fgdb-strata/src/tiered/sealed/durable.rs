@@ -582,27 +582,88 @@ pub(crate) fn read_adj_run(
     limits: SealedLimits,
     resolver: Option<&dyn CanonicalScalarResolver>,
 ) -> Result<AdjRunSegment, AdjRunError> {
+    struct ExistingWorkspace;
+    impl AdjRunReadAdmission for ExistingWorkspace {
+        type Error = core::convert::Infallible;
+        type Owner = ();
+
+        fn encoded(&mut self, _: usize) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn decoded(&mut self, _: SealedLimits) -> Result<Self::Owner, Self::Error> {
+            Ok(())
+        }
+    }
+    match read_adj_run_admitted(
+        cx,
+        expected,
+        expected_scope,
+        relation,
+        k_oid,
+        namespace,
+        bytes,
+        limits,
+        resolver,
+        &mut ExistingWorkspace,
+    )? {
+        Ok((run, ())) => Ok(run),
+        Err(never) => match never {},
+    }
+}
+
+/// The frame's actual encoded size is metered before hashing. Only after
+/// identity, checksum, scope and framing validation may its declared counts
+/// narrow the decoder's allocation ceilings. Neither event grants authority.
+pub(crate) trait AdjRunReadAdmission {
+    type Error;
+    type Owner;
+
+    fn encoded(&mut self, bytes: usize) -> Result<(), Self::Error>;
+    fn decoded(&mut self, limits: SealedLimits) -> Result<Self::Owner, Self::Error>;
+}
+
+/// An admission refusal is a successful outer result containing the owner's
+/// original error. Store readers must return it immediately, without trying
+/// another physical copy or dropping the selected durable-run implementation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn read_adj_run_admitted<A: AdjRunReadAdmission>(
+    cx: &QueryCx,
+    expected: ObjectId,
+    expected_scope: SealedScope,
+    relation: RelationId,
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    limits: SealedLimits,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    admit: &mut A,
+) -> Result<Result<(AdjRunSegment, A::Owner), A::Error>, AdjRunError> {
     checkpoint(cx)?;
     check_limit(
         "durable run bytes",
         bytes.len(),
         limits.max_image_bytes.min(MAX_ADJ_RUN_BYTES),
     )?;
+    if let Err(error) = admit.encoded(bytes.len()) {
+        return Ok(Err(error));
+    }
     let actual = adj_run_id(k_oid, namespace, bytes);
     if actual != expected {
         return Err(AdjRunError::IdentityMismatch { expected, actual });
     }
-    decode(cx, expected_scope, relation, bytes, limits, resolver)
+    decode(cx, expected_scope, relation, bytes, limits, resolver, admit)
 }
 
-fn decode(
+fn decode<A: AdjRunReadAdmission>(
     cx: &QueryCx,
     expected_scope: SealedScope,
     relation: RelationId,
     bytes: &[u8],
     limits: SealedLimits,
     resolver: Option<&dyn CanonicalScalarResolver>,
-) -> Result<AdjRunSegment, AdjRunError> {
+    admit: &mut A,
+) -> Result<Result<(AdjRunSegment, A::Owner), A::Error>, AdjRunError> {
     let end = bytes
         .len()
         .checked_sub(CHECKSUM_BYTES)
@@ -674,6 +735,27 @@ fn decode(
     if input.at != input.bytes.len() {
         return Err(SealedError::TrailingBytes.into());
     }
+    // Every allocation below is bounded by authenticated encoded bytes and
+    // incidence counts, not by the caller's potentially much larger ceilings.
+    // Incoming descriptors may outnumber forward rows, so their row bound is
+    // the incidence population rather than the forward row_count. The image
+    // and incoming decoders still validate their own counts against these
+    // tightened limits before allocating, then check their exact agreement.
+    // Encoded property bodies are a subset of the complete FGRN frame; this
+    // conservative byte bound needs no property decoding or temporary vectors.
+    let limits = SealedLimits {
+        max_rows: limits.max_rows.min(incidence_count),
+        max_incidences: incidence_count,
+        max_image_bytes: bytes.len(),
+        max_property_bytes: limits.max_property_bytes.min(image_bytes.len()),
+    };
+    // The affine owner is declared before every decoded allocation, so all
+    // decoder failures and physical-copy retries refund it only after those
+    // allocations have been destroyed.
+    let owner = match admit.decoded(limits) {
+        Ok(owner) => owner,
+        Err(error) => return Ok(Err(error)),
+    };
     let anchor = SealedAnchor {
         scope,
         relation: Some(relation),
@@ -741,21 +823,24 @@ fn decode(
         return Err(AdjRunError::StableDigestMismatch);
     }
     checkpoint(cx)?;
-    Ok(AdjRunSegment {
-        header: AdjRunHeader {
-            scope,
-            relation,
-            row_count,
-            incidence_count,
-            origin_count,
-            source_map_id,
-            destination_map_id,
-            canonical_stable_id_digest,
+    Ok(Ok((
+        AdjRunSegment {
+            header: AdjRunHeader {
+                scope,
+                relation,
+                row_count,
+                incidence_count,
+                origin_count,
+                source_map_id,
+                destination_map_id,
+                canonical_stable_id_digest,
+            },
+            partition,
+            origins: origins.into(),
+            origin_identity: Arc::new(ids),
         },
-        partition,
-        origins: origins.into(),
-        origin_identity: Arc::new(ids),
-    })
+        owner,
+    )))
 }
 
 #[cfg(test)]
