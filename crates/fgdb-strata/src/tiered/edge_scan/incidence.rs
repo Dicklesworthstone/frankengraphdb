@@ -381,11 +381,15 @@ impl<V: Vfs> Driver<'_, V> {
         &mut self,
         cx: &QueryCx,
         request: Incidence,
+        properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<Option<BufferedEdgeCandidate>>, BufferedScanError<C>> {
         if self.root.has_published_relation(request.relation) {
             self.native_incident = None;
-            return self.root.published_incident(cx, request, observe).await;
+            return self
+                .root
+                .published_incident(cx, request, properties, observe)
+                .await;
         }
         let Some(relation) = request.relation else {
             self.native_incident = None;
@@ -419,6 +423,7 @@ impl<V: Vfs> Driver<'_, V> {
             cx,
             self.root.as_of,
             request,
+            properties,
             observe,
         )
         .await
@@ -438,7 +443,10 @@ impl<V: Vfs> Driver<'_, V> {
             // before admitting a native image or reserving its selected row.
             *continuation = None;
         }
-        if let Some(candidate) = self.published_incident(cx, request, observe).await? {
+        if let Some(candidate) = self
+            .published_incident(cx, request, EdgePropertyAccess::Read, observe)
+            .await?
+        {
             return match candidate {
                 Some(candidate) => self
                     .root
@@ -495,7 +503,10 @@ impl<V: Vfs> Driver<'_, V> {
         request: Incidence,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
-        if let Some(candidate) = self.published_incident(cx, request, observe).await? {
+        if let Some(candidate) = self
+            .published_incident(cx, request, EdgePropertyAccess::Read, observe)
+            .await?
+        {
             return match candidate {
                 Some(candidate) => self
                     .root

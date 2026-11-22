@@ -82,8 +82,15 @@ async fn cold(
     .unwrap()
 }
 async fn seed(contexts: &PurposeContexts, vfs: &MemVfs) -> Database<MemVfs> {
+    seed_with_keys(contexts, vfs, keys()).await
+}
+async fn seed_with_keys(
+    contexts: &PurposeContexts,
+    vfs: &MemVfs,
+    keys: DatabaseKeys,
+) -> Database<MemVfs> {
     let mut db =
-        Database::create_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys())
+        Database::create_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys)
             .await
             .unwrap();
     let mut first = WriteBatch::new(R);
@@ -623,3 +630,538 @@ fn first_cold_incidence_seeks_descriptors_without_reading_unrelated_graph_payloa
 // An integration test's children resolve beside it, not under its own directory.
 #[path = "buffered_incidence_stream/retained_gql.rs"]
 mod retained_gql;
+
+mod native_runs {
+    use super::*;
+    use asupersync::fs::Vfs;
+    use fgdb_strata::store::{BlockStore, RootReadLimits};
+    use fgdb_strata::tiered::edge_scan::BufferedEdgeScanEvent;
+    use fgdb_strata::tiered::sealed::SealedLimits;
+    use fgdb_types::{ObjectId, SimulationCheckpointProbe};
+    use std::sync::Arc;
+
+    const ADDED: EId = EId(1_u128 << 127);
+
+    fn expected(cut: u64) -> Vec<Row> {
+        let mut rows = super::expected(cut);
+        if cut >= 2 {
+            rows.push((
+                ADDED,
+                IDS[1],
+                IDS[3],
+                R,
+                vec![(P, CanonicalScalar::Int(19).into())],
+                vec![(P, CanonicalScalar::Int(2).into())],
+                vec![(P, CanonicalScalar::Int(4).into())],
+            ));
+            rows.sort_by_key(|row| row.0);
+        }
+        rows
+    }
+
+    fn run_limits() -> SealedLimits {
+        SealedLimits {
+            max_rows: 8,
+            max_incidences: 32,
+            max_image_bytes: 4096,
+            max_property_bytes: 1024,
+        }
+    }
+
+    async fn fixture(
+        contexts: &PurposeContexts,
+        keys: DatabaseKeys,
+    ) -> (MemVfs, Database<MemVfs>, ObjectId) {
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed_with_keys(contexts, &vfs, keys).await;
+        let run = db
+            .seal_relation(
+                &contexts.commit(),
+                &contexts.query(),
+                R,
+                CommitSeq(0),
+                run_limits(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        (vfs, db, run.0)
+    }
+
+    async fn open(
+        contexts: &PurposeContexts,
+        vfs: &MemVfs,
+        keys: DatabaseKeys,
+        memory: MemoryPool,
+        source_limits: BufferedReadLimits,
+    ) -> BufferedReadView<MemVfs> {
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &contexts.commit(),
+            vfs.clone(),
+            vfs.database_dir(),
+            keys,
+            memory,
+            source_limits,
+        )
+        .await
+        .unwrap();
+        view.set_native_run_limits(&contexts.query(), Some(run_limits()))
+            .unwrap();
+        view
+    }
+
+    async fn edit(contexts: &PurposeContexts, db: &mut Database<MemVfs>) {
+        let mut second = WriteBatch::new(R);
+        second.set_vertex_property(IDS[0], P, Some(CanonicalScalar::Int(21)));
+        second.set_edge_property(EId(0), P, Some(CanonicalScalar::Int(17)));
+        second.delete_edge(EId(2));
+        second.add_edge(ADDED, IDS[1], IDS[3], vec![(P, CanonicalScalar::Int(19))]);
+        assert_eq!(
+            db.write(&contexts.commit(), second).await.unwrap(),
+            CommitSeq(2)
+        );
+        let mut third = WriteBatch::new(S);
+        third.add_edge(EId(4), IDS[1], IDS[0], vec![(P, CanonicalScalar::Int(20))]);
+        assert_eq!(
+            db.write(&contexts.commit(), third).await.unwrap(),
+            CommitSeq(3)
+        );
+    }
+
+    async fn check(view: &mut BufferedReadView<MemVfs>, contexts: &PurposeContexts, last: u64) {
+        let cx = contexts.query();
+        for cut in 0..=last {
+            for endpoint in IDS.into_iter().chain([VId(777)]) {
+                for relation in [Some(R), Some(S), None] {
+                    for direction in [
+                        BufferedEdgeDirection::Outgoing,
+                        BufferedEdgeDirection::Incoming,
+                        BufferedEdgeDirection::Undirected,
+                    ] {
+                        let wanted: Vec<_> = expected(cut)
+                            .into_iter()
+                            .filter(|row| matches(endpoint, relation, direction, row))
+                            .collect();
+                        let mut scan = view
+                            .stream_adjacency_at(
+                                &cx,
+                                endpoint,
+                                relation,
+                                direction,
+                                CommitSeq(cut),
+                                None,
+                            )
+                            .unwrap();
+                        let mut actual = Vec::new();
+                        let mut identities = Vec::new();
+                        while let Some(candidate) = scan
+                            .next_candidate_with(&cx, &mut |event| {
+                                if let BufferedEdgeScanEvent::Identity(eid) = event {
+                                    identities.push(eid);
+                                }
+                                Ok::<_, core::convert::Infallible>(())
+                            })
+                            .await
+                            .unwrap()
+                        {
+                            if let Some(value) = candidate.row {
+                                actual.push(row(&value, CommitSeq(cut)));
+                            }
+                        }
+                        assert!(scan.is_finished());
+                        assert_eq!(
+                            actual, wanted,
+                            "cut {cut}, endpoint {endpoint:?}, {relation:?}, {direction:?}"
+                        );
+                        assert!(identities.windows(2).all(|pair| pair[0] < pair[1]));
+                        if relation == Some(R) {
+                            let historical: std::collections::BTreeSet<_> = expected(1)
+                                .into_iter()
+                                .chain(expected(last))
+                                .filter(|row| matches(endpoint, relation, direction, row))
+                                .map(|row| row.0)
+                                .collect();
+                            assert_eq!(
+                                identities,
+                                historical.into_iter().collect::<Vec<_>>(),
+                                "invisible identities must still be admitted"
+                            );
+                        }
+                        drop(scan);
+                        assert_eq!(
+                            view.incident_edge_count_at(
+                                &cx,
+                                endpoint,
+                                relation,
+                                direction,
+                                CommitSeq(cut)
+                            )
+                            .await
+                            .unwrap(),
+                            wanted.len() as u64,
+                        );
+                    }
+                }
+            }
+            for after in [EId(0), EId(2), EId(u128::MAX)] {
+                let mut scan = view
+                    .stream_adjacency_at(
+                        &cx,
+                        IDS[1],
+                        Some(R),
+                        BufferedEdgeDirection::Undirected,
+                        CommitSeq(cut),
+                        Some(after),
+                    )
+                    .unwrap();
+                let mut actual = Vec::new();
+                while let Some(value) = scan.next(&cx).await.unwrap() {
+                    actual.push(row(&value, CommitSeq(cut)));
+                }
+                assert_eq!(
+                    actual,
+                    expected(cut)
+                        .into_iter()
+                        .filter(|row| {
+                            row.0 > after
+                                && matches(IDS[1], Some(R), BufferedEdgeDirection::Undirected, row)
+                        })
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_incidence_and_count_preserve_run_suffix_history_and_compacted_reopen() {
+        let ((), report) = run_async_under_lab(0xe6_40, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            for ecs in [false, true] {
+                let keys = if ecs {
+                    keys().with_default_strata_ecs()
+                } else {
+                    keys()
+                };
+                let (vfs, mut db, _) = fixture(&contexts, keys.clone()).await;
+                let retained_pool = pool();
+                let mut pinned = open(
+                    &contexts,
+                    &vfs,
+                    keys.clone(),
+                    retained_pool.clone(),
+                    limits(),
+                )
+                .await;
+                edit(&contexts, &mut db).await;
+                let mut current = open(&contexts, &vfs, keys.clone(), pool(), limits()).await;
+                check(&mut current, &contexts, 3).await;
+                check(&mut pinned, &contexts, 1).await;
+                db.compact(&contexts.commit()).await.unwrap();
+                drop(db);
+                let reopened = Database::open_with_vfs(
+                    &contexts.commit(),
+                    vfs.clone(),
+                    vfs.database_dir(),
+                    keys.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(reopened.frontier().unwrap(), CommitSeq(3));
+                let mut compacted = open(&contexts, &vfs, keys, pool(), limits()).await;
+                check(&mut compacted, &contexts, 3).await;
+                check(&mut pinned, &contexts, 1).await;
+                drop(pinned);
+                assert_eq!(retained_pool.used(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn native_incidence_uses_the_selected_run_and_counts_without_suffix_property_faults() {
+        let ((), report) = run_async_under_lab(0xe6_41, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let (vfs, mut db, run) = fixture(&contexts, keys()).await;
+            edit(&contexts, &mut db).await;
+            let store = BlockStore::open_existing_for_read_with_vfs(
+                &commit,
+                vfs.clone(),
+                vfs.database_dir(),
+                [0xc1; 32],
+                DatabaseSecurityNamespaceId([0xc2; 32]),
+            )
+            .await
+            .unwrap();
+            let root = store
+                .get_root(&commit, db.partition_root().unwrap())
+                .await
+                .unwrap();
+            let mut base = Vec::new();
+            let mut suffix_properties = std::collections::BTreeMap::new();
+            for reference in root.blocks {
+                let path = store.path(reference.block_id);
+                let bytes = vfs.read(&path).await.unwrap();
+                let (entries, properties) =
+                    fgdb_strata::decode_block_with_properties(&bytes).unwrap();
+                if entries.iter().all(|entry| entry.relation == R) {
+                    if reference.last_seq <= CommitSeq(1) {
+                        base.push((path, bytes));
+                    } else if let Some((id, _)) = properties {
+                        let path = store.path(id);
+                        suffix_properties.insert(path.clone(), vfs.read(&path).await.unwrap());
+                    }
+                }
+            }
+            assert!(!base.is_empty() && !suffix_properties.is_empty());
+            let mut ordinary = cold(&contexts, &vfs, pool()).await;
+            let mut native = open(&contexts, &vfs, keys(), pool(), limits()).await;
+            for (path, _) in &base {
+                vfs.write(path, b"damaged redundant pre-seal Tier-D block")
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                ordinary
+                    .incident_edge_count(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                    .await
+                    .is_err()
+            );
+            let mut scan = native
+                .stream_adjacency(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                .unwrap();
+            let mut actual = Vec::new();
+            while let Some(value) = scan.next(&cx).await.unwrap() {
+                actual.push(row(&value, CommitSeq(3)));
+            }
+            assert_eq!(
+                actual,
+                expected(3)
+                    .into_iter()
+                    .filter(|row| {
+                        matches(IDS[1], Some(R), BufferedEdgeDirection::Undirected, row)
+                    })
+                    .collect::<Vec<_>>()
+            );
+            drop(scan);
+            for path in suffix_properties.keys() {
+                vfs.write(path, b"damaged unrequested suffix properties")
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                native
+                    .incident_edge_count(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                    .await
+                    .unwrap(),
+                4
+            );
+            let mut scan = native
+                .stream_adjacency(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                .unwrap();
+            assert!(scan.next(&cx).await.is_err());
+            assert!(scan.is_finished());
+            assert!(scan.next(&cx).await.unwrap().is_none());
+            drop(scan);
+            // Intact Tier D is not a fallback after the caller selects a run.
+            for (path, bytes) in base
+                .iter()
+                .map(|(path, bytes)| (path, bytes))
+                .chain(suffix_properties.iter())
+            {
+                vfs.write(path, bytes).await.unwrap();
+            }
+            let run_path = store.path(run);
+            vfs.write(&run_path, b"damaged selected durable run")
+                .await
+                .unwrap();
+            assert_eq!(
+                ordinary
+                    .incident_edge_count(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                    .await
+                    .unwrap(),
+                4
+            );
+            assert!(
+                native
+                    .incident_edge_count(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                    .await
+                    .is_err()
+            );
+            let mut scan = native
+                .stream_adjacency(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                .unwrap();
+            assert!(scan.next(&cx).await.is_err());
+            assert!(scan.is_finished());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn native_incidence_retains_limits_terminal_refusals_and_independent_output_charges() {
+        let ((), report) = run_async_under_lab(0xe6_42, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let (vfs, _db, _) = fixture(&contexts, keys()).await;
+            let memory = pool();
+            let mut view = open(&contexts, &vfs, keys(), memory.clone(), limits()).await;
+            let baseline = memory.used();
+            let mut closed = view
+                .stream_adjacency(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                .unwrap();
+            drop(closed.next(&cx));
+            assert_eq!(closed.work_used(), 0);
+            assert_eq!(memory.used(), baseline);
+            closed.close();
+            assert!(closed.next(&cx).await.unwrap().is_none());
+            drop(closed);
+
+            // Declining an already admitted identity must discard the run and
+            // every decoded row without returning EOF or a reusable cursor.
+            let mut scan = view
+                .stream_adjacency(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                .unwrap();
+            let mut admitted = false;
+            let error = scan
+                .next_candidate_with(&cx, &mut |event| {
+                    match event {
+                        BufferedEdgeScanEvent::Identity(_) => admitted = true,
+                        BufferedEdgeScanEvent::Work if admitted => {
+                            return Err("stop after identity");
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })
+                .await;
+            assert!(matches!(
+                error,
+                Err(BufferedScanError::Control("stop after identity"))
+            ));
+            assert!(scan.is_finished());
+            assert!(scan.next(&cx).await.unwrap().is_none());
+            drop(scan);
+            assert_eq!(memory.used(), baseline);
+            let hold = memory.reserve(&cx, memory.limit() - memory.used()).unwrap();
+            assert!(
+                view.incident_edge_count(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                    .await
+                    .is_err()
+            );
+            drop(hold);
+            assert_eq!(memory.used(), baseline);
+
+            // Inject actual QueryCx interruption during locator/row admission,
+            // after the first demand has performed substantial source work.
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let observed = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let mut scan = view
+                .stream_adjacency(
+                    &observed,
+                    IDS[1],
+                    Some(R),
+                    BufferedEdgeDirection::Undirected,
+                )
+                .unwrap();
+            drop(scan.next(&observed).await.unwrap().unwrap());
+            let checkpoints = probe.calls();
+            assert!(checkpoints > 16);
+            scan.close();
+            drop(scan);
+            assert_eq!(memory.used(), baseline);
+            for stop in [checkpoints - 16, checkpoints - 4, checkpoints] {
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let interrupted = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let mut scan = view
+                    .stream_adjacency(
+                        &interrupted,
+                        IDS[1],
+                        Some(R),
+                        BufferedEdgeDirection::Undirected,
+                    )
+                    .unwrap();
+                assert!(
+                    matches!(
+                        scan.next(&interrupted).await,
+                        Err(BufferedReadError::Interrupted(_))
+                    ),
+                    "checkpoint {stop}"
+                );
+                assert_eq!(probe.calls(), stop);
+                assert!(scan.is_finished());
+                assert!(scan.next(&cx).await.unwrap().is_none());
+                drop(scan);
+                assert_eq!(memory.used(), baseline, "checkpoint {stop}");
+            }
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(16)));
+            let interrupted = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(matches!(
+                view.incident_edge_count(
+                    &interrupted,
+                    IDS[1],
+                    Some(R),
+                    BufferedEdgeDirection::Undirected
+                )
+                .await,
+                Err(BufferedReadError::Interrupted(_))
+            ));
+            assert_eq!(probe.calls(), 16);
+            assert_eq!(memory.used(), baseline);
+
+            let mut scan = view
+                .stream_adjacency(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                .unwrap();
+            let held = scan.next(&cx).await.unwrap().unwrap();
+            let first_work = scan.work_used();
+            assert_eq!(held.edge().entry.eid, EId(0));
+            assert!(first_work > 1);
+            scan.close();
+            drop(scan);
+            let mut tight = open(
+                &contexts,
+                &vfs,
+                keys(),
+                pool(),
+                BufferedReadLimits {
+                    max_work: first_work,
+                    ..limits()
+                },
+            )
+            .await;
+            assert!(matches!(
+                tight
+                    .incident_edge_count(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                    .await,
+                Err(BufferedReadError::Limit {
+                    resource: "buffered source work",
+                    ..
+                })
+            ));
+            let mut scan = tight
+                .stream_adjacency(&cx, IDS[1], Some(R), BufferedEdgeDirection::Undirected)
+                .unwrap();
+            assert_eq!(
+                scan.next(&cx).await.unwrap().unwrap().edge().entry.eid,
+                EId(0)
+            );
+            assert_eq!(scan.work_used(), first_work);
+            assert!(matches!(
+                scan.next(&cx).await,
+                Err(BufferedReadError::Limit {
+                    resource: "buffered source work",
+                    ..
+                })
+            ));
+            assert!(scan.is_finished());
+            assert!(scan.next(&cx).await.unwrap().is_none());
+            drop(scan);
+            drop(view);
+            assert!(memory.used() > 0);
+            assert_eq!(row(&held, CommitSeq(1)), expected(1)[0]);
+            drop(held);
+            assert_eq!(memory.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

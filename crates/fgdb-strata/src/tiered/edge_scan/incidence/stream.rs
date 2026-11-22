@@ -28,6 +28,12 @@ enum IncidenceProjection {
 /// remains governed by the MemoryPool and cumulative work ceiling. This is not
 /// an optimal sequential-I/O or whole-database memory bound.
 ///
+/// With the opt-in complete-run profile, a typed relation can use the same
+/// durable run, authenticated post-seal history and endpoint/EId locator as
+/// native joins. The source is selected on first demand and retained across
+/// pulls. Ineligible or untyped requests use ordinary descriptor routing;
+/// a selected source's failure never retries a different representation.
+///
 /// Returned edges and endpoints own independent reservations. An undirected
 /// self-loop appears once. Endpoints retain their stored orientation, even for
 /// an incoming request. Missing endpoints are errors, not absent matches.
@@ -144,6 +150,7 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
         let mut state = self.state.take();
         let request = self.request;
         let used = &mut self.work;
+        let mut published = false;
         let result = async {
             let mut observe = |event| {
                 observe(event)?;
@@ -152,19 +159,34 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
                 }
                 Ok(())
             };
-            if state.is_none() {
-                state = Some(
-                    driver
-                        .prepare_incident(cx, request, true, properties, &mut observe)
-                        .await?,
-                );
-            }
-            let state = state.as_mut().expect("complete incidence heads");
-            let Some(candidate) = driver
-                .root
-                .advance(state, cx, properties, &mut observe)
+            let candidate = match driver
+                .published_incident(cx, request, properties, &mut observe)
                 .await?
-            else {
+            {
+                Some(candidate) => {
+                    published = true;
+                    candidate
+                }
+                None => {
+                    if state.is_none() {
+                        state = Some(
+                            driver
+                                .prepare_incident(cx, request, true, properties, &mut observe)
+                                .await?,
+                        );
+                    }
+                    driver
+                        .root
+                        .advance(
+                            state.as_mut().expect("complete incidence heads"),
+                            cx,
+                            properties,
+                            &mut observe,
+                        )
+                        .await?
+                }
+            };
+            let Some(candidate) = candidate else {
                 return Ok(None);
             };
             let candidate = match properties {
@@ -195,9 +217,13 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
         }
         .await;
         self.work = driver.root.work.used;
-        if matches!(result, Ok(Some(_)))
-            && state.as_ref().is_some_and(|state| !state.heads.is_empty())
+        if let Ok(Some(candidate)) = &result
+            && (published || state.as_ref().is_some_and(State::has_more))
         {
+            // The native locator has an independent strict-successor position.
+            // Advance only after row and endpoint admission both succeeded;
+            // invisible candidates still consume their historical identity.
+            self.request.after = Some(candidate.eid);
             self.state = state;
             self.driver = Some(driver);
         }

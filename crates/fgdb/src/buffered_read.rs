@@ -133,7 +133,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     }
 
     /// Enable durable relation runs for native typed-edge MATCH streams, their
-    /// aggregate inputs, typed join children and vertex/edge-rooted probes.
+    /// aggregate inputs, typed join children, vertex/edge-rooted probes and
+    /// typed standalone incidence streams/counts.
     /// This explicit source profile reserves decoder capacity before loading
     /// a selected run and an EId locator before building its directory. If the
     /// run predates relation writes, its authenticated post-seal blocks remain
@@ -152,7 +153,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// Source selection is lazy; direct streaming LIMIT 0 and close before
     /// first demand do not load a run. External spooling retains complete-input
     /// semantics. Selected-run or suffix failures never retry another source.
-    /// Encoded extents remain outside this profile.
+    /// Encoded extents reserve their frame and erasure-decoder scratch through
+    /// this pool, including when the selected object lives inside a pack.
     pub fn set_native_run_limits(
         &mut self,
         cx: &QueryCx,
@@ -338,6 +340,10 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// Initial descriptor metadata and individual records can still exceed
     /// admission. No resident Snapshot, eager fallback,
     /// complete result vector or cross-process retention lease is introduced.
+    /// When native run limits are enabled, typed requests may instead retain
+    /// the same durable run-plus-suffix source used by native query joins.
+    /// Source admission remains lazy and charged; selected-source failures
+    /// refuse without retrying the ordinary Tier-D representation.
     pub fn stream_adjacency(
         &mut self,
         cx: &QueryCx,

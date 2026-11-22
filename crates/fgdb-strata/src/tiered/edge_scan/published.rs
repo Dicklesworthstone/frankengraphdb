@@ -128,6 +128,7 @@ pub(super) async fn load_incident_run<V: Vfs, C: Send>(
 
 /// Admit exactly the next historical identity in the requested incidence,
 /// before resolving its visible version or cloning any selected properties.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn incident_candidate<V: Vfs, C: Send>(
     partition: &mut BufferedPartition<V>,
     work: &mut EdgeScanWork,
@@ -135,6 +136,7 @@ pub(super) async fn incident_candidate<V: Vfs, C: Send>(
     cx: &QueryCx,
     as_of: CommitSeq,
     request: incidence::Incidence,
+    properties: EdgePropertyAccess,
     observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
 ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
     if request.relation != Some(run.relation) {
@@ -160,7 +162,7 @@ pub(super) async fn incident_candidate<V: Vfs, C: Send>(
         cx,
         as_of,
         eid,
-        EdgePropertyAccess::Read,
+        properties,
         observe,
     )
     .await
@@ -250,6 +252,7 @@ impl<V: Vfs> BufferedEdgeScan<'_, V> {
         &mut self,
         cx: &QueryCx,
         request: incidence::Incidence,
+        properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<Option<BufferedEdgeCandidate>>, BufferedScanError<C>> {
         let Some(run) = self.state.as_ref().and_then(|state| state.run.as_ref()) else {
@@ -265,6 +268,7 @@ impl<V: Vfs> BufferedEdgeScan<'_, V> {
             cx,
             self.as_of,
             request,
+            properties,
             observe,
         )
         .await
