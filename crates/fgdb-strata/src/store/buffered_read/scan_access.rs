@@ -392,8 +392,15 @@ impl<V: Vfs> BufferedPartition<V> {
         work: &mut EdgeScanWork,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedValue<VertexRow>>, BufferedScanError<C>> {
-        self.edge_scan_vertex_with_access(cx, vid, as_of, VertexPropertyAccess::Read, work, observe)
-            .await
+        self.edge_scan_vertex_with_access(
+            cx,
+            vid,
+            as_of,
+            VertexPointAccess::Properties(None),
+            work,
+            observe,
+        )
+        .await
     }
 
     // This projection is available only after complete root admission. The
@@ -406,9 +413,39 @@ impl<V: Vfs> BufferedPartition<V> {
         work: &mut EdgeScanWork,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedVertexTopology>, BufferedScanError<C>> {
-        self.edge_scan_vertex_with_access(cx, vid, as_of, VertexPropertyAccess::Skip, work, observe)
-            .await
-            .map(|row| row.map(BufferedVertexTopology))
+        self.edge_scan_vertex_with_access(
+            cx,
+            vid,
+            as_of,
+            VertexPointAccess::Topology,
+            work,
+            observe,
+        )
+        .await
+        .map(|row| row.map(BufferedVertexTopology))
+    }
+
+    // Select history before decoding this key. The partial owner preserves
+    // both winner metadata and absent/NULL semantics without a complete map.
+    pub(crate) async fn edge_scan_vertex_property<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        vid: VId,
+        key: PropertyKeyId,
+        as_of: CommitSeq,
+        work: &mut EdgeScanWork,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexProperty>, BufferedScanError<C>> {
+        self.edge_scan_vertex_with_access(
+            cx,
+            vid,
+            as_of,
+            VertexPointAccess::Properties(Some(key)),
+            work,
+            observe,
+        )
+        .await
+        .map(|row| row.map(BufferedVertexProperty))
     }
 
     async fn edge_scan_vertex_with_access<C: Send>(
@@ -416,7 +453,7 @@ impl<V: Vfs> BufferedPartition<V> {
         cx: &QueryCx,
         vid: VId,
         as_of: CommitSeq,
-        properties: VertexPropertyAccess,
+        access: VertexPointAccess,
         work: &mut EdgeScanWork,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedValue<VertexRow>>, BufferedScanError<C>> {
@@ -434,10 +471,6 @@ impl<V: Vfs> BufferedPartition<V> {
                 }
                 Ok::<_, BufferedScanError<C>>(())
             };
-            let access = match properties {
-                VertexPropertyAccess::Read => VertexPointAccess::Properties(None),
-                VertexPropertyAccess::Skip => VertexPointAccess::Topology,
-            };
             let Some(winner) = self
                 .vertex_point_winner_with(
                     cx,
@@ -454,7 +487,11 @@ impl<V: Vfs> BufferedPartition<V> {
             else {
                 return Ok(None);
             };
-            self.vertex_point_row_with(cx, winner, None, Admission::ScanBypass, &mut control)
+            let key = match access {
+                VertexPointAccess::Properties(key) => key,
+                VertexPointAccess::Topology => None,
+            };
+            self.vertex_point_row_with(cx, winner, key, Admission::ScanBypass, &mut control)
                 .await?
         };
         let charge = output_charge.ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;

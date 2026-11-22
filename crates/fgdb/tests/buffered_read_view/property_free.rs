@@ -571,3 +571,280 @@ fn boolean_edge_filters_keep_hidden_endpoint_inputs_and_eager_arithmetic_errors(
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+const SELECTED_VERTEX_KEY: PropertyKeyId = PropertyKeyId((1_u64 << 40) | 1);
+const SELECTED_VERTICES: [VId; 3] = [VId(1_u128 << 100), VId((1_u128 << 100) + 1), VId(u128::MAX)];
+
+fn selected_vertex_query(text: &str) -> PreparedGraphPattern<GraphValueRow> {
+    PreparedGraphText::prepare(text, |kind, name| match (kind, name) {
+        (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(SELECTED_VERTEX_KEY)),
+        _ => None,
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
+}
+
+async fn selected_vertex_fixture(contexts: &PurposeContexts) -> (MemVfs, Database<MemVfs>) {
+    let vfs = MemVfs::new().unwrap();
+    let commit = contexts.commit();
+    let mut writer = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+        .await
+        .unwrap();
+    let mut first = WriteBatch::new(RELATION);
+    for (vid, value) in SELECTED_VERTICES.into_iter().zip([
+        Some(CanonicalScalar::Int(9)),
+        Some(CanonicalScalar::Null),
+        None,
+    ]) {
+        let mut properties = vec![(
+            PROPERTY,
+            CanonicalScalar::ucs_basic_text(&"x".repeat(12 * 1024)).unwrap(),
+        )];
+        if let Some(value) = value {
+            properties.push((SELECTED_VERTEX_KEY, value));
+        }
+        first.create_vertex(vid, vec![LabelId(1)], properties);
+    }
+    assert_eq!(writer.write(&commit, first).await.unwrap(), CommitSeq(1));
+    let mut second = WriteBatch::new(RELATION);
+    second.set_vertex_property(
+        SELECTED_VERTICES[0],
+        SELECTED_VERTEX_KEY,
+        Some(CanonicalScalar::Int(11)),
+    );
+    second.set_vertex_property(
+        SELECTED_VERTICES[1],
+        SELECTED_VERTEX_KEY,
+        Some(CanonicalScalar::Int(5)),
+    );
+    second.delete_vertex(SELECTED_VERTICES[2]);
+    assert_eq!(writer.write(&commit, second).await.unwrap(), CommitSeq(2));
+    (vfs, writer)
+}
+
+async fn open_selected_vertices(
+    contexts: &PurposeContexts,
+    vfs: &MemVfs,
+    memory: &MemoryPool,
+) -> BufferedReadView<MemVfs> {
+    let mut read_limits = limits();
+    read_limits.buffer.max_extent_bytes = 64 * 1024;
+    Database::open_buffered_read_view_with_vfs(
+        &contexts.commit(),
+        vfs.clone(),
+        vfs.database_dir(),
+        keys(),
+        memory.clone(),
+        read_limits,
+    )
+    .await
+    .unwrap()
+}
+
+#[test]
+fn selected_vertex_queries_keep_full_width_keys_nulls_labels_and_pinned_history() {
+    let ((), report) = run_async_under_lab(0x6275_6616, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (vfs, mut writer) = selected_vertex_fixture(&contexts).await;
+        let old_reference = writer.read_session().unwrap();
+        let memory = pool();
+        let mut pinned = open_selected_vertices(&contexts, &vfs, &memory).await;
+        let mut third = WriteBatch::new(RELATION);
+        third.set_vertex_property(SELECTED_VERTICES[0], SELECTED_VERTEX_KEY, None);
+        third.set_vertex_property(
+            SELECTED_VERTICES[1],
+            SELECTED_VERTEX_KEY,
+            Some(CanonicalScalar::Int(21)),
+        );
+        third.set_vertex_label(SELECTED_VERTICES[1], LabelId(1), false);
+        assert_eq!(
+            writer.write(&contexts.commit(), third).await.unwrap(),
+            CommitSeq(3)
+        );
+        writer.compact(&contexts.commit()).await.unwrap();
+        let current_reference = writer.read_session().unwrap();
+        let mut current = open_selected_vertices(&contexts, &vfs, &memory).await;
+        for (view, reference, frontier) in [
+            (&mut pinned, &old_reference, 2),
+            (&mut current, &current_reference, 3),
+        ] {
+            for (text, labelled, null_filter) in [
+                ("MATCH (n) RETURN n,n.q", false, None),
+                ("MATCH (n:L) RETURN n,n.q", true, None),
+                (
+                    "MATCH (n) WHERE n.q IS NULL RETURN n,n.q",
+                    false,
+                    Some(true),
+                ),
+                (
+                    "MATCH (n:L) WHERE n.q IS NOT NULL RETURN n,n.q",
+                    true,
+                    Some(false),
+                ),
+                ("MATCH (n) WHERE true OR n.q=999 RETURN n,n.q", false, None),
+                (
+                    "MATCH (n) WHERE coalesce(n.q,0)>=0 RETURN n,n.q",
+                    false,
+                    None,
+                ),
+            ] {
+                let prepared = selected_vertex_query(text);
+                for cut in 0..=frontier {
+                    let mut values = match cut {
+                        0 => vec![],
+                        1 => vec![(0, Some(9)), (1, None), (2, None)],
+                        2 => vec![(0, Some(11)), (1, Some(5))],
+                        _ => vec![(0, None), (1, Some(21))],
+                    };
+                    values.retain(|(at, value)| {
+                        !(labelled && cut == 3 && *at == 1)
+                            && null_filter.is_none_or(|is_null| value.is_none() == is_null)
+                    });
+                    let expected: Vec<_> = values
+                        .into_iter()
+                        .map(|(at, value)| {
+                            GraphValueRow::from_owned_values(vec![
+                                GraphValue::Vertex(SELECTED_VERTICES[at]),
+                                GraphValue::Scalar(
+                                    value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                                ),
+                            ])
+                        })
+                        .collect();
+                    let (actual, stats) = collect(view, &cx, &prepared, CommitSeq(cut)).await;
+                    assert_eq!(actual, expected, "{text} at {cut}, frontier {frontier}");
+                    assert_eq!(stats.snapshot_records, 3, "retired identities still count");
+                    let resident = reference
+                        .execute_graph_pattern_governed_at(
+                            &cx,
+                            &prepared,
+                            CommitSeq(cut),
+                            query_policy(),
+                        )
+                        .unwrap();
+                    assert_eq!(actual, resident.value, "resident parity: {text} at {cut}");
+                }
+            }
+            // Switching to complete demand after selected pulls must recover
+            // the actual large field, never a partial cached property map.
+            let complete = selected_vertex_query("MATCH (n) RETURN n,n.q,n.p");
+            let expected = reference
+                .execute_graph_pattern_governed_at(
+                    &cx,
+                    &complete,
+                    CommitSeq(frontier),
+                    query_policy(),
+                )
+                .unwrap();
+            assert_eq!(
+                collect(view, &cx, &complete, CommitSeq(frontier)).await.0,
+                expected.value
+            );
+        }
+        drop(pinned);
+        drop(current);
+        assert_eq!(memory.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn selected_vertex_query_omits_unrelated_payload_charges_and_retains_output_ownership() {
+    let ((), report) = run_async_under_lab(0x6275_6617, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (vfs, _writer) = selected_vertex_fixture(&contexts).await;
+        let memory = pool();
+        let mut view = open_selected_vertices(&contexts, &vfs, &memory).await;
+        let columns = std::iter::once("n".to_owned())
+            .chain((1..96).map(|at| format!("n.q AS copy_{at}")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let occupied = memory
+            .reserve(&cx, memory.available() - 4 * 1024 * 1024)
+            .unwrap();
+        let prepared = selected_vertex_query(&format!("MATCH (n:L) WHERE n.q>=5 RETURN {columns}"));
+        let (rows, stats) = collect(&mut view, &cx, &prepared, CommitSeq(2)).await;
+        assert_eq!(stats.snapshot_records, 3);
+        assert_eq!(rows.len(), 2);
+        for (row, (vid, value)) in rows
+            .iter()
+            .zip([(SELECTED_VERTICES[0], 11), (SELECTED_VERTICES[1], 5)])
+        {
+            assert_eq!(row.get(0), Some(&GraphValue::Vertex(vid)));
+            assert!(
+                row.values()[1..]
+                    .iter()
+                    .all(|cell| { *cell == GraphValue::Scalar(CanonicalScalar::Int(value)) })
+            );
+        }
+        // Complete output admission must charge the 12 KiB property for every
+        // cell: 96 * 4 * 12 KiB already exceeds the remaining 4 MiB.
+        for text in [
+            format!("MATCH (n:L) RETURN {columns},n.p"),
+            format!("MATCH (n:L) WHERE n.p IS NOT NULL RETURN {columns}"),
+        ] {
+            let complete = selected_vertex_query(&text);
+            let mut cursor = view
+                .stream_graph_values_governed(&cx, &complete, query_policy())
+                .unwrap();
+            let error = cursor.next().await.unwrap().unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    GqlQueryError::Source(VertexScanError::Source(
+                        BufferedReadError::Memory(_)
+                            | BufferedReadError::Buffer(
+                                fgdb_strata::tiered::buffer::BufferError::Memory(_)
+                            )
+                    ))
+                ),
+                "{text}: {error:?}"
+            );
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert!(cursor.next().await.is_none());
+        }
+        let before = view.buffer_stats();
+        let mut refused = view
+            .stream_graph_values_governed(
+                &cx,
+                &prepared,
+                GqlQueryPolicy::new(0, 10, 1_000_000, 1_000_000),
+            )
+            .unwrap();
+        assert!(matches!(
+            refused.next().await.unwrap(),
+            Err(GqlQueryError::Rows(_))
+        ));
+        assert!(refused.next().await.is_none());
+        drop(refused);
+        assert_eq!(
+            view.buffer_stats(),
+            before,
+            "candidate refusal precedes I/O"
+        );
+
+        let mut cursor = view
+            .stream_graph_values_governed(&cx, &prepared, query_policy())
+            .unwrap();
+        let held = cursor.next().await.unwrap().unwrap();
+        drop(cursor);
+        drop(view);
+        drop(occupied);
+        assert!(
+            memory.used() > 0,
+            "the selected output retains its own reservation"
+        );
+        assert_eq!(
+            held.get(1),
+            Some(&GraphValue::Scalar(CanonicalScalar::Int(11)))
+        );
+        drop(held);
+        assert_eq!(memory.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

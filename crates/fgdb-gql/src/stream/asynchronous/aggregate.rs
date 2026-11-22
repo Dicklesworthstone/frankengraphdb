@@ -30,6 +30,12 @@ impl AsyncVertexSpillAggregatePlan {
         &self.definition
     }
 
+    /// Exact source fields needed by all aggregate input cells and predicates.
+    #[must_use]
+    pub fn property_demand(&self) -> VertexScanPropertyDemand {
+        self.input.property_demand()
+    }
+
     /// Payload demand of the complete compiled input, before any aggregate
     /// projection or reduction. Later host element reads retain their own
     /// source authority and do not require unused input property payloads.

@@ -47,6 +47,29 @@ mod record;
 pub use output::VertexScanOutput;
 pub use record::VertexScanRecord;
 
+/// Property fields observed by the complete compiled single-vertex evaluator.
+/// This projection proof grants no authority: every source still supplies the
+/// same-cut identity and labels and performs its normal visibility admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VertexScanPropertyDemand {
+    /// No vertex property is read.
+    Topology,
+    /// Every property read names this key on the one scanned vertex.
+    VertexProperty(PropertyKeyId),
+    /// Multiple keys, a graph probe, or an unproved program.
+    Complete,
+}
+
+impl VertexScanPropertyDemand {
+    fn with_vertex_property(self, key: PropertyKeyId) -> Self {
+        match self {
+            Self::Topology => Self::VertexProperty(key),
+            Self::VertexProperty(previous) if previous == key => self,
+            Self::VertexProperty(_) | Self::Complete => Self::Complete,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VertexScanBuildError {
     /// GLA instruction position, never source text or a graph identity.
@@ -104,33 +127,70 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             .any(|test| matches!(test, Test::Probe(_) | Test::Collect(_)))
     }
 
-    /// Whether the compiled local evaluator may inspect a property payload.
-    /// A false result permits an authenticated source to supply identity and
-    /// labels alone; visibility, candidate admission and all controls still
-    /// run normally. This proof covers the complete evaluation projection,
-    /// including hidden ordering cells, and never drops a fallible predicate.
-    /// Boolean programs retain every eager property operand, including inputs
-    /// of unselected scalar branches. Graph probes and unknown bindings remain
-    /// conservative; this proof never removes or evaluates an instruction.
+    /// Whether the complete compiled evaluator may inspect a vertex property.
+    /// Hidden ordering cells and aggregate inputs participate.
     #[must_use]
     pub fn requires_properties(&self) -> bool {
-        if self.tests.iter().any(|test| match test {
-            Test::Predicate(VertexPredicate::HasLabel(_)) | Test::Identity(_) => false,
-            Test::Binding(GlaOperator::SelectBoolean { expression }) => {
-                expression.referenced_vertex_properties().next().is_some()
-                    || expression.referenced_edge_properties().next().is_some()
+        self.property_demand() != VertexScanPropertyDemand::Topology
+    }
+
+    /// Prove the fields used by every local predicate and projection cell.
+    /// Boolean programs include all eager operands, even inputs of unselected
+    /// scalar branches. Repeated uses of one exact key share a selected field;
+    /// a second key, graph probe or unknown operation requires complete records.
+    ///
+    /// The local compiler proves every accepted binding and projected property
+    /// belongs to slot zero, the one physical vertex. This proof never removes,
+    /// evaluates or reorders an instruction, including on an empty output page.
+    #[must_use]
+    pub fn property_demand(&self) -> VertexScanPropertyDemand {
+        use VertexScanPropertyDemand::{Complete, Topology};
+
+        let mut demand = Topology;
+        for test in self.tests.iter() {
+            match test {
+                Test::Predicate(VertexPredicate::HasLabel(_)) | Test::Identity(_) => {}
+                Test::Predicate(
+                    VertexPredicate::IntegerProperty { key, .. }
+                    | VertexPredicate::ScalarProperty { key, .. }
+                    | VertexPredicate::PropertyNull { key, .. },
+                ) => demand = demand.with_vertex_property(*key),
+                Test::Binding(GlaOperator::CompareProperties {
+                    left_key,
+                    right_key,
+                    ..
+                }) => {
+                    demand = demand
+                        .with_vertex_property(*left_key)
+                        .with_vertex_property(*right_key);
+                }
+                Test::Binding(GlaOperator::SelectBoolean { expression }) => {
+                    if expression.referenced_edge_properties().next().is_some() {
+                        return Complete;
+                    }
+                    for (_, key) in expression.referenced_vertex_properties() {
+                        demand = demand.with_vertex_property(key);
+                    }
+                }
+                Test::Binding(_) | Test::Probe(_) | Test::Collect(_) => return Complete,
             }
-            Test::Predicate(_) | Test::Binding(_) | Test::Probe(_) | Test::Collect(_) => true,
-        }) {
-            return true;
         }
         match self.projection.as_ref() {
-            GlaOperator::Project { .. } => false,
-            GlaOperator::ProjectValues { columns } => columns
-                .iter()
-                .any(|column| !matches!(column, ValueProjection::Vertex { .. })),
-            _ => true,
+            GlaOperator::Project { .. } => {}
+            GlaOperator::ProjectValues { columns } => {
+                for column in columns {
+                    match column {
+                        ValueProjection::Vertex { .. } => {}
+                        ValueProjection::Property { key, .. } => {
+                            demand = demand.with_vertex_property(*key);
+                        }
+                        _ => return Complete,
+                    }
+                }
+            }
+            _ => return Complete,
         }
+        demand
     }
 
     /// Infallible root predicates that precede every Boolean expression and

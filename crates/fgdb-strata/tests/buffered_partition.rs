@@ -555,6 +555,382 @@ fn edge_point_and_adjacency_routes_keep_publication_winners_before_liveness() {
 }
 
 #[test]
+fn vertex_selected_property_scan_matches_history_and_seeded_points() {
+    run(|contexts, dir| async move {
+        let (store, id) = vertex_scan_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        for cut in 0..=5 {
+            let expected = {
+                let mut scan = view.vertex_scan(&cx, CommitSeq(cut)).unwrap();
+                let mut expected = Vec::new();
+                while let Some(candidate) = scan
+                    .next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap()
+                {
+                    expected.push((candidate.vid, candidate.row.map(|row| (*row).clone())));
+                }
+                expected
+            };
+            for key in [PropertyKeyId(11), PropertyKeyId(99)] {
+                let selected: Vec<_> = expected
+                    .iter()
+                    .map(|(vid, row)| {
+                        (
+                            *vid,
+                            row.as_ref().map(|row| {
+                                (
+                                    row.vid,
+                                    row.birth_ordinal,
+                                    row.created_at,
+                                    row.retired_at,
+                                    row.labels.clone(),
+                                    row.props
+                                        .iter()
+                                        .filter(|(candidate, _)| *candidate == key)
+                                        .cloned()
+                                        .collect::<Vec<_>>(),
+                                )
+                            }),
+                        )
+                    })
+                    .collect();
+                let mut admitted = Vec::new();
+                let actual = {
+                    let mut scan = view.vertex_scan(&cx, CommitSeq(cut)).unwrap();
+                    let mut actual = Vec::new();
+                    while let Some(candidate) = scan
+                        .next_property_candidate_with(&cx, key, &mut |event| {
+                            if let BufferedScanEvent::Identity(vid) = event {
+                                admitted.push(vid);
+                            }
+                            Ok::<_, ()>(())
+                        })
+                        .await
+                        .unwrap()
+                    {
+                        actual.push((
+                            candidate.vid,
+                            candidate.row.map(|row| {
+                                assert!(row.properties().len() <= 1);
+                                (
+                                    row.vid(),
+                                    row.birth_ordinal(),
+                                    row.created_at(),
+                                    row.retired_at(),
+                                    row.labels().to_vec(),
+                                    row.properties().to_vec(),
+                                )
+                            }),
+                        ));
+                    }
+                    actual
+                };
+                assert_eq!(actual, selected, "cut {cut}, key {key:?}");
+                assert_eq!(
+                    admitted,
+                    selected.iter().map(|(vid, _)| *vid).collect::<Vec<_>>(),
+                    "future and retired identities still admit one candidate",
+                );
+                let mut seeded = view
+                    .edge_scan(&cx, CommitSeq(cut))
+                    .unwrap()
+                    .into_join_scan();
+                for (vid, expected) in &selected {
+                    let candidate = seeded
+                        .vertex_property_candidate_with(&cx, *vid, key, &mut |_| Ok::<_, ()>(()))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(candidate.vid, *vid);
+                    let row = candidate.row.map(|row| {
+                        (
+                            row.vid(),
+                            row.birth_ordinal(),
+                            row.created_at(),
+                            row.retired_at(),
+                            row.labels().to_vec(),
+                            row.properties().to_vec(),
+                        )
+                    });
+                    assert_eq!(&row, expected);
+                    let topology = seeded
+                        .vertex_topology_candidate_with(&cx, *vid, &mut |_| Ok::<_, ()>(()))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        topology.row.map(|row| (row.vid(), row.labels().to_vec())),
+                        expected.as_ref().map(|row| (row.0, row.4.clone())),
+                    );
+                }
+                let absent = seeded
+                    .vertex_property_candidate_with(&cx, VId(99), key, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(absent.vid, VId(99));
+                assert!(absent.row.is_none());
+                seeded.close();
+                assert!(
+                    seeded
+                        .vertex_topology_candidate_with(&cx, VId(1), &mut |_| -> Result<(), ()> {
+                            panic!("closed source must be inert")
+                        })
+                        .await
+                        .unwrap()
+                        .is_none(),
+                );
+                drop(seeded);
+                assert_eq!(pool.used(), baseline);
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_property_topology_and_complete_pulls_keep_distinct_owners_and_reuse_heads() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let rows: Vec<_> = (1..=7)
+            .map(|vid| VertexRow {
+                labels: vec![LabelId(vid as u64)],
+                props: vec![
+                    (PropertyKeyId(11), CanonicalScalar::Int(vid as i64).into()),
+                    (
+                        PropertyKeyId(12),
+                        CanonicalPropertyValue::List(
+                            fgdb_types::CanonicalList::try_new(vec![
+                                CanonicalScalar::bytes(vec![vid as u8; 600]).unwrap().into(),
+                                CanonicalScalar::Int(vid as i64).into(),
+                            ])
+                            .unwrap(),
+                        ),
+                    ),
+                    (PropertyKeyId(13), CanonicalScalar::Null.into()),
+                ],
+                ..scan_vertex(vid, 1, None, 0)
+            })
+            .collect();
+        let patch = store
+            .put_patch(&commit, &encode_patch(&rows).unwrap())
+            .await
+            .unwrap();
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(1),
+                    blocks: vec![],
+                    vertex_patches: vec![PatchRef {
+                        patch_id: patch.0,
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let before = view.stats().bypasses;
+        let mut scan = view.vertex_scan(&cx, CommitSeq(1)).unwrap();
+        let mut observe = |_| Ok::<_, ()>(());
+        let unpolled = scan.next_property_candidate_with(&cx, PropertyKeyId(11), &mut observe);
+        drop(unpolled);
+        let first = scan
+            .next_property_candidate_with(&cx, PropertyKeyId(11), &mut observe)
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        let second = scan
+            .next_property_candidate_with(&cx, PropertyKeyId(12), &mut observe)
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        let third = scan
+            .next_topology_candidate_with(&cx, &mut observe)
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        let fourth = scan.next(&cx).await.unwrap().unwrap();
+        let fifth = scan
+            .next_property_candidate_with(&cx, PropertyKeyId(99), &mut observe)
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        let sixth = scan
+            .next_property_candidate_with(&cx, PropertyKeyId(13), &mut observe)
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        let seventh = scan
+            .next_property_candidate_with(&cx, PropertyKeyId(11), &mut observe)
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        assert!(scan.next(&cx).await.unwrap().is_none());
+        assert_eq!(first.vid(), VId(1));
+        assert_eq!(first.properties(), &rows[0].props[..1]);
+        assert_eq!(second.vid(), VId(2));
+        assert_eq!(second.properties(), &rows[1].props[1..2]);
+        assert_eq!(third.vid(), VId(3));
+        assert_eq!(third.labels(), &[LabelId(3)]);
+        assert_eq!(fourth.as_ref(), &rows[3]);
+        assert_eq!(fifth.vid(), VId(5));
+        assert!(fifth.properties().is_empty());
+        assert_eq!(sixth.vid(), VId(6));
+        assert_eq!(
+            sixth.properties(),
+            &[(PropertyKeyId(13), CanonicalScalar::Null.into())]
+        );
+        assert_eq!(seventh.vid(), VId(7));
+        assert_eq!(seventh.properties(), &rows[6].props[..1]);
+        assert!(first.charged_bytes() < fourth.charged_bytes());
+        assert_eq!(first.charged_bytes(), seventh.charged_bytes());
+        drop(scan);
+        assert_eq!(
+            view.stats().bypasses - before,
+            7,
+            "one initial topology read, five winning-key reads and one complete upgrade; no per-identity history restart",
+        );
+        drop(view);
+        let retained = first.charged_bytes()
+            + second.charged_bytes()
+            + third.charged_bytes()
+            + fourth.charged_bytes()
+            + fifth.charged_bytes()
+            + sixth.charged_bytes()
+            + seventh.charged_bytes();
+        assert_eq!(pool.used(), retained, "returned owners outlive the view");
+        drop((first, second, third, fourth, fifth, sixth, seventh));
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_property_refusal_at_every_candidate_and_work_boundary_fuses_and_refunds() {
+    run(|contexts, dir| async move {
+        let (store, id) = vertex_scan_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let mut events = Vec::new();
+        {
+            let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
+            while scan
+                .next_property_candidate_with(&cx, PropertyKeyId(11), &mut |event| {
+                    events.push(event);
+                    Ok::<_, ()>(())
+                })
+                .await
+                .unwrap()
+                .is_some()
+            {}
+        }
+        for stop in 0..events.len() {
+            let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
+            let mut observed = Vec::new();
+            loop {
+                let result = scan
+                    .next_property_candidate_with(&cx, PropertyKeyId(11), &mut |event| {
+                        if observed.len() == stop {
+                            return Err(stop);
+                        }
+                        observed.push(event);
+                        Ok(())
+                    })
+                    .await;
+                match result {
+                    Ok(Some(_)) => {}
+                    Err(BufferedScanError::Control(at)) => {
+                        assert_eq!(at, stop);
+                        break;
+                    }
+                    other => panic!("expected refusal at {stop}, got {other:?}"),
+                }
+            }
+            assert_eq!(observed, events[..stop]);
+            assert_eq!(
+                scan.work_used(),
+                observed
+                    .iter()
+                    .filter(|event| **event == BufferedScanEvent::Work)
+                    .count(),
+            );
+            assert!(
+                scan.next_property_candidate_with(&cx, PropertyKeyId(99), &mut |_| -> Result<
+                    (),
+                    (),
+                > {
+                    panic!("failed selected scan must be inert")
+                })
+                .await
+                .unwrap()
+                .is_none(),
+            );
+            assert!(scan.next(&cx).await.unwrap().is_none());
+            drop(scan);
+            assert_eq!(pool.used(), baseline, "callback {stop}");
+        }
+        let before = view.stats();
+        let mut seeded = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
+        assert!(matches!(
+            seeded
+                .vertex_property_candidate_with(&cx, VId(1), PropertyKeyId(11), &mut |event| {
+                    assert_eq!(event, BufferedScanEvent::Identity(VId(1)));
+                    Err(7)
+                })
+                .await,
+            Err(BufferedScanError::Control(7)),
+        ));
+        assert!(seeded.is_closed());
+        assert_eq!(seeded.work_used(), 0);
+        drop(seeded);
+        assert_eq!(
+            view.stats(),
+            before,
+            "seed refusal precedes any history I/O"
+        );
+        assert_eq!(pool.used(), baseline);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn cold_points_select_all_matching_histories_and_only_the_winning_property_patch() {
     run(|contexts, dir| async move {
         let (store, id) = routed_fixture(&contexts, &dir).await;

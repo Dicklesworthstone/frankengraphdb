@@ -12,6 +12,40 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Selected vertex-property buffered queries — qualification pending
+
+Vertex-local scan plans now distinguish topology, one exact vertex-property
+key, and complete-record demand. Every local predicate, eager Boolean operand,
+projection cell and hidden sort/aggregate input contributes to that proof.
+Repeated uses of one key share the selected field; a second key, graph probe
+or unproved operation retains complete-record admission.
+
+The buffered facade applies the proof to ordinary and identity-seeded inputs,
+including external sorting and aggregation. The ordered FGSV merge selects
+the complete same-cut history winner before decoding its requested field.
+Positional materialization reuses the active patch workspace and transfers
+the value into an independently charged opaque owner. It does not re-run a
+point-history search for each scan row. Seeded topology and selected-property
+pulls use the same existing point resolver and cumulative controls.
+
+Regression sources cover full-width keys, absent versus actual NULL, removed
+properties, retired identities, historical labels, mixed complete/projected
+pulls, pinned cuts through compaction, resolver-bound values, corruption,
+every refusal/cancellation boundary and reservation ownership. Public tests
+exercise a 96-cell selected projection with only 4 MiB remaining, complete
+fallback for a second field, external sort, duplicate identity seeds and
+COUNT/SUM/AVG inputs.
+
+All twelve changed Rust files pass individual pinned Rustfmt checks;
+whitespace checks and independent source review are complete. Static-only UBS
+exited 0 with no critical findings; added-line review found no introduced
+production finding. Its AST rule pack is unavailable and Cargo phases are
+excluded, so this remains limited static evidence. Compilation, runtime assertions, Clippy and full exact-tree
+qualification remain **UNRUN** under repeated executor resets and unstable
+build-resource headroom. No performance benchmark is claimed. Complete root
+admission and whole-extent authentication remain required, and broad
+`fgdb-w3-properties-gou` and `fgdb-w3-buffer-g2v` remain open.
+
 ### Streaming aggregates over collected neighborhoods — qualification pending
 
 The vertex aggregate cursor now carries each root's collected neighborhood

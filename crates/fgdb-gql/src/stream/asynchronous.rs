@@ -98,6 +98,12 @@ pub struct AsyncVertexScanPlan<Row = VId> {
 }
 
 impl<Row: VertexScanOutput> AsyncVertexScanPlan<Row> {
+    /// Exact field demand of the complete compiled local evaluator.
+    #[must_use]
+    pub fn property_demand(&self) -> VertexScanPropertyDemand {
+        self.inner.property_demand()
+    }
+
     /// Whether this complete compiled source projection can read properties.
     /// Hosts may use authenticated topology rows only when this returns false.
     #[must_use]

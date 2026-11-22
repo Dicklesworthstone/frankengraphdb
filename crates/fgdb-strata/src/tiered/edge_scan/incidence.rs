@@ -3,7 +3,9 @@
 //! The existing EId merge selects history winners and property locators.
 
 use super::*;
-use crate::store::{BufferedScanEvent, BufferedVertexCandidate, BufferedVertexScanState};
+use crate::store::{
+    BufferedScanEvent, BufferedVertexCandidate, BufferedVertexProperty, BufferedVertexScanState,
+};
 use fgdb_types::VId;
 
 mod stream;
@@ -170,6 +172,81 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
                 *used = used.saturating_add(1);
                 Ok(())
             })
+            .await;
+        self.work = driver.root.work.used;
+        if result.is_ok() {
+            self.driver = Some(driver);
+        }
+        result.map(|row| Some(BufferedVertexCandidate { vid, row }))
+    }
+
+    /// Resolve only a selected vertex's identity, lifetime and labels. The
+    /// candidate, shared work meter and terminal lifecycle match the complete
+    /// seeded read; property payloads are not requested.
+    pub async fn vertex_topology_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        vid: VId,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate<BufferedVertexTopology>>, BufferedScanError<C>> {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        self.continuation = None;
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        observe(BufferedScanEvent::Identity(vid)).map_err(BufferedScanError::Control)?;
+        let used = &mut self.work;
+        let result = driver
+            .root
+            .partition
+            .edge_scan_vertex_topology(cx, vid, self.as_of, &mut driver.root.work, &mut |event| {
+                debug_assert_eq!(event, BufferedEdgeScanEvent::Work);
+                observe(BufferedScanEvent::Work)?;
+                *used = used.saturating_add(1);
+                Ok(())
+            })
+            .await;
+        self.work = driver.root.work.used;
+        if result.is_ok() {
+            self.driver = Some(driver);
+        }
+        result.map(|row| Some(BufferedVertexCandidate { vid, row }))
+    }
+
+    /// Resolve one selected key only after this vertex's visible history
+    /// winner is known. The returned partial owner retains the same-cut labels
+    /// and distinguishes an absent key from a stored NULL. Every history and
+    /// materialization event shares this driver's cumulative source allowance.
+    pub async fn vertex_property_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        vid: VId,
+        key: PropertyKeyId,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate<BufferedVertexProperty>>, BufferedScanError<C>> {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        self.continuation = None;
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        observe(BufferedScanEvent::Identity(vid)).map_err(BufferedScanError::Control)?;
+        let used = &mut self.work;
+        let result = driver
+            .root
+            .partition
+            .edge_scan_vertex_property(
+                cx,
+                vid,
+                key,
+                self.as_of,
+                &mut driver.root.work,
+                &mut |event| {
+                    debug_assert_eq!(event, BufferedEdgeScanEvent::Work);
+                    observe(BufferedScanEvent::Work)?;
+                    *used = used.saturating_add(1);
+                    Ok(())
+                },
+            )
             .await;
         self.work = driver.root.work.used;
         if result.is_ok() {

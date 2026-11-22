@@ -470,16 +470,10 @@ fn external_scalar_identity_roots_narrow_id_and_element_id_correlations_across_c
                     "only distinct canonical decimal elementId seeds (0, 7, 13, u128::MAX): {shape}"
                 );
                 for run_rows in [1, 2] {
-                    let (rows, _, stats) = ordered_parameters(
-                        &mut view,
-                        &cx,
-                        &shape,
-                        &eid_params,
-                        policy(),
-                        run_rows,
-                    )
-                    .await
-                    .unwrap();
+                    let (rows, _, stats) =
+                        ordered_parameters(&mut view, &cx, &shape, &eid_params, policy(), run_rows)
+                            .await
+                            .unwrap();
                     assert_eq!(rows, expected_eid_rows);
                     assert_eq!(stats.snapshot_records, 68);
                 }
@@ -1035,6 +1029,138 @@ fn vertex_probe_external_errors_preserve_predicate_order_and_zero_window_barrier
         }
         drop(view);
         assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn selected_vertex_fields_reach_external_sort_seeded_inputs_and_aggregates() {
+    let ((), report) = run_async_under_lab(0xe6_7a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db =
+            Database::create_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys())
+                .await
+                .unwrap();
+        for (at, value) in [7, 9].into_iter().enumerate() {
+            let mut batch = WriteBatch::new(R);
+            batch.create_vertex(
+                IDS[at],
+                vec![],
+                vec![
+                    (P, CanonicalScalar::Int(value)),
+                    (
+                        PropertyKeyId((1_u64 << 40) | P.0),
+                        CanonicalScalar::ucs_basic_text(&"x".repeat(12 * 1024)).unwrap(),
+                    ),
+                ],
+            );
+            assert_eq!(
+                db.write(&contexts.commit(), batch).await.unwrap(),
+                CommitSeq(at as u64 + 1)
+            );
+        }
+        let source_pool = memory();
+        let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+        let occupied = source_pool
+            .reserve(&cx, source_pool.available() - 4 * 1024 * 1024)
+            .unwrap();
+        let columns = (0..96)
+            .map(|at| format!("n.p AS cell_{at}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let expected = |values: &[i64]| {
+            values
+                .iter()
+                .map(|value| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Scalar(CanonicalScalar::Int(
+                            *value
+                        ));
+                        96
+                    ])
+                    .canonical_bytes()
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let (rows, cut, stats) = ordered_parameters(
+            &mut view,
+            &cx,
+            &format!("MATCH (n) RETURN {columns} ORDER BY cell_0 DESC"),
+            &GqlParameters::new(),
+            policy(),
+            8,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows, expected(&[9, 7]));
+        assert_eq!(cut, CommitSeq(2));
+        assert_eq!(stats.snapshot_records, 2);
+
+        let parameters = GqlParameters::new()
+            .with_list(
+                "ids",
+                vec![
+                    GraphValue::Vertex(IDS[1]),
+                    GraphValue::Vertex(IDS[0]),
+                    GraphValue::Vertex(IDS[1]),
+                    GraphValue::Vertex(VId(13)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ],
+            )
+            .unwrap();
+        let text = format!(
+            "UNWIND $ids AS wanted MATCH (n) WHERE n=wanted \
+             RETURN {columns} ORDER BY cell_0 DESC"
+        );
+        let logical = PreparedGraphSetText::prepare(&text, resolve)
+            .unwrap()
+            .bind_parameters(&parameters)
+            .unwrap();
+        let physical = AsyncSpillSetPlan::compile(&logical).unwrap();
+        assert!(
+            matches!(physical.source(), AsyncSpillSetSourcePlan::Cross(plan)
+                if plan.vertex_seed_column() == Some(0))
+        );
+        let (rows, cut, stats) =
+            ordered_parameters(&mut view, &cx, &text, &parameters, policy(), 8)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            expected(&[9, 9, 7]),
+            "outer multiplicity is preserved"
+        );
+        assert_eq!(cut, CommitSeq(2));
+        assert_eq!(
+            stats.snapshot_records, 3,
+            "distinct seeds include the missing identity"
+        );
+
+        let rows = aggregate(
+            &mut view,
+            &cx,
+            "MATCH (n) RETURN count(n.p) AS c,sum(n.p) AS s,avg(n.p) AS a",
+            policy(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                vec![],
+                vec![
+                    GraphAggregateValue::Count(2),
+                    GraphAggregateValue::Integer(16),
+                    GraphAggregateValue::Average(GraphExactAverage::new(16, 2).unwrap()),
+                ],
+            )]
+        );
+        drop(view);
+        drop(occupied);
+        assert_eq!(source_pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
