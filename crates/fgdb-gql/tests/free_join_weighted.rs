@@ -175,6 +175,158 @@ fn weighted_products_seek_the_last_of_ten_to_the_thirty_six_rows() {
 }
 
 #[test]
+fn factorized_bindings_keep_weighted_products_unions_and_nullary_relations() {
+    let schemas = vec![vec![], vec![V(0), V(1)], vec![V(0), V(2)], vec![V(0), V(3)]];
+    let data = vec![
+        vec![(vec![], 2), (vec![], 3)],
+        vec![(vec![10, 1], 2), (vec![10, 2], 3), (vec![20, 4], 7)],
+        vec![(vec![10, 5], 11), (vec![10, 6], 13), (vec![20, 8], 17)],
+        vec![(vec![10, 9], 19), (vec![20, 0], 23)],
+    ];
+    let expected = [
+        ([10, 1, 5, 9], 5 * 2 * 11 * 19),
+        ([10, 1, 6, 9], 5 * 2 * 13 * 19),
+        ([10, 2, 5, 9], 5 * 3 * 11 * 19),
+        ([10, 2, 6, 9], 5 * 3 * 13 * 19),
+        ([20, 4, 8, 0], 5 * 7 * 17 * 23),
+    ];
+    for order in [vec![V(0), V(1), V(2), V(3)], vec![V(1), V(0), V(3), V(2)]] {
+        let wanted: BTreeMap<Vec<u128>, u128> = expected
+            .iter()
+            .map(|(row, weight)| (order.iter().map(|v| row[v.0 as usize]).collect(), *weight))
+            .collect();
+        let plan = FreeJoinPlan::generic(schemas.clone(), order).unwrap();
+        let tries = inputs(&plan, &schemas, &data);
+        let batch = FreeJoin::new(&plan, &tries)
+            .unwrap()
+            .factorize(&mut allow)
+            .unwrap();
+        let mut observed = BTreeMap::new();
+        batch
+            .for_each_binding(&mut allow, |binding, _| {
+                let row = binding.values().copied().collect();
+                assert!(
+                    observed
+                        .insert(row, binding.multiplicity().unwrap())
+                        .is_none()
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(observed, wanted);
+        assert_eq!(observed, collect(&plan, &tries));
+        assert_eq!(batch.cardinality(), Ok(wanted.values().sum()));
+    }
+}
+
+#[test]
+fn factorized_binding_visits_ignore_occurrence_count_even_when_u128_overflows() {
+    let order: Vec<_> = (0..7).map(V).collect();
+    let schemas: Vec<_> = order.iter().map(|&variable| vec![variable]).collect();
+    let plan = FreeJoinPlan::generic(schemas.clone(), order).unwrap();
+    let mut traces = Vec::new();
+    for weight in [1, 1_000_000] {
+        let data: Vec<_> = (0..7_u128).map(|key| vec![(vec![key], weight)]).collect();
+        let tries = inputs(&plan, &schemas, &data);
+        let batch = FreeJoin::new(&plan, &tries)
+            .unwrap()
+            .factorize(&mut allow)
+            .unwrap();
+        let expected_count = if weight == 1 {
+            Ok(1)
+        } else {
+            Err(MultiplicityOverflow)
+        };
+        assert_eq!(batch.cardinality(), expected_count);
+        let mut trace = Vec::new();
+        let mut emissions = 0;
+        batch
+            .for_each_binding(
+                &mut |event| {
+                    trace.push(event);
+                    Ok::<_, Infallible>(())
+                },
+                |binding, _| {
+                    emissions += 1;
+                    assert_eq!(
+                        binding.values().copied().collect::<Vec<_>>(),
+                        (0..7).collect::<Vec<_>>()
+                    );
+                    assert_eq!(binding.multiplicity(), expected_count);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(emissions, 1);
+        traces.push(trace);
+    }
+    assert_eq!(
+        traces[0], traces[1],
+        "visits must not flatten bag occurrences"
+    );
+}
+
+#[test]
+fn factorized_binding_control_and_sink_refusals_leave_the_batch_reusable() {
+    let schemas = vec![vec![V(0), V(1)], vec![V(0), V(2)], vec![V(0), V(3)]];
+    let plan = FreeJoinPlan::generic(schemas.clone(), vec![V(0), V(1), V(2), V(3)]).unwrap();
+    let data = vec![vec![(vec![0, 1], 2), (vec![0, 2], 3)]; 3];
+    let tries = inputs(&plan, &schemas, &data);
+    let batch = FreeJoin::new(&plan, &tries)
+        .unwrap()
+        .factorize(&mut allow)
+        .unwrap();
+    let mut total = 0;
+    batch
+        .for_each_binding(
+            &mut |_| {
+                total += 1;
+                Ok::<_, usize>(())
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(total > 0);
+    for stop in 0..total {
+        let mut observed = 0;
+        let result = batch.for_each_binding(
+            &mut |_| {
+                let at = observed;
+                observed += 1;
+                if at == stop { Err(at) } else { Ok(()) }
+            },
+            |_, _| Ok(()),
+        );
+        assert_eq!(result, Err(stop));
+        assert_eq!(observed, stop + 1);
+    }
+    let mut emitted = 0;
+    assert_eq!(
+        batch.for_each_binding(&mut |_| Ok(()), |_, _| {
+            emitted += 1;
+            if emitted == 2 { Err("sink") } else { Ok(()) }
+        }),
+        Err("sink")
+    );
+    assert_eq!(emitted, 2);
+    let mut observed = BTreeMap::new();
+    batch
+        .for_each_binding(&mut allow, |binding, _| {
+            assert!(
+                observed
+                    .insert(
+                        binding.values().copied().collect(),
+                        binding.multiplicity().unwrap()
+                    )
+                    .is_none()
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(observed, collect(&plan, &tries));
+}
+
+#[test]
 fn zero_arity_width_and_weight_errors_remain_distinct() {
     let unit =
         ColumnarTrie::<u128>::new_weighted(&[], &[], vec![(vec![], 2), (vec![], 5)], 1, &mut allow)
@@ -231,6 +383,14 @@ fn weighted_empty_input_annihilates_an_overflowing_factorized_product() {
         .unwrap();
     assert_eq!(empty.cardinality(), Ok(0));
     assert!(collect(&plan, &tries).is_empty());
+    let mut emissions = 0;
+    empty
+        .for_each_binding(&mut allow, |_, _| {
+            emissions += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(emissions, 0);
 }
 
 #[test]

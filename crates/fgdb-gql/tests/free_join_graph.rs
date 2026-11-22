@@ -260,3 +260,312 @@ fn empty_descriptors_and_empty_vertex_domains_have_no_phantom_rows() {
         assert_eq!(cursor.key(), None);
     }
 }
+
+mod calibrated_factorized_pages {
+    use core::convert::Infallible;
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_gql::algebra::{
+        GlaDirection, GraphPatternBuilder, GraphValue, GraphValueRow, PreparedGraphPattern,
+    };
+    use fgdb_gql::free_join::{CalibratedFreeJoin, ConformalJoinCalibration, JoinStrategy};
+    use fgdb_gql::{
+        GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
+        PreparedGraphText,
+    };
+    use fgdb_types::{EId, VId};
+    use std::cell::Cell;
+
+    type Edge = (EId, VId, RelationId, VId);
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Property, "score") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        }
+    }
+
+    fn prepare(tail: &str) -> PreparedGraphPattern<GraphValueRow> {
+        PreparedGraphText::prepare_with_resolver(
+            &format!(
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]->(x), (a)-[:R]->(y), (a)-[:R]->(z) {tail}"
+            ),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    }
+
+    fn edges(weights: [usize; 2]) -> Vec<Edge> {
+        let mut result = Vec::new();
+        for (target, count) in [(VId(2), weights[0]), (VId(3), weights[1])] {
+            for _ in 0..count {
+                result.push((EId(result.len() as u128 + 1), VId(1), RelationId(1), target));
+            }
+        }
+        result
+    }
+
+    fn policy() -> GqlQueryPolicy {
+        GqlQueryPolicy::new(10_000, 10_000, 250_000, 250_000)
+    }
+
+    fn fallback() -> ConformalJoinCalibration {
+        ConformalJoinCalibration {
+            observed_residual_override: Some(0.95),
+            ..ConformalJoinCalibration::default()
+        }
+    }
+
+    #[test]
+    fn factorized_and_generic_projections_preserve_bags_distinct_hidden_keys_and_pages() {
+        let input = edges([2, 3]);
+        for tail in [
+            "RETURN ALL x, y, z ORDER BY x, y, z",
+            "RETURN ALL x, y, z ORDER BY x, y, z SKIP 3 LIMIT 7",
+            "RETURN ALL x ORDER BY x SKIP 7 LIMIT 5",
+            "RETURN DISTINCT x ORDER BY x",
+            "RETURN DISTINCT x, y, z ORDER BY x, y, z SKIP 1 LIMIT 3",
+            "RETURN ALL a, y ORDER BY x DESC, y, z SKIP 4 LIMIT 8",
+            "RETURN ALL x ORDER BY y.score DESC, x SKIP 3 LIMIT 7",
+            "RETURN ALL x, y, z ORDER BY x, y, z LIMIT 0",
+        ] {
+            let query = prepare(tail);
+            let plan = query.plan();
+            let physical = CalibratedFreeJoin::try_compile(plan.operators()).unwrap();
+            let baseline = plan
+                .execute_governed_with_identified_properties(
+                    input.len() as u64,
+                    [VId(1), VId(2), VId(3)],
+                    input.iter().copied(),
+                    |_, _| Ok::<_, Infallible>(true),
+                    |_, _| Ok(None),
+                    policy(),
+                    || Ok::<_, Infallible>(()),
+                )
+                .unwrap();
+            for (calibration, strategy) in [
+                (
+                    ConformalJoinCalibration::default(),
+                    JoinStrategy::FactorizedFreeJoin,
+                ),
+                (fallback(), JoinStrategy::WorstCaseOptimalGeneric),
+            ] {
+                let (actual, card) = physical
+                    .execute_governed_with_calibration(
+                        plan,
+                        input.len() as u64,
+                        [VId(1), VId(2), VId(3)],
+                        input.iter().copied(),
+                        |_, _| Ok::<_, Infallible>(true),
+                        |_, _| Ok(None),
+                        &calibration,
+                        policy(),
+                        || Ok::<_, Infallible>(()),
+                    )
+                    .unwrap();
+                assert_eq!(card.selected_strategy, strategy, "{tail}");
+                assert_eq!(actual.value, baseline.value, "{tail}");
+                assert_eq!(actual.rows.result_rows, actual.value.len() as u64);
+            }
+        }
+    }
+
+    #[test]
+    fn weighted_prefixes_keep_canonical_visible_ties_for_bounded_pages() {
+        // Prefix Unit weights for x and y repeat a suffix containing both
+        // z=2 and z=3. Visiting weighted bindings groups those occurrences
+        // differently from flattening the factor tree. Every ORDER BY a key
+        // is equal, so the complete visible row must break ties: eighteen
+        // z=2 occurrences precede nine z=3 occurrences, regardless of arrival.
+        let input = edges([2, 1]);
+        for (tail, expected_vertices) in [
+            (
+                "RETURN ALL z ORDER BY a LIMIT 20",
+                [vec![VId(2); 18], vec![VId(3); 2]].concat(),
+            ),
+            (
+                "RETURN ALL z ORDER BY a SKIP 17 LIMIT 5",
+                vec![VId(2), VId(3), VId(3), VId(3), VId(3)],
+            ),
+        ] {
+            let expected: Vec<_> = expected_vertices
+                .into_iter()
+                .map(|vid| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(vid)]))
+                .collect();
+            let query = prepare(tail);
+            let plan = query.plan();
+            let physical = CalibratedFreeJoin::try_compile(plan.operators()).unwrap();
+            let baseline = plan
+                .execute_governed_with_identified_properties(
+                    input.len() as u64,
+                    [VId(1), VId(2), VId(3)],
+                    input.iter().copied(),
+                    |_, _| Ok::<_, Infallible>(true),
+                    |_, _| Ok(None),
+                    policy(),
+                    || Ok::<_, Infallible>(()),
+                )
+                .unwrap();
+            assert_eq!(baseline.value, expected, "{tail}");
+            for (calibration, strategy) in [
+                (
+                    ConformalJoinCalibration::default(),
+                    JoinStrategy::FactorizedFreeJoin,
+                ),
+                (fallback(), JoinStrategy::WorstCaseOptimalGeneric),
+            ] {
+                let (actual, card) = physical
+                    .execute_governed_with_calibration(
+                        plan,
+                        input.len() as u64,
+                        [VId(1), VId(2), VId(3)],
+                        input.iter().copied(),
+                        |_, _| Ok::<_, Infallible>(true),
+                        |_, _| Ok(None),
+                        &calibration,
+                        policy(),
+                        || Ok::<_, Infallible>(()),
+                    )
+                    .unwrap();
+                assert_eq!(card.selected_strategy, strategy, "{tail}");
+                assert_eq!(actual.value, baseline.value, "{tail}");
+                assert_eq!(actual.rows.result_rows, expected.len() as u64);
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_factorized_pages_do_not_flatten_millions_of_parallel_edge_occurrences() {
+        // 256 physical edges, eight complete vertex assignments and 256^3 bag
+        // occurrences. A DISTINCT or small page fits the same governed budget
+        // as its live generic incumbent; enumerating the occurrence bag cannot.
+        let input = edges([128, 128]);
+        for (tail, length) in [
+            ("RETURN DISTINCT x ORDER BY x", 2),
+            ("RETURN ALL x, y, z ORDER BY x, y, z LIMIT 0", 0),
+            ("RETURN ALL x, y, z ORDER BY x, y, z SKIP 5 LIMIT 7", 7),
+            ("RETURN ALL x ORDER BY x DESC LIMIT 1", 1),
+            ("RETURN ALL a, y ORDER BY x DESC, y, z SKIP 5 LIMIT 7", 7),
+        ] {
+            let query = prepare(tail);
+            let plan = query.plan();
+            let physical = CalibratedFreeJoin::try_compile(plan.operators()).unwrap();
+            let mut results = Vec::new();
+            for (calibration, strategy) in [
+                (
+                    ConformalJoinCalibration::default(),
+                    JoinStrategy::FactorizedFreeJoin,
+                ),
+                (fallback(), JoinStrategy::WorstCaseOptimalGeneric),
+            ] {
+                let (actual, card) = physical
+                    .execute_governed_with_calibration(
+                        plan,
+                        input.len() as u64,
+                        [VId(1), VId(2), VId(3)],
+                        input.iter().copied(),
+                        |_, _| Ok::<_, Infallible>(true),
+                        |_, _| Ok(None),
+                        &calibration,
+                        policy(),
+                        || Ok::<_, Infallible>(()),
+                    )
+                    .unwrap();
+                assert_eq!(card.selected_strategy, strategy, "{tail}");
+                assert_eq!(actual.value.len(), length, "{tail}");
+                results.push(actual.value);
+            }
+            assert_eq!(results[0], results[1], "{tail}");
+        }
+    }
+
+    #[test]
+    fn factorized_pages_keep_late_visible_and_hidden_projection_errors() {
+        let input = edges([2, 3]);
+        for tail in [
+            "RETURN ALL x.score AS score ORDER BY score LIMIT 0",
+            "RETURN DISTINCT x.score AS score ORDER BY score LIMIT 1",
+            "RETURN ALL x.score AS score ORDER BY score SKIP 200 LIMIT 1",
+            "RETURN ALL a ORDER BY x.score LIMIT 0",
+            "RETURN ALL a ORDER BY x.score LIMIT 1",
+        ] {
+            let query = prepare(tail);
+            let plan = query.plan();
+            let physical = CalibratedFreeJoin::try_compile(plan.operators()).unwrap();
+            for calibration in [ConformalJoinCalibration::default(), fallback()] {
+                let successful_reads = Cell::new(0);
+                let result = physical.execute_governed_with_calibration(
+                    plan,
+                    input.len() as u64,
+                    [VId(1), VId(2), VId(3)],
+                    input.iter().copied(),
+                    |_, _| Ok::<_, &str>(true),
+                    |vid, _| {
+                        if vid == VId(3) {
+                            Err("late property source")
+                        } else {
+                            successful_reads.set(successful_reads.get() + 1);
+                            Ok(None)
+                        }
+                    },
+                    &calibration,
+                    policy(),
+                    || Ok::<_, Infallible>(()),
+                );
+                assert!(
+                    matches!(result, Err(GqlQueryError::Source("late property source"))),
+                    "{tail}: {result:?}"
+                );
+                assert!(
+                    successful_reads.get() > 0,
+                    "refusal must follow an earlier binding"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overflowing_offset_plus_count_never_wraps_a_factorized_page_cap() {
+        let mut builder = GraphPatternBuilder::default();
+        for name in ["a", "x", "y", "z"] {
+            builder.vertex(name).unwrap();
+        }
+        for leaf in ["x", "y", "z"] {
+            builder
+                .edge("a", RelationId(1), GlaDirection::Forward, leaf)
+                .unwrap();
+        }
+        let query = builder
+            .prepare_bindings(&["x", "y", "z"], u64::MAX, Some(2))
+            .unwrap()
+            .with_duplicates();
+        let plan = query.plan();
+        let physical = CalibratedFreeJoin::try_compile(plan.operators()).unwrap();
+        let input = edges([2, 3]);
+        for (calibration, strategy) in [
+            (
+                ConformalJoinCalibration::default(),
+                JoinStrategy::FactorizedFreeJoin,
+            ),
+            (fallback(), JoinStrategy::WorstCaseOptimalGeneric),
+        ] {
+            let (actual, card) = physical
+                .execute_governed_with_calibration(
+                    plan,
+                    input.len() as u64,
+                    [VId(1), VId(2), VId(3)],
+                    input.iter().copied(),
+                    |_, _| Ok::<_, Infallible>(true),
+                    |_, _| Ok(None),
+                    &calibration,
+                    policy(),
+                    || Ok::<_, Infallible>(()),
+                )
+                .unwrap();
+            assert_eq!(card.selected_strategy, strategy);
+            assert!(actual.value.is_empty());
+        }
+    }
+}

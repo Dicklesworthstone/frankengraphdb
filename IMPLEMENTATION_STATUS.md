@@ -12,6 +12,26 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Factorized join multiplicities through ordered projection — qualification pending
+
+The calibrated factorized FreeJoin strategy now visits complete bindings with
+their original multiplicity factors. DISTINCT and bounded ordered pages apply
+the same terminal occurrence cap as the generic FreeJoin strategy; they no
+longer flatten the entire parallel-edge product first. Bags whose total
+cardinality overflows `u128` remain traversable without reopening the join.
+Unbounded bag projection still emits every occurrence. LIMIT 0 still evaluates
+each binding's projection, including hidden sort cells, so source errors and
+cancellation remain observable.
+
+Regression sources compare the factorized strategy with the generic strategy
+and the existing GLA evaluator, and cover weighted products/unions, nullary
+relations, overflow, offsets, hidden order keys, resource limits and refused
+visits. This change avoids duplicate expansion; it still enumerates distinct
+complete bindings and retains the existing in-memory factor tree. Spill,
+RunSlice integration and the broader factorization work remain open under
+`fgdb-w5-factorization-awm`. Runtime and exact-tree qualification are recorded
+with the landing evidence rather than inferred from source review.
+
 ### Selected edge-property buffered queries — qualification pending
 
 The single-edge compiler now exposes one complete field-demand proof:

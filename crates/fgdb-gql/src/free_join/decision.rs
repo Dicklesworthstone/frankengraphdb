@@ -15,8 +15,8 @@
 
 use super::graph::SliceAdjacencyTrie;
 use super::{
-    FactorizedBatch, FreeJoin, FreeJoinPlan, GraphTrieError, JoinVariable, MAX_JOIN_RELATIONS,
-    MAX_JOIN_VARIABLES,
+    FactorizedBatch, FreeJoin, FreeJoinPlan, GraphTrieError, JoinBinding, JoinVariable,
+    MAX_JOIN_RELATIONS, MAX_JOIN_VARIABLES,
 };
 use crate::algebra::{
     EdgeRelation, GlaDirection, GlaOperator, GlaOutput, GlaPlan, ValueProjection, VertexPredicate,
@@ -986,30 +986,22 @@ impl CalibratedFreeJoin {
 
         if card.selected_strategy == JoinStrategy::FactorizedFreeJoin {
             // Genuine `FactorizedBatch` intermediate execution for patterns with
-            // independent suffix components.
+            // independent suffix components. Preserve bag weights until the
+            // terminal projection: flattening the whole batch first makes even
+            // DISTINCT / LIMIT 0 visit the product of parallel-edge counts.
             let batch: FactorizedBatch<VId> = join.factorize(control)?;
-            if let Ok(mut cursor) = batch.cursor() {
-                loop {
-                    let cols = cursor.next_batch(256, control).map_err(|err| match err {
-                        super::FactorizedReadError::Control(e) => e,
-                        super::FactorizedReadError::Failed => {
-                            unreachable!("fresh cursor has not failed")
-                        }
-                    })?;
-                    if cols.row_count() == 0 {
-                        break;
-                    }
-                    let batch_vars = cols.variables();
-                    let batch_cols = cols.columns();
-                    for row_idx in 0..cols.row_count() {
-                        for (slot_at, &var) in self.slot_to_var.iter().enumerate() {
-                            control(GlaExecutionEvent::Work)?;
-                            let var_col = batch_vars
-                                .iter()
-                                .position(|&v| v == var)
-                                .expect("factorized batch binds every plan variable");
-                            bound_slots[slot_at] = Some(batch_cols[var_col][row_idx]);
-                        }
+            batch.for_each_binding(control, |binding, control| {
+                for (slot_at, &var) in self.slot_to_var.iter().enumerate() {
+                    control(GlaExecutionEvent::Work)?;
+                    bound_slots[slot_at] =
+                        Some(*binding.get(var).expect("complete factorized binding"));
+                }
+                emit_projection_occurrences(
+                    &binding,
+                    self.distinct,
+                    self.page_capacity,
+                    control,
+                    |control| {
                         control(GlaExecutionEvent::Work)?;
                         Row::collect_properties(
                             &operators[self.projection_index],
@@ -1017,22 +1009,10 @@ impl CalibratedFreeJoin {
                             &mut projected,
                             &mut |vid, key| property(vid, key).map_err(GqlQueryError::Source),
                             control,
-                        )?;
-                    }
-                }
-            } else {
-                self.emit_streaming_bindings(
-                    &join,
-                    operators,
-                    has_different_edges,
-                    &atom_forward_idx,
-                    &oriented_runs,
-                    &mut bound_slots,
-                    &mut projected,
-                    property,
-                    control,
-                )?;
-            }
+                        )
+                    },
+                )
+            })?;
         } else {
             self.emit_streaming_bindings(
                 &join,
@@ -1144,29 +1124,14 @@ impl CalibratedFreeJoin {
                         emit(control)?;
                     }
                 }
-            } else if self.distinct {
-                emit(control)?;
-            } else if let Some(capacity) = self.page_capacity {
-                if capacity == 0 {
-                    if !binding.multiplicity_factors().contains(&0) {
-                        emit(control)?;
-                    }
-                } else {
-                    let copies =
-                        binding
-                            .multiplicity_factors()
-                            .iter()
-                            .fold(1_u128, |n, &weight| {
-                                n.checked_mul(weight as u128)
-                                    .unwrap_or(u128::from(capacity))
-                                    .min(u128::from(capacity))
-                            });
-                    for _ in 0..copies {
-                        emit(control)?;
-                    }
-                }
             } else {
-                binding.for_each_occurrence(control, |_, control| emit(control))?;
+                emit_projection_occurrences(
+                    &binding,
+                    self.distinct,
+                    self.page_capacity,
+                    control,
+                    &mut emit,
+                )?;
             }
             Ok(())
         })
@@ -1864,6 +1829,46 @@ where
         sift(values, 0, end, control)?;
     }
     Ok(())
+}
+
+// Terminal ORDER BY retains at most offset + count identical occurrences of
+// one complete binding. DISTINCT needs one. Every binding still projects at
+// least once for LIMIT 0, preserving property-source errors before pagination.
+// Keep this law shared by the generic and factorized physical strategies.
+fn emit_projection_occurrences<K, E, C>(
+    binding: &JoinBinding<'_, K>,
+    distinct: bool,
+    page_capacity: Option<u64>,
+    control: &mut C,
+    mut emit: impl FnMut(&mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+{
+    if binding.multiplicity_factors().contains(&0) {
+        return Ok(());
+    }
+    if distinct {
+        return emit(control);
+    }
+    if let Some(capacity) = page_capacity {
+        let capacity = u128::from(capacity.max(1));
+        let copies = binding
+            .multiplicity_factors()
+            .iter()
+            .fold(1_u128, |count, &weight| {
+                count
+                    .checked_mul(weight as u128)
+                    .unwrap_or(capacity)
+                    .min(capacity)
+            });
+        for _ in 0..copies {
+            emit(control)?;
+        }
+        Ok(())
+    } else {
+        binding.for_each_occurrence(control, |_, control| emit(control))
+    }
 }
 
 fn sort_vids<M, Err>(values: &mut [VId], control: &mut M) -> Result<(), Err>

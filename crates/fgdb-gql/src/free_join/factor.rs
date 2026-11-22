@@ -10,8 +10,8 @@
 
 use super::execute::{GroupScan, driver, probe};
 use super::{
-    FreeJoin, FreeJoinCursor, FreeJoinPlan, JoinVariable, MultiplicityOverflow, TrieCursor,
-    TrieRelation,
+    FreeJoin, FreeJoinCursor, FreeJoinPlan, JoinBinding, JoinVariable, MultiplicityOverflow,
+    TrieCursor, TrieRelation,
 };
 use crate::GlaExecutionEvent;
 use core::num::NonZeroUsize;
@@ -194,6 +194,121 @@ impl<K> FactorizedBatch<K> {
             control,
         )
     }
+}
+
+impl<K: Clone> FactorizedBatch<K> {
+    /// Visit each complete assignment once, retaining its bag multiplicity as
+    /// factors instead of flattening occurrences. No total-cardinality product
+    /// is required, so an overflowing bag remains usable by DISTINCT and a
+    /// bounded terminal projection.
+    ///
+    /// The deterministic support order follows the factor tree. It is not the
+    /// flat occurrence order: a Unit weight may repeat an entire suffix in
+    /// [`FactorizedCursor`]. The consumer owns any logical ordering and must
+    /// explicitly expand multiplicities when its semantics require them.
+    /// Navigation and the current assignment are plan-sized; no source cursor
+    /// is reopened and no flat result relation is allocated. A control or sink
+    /// error stops the visit immediately without changing this immutable batch.
+    pub fn for_each_binding<E, C>(
+        &self,
+        control: &mut C,
+        mut emit: impl FnMut(JoinBinding<'_, K>, &mut C) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+    {
+        control(GlaExecutionEvent::Work)?;
+        if self.nodes[self.root].count == Some(0) {
+            return Ok(());
+        }
+        let mut values = Vec::new();
+        for _ in &self.variables {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            values.push(None);
+        }
+        control(GlaExecutionEvent::ScratchEntry)?;
+        let mut pending = vec![self.root];
+        visit_bindings(
+            self,
+            &mut pending,
+            &mut values,
+            &mut Vec::new(),
+            control,
+            &mut emit,
+        )
+    }
+}
+
+// `pending` is a continuation stack. Each invocation restores its own node on
+// success, so a Union can visit each alternative with the same product suffix
+// without cloning that suffix or a row. Only Flat nodes assign columns; every
+// complete path binds each plan variable exactly once. Unit nodes retain the
+// original usize leaf weights, including nullary relations, without multiplying.
+fn visit_bindings<K: Clone, E, C>(
+    batch: &FactorizedBatch<K>,
+    pending: &mut Vec<usize>,
+    values: &mut [Option<K>],
+    factors: &mut Vec<usize>,
+    control: &mut C,
+    emit: &mut impl FnMut(JoinBinding<'_, K>, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+{
+    control(GlaExecutionEvent::Work)?;
+    let Some(id) = pending.pop() else {
+        return emit(
+            JoinBinding {
+                variables: &batch.variables,
+                values,
+                factors,
+            },
+            control,
+        );
+    };
+    let node = &batch.nodes[id];
+    match &node.value {
+        Value::Empty => {}
+        Value::Unit => {
+            let weight = usize::try_from(node.count.expect("Unit has an exact leaf weight"))
+                .expect("Unit weights come from usize trie multiplicities");
+            if weight != 0 {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                factors.push(weight);
+                visit_bindings(batch, pending, values, factors, control, emit)?;
+                factors.pop();
+            }
+        }
+        Value::Flat {
+            start,
+            values: keys,
+        } => {
+            for (offset, key) in keys.iter().enumerate() {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                values[start + offset] = Some(key.clone());
+            }
+            visit_bindings(batch, pending, values, factors, control, emit)?;
+        }
+        Value::Product { children, .. } => {
+            let previous = pending.len();
+            for &child in children.iter().rev() {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                pending.push(child);
+            }
+            visit_bindings(batch, pending, values, factors, control, emit)?;
+            pending.truncate(previous);
+        }
+        Value::Union { children, .. } => {
+            for &child in children {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                pending.push(child);
+                visit_bindings(batch, pending, values, factors, control, emit)?;
+                pending.pop();
+            }
+        }
+    }
+    pending.push(id);
+    Ok(())
 }
 
 struct StageTree {
