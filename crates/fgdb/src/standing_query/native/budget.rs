@@ -146,7 +146,7 @@ fn circuit(
             .ok_or(StandingQueryError::Unsupported)?;
         return circuit(cx, &plan.left, scoped)?.combine(circuit(cx, &plan.right, scoped)?, stages);
     }
-    if let Some(plan) = query.incremental_filtered_count_with_control(&mut |_| {
+    if let Some(plan) = query.incremental_filtered_aggregate_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
     })? {
         // Match the shared invocation-domain circuit exactly: outer keys,

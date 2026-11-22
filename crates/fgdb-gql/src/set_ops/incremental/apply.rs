@@ -13,7 +13,7 @@ mod count;
 mod distinct;
 mod existence;
 
-pub use count::{MaintainedCollectedCount, MaintainedCountJoin, MaintainedFilteredCount};
+pub use count::{MaintainedCollectedCount, MaintainedCountJoin, MaintainedFilteredAggregate};
 pub use distinct::MaintainedDistinctApply;
 pub use existence::MaintainedExistenceJoin;
 

@@ -12,6 +12,43 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Maintained correlated scalar aggregates — qualification pending
+
+Reader-free correlated scalar summaries now admit integer SUM and AVG,
+including DISTINCT, plus typed MIN and MAX. The compiler retains the exact
+ordered body filters and projections, forms distinct NULL-safe invocation
+keys, groups the actual complete shared source, and restores every original
+outer occurrence. Duplicate outer arguments cannot multiply an aggregate.
+The existing native grouping owner maintains weighted support and retractions;
+updates do not re-execute each correlated query.
+
+Only COUNT receives integer zero-fill. Empty and all-NULL non-COUNT summaries
+retain NULL, AVG retains its native float result, and extrema retain their
+original value domains. The optimized COUNT and collected-count recipes remain
+COUNT-only. Unsupported reader effects, per-invocation pages, relational
+DISTINCT, grouped/multiple summaries and transformed aggregate outputs retain
+their conservative refusal.
+
+Regression sources include 1,536 independently calculated weighted transitions
+across six aggregate variants, nullable and duplicate invocations, simultaneous
+argument/witness changes, last-support retractions, and vertex/text extrema.
+Native integration cases compare literal expected bags with batch and maintained
+results and check exact delivered deltas, redelivery and rebuild. They also
+exercise private-witness versus public-row quotas, every registration/rebuild
+checkpoint, dormant errors, invalid numeric inputs and checked SUM output
+overflow without partial group publication.
+
+All nine changed Rust files pass individual pinned Rustfmt and whitespace
+checks. Independent source review found no remaining blocker. Limited static
+UBS exited 0 with no critical findings; the introduced production notices are
+the intentional API re-export and the existing bounded, charged private-name
+search generalized for aggregates. Test notices cover assertions, fixture
+copies/strings and a positive-denominator oracle calculation. AST rules were
+unavailable and Cargo phases excluded. Compilation, runtime assertions, Clippy
+and full exact-tree qualification remain **UNRUN** under the unavailable stable
+build lane. No full incremental-query coverage or W6 completion is claimed;
+`fgdb-w6-zset-circuits-kjv` and `fgdb-epic-w6-65w` remain open.
+
 ### Selected vertex-property buffered queries — qualification pending
 
 Vertex-local scan plans now distinguish topology, one exact vertex-property

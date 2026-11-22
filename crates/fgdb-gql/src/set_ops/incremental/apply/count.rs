@@ -1,5 +1,5 @@
-//! Keyed correlated counts through source restriction and native grouping.
-//! Counts are formed from RHS weights, never from an outer-multiplied join.
+//! Keyed correlated summaries through source restriction and native grouping.
+//! Aggregates use RHS weights, never an outer-multiplied join.
 
 use super::*;
 use crate::algebra::{BindingSlot, GlaPlan, GraphValueRow, PreparedGraphPattern};
@@ -28,15 +28,16 @@ pub struct MaintainedCountJoin<'a> {
     pub output: Vec<RowProjectionSpec>,
 }
 
-/// Per-invocation filtered COUNT through the existing native row operators.
+/// Per-invocation scalar aggregates through the existing native row operators.
 ///
 /// Project the original left bag through outer, then DISTINCT its arguments.
 /// Join those arguments with the complete right source and apply body in
 /// order. Group by the private invocation key, Left-join through restore to
-/// the ORIGINAL keyed outer bag, and apply output for zero-fill/public names.
+/// the ORIGINAL keyed outer bag, and apply output for public names and COUNT's
+/// zero-fill. Other aggregates retain their native empty/NULL and value domains.
 /// The host must share sources and publish all stages atomically.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MaintainedFilteredCount<'a> {
+pub struct MaintainedFilteredAggregate<'a> {
     pub left: &'a PreparedGraphSet,
     pub right: &'a PreparedGraphSet,
     pub outer: RowProjectionSpec,
@@ -64,7 +65,7 @@ pub struct MaintainedCollectedCount {
     pub output: Vec<RowProjectionSpec>,
 }
 
-fn count_summary<'a, E>(
+fn scalar_summary<'a, E>(
     query: &'a PreparedGraphSet,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<&'a PreparedGraphSetAggregate>, E> {
@@ -73,14 +74,14 @@ fn count_summary<'a, E>(
         return Ok(None);
     }
     match &query.node {
-        SetNode::Scope(input) => count_summary(input, control),
+        SetNode::Scope(input) => scalar_summary(input, control),
         SetNode::Project {
             input,
             projection,
             quantifier: GraphSetQuantifier::All,
             ..
         } if projection.len() == 1 && matches!(projection[0].value(), GraphSetValue::Column(0)) => {
-            count_summary(input, control)
+            scalar_summary(input, control)
         }
         SetNode::Aggregate(summary) => {
             if !summary.group_key_columns().is_empty()
@@ -90,7 +91,7 @@ fn count_summary<'a, E>(
                 || summary.has_computed_ordering()
                 || summary.incremental_result_window() != (0, None)
                 || !summary.supports_incremental_maintenance_with_having()
-                || query.types.as_slice() != [GraphSetColumnType::Scalar]
+                || query.types.len() != 1
             {
                 return Ok(None);
             }
@@ -100,7 +101,14 @@ fn count_summary<'a, E>(
                 specs.next(),
                 Some((GraphAggregateFunction::CountRows, None))
                     | Some((
-                        GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct,
+                        GraphAggregateFunction::Count
+                            | GraphAggregateFunction::CountDistinct
+                            | GraphAggregateFunction::SumInt
+                            | GraphAggregateFunction::SumIntDistinct
+                            | GraphAggregateFunction::AverageInt
+                            | GraphAggregateFunction::AverageIntDistinct
+                            | GraphAggregateFunction::Min
+                            | GraphAggregateFunction::Max,
                         Some(_),
                     ))
             ) || specs.next().is_some()
@@ -113,30 +121,52 @@ fn count_summary<'a, E>(
     }
 }
 
+// The source-restriction recipe below is specific to COUNT. In particular,
+// its final integer zero-fill must never receive AVG or a typed extremum.
+fn count_summary<'a, E>(
+    query: &'a PreparedGraphSet,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<&'a PreparedGraphSetAggregate>, E> {
+    let Some(summary) = scalar_summary(query, control)? else {
+        return Ok(None);
+    };
+    Ok(matches!(
+        summary.aggregate_specs().next(),
+        Some((GraphAggregateFunction::CountRows, None))
+            | Some((
+                GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct,
+                Some(_),
+            ))
+    )
+    .then_some(summary))
+}
+
 impl PreparedGraphSet {
-    /// Prove a reader-free filtered COUNT with exact invocation identity.
+    /// Prove a reader-free scalar aggregate with exact invocation identity.
     ///
     /// This fallback retains every ordered body projection and filter rather
-    /// than tracing a counted column back through discarded computation. It
-    /// admits COUNT(*), COUNT(value) and COUNT(DISTINCT value), including an
-    /// imported value. The independent RHS keeps the existing conditional
+    /// than tracing an aggregate argument through discarded computation. It
+    /// admits COUNT, integer SUM/AVG (including DISTINCT), and typed MIN/MAX,
+    /// including imported values. The independent RHS keeps the conditional
     /// source-effect proof: no property reader or uninvoked fallible source is
     /// moved into eager maintenance.
     ///
     /// Argument tuples use the existing NULL-safe canonical key proof.
     /// DISTINCT arguments prevent duplicate outer occurrences from multiplying
-    /// the count; the final Left restoration preserves those occurrences and
-    /// emits zero for empty bodies. NULL is an invocation value, not a missing
-    /// invocation. Body evaluation happens only for active argument tuples,
-    /// and native grouping owns counted NULL/distinct support and retractions.
+    /// the aggregate; the final Left restoration preserves those occurrences.
+    /// Empty bodies produce zero for COUNT and NULL for other aggregates. NULL
+    /// is an invocation value, not a missing invocation. Body evaluation
+    /// happens only for active argument tuples,
+    /// and native grouping owns NULL/distinct support, checked output conversion
+    /// and retractions. AVG and extrema retain their native output domains.
     ///
     /// Pages, relational DISTINCT, grouped/multiple summaries, unsupported key
     /// domains and reader/ordinal effects retain their conservative refusal.
     /// The optimized existing source-restriction recipe remains preferred.
-    pub fn incremental_filtered_count_with_control<E>(
+    pub fn incremental_filtered_aggregate_with_control<E>(
         &self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<Option<MaintainedFilteredCount<'_>>, E> {
+    ) -> Result<Option<MaintainedFilteredAggregate<'_>>, E> {
         control(GlaExecutionEvent::Work)?;
         if !self.unadorned_incremental_node() {
             return Ok(None);
@@ -150,7 +180,7 @@ impl PreparedGraphSet {
         else {
             return Ok(None);
         };
-        let Some(summary) = count_summary(body_query, control)? else {
+        let Some(summary) = scalar_summary(body_query, control)? else {
             return Ok(None);
         };
         let mut stages = Vec::new();
@@ -297,31 +327,63 @@ impl PreparedGraphSet {
         let Some((function, argument)) = summary.aggregate_specs().next() else {
             return Ok(None);
         };
-        let mut count_name = None;
+        let is_count = matches!(
+            function,
+            GraphAggregateFunction::CountRows
+                | GraphAggregateFunction::Count
+                | GraphAggregateFunction::CountDistinct
+        );
+        // Preserve the existing COUNT circuit's private definition names.
+        let prefix = if is_count {
+            "__fg_count"
+        } else {
+            "__fg_aggregate"
+        };
+        let mut aggregate_name = None;
         for suffix in 0..=active.columns.len() {
             charge(1 + active.columns.len(), control)?;
-            let candidate = format!("__fg_count_{suffix}");
+            let candidate = format!("{prefix}_{suffix}");
             if !active.columns.contains(&candidate) {
-                count_name = Some(candidate);
+                aggregate_name = Some(candidate);
                 break;
             }
         }
-        let Some(count_name) = count_name else {
+        let Some(aggregate_name) = aggregate_name else {
             return Ok(None);
         };
-        let count = match (function, argument) {
-            (GraphAggregateFunction::CountRows, None) => GraphAggregate::count_rows(&count_name),
+        let aggregate = match (function, argument) {
+            (GraphAggregateFunction::CountRows, None) => {
+                GraphAggregate::count_rows(&aggregate_name)
+            }
             (GraphAggregateFunction::Count, Some(column)) => {
-                GraphAggregate::count(&count_name, column)
+                GraphAggregate::count(&aggregate_name, column)
             }
             (GraphAggregateFunction::CountDistinct, Some(column)) => {
-                GraphAggregate::count_distinct(&count_name, column)
+                GraphAggregate::count_distinct(&aggregate_name, column)
+            }
+            (GraphAggregateFunction::SumInt, Some(column)) => {
+                GraphAggregate::sum_int(&aggregate_name, column)
+            }
+            (GraphAggregateFunction::SumIntDistinct, Some(column)) => {
+                GraphAggregate::sum_int_distinct(&aggregate_name, column)
+            }
+            (GraphAggregateFunction::AverageInt, Some(column)) => {
+                GraphAggregate::average_int(&aggregate_name, column)
+            }
+            (GraphAggregateFunction::AverageIntDistinct, Some(column)) => {
+                GraphAggregate::average_int_distinct(&aggregate_name, column)
+            }
+            (GraphAggregateFunction::Min, Some(column)) => {
+                GraphAggregate::min(&aggregate_name, column)
+            }
+            (GraphAggregateFunction::Max, Some(column)) => {
+                GraphAggregate::max(&aggregate_name, column)
             }
             _ => return Ok(None),
         };
         charge(key_width, control)?;
         let keys: Vec<_> = (width..width + key_width).collect();
-        let Ok(grouped) = active.group_by(&keys, &[count]) else {
+        let Ok(grouped) = active.group_by(&keys, &[aggregate]) else {
             return Ok(None);
         };
         let PreparedGraphSet {
@@ -342,16 +404,24 @@ impl PreparedGraphSet {
             return Ok(None);
         };
         let restore = restore.with_kind(RowJoinKind::Left);
-        let Ok(zero_filled) = GraphIntegerExpression::prepare(&[
-            GraphIntegerOp::Column(outer.column_types().len() + key_width),
-            GraphIntegerOp::Literal(Some(0)),
-            GraphIntegerOp::Coalesce,
-        ]) else {
-            return Ok(None);
+        let aggregate_column = outer.column_types().len() + key_width;
+        let restored = if is_count {
+            let Ok(zero_filled) = GraphIntegerExpression::prepare(&[
+                GraphIntegerOp::Column(aggregate_column),
+                GraphIntegerOp::Literal(Some(0)),
+                GraphIntegerOp::Coalesce,
+            ]) else {
+                return Ok(None);
+            };
+            GraphSetValue::Integer(zero_filled)
+        } else {
+            // Preserve the native NULL, Float average, or typed extremum.
+            // Group output conversion is already checked before restoration.
+            GraphSetValue::Column(aggregate_column)
         };
         charge(left_width + 4, control)?;
         let mut values: Vec<_> = (0..left_width).map(GraphSetValue::Column).collect();
-        values.push(GraphSetValue::Integer(zero_filled));
+        values.push(restored);
         let types: Vec<_> = restore.column_types().collect();
         let Some(public) = project(&types, values, control)? else {
             return Ok(None);
@@ -368,7 +438,7 @@ impl PreparedGraphSet {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work)?;
-        Ok(Some(MaintainedFilteredCount {
+        Ok(Some(MaintainedFilteredAggregate {
             left,
             right: base.right,
             outer,

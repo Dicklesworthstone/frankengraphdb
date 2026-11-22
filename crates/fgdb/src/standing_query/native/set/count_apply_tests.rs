@@ -1,5 +1,5 @@
-//! Correlated COUNT maintains one summary per needed key, independently of outer multiplicity.
-//! Literal fixture counts exercise both native COUNT bodies and returning CALL aggregates.
+//! Correlated scalar aggregates retain one summary per invocation, independent of outer multiplicity.
+//! Literal fixture values exercise native COUNT bodies and returning CALL aggregates.
 
 use super::*;
 use crate::{DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
@@ -8,7 +8,9 @@ use fgdb_delta_types::{LabelId, LimbLimit, PropertyKeyId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::row_join::RowJoinKind;
 use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphSetText};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts};
+use fgdb_types::{
+    CanonicalF64, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts,
+};
 use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -116,7 +118,7 @@ fn cells(values: Vec<QueryValue>) -> GraphValueRow {
         .into_iter()
         .map(|value| match value {
             QueryValue::Value(value) => value,
-            _ => panic!("a native relational count retains its value cells"),
+            _ => panic!("a native relational aggregate retains its value cells"),
         })
         .collect())
 }
@@ -167,7 +169,7 @@ fn check(
         db.standing_native_query(cx, handle, policy).unwrap().1,
     ] {
         let QueryResult::Rows { columns, rows } = result else {
-            panic!("native correlated counts return rows");
+            panic!("native correlated aggregates return rows");
         };
         assert_eq!(columns.as_slice(), query.columns());
         assert_eq!(
@@ -740,43 +742,93 @@ fn saved(queries: &[StandingQuery]) -> Vec<Saved> {
 }
 
 #[test]
-fn each_count_registration_and_rebuild_checkpoint_preserves_existing_circuits() {
+fn each_count_and_average_registration_and_rebuild_checkpoint_preserves_existing_circuits() {
     let ((), report) = run_async_under_lab(0x636e_7005, |root| async move {
-        let c = PurposeContexts::narrow_runtime_root(&root);
-        let cx = c.query();
-        let commit = c.commit();
-        let mut db = Database::open_memory(&commit, keys(0xe5)).await.unwrap();
-        db.write(&commit, seed()).await.unwrap();
-        let sibling = db
-            .register_standing_native(
-                &cx,
-                "MATCH (n) RETURN n",
-                &GqlParameters::new(),
-                symbols,
-                policy(),
-            )
-            .unwrap();
-        let query = bind(CALL_COUNT);
-        let before = saved(&db.standing_queries);
-        let mut calls = 0;
-        {
-            let mut staged = Staging::new(&mut db);
-            staged
-                .compile_root(&cx, &query, policy(), &mut || {
-                    calls += 1;
-                    Ok(())
-                })
+        for text in [CALL_COUNT.to_owned(), scalar_call_text("avg(id(b))")] {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let cx = c.query();
+            let commit = c.commit();
+            let mut db = Database::open_memory(&commit, keys(0xe5)).await.unwrap();
+            db.write(&commit, seed()).await.unwrap();
+            let sibling = db
+                .register_standing_native(
+                    &cx,
+                    "MATCH (n) RETURN n",
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
                 .unwrap();
-        }
-        assert!(calls > 0);
-        assert_eq!(saved(&db.standing_queries), before);
-        for stop in 1..=calls {
-            let mut seen = 0;
+            let query = bind(&text);
+            let before = saved(&db.standing_queries);
+            let mut calls = 0;
             {
                 let mut staged = Staging::new(&mut db);
+                staged
+                    .compile_root(&cx, &query, policy(), &mut || {
+                        calls += 1;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            assert!(calls > 0);
+            assert_eq!(saved(&db.standing_queries), before);
+            for stop in 1..=calls {
+                let mut seen = 0;
+                {
+                    let mut staged = Staging::new(&mut db);
+                    assert!(
+                        staged
+                            .compile_root(&cx, &query, policy(), &mut || {
+                                seen += 1;
+                                if seen == stop {
+                                    Err(StandingQueryError::Maintenance(
+                                        StandingQueryFailure::Interrupted,
+                                    ))
+                                } else {
+                                    Ok(())
+                                }
+                            })
+                            .is_err()
+                    );
+                }
+                assert_eq!(seen, stop);
+                assert_eq!(saved(&db.standing_queries), before);
+            }
+            let handle = db
+                .register_standing_relation(&cx, &query, policy())
+                .unwrap();
+            let Layout::Circuit { first, .. } = handle.native.as_deref().unwrap() else {
+                panic!("scalar Apply owns one complete circuit");
+            };
+            let first = *first;
+            let mut calls = 0;
+            let private_inputs = handle.native.as_deref().unwrap().private_inputs().unwrap();
+            rebuild_checked(
+                &mut db,
+                &cx,
+                first,
+                handle.index,
+                private_inputs,
+                policy(),
+                &mut || {
+                    calls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let accepted = saved(&db.standing_queries);
+            for stop in 1..=calls {
+                let mut seen = 0;
                 assert!(
-                    staged
-                        .compile_root(&cx, &query, policy(), &mut || {
+                    rebuild_checked(
+                        &mut db,
+                        &cx,
+                        first,
+                        handle.index,
+                        private_inputs,
+                        policy(),
+                        &mut || {
                             seen += 1;
                             if seen == stop {
                                 Err(StandingQueryError::Maintenance(
@@ -785,76 +837,24 @@ fn each_count_registration_and_rebuild_checkpoint_preserves_existing_circuits() 
                             } else {
                                 Ok(())
                             }
-                        })
-                        .is_err()
-                );
-            }
-            assert_eq!(seen, stop);
-            assert_eq!(saved(&db.standing_queries), before);
-        }
-        let handle = db
-            .register_standing_relation(&cx, &query, policy())
-            .unwrap();
-        let Layout::Circuit { first, .. } = handle.native.as_deref().unwrap() else {
-            panic!("count Apply owns one complete circuit");
-        };
-        let first = *first;
-        let mut calls = 0;
-        let private_inputs = handle.native.as_deref().unwrap().private_inputs().unwrap();
-        rebuild_checked(
-            &mut db,
-            &cx,
-            first,
-            handle.index,
-            private_inputs,
-            policy(),
-            &mut || {
-                calls += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-        let accepted = saved(&db.standing_queries);
-        for stop in 1..=calls {
-            let mut seen = 0;
-            assert!(
-                rebuild_checked(
-                    &mut db,
-                    &cx,
-                    first,
-                    handle.index,
-                    private_inputs,
-                    policy(),
-                    &mut || {
-                        seen += 1;
-                        if seen == stop {
-                            Err(StandingQueryError::Maintenance(
-                                StandingQueryFailure::Interrupted,
-                            ))
-                        } else {
-                            Ok(())
                         }
-                    }
-                )
-                .is_err()
-            );
-            assert_eq!(seen, stop);
-            assert_eq!(saved(&db.standing_queries), accepted);
+                    )
+                    .is_err()
+                );
+                assert_eq!(seen, stop);
+                assert_eq!(saved(&db.standing_queries), accepted);
+            }
+            let mut change = WriteBatch::new(R);
+            change.delete_vertex(VId(2));
+            db.write(&commit, change).await.unwrap();
+            let expected = if text == CALL_COUNT {
+                expected_bags(&[(1, 0), (3, 1), (5, 0)])[1].clone()
+            } else {
+                scalar_call_bag([vertex(None), floating(4.0), vertex(None)])
+            };
+            check(&db, &cx, &text, &query, &handle, &expected, policy());
+            db.standing_native_query(&cx, &sibling, policy()).unwrap();
         }
-        let mut change = WriteBatch::new(R);
-        change.delete_vertex(VId(2));
-        db.write(&commit, change).await.unwrap();
-        let expected = expected_bags(&[(1, 0), (3, 1), (5, 0)]);
-        check(
-            &db,
-            &cx,
-            CALL_COUNT,
-            &query,
-            &handle,
-            &expected[1],
-            policy(),
-        );
-        db.standing_native_query(&cx, &sibling, policy()).unwrap();
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -1211,6 +1211,461 @@ fn filtered_count_keeps_uninvoked_and_invoked_expression_errors_distinct() {
             assert_eq!(saved(&db.standing_queries), saved_registry);
         }
         check(&db, &cx, theta, &bind(theta), &selected, &one, policy());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn floating(value: f64) -> GraphValue {
+    GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(value)))
+}
+
+fn null_summaries() -> [GraphValue; 6] {
+    std::array::from_fn(|_| GraphValue::Scalar(CanonicalScalar::Null))
+}
+
+// Fixture literals only: this helper formats the six native result domains.
+fn scalar_summaries(
+    sum: i64,
+    distinct_sum: i64,
+    average: f64,
+    distinct_average: f64,
+    min: i64,
+    max: i64,
+) -> [GraphValue; 6] {
+    [
+        integer(sum),
+        integer(distinct_sum),
+        floating(average),
+        floating(distinct_average),
+        integer(min),
+        integer(max),
+    ]
+}
+
+fn scalar_aggregates_text(aggregate: &str) -> String {
+    format!(
+        "MATCH (a:L) UNWIND [NULL,1,3,3] AS floor \
+         WITH a,a.p AS score,toInteger(floor) AS floor \
+         CALL (a,score,floor) {{ \
+         MATCH (a)-[:R]->(b:M {{selected:1}}) \
+         WHERE (floor IS NULL OR score >= floor) AND b <> a \
+         WITH score + id(b) AS value RETURN {aggregate} AS total }} \
+         RETURN a,floor,total"
+    )
+}
+
+// Each explicit result tuple belongs to NULL, one, or three respectively.
+// The duplicate three restores two outer occurrences without scaling the body.
+fn scalar_aggregate_bags(entries: &[(u128, [[GraphValue; 6]; 3])]) -> [Bag; 6] {
+    let mut bags: [Bag; 6] = std::array::from_fn(|_| Bag::new());
+    for (owner, results) in entries {
+        for ((floor, multiplicity), values) in [(None, 1), (Some(1), 1), (Some(3), 2)]
+            .into_iter()
+            .zip(results)
+        {
+            for (bag, value) in bags.iter_mut().zip(values) {
+                bag.insert(
+                    row(vec![
+                        vertex(Some(*owner)),
+                        floor.map_or(GraphValue::Scalar(CanonicalScalar::Null), integer),
+                        value.clone(),
+                    ]),
+                    multiplicity,
+                );
+            }
+        }
+    }
+    bags
+}
+
+#[test]
+fn filtered_scalar_aggregates_maintain_nullable_duplicate_invocations_and_retractions() {
+    let ((), report) = run_async_under_lab(0x7361_7010, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xf3)).await.unwrap();
+        let mut initial = WriteBatch::new(R);
+        for (id, labels, props) in [
+            (
+                1,
+                vec![L, M],
+                vec![
+                    (P, CanonicalScalar::Int(2)),
+                    (SELECTED, CanonicalScalar::Int(1)),
+                ],
+            ),
+            (2, vec![M], vec![(SELECTED, CanonicalScalar::Int(1))]),
+            (3, vec![L], vec![(P, CanonicalScalar::Int(1))]),
+            (4, vec![M], vec![(SELECTED, CanonicalScalar::Int(1))]),
+            (5, vec![L], vec![]),
+            (6, vec![M], vec![(SELECTED, CanonicalScalar::Int(0))]),
+        ] {
+            initial.create_vertex(VId(id), labels, props);
+        }
+        for (id, src, dst) in [
+            (11, 1, 2),
+            (12, 1, 2),
+            (13, 1, 4),
+            (14, 1, 1),
+            (15, 3, 4),
+            (16, 5, 2),
+            (17, 1, 6),
+        ] {
+            initial.add_edge(EId(id), VId(src), VId(dst), vec![]);
+        }
+        db.write(&commit, initial).await.unwrap();
+        let parameters = GqlParameters::new();
+        let mut queries = Vec::new();
+        for aggregate in [
+            "sum(value)",
+            "sum(DISTINCT value)",
+            "avg(value)",
+            "avg(DISTINCT value)",
+            "min(value)",
+            "max(value)",
+        ] {
+            let text = scalar_aggregates_text(aggregate);
+            let prepared = PreparedNativeRead::prepare(&text, &parameters, symbols).unwrap();
+            let (nodes, _) = prepared.subscription_footprint(&cx, &parameters).unwrap();
+            let first = db.standing_queries.len();
+            let handle = prepared
+                .register_standing(&mut db, &cx, &parameters, policy())
+                .unwrap();
+            assert!(nodes >= (db.standing_queries.len() - first) as u64);
+            assert!(
+                db.standing_queries[first..]
+                    .iter()
+                    .any(|query| matches!(query, StandingQuery::Group(_)))
+            );
+            queries.push((text.clone(), bind(&text), handle));
+        }
+        let nulls = null_summaries();
+        let one = scalar_summaries(14, 10, 14.0 / 3.0, 5.0, 4, 6);
+        let three = scalar_summaries(5, 5, 5.0, 5.0, 5, 5);
+        let mut expected = scalar_aggregate_bags(&[
+            (1, [one.clone(), one, nulls.clone()]),
+            (3, [three.clone(), three.clone(), nulls.clone()]),
+            (5, [nulls.clone(), nulls.clone(), nulls.clone()]),
+        ]);
+        for ((text, query, handle), rows) in queries.iter().zip(&expected) {
+            check(&db, &cx, text, query, handle, rows, policy());
+        }
+        for phase in 0..5 {
+            let from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(R);
+            match phase {
+                0 => {
+                    // Simultaneous argument replacement and witness retraction.
+                    change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(4)));
+                    change.delete_edge(EId(11));
+                }
+                1 => {
+                    change.delete_edge(EId(13));
+                    change.set_vertex_property(VId(4), SELECTED, None);
+                }
+                2 => {
+                    change.set_vertex_property(VId(4), SELECTED, Some(CanonicalScalar::Int(1)));
+                    change.add_edge(EId(21), VId(1), VId(4), vec![]);
+                    change.delete_edge(EId(12));
+                }
+                3 => {
+                    change.delete_edge(EId(21));
+                    // All-NULL input becomes empty without changing its NULL result.
+                    change.delete_edge(EId(16));
+                }
+                4 => {
+                    change.set_vertex_property(VId(6), P, Some(CanonicalScalar::Int(99)));
+                }
+                _ => unreachable!(),
+            }
+            db.write(&commit, change).await.unwrap();
+            let one = match phase {
+                0 => scalar_summaries(14, 14, 7.0, 7.0, 6, 8),
+                1 => scalar_summaries(6, 6, 6.0, 6.0, 6, 6),
+                2 => scalar_summaries(8, 8, 8.0, 8.0, 8, 8),
+                _ => nulls.clone(),
+            };
+            let three = if phase == 1 {
+                nulls.clone()
+            } else {
+                three.clone()
+            };
+            let next = scalar_aggregate_bags(&[
+                (1, [one.clone(), one.clone(), one]),
+                (3, [three.clone(), three, nulls.clone()]),
+                (5, [nulls.clone(), nulls.clone(), nulls.clone()]),
+            ]);
+            for (((text, query, handle), before), after) in queries.iter().zip(&expected).zip(&next)
+            {
+                check(&db, &cx, text, query, handle, after, policy());
+                check_delta(&db, &cx, handle, from, before, after);
+            }
+            expected = next;
+        }
+        for ((text, query, handle), rows) in queries.iter().zip(&expected) {
+            db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+            check(&db, &cx, text, query, handle, rows, policy());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn scalar_call_text(aggregate: &str) -> String {
+    format!(
+        "MATCH (a:L) UNWIND [7,7] AS token WITH token,a \
+         CALL (a) {{ MATCH (a)-[:R]->(b:M) RETURN {aggregate} AS degree }} \
+         RETURN token,a,degree"
+    )
+}
+
+fn scalar_call_bag(values: [GraphValue; 3]) -> Bag {
+    bag([1, 3, 5]
+        .into_iter()
+        .zip(values)
+        .map(|(owner, value)| (row(vec![integer(7), vertex(Some(owner)), value]), 2)))
+}
+
+#[test]
+fn filtered_extrema_restore_vertex_and_text_values_without_integer_coercion() {
+    let ((), report) = run_async_under_lab(0x7361_7011, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xf4)).await.unwrap();
+        let mut initial = seed();
+        initial.add_edge(EId(15), VId(1), VId(4), vec![]);
+        db.write(&commit, initial).await.unwrap();
+        let mut queries = Vec::new();
+        for aggregate in ["min(b)", "max(b)", "min(elementId(b))", "max(elementId(b))"] {
+            let text = scalar_call_text(aggregate);
+            let handle = db
+                .register_standing_native(&cx, &text, &GqlParameters::new(), symbols, policy())
+                .unwrap();
+            queries.push((text.clone(), bind(&text), handle));
+        }
+        let text_value =
+            |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let mut expected = [
+            scalar_call_bag([vertex(Some(2)), vertex(Some(4)), null.clone()]),
+            scalar_call_bag([vertex(Some(4)), vertex(Some(4)), null.clone()]),
+            scalar_call_bag([text_value("2"), text_value("4"), null.clone()]),
+            scalar_call_bag([text_value("4"), text_value("4"), null.clone()]),
+        ];
+        for ((text, query, handle), rows) in queries.iter().zip(&expected) {
+            check(&db, &cx, text, query, handle, rows, policy());
+        }
+        for phase in 0..4 {
+            let from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(R);
+            match phase {
+                0 => change.delete_edge(EId(11)),
+                1 => change.delete_edge(EId(12)),
+                2 => change.delete_edge(EId(15)),
+                3 => change.delete_vertex(VId(4)),
+                _ => unreachable!(),
+            }
+            db.write(&commit, change).await.unwrap();
+            let (min, max) = match phase {
+                0 => (Some(2), Some(4)),
+                1 => (Some(4), Some(4)),
+                _ => (None, None),
+            };
+            let other = if phase == 3 { None } else { Some(4) };
+            let as_text = |id: Option<u128>| {
+                id.map_or_else(|| null.clone(), |id| text_value(&id.to_string()))
+            };
+            let next = [
+                scalar_call_bag([vertex(min), vertex(other), null.clone()]),
+                scalar_call_bag([vertex(max), vertex(other), null.clone()]),
+                scalar_call_bag([as_text(min), as_text(other), null.clone()]),
+                scalar_call_bag([as_text(max), as_text(other), null.clone()]),
+            ];
+            for (((text, query, handle), before), after) in queries.iter().zip(&expected).zip(&next)
+            {
+                check(&db, &cx, text, query, handle, after, policy());
+                check_delta(&db, &cx, handle, from, before, after);
+            }
+            expected = next;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn filtered_scalar_aggregate_witnesses_preserve_final_quota_and_budget_atomicity() {
+    let ((), report) = run_async_under_lab(0x7361_7012, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xf5)).await.unwrap();
+        let mut initial = WriteBatch::new(R);
+        initial.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+        initial.create_vertex(VId(2), vec![M], vec![(SELECTED, CanonicalScalar::Int(1))]);
+        for edge in 10..74 {
+            initial.add_edge(EId(edge), VId(1), VId(2), vec![]);
+        }
+        db.write(&commit, initial).await.unwrap();
+        let four = GqlQueryPolicy::new(1_000, 4, 50_000_000, 50_000_000);
+        let value = scalar_summaries(256, 4, 4.0, 4.0, 4, 4);
+        let nulls = null_summaries();
+        let expected = scalar_aggregate_bags(&[(1, [value.clone(), value, nulls.clone()])]);
+        let mut queries = Vec::new();
+        for (index, aggregate) in [
+            "sum(value)",
+            "sum(DISTINCT value)",
+            "avg(value)",
+            "avg(DISTINCT value)",
+            "min(value)",
+            "max(value)",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let text = scalar_aggregates_text(aggregate);
+            let query = bind(&text);
+            let handle = db
+                .register_standing_native(&cx, &text, &GqlParameters::new(), symbols, four)
+                .unwrap();
+            check(&db, &cx, &text, &query, &handle, &expected[index], four);
+            let before = saved(&db.standing_queries);
+            for refused in [
+                GqlQueryPolicy::new(1_000, 4, 0, 50_000_000),
+                GqlQueryPolicy::new(1_000, 4, 50_000_000, 0),
+                GqlQueryPolicy::new(1_000, 3, 50_000_000, 50_000_000),
+            ] {
+                assert!(
+                    db.register_standing_native(
+                        &cx,
+                        &text,
+                        &GqlParameters::new(),
+                        symbols,
+                        refused
+                    )
+                    .is_err()
+                );
+                assert_eq!(saved(&db.standing_queries), before);
+            }
+            let too_few = GqlQueryPolicy::new(1_000, 3, 50_000_000, 50_000_000);
+            assert!(db.standing_native_bag(&cx, &handle, too_few).is_err());
+            assert_eq!(saved(&db.standing_queries), before);
+            check(&db, &cx, &text, &query, &handle, &expected[index], four);
+            queries.push((text, query, handle));
+        }
+        let from = db.frontier().unwrap();
+        let mut change = WriteBatch::new(R);
+        change.set_vertex_property(VId(2), SELECTED, None);
+        db.write(&commit, change).await.unwrap();
+        let empty = scalar_aggregate_bags(&[(1, [nulls.clone(), nulls.clone(), nulls])]);
+        for (((text, query, handle), before), after) in queries.iter().zip(&expected).zip(&empty) {
+            check(&db, &cx, text, query, handle, after, four);
+            check_delta(&db, &cx, handle, from, before, after);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn filtered_sum_keeps_dormant_errors_private_and_failed_conversion_retryable() {
+    let ((), report) = run_async_under_lab(0x7361_7013, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xf6)).await.unwrap();
+        let mut initial = WriteBatch::new(R);
+        initial.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(i64::MAX))]);
+        initial.create_vertex(VId(2), vec![M], vec![]);
+        initial.add_edge(EId(11), VId(1), VId(2), vec![]);
+        initial.add_edge(EId(12), VId(1), VId(2), vec![]);
+        db.write(&commit, initial).await.unwrap();
+        let text = concat!(
+            "MATCH (a:L) WITH a,a.p AS value ",
+            "CALL (a,value) { MATCH (a)-[:R]->(b:M) RETURN sum(value) AS total } ",
+            "RETURN a,total"
+        );
+        let query = bind(text);
+        let first = db.standing_queries.len();
+        let handle = db
+            .register_standing_native(&cx, text, &GqlParameters::new(), symbols, policy())
+            .unwrap();
+        check(&db, &cx, text, &query, &handle, &Bag::new(), policy());
+        let group = (first..db.standing_queries.len())
+            .find(|&index| matches!(db.standing_queries[index], StandingQuery::Group(_)))
+            .unwrap();
+        let old_frontier = db.standing_queries[group].status().1;
+        let old_rows = sets::rows(&db.standing_queries[group])
+            .unwrap()
+            .checked_clone(LIMBS, &mut |_| Ok::<_, ()>(()))
+            .unwrap();
+        let mut activate = WriteBatch::new(R);
+        activate.set_vertex_label(VId(1), L, true);
+        db.write(&commit, activate).await.unwrap();
+        assert!(matches!(
+            db.standing_queries[group].status().2,
+            Some(StandingQueryFailure::OutputExpression {
+                error: fgdb_gql::GraphIntegerError {
+                    kind: fgdb_gql::GraphIntegerErrorKind::Overflow,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert_eq!(db.standing_queries[group].status().1, old_frontier);
+        assert_eq!(sets::rows(&db.standing_queries[group]).unwrap(), &old_rows);
+        assert!(db.standing_native_query(&cx, &handle, policy()).is_err());
+        let before = saved(&db.standing_queries);
+        for candidate in [text.to_owned(), format!("{text} ORDER BY total LIMIT 0")] {
+            assert!(
+                db.execute_graph_set_governed(&cx, &bind(&candidate), policy())
+                    .is_err()
+            );
+            assert!(
+                db.register_standing_native(
+                    &cx,
+                    &candidate,
+                    &GqlParameters::new(),
+                    symbols,
+                    policy()
+                )
+                .is_err()
+            );
+            assert_eq!(saved(&db.standing_queries), before);
+        }
+        let mut repair = WriteBatch::new(R);
+        repair.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1)));
+        db.write(&commit, repair).await.unwrap();
+        assert!(db.standing_native_query(&cx, &handle, policy()).is_err());
+        let before = saved(&db.standing_queries);
+        assert!(
+            db.rebuild_standing_query(&cx, &handle, GqlQueryPolicy::new(1_000, 4, 0, 50_000_000))
+                .is_err()
+        );
+        assert_eq!(saved(&db.standing_queries), before);
+        db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
+        let two = bag([(row(vec![vertex(Some(1)), integer(2)]), 1)]);
+        check(&db, &cx, text, &query, &handle, &two, policy());
+        let mut invalid = WriteBatch::new(R);
+        invalid.set_vertex_property(
+            VId(1),
+            P,
+            Some(CanonicalScalar::ucs_basic_text("bad").unwrap()),
+        );
+        db.write(&commit, invalid).await.unwrap();
+        assert!(matches!(
+            db.standing_queries[group].status().2,
+            Some(StandingQueryFailure::NonIntegerAggregate { .. })
+        ));
+        assert!(db.standing_native_query(&cx, &handle, policy()).is_err());
+        let before = saved(&db.standing_queries);
+        assert!(db.rebuild_standing_query(&cx, &handle, policy()).is_err());
+        assert_eq!(saved(&db.standing_queries), before);
+        let mut repair = WriteBatch::new(R);
+        repair.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(0)));
+        db.write(&commit, repair).await.unwrap();
+        db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
+        let zero = bag([(row(vec![vertex(Some(1)), integer(0)]), 1)]);
+        check(&db, &cx, text, &query, &handle, &zero, policy());
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -8,7 +8,7 @@ mod window;
 
 pub use apply::{
     MaintainedApplyJoin, MaintainedCollectedCount, MaintainedCountJoin, MaintainedDistinctApply,
-    MaintainedExistenceJoin, MaintainedFilteredCount,
+    MaintainedExistenceJoin, MaintainedFilteredAggregate,
 };
 
 impl PreparedGraphSet {

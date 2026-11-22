@@ -1,5 +1,5 @@
-//! Correlated COUNT(*) laws over full weighted bags.
-//! Expected counts are summed independently; the circuit uses native operators.
+//! Correlated scalar summary laws over full weighted bags.
+//! Expected values are computed independently; the circuit uses native operators.
 
 use super::*;
 use crate::algebra::{GraphValueOrder, GraphValueRow, IntegerComparison};
@@ -898,7 +898,7 @@ struct FilteredCircuit {
 impl FilteredCircuit {
     fn new(query: &PreparedGraphSet) -> Self {
         let recipe = query
-            .incremental_filtered_count_with_control(&mut allow)
+            .incremental_filtered_aggregate_with_control(&mut allow)
             .unwrap()
             .unwrap();
         let schema = recipe.group.input().column_types().to_vec();
@@ -1160,7 +1160,7 @@ fn filtered_count_recipe_retains_the_complete_input_and_all_cancellation_points(
     let original = query.canonical_bytes();
     let mut calls = 0;
     let recipe = query
-        .incremental_filtered_count_with_control(&mut |_| {
+        .incremental_filtered_aggregate_with_control(&mut |_| {
             calls += 1;
             Ok::<_, usize>(())
         })
@@ -1208,7 +1208,7 @@ fn filtered_count_recipe_retains_the_complete_input_and_all_cancellation_points(
     assert!(outer().project_incremental_spec(&expanded).is_none());
     for stop in 1..=calls {
         let mut seen = 0;
-        let result = query.incremental_filtered_count_with_control(&mut |_| {
+        let result = query.incremental_filtered_aggregate_with_control(&mut |_| {
             seen += 1;
             if seen == stop { Err(stop) } else { Ok(()) }
         });
@@ -1218,9 +1218,9 @@ fn filtered_count_recipe_retains_the_complete_input_and_all_cancellation_points(
     }
 }
 
-fn has_filtered_count(query: &PreparedGraphSet) -> bool {
+fn has_filtered_aggregate(query: &PreparedGraphSet) -> bool {
     if query
-        .incremental_filtered_count_with_control(&mut allow)
+        .incremental_filtered_aggregate_with_control(&mut allow)
         .unwrap()
         .is_some()
     {
@@ -1230,7 +1230,7 @@ fn has_filtered_count(query: &PreparedGraphSet) -> bool {
         SetNode::Scope(input)
         | SetNode::Project { input, .. }
         | SetNode::Filter { input, .. }
-        | SetNode::Unwind { input, .. } => has_filtered_count(input),
+        | SetNode::Unwind { input, .. } => has_filtered_aggregate(input),
         _ => false,
     }
 }
@@ -1247,7 +1247,7 @@ fn native_filtered_counts_accept_imported_thresholds_and_static_property_sources
             .unwrap()
             .bind_parameters(&GqlParameters::new())
             .unwrap();
-        assert!(has_filtered_count(&query), "{text}");
+        assert!(has_filtered_aggregate(&query), "{text}");
     }
 }
 
@@ -1311,6 +1311,312 @@ fn filtered_counts_keep_conditional_source_effects_and_real_pages_refused() {
             .unwrap()
             .bind_parameters(&GqlParameters::new())
             .unwrap();
-        assert!(!has_filtered_count(&query), "{text}");
+        assert!(!has_filtered_aggregate(&query), "{text}");
+    }
+}
+
+const SCALAR_FUNCTIONS: [GraphAggregateFunction; 6] = [
+    GraphAggregateFunction::SumInt,
+    GraphAggregateFunction::SumIntDistinct,
+    GraphAggregateFunction::AverageInt,
+    GraphAggregateFunction::AverageIntDistinct,
+    GraphAggregateFunction::Min,
+    GraphAggregateFunction::Max,
+];
+
+fn filtered_aggregate(profile: usize) -> PreparedGraphSet {
+    let SetNode::Apply {
+        left,
+        right,
+        imports,
+        ..
+    } = filtered_count(0).node
+    else {
+        unreachable!()
+    };
+    let SetNode::Aggregate(summary) = right.node else {
+        unreachable!()
+    };
+    // Keep the actual filtered relation, then compute a variable argument
+    // from both the invocation's nullable score and the RHS identity.
+    let value = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::IdentityColumn {
+                column: 0,
+                text: false,
+            },
+            GraphIntegerOp::Column(1),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Add),
+        ])
+        .unwrap(),
+    );
+    let body = summary
+        .input()
+        .clone()
+        .project(
+            vec![GraphSetProjection::new("value", value)],
+            GraphSetQuantifier::All,
+        )
+        .unwrap();
+    let aggregate = match profile {
+        0 => GraphAggregate::sum_int("summary", 0),
+        1 => GraphAggregate::sum_int_distinct("summary", 0),
+        2 => GraphAggregate::average_int("summary", 0),
+        3 => GraphAggregate::average_int_distinct("summary", 0),
+        4 => GraphAggregate::min("summary", 0),
+        5 => GraphAggregate::max("summary", 0),
+        _ => unreachable!(),
+    };
+    (*left)
+        .apply(body.group_by(&[], &[aggregate]).unwrap(), imports)
+        .unwrap()
+}
+
+fn scalar_oracle(left: &ZSet<GraphValueRow>, right: &ZSet<GraphValueRow>, profile: usize) -> Bag {
+    let mut output = Bag::new();
+    for (outer, multiplicity) in left.iter() {
+        let score = &outer.values()[0];
+        let other = &outer.values()[2];
+        let mut support = BTreeMap::<i64, i128>::new();
+        // The fixture's WHERE admits score=3 and NULL. NULL arithmetic
+        // contributes no nonnull argument; other scores fail that filter.
+        if score == &scalar(Some(3)) {
+            for (inner, weight) in right.iter() {
+                let candidate = &inner.values()[1];
+                if (other.is_null() || candidate != other)
+                    && let GraphValue::Vertex(VId(id)) = candidate
+                {
+                    *support.entry(i64::try_from(*id).unwrap() + 3).or_default() +=
+                        weight.to_i128().unwrap();
+                }
+            }
+        }
+        let value = if support.is_empty() {
+            scalar(None)
+        } else {
+            let mut sum = 0_i128;
+            let mut count = 0_i128;
+            for (&value, &weight) in &support {
+                let weight = if matches!(profile, 1 | 3) { 1 } else { weight };
+                sum += i128::from(value) * weight;
+                count += weight;
+            }
+            match profile {
+                0 | 1 => scalar(Some(i64::try_from(sum).unwrap())),
+                2 | 3 => GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
+                    sum as f64 / count as f64,
+                ))),
+                4 => scalar(Some(*support.first_key_value().unwrap().0)),
+                5 => scalar(Some(*support.last_key_value().unwrap().0)),
+                _ => unreachable!(),
+            }
+        };
+        let mut cells = outer.values().to_vec();
+        cells.push(value);
+        output.insert(row(cells), multiplicity.to_i128().unwrap());
+    }
+    output
+}
+
+#[test]
+fn scalar_aggregates_match_1536_weighted_transitions_with_null_and_duplicate_invocations() {
+    for profile in 0..SCALAR_FUNCTIONS.len() {
+        let query = filtered_aggregate(profile);
+        for before in 0..16 {
+            for after in 0..16 {
+                let old_left = filtered_left(before & 3);
+                let old_right = filtered_right(before >> 2);
+                let next_left = filtered_left(after & 3);
+                let next_right = filtered_right(after >> 2);
+                let old = scalar_oracle(&old_left, &old_right, profile);
+                let next = scalar_oracle(&next_left, &next_right, profile);
+                let mut circuit = FilteredCircuit::new(&query);
+                circuit.tick(&old_left, &old_right).unwrap();
+                assert_eq!(
+                    plain(circuit.rows()),
+                    old,
+                    "profile {profile}, before {before}"
+                );
+                let delta = circuit
+                    .tick(
+                        &difference(&next_left, &old_left),
+                        &difference(&next_right, &old_right),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    plain(circuit.rows()),
+                    next,
+                    "profile {profile}, after {after}"
+                );
+                assert_eq!(
+                    delta,
+                    bag(next
+                        .into_iter()
+                        .chain(old.into_iter().map(|(row, weight)| (row, -weight))))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scalar_extrema_restore_vertex_and_stored_domains_without_integer_coercion() {
+    let left = bag([
+        (
+            row(vec![
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("zeta").unwrap()),
+                vertex(1),
+                vertex(8),
+            ]),
+            2,
+        ),
+        (
+            row(vec![
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("alpha").unwrap()),
+                vertex(2),
+                vertex(9),
+            ]),
+            3,
+        ),
+        (row(vec![scalar(None), vertex(3), scalar(None)]), 4),
+        (
+            row(vec![
+                GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.5))),
+                vertex(4),
+                vertex(7),
+            ]),
+            5,
+        ),
+    ]);
+    let right = right_rows(3);
+    for (kind, imported) in [
+        (GraphSetColumnType::Stored, 0),
+        (GraphSetColumnType::Vertex, 2),
+    ] {
+        for maximum in [false, true] {
+            let aggregate = if maximum {
+                GraphAggregate::max("summary", 0)
+            } else {
+                GraphAggregate::min("summary", 0)
+            };
+            let body = arguments(vec![kind]).cross_join(self::right()).unwrap();
+            let query = outer()
+                .apply(body.group_by(&[], &[aggregate]).unwrap(), vec![imported])
+                .unwrap();
+            let expected = |present: bool| -> Bag {
+                left.iter()
+                    .map(|(outer, weight)| {
+                        let mut cells = outer.values().to_vec();
+                        cells.push(if present {
+                            cells[imported].clone()
+                        } else {
+                            scalar(None)
+                        });
+                        (row(cells), weight.to_i128().unwrap())
+                    })
+                    .collect()
+            };
+            let mut circuit = FilteredCircuit::new(&query);
+            circuit.tick(&left, &ZSet::new()).unwrap();
+            assert_eq!(plain(circuit.rows()), expected(false));
+            circuit.tick(&ZSet::new(), &right).unwrap();
+            assert_eq!(plain(circuit.rows()), expected(true));
+            circuit
+                .tick(&ZSet::new(), &difference(&ZSet::new(), &right))
+                .unwrap();
+            assert_eq!(plain(circuit.rows()), expected(false));
+        }
+    }
+}
+
+#[test]
+fn scalar_recipe_retains_complete_input_and_cancellation_while_count_fast_path_stays_narrow() {
+    for (profile, function) in SCALAR_FUNCTIONS.into_iter().enumerate() {
+        let query = filtered_aggregate(profile);
+        let original = query.canonical_bytes();
+        assert!(
+            query
+                .incremental_apply_count_with_control(&mut allow)
+                .unwrap()
+                .is_none()
+        );
+        let mut calls = 0;
+        let recipe = query
+            .incremental_filtered_aggregate_with_control(&mut |_| {
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recipe.group.aggregate_specs().collect::<Vec<_>>(),
+            [(function, Some(0))]
+        );
+        let mut input = recipe
+            .left
+            .clone()
+            .project_incremental_spec(&recipe.outer)
+            .unwrap()
+            .project_incremental_spec(&recipe.arguments)
+            .unwrap()
+            .join(recipe.right.clone(), recipe.join.clone())
+            .unwrap();
+        for step in &recipe.body {
+            input = input.project_incremental_spec(step).unwrap();
+        }
+        assert_eq!(recipe.group.input(), &input);
+        assert_eq!(
+            recipe.output.last().unwrap().column_types(),
+            query.column_types()
+        );
+        for stop in 1..=calls {
+            let mut seen = 0;
+            let result = query.incremental_filtered_aggregate_with_control(&mut |_| {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(at) if at == stop));
+            assert_eq!(seen, stop);
+            assert_eq!(query.canonical_bytes(), original);
+        }
+    }
+}
+
+#[test]
+fn scalar_recipe_accepts_native_calls_and_keeps_conditional_effect_refusals() {
+    for (function, distinct) in [
+        ("sum", false),
+        ("sum", true),
+        ("avg", false),
+        ("avg", true),
+        ("min", false),
+        ("max", false),
+    ] {
+        let qualifier = if distinct { "DISTINCT " } else { "" };
+        let call = format!("{function}({qualifier}id(b)+score)");
+        let text = format!(
+            "MATCH (a:L) WITH a,a.p AS score CALL (a,score) {{ MATCH (a)-[:R]->(b:L) WHERE b <> a RETURN {call} AS total }} RETURN a,total"
+        );
+        let query = PreparedGraphSetText::prepare(&text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(has_filtered_aggregate(&query), "{text}");
+    }
+    for text in [
+        "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (b:L) WHERE b.p > threshold RETURN sum(id(b)) AS total } RETURN a,total",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN avg(b.p) AS total } RETURN a,total",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH b LIMIT 1 RETURN min(b) AS total } RETURN a,total",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b RETURN max(b) AS total } RETURN a,total",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN b,sum(1) AS total } RETURN a,total",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN sum(1) AS total,avg(1) AS mean } RETURN a,total,mean",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN sum(1)+1 AS total } RETURN a,total",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN collect(b) AS total } RETURN a,total",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(!has_filtered_aggregate(&query), "{text}");
     }
 }

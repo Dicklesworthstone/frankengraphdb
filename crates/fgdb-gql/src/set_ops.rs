@@ -27,7 +27,7 @@ pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub use incremental::{
     MaintainedApplyJoin, MaintainedCollectedCount, MaintainedCountJoin, MaintainedDistinctApply,
-    MaintainedExistenceJoin, MaintainedFilteredCount,
+    MaintainedExistenceJoin, MaintainedFilteredAggregate,
 };
 pub(crate) use merge::InPlaceSort;
 pub(crate) use procedure::WithOwnedRows;

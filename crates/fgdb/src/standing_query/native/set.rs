@@ -776,9 +776,9 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 checkpoint,
             )?
         } else if let Some(plan) =
-            query.incremental_filtered_count_with_control(&mut |_| checkpoint())?
+            query.incremental_filtered_aggregate_with_control(&mut |_| checkpoint())?
         {
-            // A filtered count belongs to one exact invocation tuple. Keep
+            // A filtered aggregate belongs to one exact invocation tuple. Keep
             // outer multiplicity out of the body, then restore every original
             // occurrence only after its complete predicate/projection pipeline.
             let left = self.compile(cx, plan.left, policy, checkpoint)?;
