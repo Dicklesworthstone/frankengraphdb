@@ -1,4 +1,97 @@
-//! Bounded, canonical schema unions shared by preparation and graph sources.
+//! Bounded, canonical selections shared by preparation and graph sources.
+
+use crate::PropertyKeyId;
+
+/// Exact property keys to materialize from an already admitted graph record.
+///
+/// This is a projection, not a visibility or authorization predicate. Empty
+/// selects no properties; it never denotes the complete record. Keys retain
+/// their full catalog width, and duplicate reads share one selected field.
+/// The inline bound keeps preparation and every suspended source owner free
+/// of an additional allocation. A compiler exceeding it must request complete
+/// records rather than silently dropping a demanded field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PropertySelection {
+    keys: [PropertyKeyId; PropertySelection::CAPACITY],
+    len: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PropertySelectionLimit;
+
+impl core::fmt::Display for PropertySelectionLimit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "property selection exceeds {} distinct keys",
+            PropertySelection::CAPACITY
+        )
+    }
+}
+
+impl core::error::Error for PropertySelectionLimit {}
+
+impl PropertySelection {
+    pub const CAPACITY: usize = 16;
+
+    pub const EMPTY: Self = Self {
+        keys: [PropertyKeyId(0); Self::CAPACITY],
+        len: 0,
+    };
+
+    #[must_use]
+    pub const fn one(key: PropertyKeyId) -> Self {
+        let mut selected = Self::EMPTY;
+        selected.keys[0] = key;
+        selected.len = 1;
+        selected
+    }
+
+    pub fn try_from_slice(keys: &[PropertyKeyId]) -> Result<Self, PropertySelectionLimit> {
+        let mut selected = Self::EMPTY;
+        for &key in keys {
+            selected.insert(key)?;
+        }
+        Ok(selected)
+    }
+
+    /// Refusal leaves the selection unchanged. An already selected key always
+    /// succeeds, including when every inline slot is occupied.
+    pub fn insert(&mut self, key: PropertyKeyId) -> Result<(), PropertySelectionLimit> {
+        let at = match self.keys().binary_search(&key) {
+            Ok(_) => return Ok(()),
+            Err(at) => at,
+        };
+        let len = self.len();
+        if len == Self::CAPACITY {
+            return Err(PropertySelectionLimit);
+        }
+        self.keys.copy_within(at..len, at + 1);
+        self.keys[at] = key;
+        self.len += 1;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn keys(&self) -> &[PropertyKeyId] {
+        &self.keys[..self.len()]
+    }
+
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[must_use]
+    pub fn contains(&self, key: PropertyKeyId) -> bool {
+        self.keys().binary_search(&key).is_ok()
+    }
+}
 
 /// Maximum distinct labels or relation types in one induced graph selection.
 pub const MAX_SCHEMA_SELECTION_IDS: usize = 16;
@@ -116,6 +209,59 @@ impl<T: Copy> From<Option<T>> for SchemaSelection<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn property_projection_is_canonical_full_width_and_empty_selects_nothing() {
+        let low = PropertyKeyId(1);
+        let high = PropertyKeyId((1_u64 << 40) | 1);
+        let last = PropertyKeyId(u64::MAX);
+        let selected = PropertySelection::try_from_slice(&[last, high, low, high]).unwrap();
+        assert_eq!(selected.keys(), &[low, high, last]);
+        assert_eq!(
+            selected,
+            PropertySelection::try_from_slice(&[low, high, last]).unwrap()
+        );
+        for key in [low, high, last] {
+            assert!(selected.contains(key));
+        }
+        assert!(!selected.contains(PropertyKeyId(2)));
+        assert!(PropertySelection::EMPTY.is_empty());
+        assert!(!PropertySelection::EMPTY.contains(PropertyKeyId(0)));
+        assert_eq!(
+            PropertySelection::try_from_slice(&[]),
+            Ok(PropertySelection::EMPTY)
+        );
+        assert_eq!(
+            PropertySelection::try_from_slice(&[PropertyKeyId(0), PropertyKeyId(0)]),
+            Ok(PropertySelection::one(PropertyKeyId(0)))
+        );
+    }
+
+    #[test]
+    fn property_projection_limit_counts_distinct_keys_and_refuses_atomically() {
+        let keys: Vec<_> = (0..PropertySelection::CAPACITY as u64)
+            .map(PropertyKeyId)
+            .collect();
+        let repeated: Vec<_> = keys.iter().rev().chain(&keys).copied().collect();
+        let mut selected = PropertySelection::try_from_slice(&repeated).unwrap();
+        assert_eq!(selected.keys(), keys);
+        let before = selected;
+        for key in keys {
+            assert_eq!(selected.insert(key), Ok(()));
+        }
+        assert_eq!(selected, before);
+        assert_eq!(
+            selected.insert(PropertyKeyId(u64::MAX)),
+            Err(PropertySelectionLimit)
+        );
+        assert_eq!(selected, before);
+        let mut over = repeated;
+        over.push(PropertyKeyId(u64::MAX));
+        assert_eq!(
+            PropertySelection::try_from_slice(&over),
+            Err(PropertySelectionLimit)
+        );
+    }
 
     #[test]
     fn canonical_unions_preserve_all_singleton_full_width_and_any_semantics() {

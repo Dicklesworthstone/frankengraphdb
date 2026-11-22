@@ -36,7 +36,7 @@ use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
     GqlQueryPolicy,
 };
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{PropertyKeyId, PropertySelection, RelationId};
 #[cfg(test)]
 use fgdb_types::CanonicalScalar;
 use fgdb_types::{CanonicalPropertyValue, CommitSeq, EId, VId};
@@ -54,18 +54,24 @@ pub use crate::stream::{
 pub enum EdgeScanPropertyDemand {
     /// No edge or endpoint property is read.
     Topology,
-    /// Every property read names this key on the one captured edge.
-    EdgeProperty(PropertyKeyId),
-    /// Multiple edge keys, endpoint properties, or an unproved program.
+    /// Every property read belongs to this bounded set on the captured edge.
+    Properties(PropertySelection),
+    /// The key bound is exceeded, endpoint properties, or an unproved program.
     Complete,
 }
 
 impl EdgeScanPropertyDemand {
     fn with_edge_property(self, key: PropertyKeyId) -> Self {
         match self {
-            Self::Topology => Self::EdgeProperty(key),
-            Self::EdgeProperty(previous) if previous == key => self,
-            Self::EdgeProperty(_) | Self::Complete => Self::Complete,
+            Self::Topology => Self::Properties(PropertySelection::one(key)),
+            Self::Properties(mut selected) => {
+                if selected.insert(key).is_ok() {
+                    Self::Properties(selected)
+                } else {
+                    Self::Complete
+                }
+            }
+            Self::Complete => Self::Complete,
         }
     }
 }
@@ -134,9 +140,9 @@ impl EdgeScanPlan {
 
     /// Prove the fields used by every local instruction and projection cell.
     /// Boolean programs include all eager operands, even inputs of unselected
-    /// scalar branches. Repeated uses of one edge key share one selected field;
-    /// a second key, any endpoint property, joined/probed plan or unrecognized
-    /// instruction/projection retains complete-record admission.
+    /// scalar branches. Repeated uses of an exact edge key share a selected
+    /// field; a key-set overflow, any endpoint property, joined/probed plan or
+    /// unrecognized instruction/projection retains complete-record admission.
     ///
     /// The proof never removes, evaluates or reorders an instruction. All path
     /// captures in this local profile denote the same single physical edge.

@@ -30,7 +30,7 @@ use crate::tiered::memory::{MemoryCharge, MemoryError, MemoryPool};
 use crate::vertex::{VertexPatchRows, VertexRow};
 use crate::{AdjacencyEntry, PartitionRootVersion};
 use asupersync::fs::Vfs;
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{PropertyKeyId, PropertySelection, RelationId};
 use fgdb_types::{CanonicalPropertyValue, CommitCx, CommitSeq, EId, QueryCx, StorageReadCx, VId};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -316,14 +316,14 @@ impl BufferedVertexTopology {
     }
 }
 
-/// One authenticated historical vertex with at most the requested property.
-/// This partial owner cannot expose a complete VertexRow. An absent key leaves
-/// an empty property slice; a stored NULL remains a present value. The labels,
-/// lifetime and selected value all belong to the same visible history winner.
+/// One authenticated historical vertex with only requested properties.
+/// This partial owner cannot expose a complete VertexRow. Absent keys are
+/// omitted; stored NULLs remain present values. The labels, lifetime and
+/// selected values all belong to the same visible history winner.
 #[derive(Debug)]
-pub struct BufferedVertexProperty(BufferedValue<VertexRow>);
+pub struct BufferedVertexProperties(BufferedValue<VertexRow>);
 
-impl BufferedVertexProperty {
+impl BufferedVertexProperties {
     pub fn vid(&self) -> VId {
         self.0.vid
     }
@@ -344,7 +344,7 @@ impl BufferedVertexProperty {
         &self.0.labels
     }
 
-    /// Borrow only the requested key, if present, rather than a complete map.
+    /// Borrow only requested keys that are present, rather than a complete map.
     pub fn properties(&self) -> &[(PropertyKeyId, CanonicalPropertyValue)] {
         &self.0.props
     }
@@ -409,7 +409,7 @@ enum VertexPointWinner {
 
 #[derive(Clone, Copy)]
 enum VertexPointAccess {
-    Properties(Option<PropertyKeyId>),
+    Properties(Option<PropertySelection>),
     Topology,
 }
 
@@ -1170,7 +1170,7 @@ impl<V: Vfs> BufferedPartition<V> {
         &self,
         at: usize,
         bytes: &[u8],
-        selected: Option<(usize, Option<PropertyKeyId>)>,
+        selected: Option<(usize, Option<PropertySelection>)>,
     ) -> Result<VertexPatchRows, BufferedReadError> {
         let reference = &self.root.vertex_patches[at];
         let rows = match selected {
@@ -1199,18 +1199,18 @@ impl<V: Vfs> BufferedPartition<V> {
         at: usize,
         bytes: &[u8],
         vid: VId,
-        key: Option<PropertyKeyId>,
+        keys: Option<PropertySelection>,
     ) -> Result<VertexPatchRows, BufferedReadError> {
         let expected = crate::vertex::VertexPatchVersion(self.root.vertex_patches[at].patch_id);
-        let rows = match key {
-            Some(key) => crate::vertex::read_admitted_patch_for_vertex_property(
+        let rows = match keys {
+            Some(keys) => crate::vertex::read_admitted_patch_for_vertex_properties(
                 self.store.k_oid.expose(),
                 self.store.namespace,
                 bytes,
                 expected,
                 self.store.decode_resolver(),
                 vid,
-                key,
+                keys,
             ),
             None => crate::vertex::read_admitted_patch_for_vertex(
                 self.store.k_oid.expose(),
@@ -1273,7 +1273,7 @@ impl<V: Vfs> BufferedPartition<V> {
             VertexPointRead {
                 vid,
                 as_of,
-                access: VertexPointAccess::Properties(key),
+                access: VertexPointAccess::Properties(key.map(PropertySelection::one)),
                 admission: Admission::Normal,
             },
             None,
@@ -1416,7 +1416,7 @@ impl<V: Vfs> BufferedPartition<V> {
         self.vertex_point_row_with(
             cx,
             VertexPointWinner::Deferred(winner, retained),
-            key,
+            key.map(PropertySelection::one),
             Admission::Normal,
             &mut |event| event.point(cx, work, maximum),
         )
@@ -1427,7 +1427,7 @@ impl<V: Vfs> BufferedPartition<V> {
         &mut self,
         cx: &QueryCx,
         winner: VertexPointWinner,
-        key: Option<PropertyKeyId>,
+        keys: Option<PropertySelection>,
         admission: Admission,
         control: &mut (impl FnMut(VertexPointEvent) -> Result<(), C> + Send),
     ) -> Result<VertexRow, C> {
@@ -1454,7 +1454,7 @@ impl<V: Vfs> BufferedPartition<V> {
             }
         };
         let rows =
-            self.decode_vertex_point_patch(winner.patch, bytes.as_ref(), Some((winner.row, key)))?;
+            self.decode_vertex_point_patch(winner.patch, bytes.as_ref(), Some((winner.row, keys)))?;
         if rows.get(winner.row).is_none_or(|row| !winner.matches(row)) {
             return Err(BufferedReadError::from(BufferError::InvalidLoad).into());
         }
@@ -1607,7 +1607,7 @@ impl<V: Vfs> BufferedPartition<V> {
         } else {
             advance(&mut work, 1, self.limits.max_work)?;
             let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
-            self.block_property_row(cx, block, locator, Admission::Normal)
+            self.block_property_row(cx, block, locator, None, Admission::Normal)
                 .await?
         };
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
@@ -1886,15 +1886,15 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
     }
 
     // The merge has already proved the exact visible history winner. Reuse
-    // its active patch workspace for one positional/key decode; never rescan
+    // its active patch workspace for one positional selection; never rescan
     // the identity's history or decode values from its superseded versions.
-    // Moving the selected property into the answer leaves a topology-only
+    // Moving selected properties into the answer leaves a topology-only
     // active patch that the remaining heap heads can continue to reuse.
-    async fn materialize_property<C: Send>(
+    async fn materialize_properties<C: Send>(
         &mut self,
         cx: &QueryCx,
         winner: VertexPointLocator,
-        key: PropertyKeyId,
+        keys: PropertySelection,
         output: &mut VertexRow,
         observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
     ) -> Result<(), BufferedScanError<C>> {
@@ -1925,7 +1925,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         let rows = self.partition.decode_vertex_point_patch(
             winner.patch,
             bytes.as_ref(),
-            Some((winner.row, Some(key))),
+            Some((winner.row, Some(keys))),
         )?;
         // This decoder owns its patch uniquely. Consume that allocation into
         // the private active image, preserving each row's labels and values.
@@ -2042,12 +2042,12 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         }
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         let mut winning_row = winning_row.filter(|row| row.visible_at(self.as_of));
-        if let (Some(row), VertexPointAccess::Properties(Some(key))) =
+        if let (Some(row), VertexPointAccess::Properties(Some(keys))) =
             (winning_row.as_mut(), access)
         {
             let winner =
                 winning_locator.ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
-            self.materialize_property(cx, winner, key, &mut row.value, observe)
+            self.materialize_properties(cx, winner, keys, &mut row.value, observe)
                 .await?;
         }
         let row = winning_row
@@ -2094,24 +2094,30 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
             })
     }
 
-    /// Resolve history from authenticated topology, then decode only this key
+    /// Resolve history from authenticated topology, then decode only selected keys
     /// from the selected visible row. Superseded, future and retired values are
     /// never materialized. FGSV's inline framing still requires the complete
     /// bounded winning patch bytes; every refault authenticates that extent.
     /// Missing keys and stored NULL remain distinct in the partial owner.
-    /// Complete, topology and differently keyed pulls may freely alternate.
-    pub async fn next_property_candidate_with<C: Send>(
+    /// Complete, topology and differently selected pulls may freely alternate.
+    pub async fn next_properties_candidate_with<C: Send>(
         &mut self,
         cx: &QueryCx,
-        key: PropertyKeyId,
+        keys: PropertySelection,
         observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<BufferedVertexCandidate<BufferedVertexProperty>>, BufferedScanError<C>> {
-        self.next_candidate_with_access(cx, VertexPointAccess::Properties(Some(key)), observe)
+    ) -> Result<Option<BufferedVertexCandidate<BufferedVertexProperties>>, BufferedScanError<C>>
+    {
+        let access = if keys.is_empty() {
+            VertexPointAccess::Topology
+        } else {
+            VertexPointAccess::Properties(Some(keys))
+        };
+        self.next_candidate_with_access(cx, access, observe)
             .await
             .map(|candidate| {
                 candidate.map(|candidate| BufferedVertexCandidate {
                     vid: candidate.vid,
-                    row: candidate.row.map(BufferedVertexProperty),
+                    row: candidate.row.map(BufferedVertexProperties),
                 })
             })
     }
@@ -2511,7 +2517,11 @@ mod tests {
             // routing descriptor refusal, not just keyed payload identity.
             view.root.vertex_patches[0].first_seq = CommitSeq(2);
             let error = view
-                .decode_vertex_point_patch(0, &encoded[0].0, Some((0, Some(PropertyKeyId(1)))))
+                .decode_vertex_point_patch(
+                    0,
+                    &encoded[0].0,
+                    Some((0, Some(PropertySelection::one(PropertyKeyId(1))))),
+                )
                 .unwrap_err();
             assert!(matches!(
                 error,
@@ -2523,7 +2533,11 @@ mod tests {
             view.root.vertex_patches[0].first_seq = CommitSeq(1);
             view.patches[0].rows += 1;
             assert!(matches!(
-                view.decode_vertex_point_patch(0, &encoded[0].0, Some((0, Some(PropertyKeyId(1))))),
+                view.decode_vertex_point_patch(
+                    0,
+                    &encoded[0].0,
+                    Some((0, Some(PropertySelection::one(PropertyKeyId(1)))))
+                ),
                 Err(BufferedReadError::Buffer(BufferError::InvalidLoad)),
             ));
             view.patches[0].rows -= 1;
@@ -2863,16 +2877,26 @@ mod tests {
                     }
 
                     // Ordinary selected scans retain their merge heads while
-                    // decoding only the visible winner's requested key. Both
+                    // decoding only the visible winner's requested keys. Both
                     // source forms must fit the same two-workspace allowance,
                     // including when a newer version removes a prior value.
-                    for key in [PropertyKeyId(1), PropertyKeyId(2)] {
-                        let expected: Vec<(PropertyKeyId, CanonicalPropertyValue)> =
-                            match (cut, key.0) {
-                                (3 | 4, 1) => vec![(key, CanonicalScalar::Int(33).into())],
-                                (5 | 6, 2) => vec![(key, CanonicalScalar::Null.into())],
-                                _ => Vec::new(),
-                            };
+                    for keys in [
+                        PropertySelection::EMPTY,
+                        PropertySelection::one(PropertyKeyId(1)),
+                        PropertySelection::one(PropertyKeyId(2)),
+                        PropertySelection::try_from_slice(&[
+                            PropertyKeyId(2),
+                            PropertyKeyId(1),
+                            PropertyKeyId(u64::MAX),
+                        ])
+                        .unwrap(),
+                    ] {
+                        let mut expected: Vec<(PropertyKeyId, CanonicalPropertyValue)> = match cut {
+                            3 | 4 => vec![(PropertyKeyId(1), CanonicalScalar::Int(33).into())],
+                            5 | 6 => vec![(PropertyKeyId(2), CanonicalScalar::Null.into())],
+                            _ => Vec::new(),
+                        };
+                        expected.retain(|(key, _)| keys.contains(*key));
                         for seeded in [false, true] {
                             let mut events = Vec::new();
                             let (candidate, work) = if seeded {
@@ -2881,10 +2905,10 @@ mod tests {
                                     .unwrap()
                                     .into_join_scan();
                                 let candidate = scan
-                                    .vertex_property_candidate_with(
+                                    .vertex_properties_candidate_with(
                                         &query,
                                         VId(101),
-                                        key,
+                                        keys,
                                         &mut |event| {
                                             events.push(event);
                                             Ok::<_, ()>(())
@@ -2898,7 +2922,7 @@ mod tests {
                             } else {
                                 let mut scan = view.vertex_scan(&query, CommitSeq(cut)).unwrap();
                                 let candidate = scan
-                                    .next_property_candidate_with(&query, key, &mut |event| {
+                                    .next_properties_candidate_with(&query, keys, &mut |event| {
                                         events.push(event);
                                         Ok::<_, ()>(())
                                     })
@@ -2949,10 +2973,12 @@ mod tests {
                 // unavailable timestamp in key 1. Key 2 and topology may read
                 // that same winner without consulting its unrelated artifact.
                 let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
-                let row =
-                    scan.next_property_candidate_with(&query, PropertyKeyId(2), &mut |_| {
-                        Ok::<_, ()>(())
-                    })
+                let row = scan
+                    .next_properties_candidate_with(
+                        &query,
+                        PropertySelection::one(PropertyKeyId(2)),
+                        &mut |_| Ok::<_, ()>(()),
+                    )
                     .await
                     .unwrap()
                     .unwrap()
@@ -2966,9 +2992,12 @@ mod tests {
                     .unwrap()
                     .into_join_scan();
                 let row = scan
-                    .vertex_property_candidate_with(&query, VId(101), PropertyKeyId(2), &mut |_| {
-                        Ok::<_, ()>(())
-                    })
+                    .vertex_properties_candidate_with(
+                        &query,
+                        VId(101),
+                        PropertySelection::one(PropertyKeyId(2)),
+                        &mut |_| Ok::<_, ()>(()),
+                    )
                     .await
                     .unwrap()
                     .unwrap()
@@ -3007,18 +3036,18 @@ mod tests {
                 drop(scan);
                 let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
                 assert!(matches!(
-                    scan.next_property_candidate_with(
+                    scan.next_properties_candidate_with(
                         &query,
-                        PropertyKeyId(1),
+                        PropertySelection::one(PropertyKeyId(1)),
                         &mut |_| Ok::<_, ()>(())
                     )
                     .await,
                     Err(BufferedScanError::Read(_)),
                 ));
                 assert!(
-                    scan.next_property_candidate_with(
+                    scan.next_properties_candidate_with(
                         &query,
-                        PropertyKeyId(2),
+                        PropertySelection::one(PropertyKeyId(2)),
                         &mut |_| -> Result<(), ()> { panic!("failed selected scan is terminal") }
                     )
                     .await
@@ -3031,10 +3060,10 @@ mod tests {
                     .unwrap()
                     .into_join_scan();
                 assert!(matches!(
-                    scan.vertex_property_candidate_with(
+                    scan.vertex_properties_candidate_with(
                         &query,
                         VId(101),
-                        PropertyKeyId(1),
+                        PropertySelection::one(PropertyKeyId(1)),
                         &mut |_| Ok::<_, ()>(()),
                     )
                     .await,
@@ -3174,10 +3203,14 @@ mod tests {
                     let selected_work = {
                         let mut scan = view.vertex_scan(&query, CommitSeq(3)).unwrap();
                         let candidate = scan
-                            .next_property_candidate_with(&query, PropertyKeyId(1), &mut |event| {
-                                healthy_events.push(event);
-                                Ok::<_, ()>(())
-                            })
+                            .next_properties_candidate_with(
+                                &query,
+                                PropertySelection::one(PropertyKeyId(1)),
+                                &mut |event| {
+                                    healthy_events.push(event);
+                                    Ok::<_, ()>(())
+                                },
+                            )
                             .await
                             .unwrap()
                             .unwrap();
@@ -3192,13 +3225,17 @@ mod tests {
                         let mut scan = view.vertex_scan(&query, CommitSeq(3)).unwrap();
                         let mut observed = Vec::new();
                         let result = scan
-                            .next_property_candidate_with(&query, PropertyKeyId(1), &mut |event| {
-                                observed.push(event);
-                                if observed.len() == stop + 1 {
-                                    root.set_cancel_requested(true);
-                                }
-                                Ok::<_, ()>(())
-                            })
+                            .next_properties_candidate_with(
+                                &query,
+                                PropertySelection::one(PropertyKeyId(1)),
+                                &mut |event| {
+                                    observed.push(event);
+                                    if observed.len() == stop + 1 {
+                                        root.set_cancel_requested(true);
+                                    }
+                                    Ok::<_, ()>(())
+                                },
+                            )
                             .await;
                         root.set_cancel_requested(false);
                         assert!(matches!(
@@ -3221,9 +3258,11 @@ mod tests {
                         view.limits.max_work = selected_work - usize::from(!exact);
                         let mut scan = view.vertex_scan(&query, CommitSeq(3)).unwrap();
                         let result = scan
-                            .next_property_candidate_with(&query, PropertyKeyId(1), &mut |_| {
-                                Ok::<_, ()>(())
-                            })
+                            .next_properties_candidate_with(
+                                &query,
+                                PropertySelection::one(PropertyKeyId(1)),
+                                &mut |_| Ok::<_, ()>(()),
+                            )
                             .await;
                         if exact {
                             assert!(result.unwrap().unwrap().row.is_some());
@@ -3313,10 +3352,12 @@ mod tests {
             }
             for cut in [0, 1, 2, 5, 7] {
                 let mut scan = view.vertex_scan(&query, CommitSeq(cut)).unwrap();
-                let candidate =
-                    scan.next_property_candidate_with(&query, PropertyKeyId(1), &mut |_| {
-                        Ok::<_, ()>(())
-                    })
+                let candidate = scan
+                    .next_properties_candidate_with(
+                        &query,
+                        PropertySelection::one(PropertyKeyId(1)),
+                        &mut |_| Ok::<_, ()>(()),
+                    )
                     .await
                     .unwrap()
                     .unwrap();
@@ -3423,14 +3464,14 @@ mod tests {
                             }
                         };
                         let legacy = match key {
-                            Some(key) => crate::vertex::read_admitted_patch_for_vertex_property(
+                            Some(key) => crate::vertex::read_admitted_patch_for_vertex_properties(
                                 store.k_oid.expose(),
                                 store.namespace,
                                 &bytes,
                                 patch,
                                 store.decode_resolver(),
                                 VId(101),
-                                key,
+                                PropertySelection::one(key),
                             ),
                             None => crate::vertex::read_admitted_patch_for_vertex(
                                 store.k_oid.expose(),
@@ -3525,9 +3566,11 @@ mod tests {
             drop(scan);
             let mut scan = view.vertex_scan(&query, CommitSeq(3)).unwrap();
             assert!(matches!(
-                scan.next_property_candidate_with(&query, PropertyKeyId(1), &mut |_| Ok::<_, ()>(
-                    ()
-                ))
+                scan.next_properties_candidate_with(
+                    &query,
+                    PropertySelection::one(PropertyKeyId(1)),
+                    &mut |_| Ok::<_, ()>(())
+                )
                 .await,
                 Err(BufferedScanError::Read(_)),
             ));
@@ -3538,10 +3581,10 @@ mod tests {
                 .unwrap()
                 .into_join_scan();
             assert!(matches!(
-                scan.vertex_property_candidate_with(
+                scan.vertex_properties_candidate_with(
                     &query,
                     VId(101),
-                    PropertyKeyId(1),
+                    PropertySelection::one(PropertyKeyId(1)),
                     &mut |_| Ok::<_, ()>(()),
                 )
                 .await,

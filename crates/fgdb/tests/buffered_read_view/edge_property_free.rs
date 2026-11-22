@@ -192,6 +192,20 @@ fn payload() -> CanonicalScalar {
 async fn large_fixture(
     contexts: &PurposeContexts,
 ) -> (MemVfs, Database<MemVfs>, AdjRunSegmentVersion) {
+    large_fixture_with_selected_base(contexts, false).await
+}
+
+fn selected_base_limits() -> SealedLimits {
+    SealedLimits {
+        max_property_bytes: 256,
+        ..small_run_limits()
+    }
+}
+
+async fn large_fixture_with_selected_base(
+    contexts: &PurposeContexts,
+    selected_base: bool,
+) -> (MemVfs, Database<MemVfs>, AdjRunSegmentVersion) {
     let vfs = MemVfs::new().unwrap();
     let commit = contexts.commit();
     let mut writer = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
@@ -205,13 +219,17 @@ async fn large_fixture(
             vec![(PROPERTY, CanonicalScalar::Int(1))],
         );
     }
-    first.add_edge(EId(0), A, B, vec![(PROPERTY, CanonicalScalar::Int(7))]);
-    first.add_edge(
-        EId(u128::MAX),
-        B,
-        B,
-        vec![(PROPERTY, CanonicalScalar::Int(8))],
-    );
+    for (eid, source, value) in [(EId(0), A, 7), (EId(u128::MAX), B, 8)] {
+        let mut properties = vec![(PROPERTY, CanonicalScalar::Int(value))];
+        if selected_base {
+            properties.push((PropertyKeyId(2), CanonicalScalar::Int(value - 4)));
+            properties.push((
+                PropertyKeyId(u64::MAX),
+                CanonicalScalar::Int((value - 4) * 10),
+            ));
+        }
+        first.add_edge(eid, source, B, properties);
+    }
     assert_eq!(writer.write(&commit, first).await.unwrap(), CommitSeq(1));
     let run = writer
         .seal_relation(
@@ -219,7 +237,11 @@ async fn large_fixture(
             &contexts.query(),
             RELATION,
             CommitSeq(0),
-            small_run_limits(),
+            if selected_base {
+                selected_base_limits()
+            } else {
+                small_run_limits()
+            },
             RootReadLimits::default(),
         )
         .await
@@ -350,6 +372,7 @@ fn projection_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> 
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+        (GraphSymbolKind::Property, "s") => Some(GraphSymbol::Property(PropertyKeyId(u64::MAX))),
         _ => None,
     }
 }
@@ -764,7 +787,7 @@ fn selected_edge_property_queries_fit_without_unrelated_payloads_and_keep_output
     let ((), report) = run_async_under_lab(0x6275_ef06, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
-        let (vfs, mut writer, _) = large_fixture(&contexts).await;
+        let (vfs, mut writer, _) = large_fixture_with_selected_base(&contexts, true).await;
         let mut add = WriteBatch::new(RELATION);
         add.set_edge_property(EId(0), PropertyKeyId(2), Some(CanonicalScalar::Int(9)));
         add.set_edge_property(
@@ -772,38 +795,59 @@ fn selected_edge_property_queries_fit_without_unrelated_payloads_and_keep_output
             PropertyKeyId(2),
             Some(CanonicalScalar::Int(11)),
         );
+        for (eid, value) in [(EId(0), 90), (EId(u128::MAX), 110)] {
+            add.set_edge_property(
+                eid,
+                PropertyKeyId(u64::MAX),
+                Some(CanonicalScalar::Int(value)),
+            );
+        }
         assert_eq!(
             writer.write(&contexts.commit(), add).await.unwrap(),
             CommitSeq(3)
         );
         let columns = std::iter::once("r".to_owned())
-            .chain((1..32).map(|at| format!("r.q AS copy_{at}")))
+            .chain((1..32).map(|at| {
+                let field = if at % 2 == 1 { "q" } else { "s" };
+                format!("r.{field} AS copy_{at}")
+            }))
             .collect::<Vec<_>>()
             .join(",");
         let prepared = selected_query(&format!(
-            "MATCH (a:L)-[r:R]->(b:L) WHERE r.q>=0 RETURN {columns}"
+            "MATCH (a:L)-[r:R]->(b:L) WHERE r.q>=0 AND r.s>=0 RETURN {columns}"
         ));
         for native in [false, true] {
             let memory = memory();
-            let mut view = open(&contexts, &vfs, &memory, native.then(small_run_limits)).await;
+            let mut view = open(&contexts, &vfs, &memory, native.then(selected_base_limits)).await;
             let occupied = memory
                 .reserve(&cx, memory.available() - 3 * 1024 * 1024)
                 .unwrap();
-            let (rows, stats) = collect(&mut view, &cx, &prepared, CommitSeq(3)).await;
-            assert_eq!(stats.snapshot_records, 2);
-            assert_eq!(rows.len(), 2);
-            for (row, eid, value) in [(&rows[0], EId(0), 9), (&rows[1], EId(u128::MAX), 11)] {
-                assert_eq!(row[0], GraphValue::Edge(eid));
-                assert_eq!(
-                    row[1..],
-                    vec![GraphValue::Scalar(CanonicalScalar::Int(value)); 31]
-                );
+            // Cut 1 reads both selected keys from the durable base. Cut 2
+            // preserves them through a large unrelated suffix update; cut 3
+            // replaces both selected fields in that suffix.
+            for (cut, values) in [(1, [3, 4]), (2, [3, 4]), (3, [9, 11])] {
+                let (rows, stats) = collect(&mut view, &cx, &prepared, CommitSeq(cut)).await;
+                assert_eq!(stats.snapshot_records, 2);
+                assert_eq!(rows.len(), 2);
+                for (at, row) in rows.iter().enumerate() {
+                    assert_eq!(row[0], GraphValue::Edge([EId(0), EId(u128::MAX)][at]));
+                    for (column, cell) in row.iter().enumerate().skip(1) {
+                        let value = values[at] * if column % 2 == 1 { 1 } else { 10 };
+                        assert_eq!(*cell, GraphValue::Scalar(CanonicalScalar::Int(value)));
+                    }
+                }
             }
-            // A second edge key or any endpoint property keeps complete
-            // records. Repeated selected columns cannot hide that demand.
+            // Requesting the large edge property charges its payload; an
+            // endpoint property still requires complete source records.
             for field in ["r.p", "a.p"] {
+                // Even the selected edge payload alone exceeds the 3 MiB
+                // allowance at this width: 72 * 4 * 12 KiB > 3 MiB.
+                let required_columns = (0..40)
+                    .map(|at| format!("{field} AS required_{at}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let required = selected_query(&format!(
-                    "MATCH (a)-[r:R]->(b) RETURN {columns},{field} AS required"
+                    "MATCH (a)-[r:R]->(b) RETURN {columns},{required_columns}"
                 ));
                 let mut cursor = view
                     .stream_graph_edges_governed(&cx, &required, native_run_policy(100))
@@ -833,7 +877,7 @@ fn selected_edge_property_queries_fit_without_unrelated_payloads_and_keep_output
             assert_eq!(
                 rows[0].last(),
                 Some(&GraphValue::Scalar(payload())),
-                "complete fallback still exposes its required payload"
+                "the additional demanded field still exposes its required payload"
             );
             let mut cursor = view
                 .stream_graph_edges_governed(&cx, &prepared, native_run_policy(100))
@@ -849,6 +893,10 @@ fn selected_edge_property_queries_fit_without_unrelated_payloads_and_keep_output
             assert_eq!(
                 held.row().values()[1],
                 GraphValue::Scalar(CanonicalScalar::Int(9))
+            );
+            assert_eq!(
+                held.row().values()[2],
+                GraphValue::Scalar(CanonicalScalar::Int(90))
             );
             drop(held);
             assert_eq!(memory.used(), 0);

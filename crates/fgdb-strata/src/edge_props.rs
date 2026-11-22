@@ -22,7 +22,7 @@
 //! (rows referenced exactly once, in entry order) means a patch cannot hold
 //! an unreferenced row or serve two entries with one row.
 
-use fgdb_delta_types::PropertyKeyId;
+use fgdb_delta_types::{PropertyKeyId, PropertySelection};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{
     CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar, CanonicalScalarResolver,
@@ -331,18 +331,18 @@ fn decode_property_patch_inner(
 // A selection is legal only behind the already-admitted read below. All public
 // decoders pass None and independently validate every value and format profile.
 // Selected reads still parse every row, including skipped rows' lengths and key
-// order. A key filter retains at most one value of the selected physical row;
-// that row remains present even when the key is absent.
+// order. A key filter retains only requested values of the selected physical
+// row; that row remains present even when every selected key is absent.
 fn decode_property_patch_fields(
     bytes: &[u8],
     resolver: Option<&dyn CanonicalScalarResolver>,
-    selected: Option<(usize, Option<PropertyKeyId>)>,
+    selected: Option<(usize, Option<PropertySelection>)>,
 ) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
     decode_property_patch_selection(
         bytes,
         resolver,
         selected.map(|(row, _)| row),
-        selected.and_then(|(_, key)| key),
+        selected.and_then(|(_, keys)| keys),
     )
 }
 
@@ -350,7 +350,7 @@ fn decode_property_patch_selection(
     bytes: &[u8],
     resolver: Option<&dyn CanonicalScalarResolver>,
     selected_row: Option<usize>,
-    selected_key: Option<PropertyKeyId>,
+    selected_keys: Option<PropertySelection>,
 ) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
     let mut at = 0usize;
     let take = |at: &mut usize, n: usize| -> Result<usize, EdgePropertyPatchError> {
@@ -389,8 +389,8 @@ fn decode_property_patch_selection(
         let decode = selected_row.is_none_or(|selected| selected == row_at);
         let mut row: EdgePropertyRow = Vec::with_capacity(if !decode {
             0
-        } else if selected_key.is_some() {
-            usize::from(props != 0)
+        } else if let Some(keys) = selected_keys {
+            keys.len().min(props as usize)
         } else {
             props.min(MAX_PROPERTY_PATCH_ROWS) as usize
         });
@@ -404,12 +404,12 @@ fn decode_property_patch_selection(
             let len = u32::from_le_bytes(bytes[start..start + 4].try_into().expect("four bytes"))
                 as usize;
             let start = take(&mut at, len)?;
-            if !decode || selected_key.is_some() {
+            if !decode || selected_keys.is_some() {
                 if previous_key.is_some_and(|previous| previous >= key.0) {
                     return Err(EdgePropertyPatchError::NonCanonicalRow { at: row_at });
                 }
                 previous_key = Some(key.0);
-                if !decode || selected_key != Some(key) {
+                if !decode || selected_keys.is_some_and(|keys| !keys.contains(key)) {
                     continue;
                 }
             }
@@ -435,7 +435,7 @@ fn decode_property_patch_selection(
             row.push((key, value));
         }
         if decode {
-            if selected_key.is_none() || !row.is_empty() {
+            if selected_keys.is_none() || !row.is_empty() {
                 validate_row(row_at, &row)?;
             } else if props == 0 {
                 // An absent requested key is legal in a nonempty stored row.
@@ -457,7 +457,7 @@ fn decode_property_patch_selection(
     // An admitted selection cannot infer the complete patch's required format
     // from one row. Initial admission already proved that exact format, and the
     // keyed identity plus current extent checksum bind all skipped payloads.
-    if selected_row.is_none() && selected_key.is_none() {
+    if selected_row.is_none() && selected_keys.is_none() {
         let required = property_patch_format_for(&rows);
         if format != required {
             return Err(EdgePropertyPatchError::FormatMismatch { format, required });
@@ -527,7 +527,7 @@ pub(crate) fn read_property_patch_inner(
 /// value, the exact format profile and the block/patch locator bijection. Its
 /// current fault must also match the admitted extent checksum. Recheck the
 /// complete keyed identity and every row's framing and property-key order, but
-/// decode values only for the requested zero-based row. Unselected rows are
+/// decode values only for the requested zero-based row and optional key set. Unselected rows are
 /// never returned with empty properties that could be mistaken for absence.
 /// An out-of-range selection returns None only after complete framing checks.
 pub(crate) fn read_admitted_property_row(
@@ -537,6 +537,7 @@ pub(crate) fn read_admitted_property_row(
     expected: EdgePropertyPatchVersion,
     resolver: Option<&dyn CanonicalScalarResolver>,
     row: usize,
+    keys: Option<PropertySelection>,
 ) -> Result<Option<EdgePropertyRow>, EdgePropertyPatchError> {
     let actual = property_patch_id(k_oid, namespace, bytes);
     if actual != expected.0 {
@@ -545,7 +546,7 @@ pub(crate) fn read_admitted_property_row(
             actual,
         });
     }
-    Ok(decode_property_patch_fields(bytes, resolver, Some((row, None)))?.pop())
+    Ok(decode_property_patch_fields(bytes, resolver, Some((row, keys)))?.pop())
 }
 
 /// Read one value of a positional row from a completely admitted sidecar.
@@ -572,29 +573,31 @@ pub(crate) fn read_admitted_property_value(
             actual,
         });
     }
-    Ok(
-        decode_property_patch_fields(bytes, resolver, Some((row, Some(key))))?
-            .pop()
-            .map(|mut row| row.pop().map(|(_, value)| value)),
-    )
+    Ok(decode_property_patch_fields(
+        bytes,
+        resolver,
+        Some((row, Some(PropertySelection::one(key)))),
+    )?
+    .pop()
+    .map(|mut row| row.pop().map(|(_, value)| value)))
 }
 
-/// Select one property in every physical row of an already admitted sidecar.
+/// Select properties in every physical row of an already admitted sidecar.
 ///
 /// Complete root admission proved every value, profile and locator binding;
 /// the current fault must match its admitted extent checksum. Reauthenticate
 /// the entire patch and check every row's framing and key order. Empty stored
 /// rows remain errors. Returned rows preserve their original positions but
-/// contain at most the requested key; an empty projected row means that key is
-/// absent. These partial rows must stay behind the buffered scan's opaque
+/// contain only requested keys; an empty projected row means every selected
+/// key is absent. These partial rows must stay behind the buffered scan's opaque
 /// selected-property owner, never become complete edge records.
-pub(crate) fn read_admitted_property_column(
+pub(crate) fn read_admitted_property_columns(
     k_oid: &[u8; 32],
     namespace: DatabaseSecurityNamespaceId,
     bytes: &[u8],
     expected: EdgePropertyPatchVersion,
     resolver: Option<&dyn CanonicalScalarResolver>,
-    key: PropertyKeyId,
+    keys: PropertySelection,
 ) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
     let actual = property_patch_id(k_oid, namespace, bytes);
     if actual != expected.0 {
@@ -603,7 +606,7 @@ pub(crate) fn read_admitted_property_column(
             actual,
         });
     }
-    decode_property_patch_selection(bytes, resolver, None, Some(key))
+    decode_property_patch_selection(bytes, resolver, None, Some(keys))
 }
 
 /// The locator column's own canonical law: non-zero locators are exactly
@@ -677,6 +680,7 @@ mod selected_row_tests {
             EdgePropertyPatchVersion(property_patch_id(&KEY, NS, bytes)),
             None,
             row,
+            None,
         )
     }
 
@@ -879,7 +883,7 @@ mod selected_row_tests {
             let mut changed = bytes.clone();
             changed[at] ^= 1;
             assert!(matches!(
-                read_admitted_property_row(&KEY, NS, &changed, expected, None, 0),
+                read_admitted_property_row(&KEY, NS, &changed, expected, None, 0, None),
                 Err(EdgePropertyPatchError::IdentityMismatch { .. })
             ));
             assert!(matches!(
@@ -900,7 +904,7 @@ mod selected_row_tests {
             (KEY, DatabaseSecurityNamespaceId([0x98; 32])),
         ] {
             assert!(matches!(
-                read_admitted_property_row(&key, namespace, &bytes, expected, None, 0),
+                read_admitted_property_row(&key, namespace, &bytes, expected, None, 0, None),
                 Err(EdgePropertyPatchError::IdentityMismatch { .. })
             ));
             assert!(matches!(
@@ -1127,13 +1131,13 @@ mod selected_row_tests {
         resolver.reject.set(true);
         for selection in [1, rows.len(), usize::MAX] {
             assert_eq!(
-                read_admitted_property_row(&KEY, NS, &bytes, id, None, selection)
+                read_admitted_property_row(&KEY, NS, &bytes, id, None, selection, None)
                     .unwrap()
                     .as_ref(),
                 rows.get(selection)
             );
             assert_eq!(
-                read_admitted_property_row(&KEY, NS, &bytes, id, Some(&resolver), selection)
+                read_admitted_property_row(&KEY, NS, &bytes, id, Some(&resolver), selection, None)
                     .unwrap()
                     .as_ref(),
                 rows.get(selection)
@@ -1147,13 +1151,13 @@ mod selected_row_tests {
         for selection in [0, 2] {
             resolver.reject.set(true);
             assert!(
-                read_admitted_property_row(&KEY, NS, &bytes, id, Some(&resolver), selection)
+                read_admitted_property_row(&KEY, NS, &bytes, id, Some(&resolver), selection, None)
                     .is_err()
             );
             resolver.reject.set(false);
             let before = resolver.calls.get();
             assert_eq!(
-                read_admitted_property_row(&KEY, NS, &bytes, id, Some(&resolver), selection)
+                read_admitted_property_row(&KEY, NS, &bytes, id, Some(&resolver), selection, None)
                     .unwrap()
                     .as_ref(),
                 rows.get(selection)
@@ -1162,17 +1166,17 @@ mod selected_row_tests {
         }
     }
 
-    fn select_column(
+    fn select_columns(
         bytes: &[u8],
-        key: PropertyKeyId,
+        keys: PropertySelection,
     ) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
-        read_admitted_property_column(
+        read_admitted_property_columns(
             &KEY,
             NS,
             bytes,
             EdgePropertyPatchVersion(property_patch_id(&KEY, NS, bytes)),
             None,
-            key,
+            keys,
         )
     }
 
@@ -1190,17 +1194,35 @@ mod selected_row_tests {
                     .collect();
                 let bytes = encode_property_patch(&rows).unwrap();
                 let complete = decode_property_patch(&bytes).unwrap();
-                for key in [PropertyKeyId(0), PropertyKeyId(3), PropertyKeyId(u64::MAX)] {
+                let full_width: Vec<_> = (0..PropertySelection::CAPACITY as u64 - 1)
+                    .map(PropertyKeyId)
+                    .chain([PropertyKeyId(u64::MAX)])
+                    .collect();
+                for keys in [
+                    PropertySelection::EMPTY,
+                    PropertySelection::one(PropertyKeyId(0)),
+                    PropertySelection::one(PropertyKeyId(3)),
+                    PropertySelection::one(PropertyKeyId(u64::MAX)),
+                    PropertySelection::try_from_slice(&[
+                        PropertyKeyId(u64::MAX),
+                        PropertyKeyId(3),
+                        PropertyKeyId(3),
+                    ])
+                    .unwrap(),
+                    PropertySelection::try_from_slice(&full_width).unwrap(),
+                ] {
                     let expected: Vec<EdgePropertyRow> = complete
                         .iter()
                         .map(|row| {
                             row.iter()
-                                .filter(|(candidate, _)| *candidate == key)
+                                .filter(|(candidate, _)| keys.contains(*candidate))
                                 .cloned()
                                 .collect()
                         })
                         .collect();
-                    let selected = select_column(&bytes, key).unwrap();
+                    let id = EdgePropertyPatchVersion(property_patch_id(&KEY, NS, &bytes));
+                    let selected =
+                        read_admitted_property_columns(&KEY, NS, &bytes, id, None, keys).unwrap();
                     assert_eq!(selected, expected);
                     assert_eq!(
                         selected.len(),
@@ -1211,6 +1233,14 @@ mod selected_row_tests {
                         .chain((1..=count).map(|at| at as u8))
                         .collect();
                     validate_block_patch_consistency(&locators, selected.len()).unwrap();
+                    // Native suffix reads use one exact row from this same
+                    // parser. Missing keys keep Some([]); absent rows are None.
+                    for row in [0, count / 2, count] {
+                        let actual =
+                            read_admitted_property_row(&KEY, NS, &bytes, id, None, row, Some(keys))
+                                .unwrap();
+                        assert_eq!(actual.as_ref(), expected.get(row));
+                    }
                 }
             }
         }
@@ -1228,24 +1258,32 @@ mod selected_row_tests {
         ];
         let bytes = encode_property_patch(&rows).unwrap();
         let id = EdgePropertyPatchVersion(property_patch_id(&KEY, NS, &bytes));
-        for key in [PropertyKeyId(11), PropertyKeyId(19), PropertyKeyId(99)] {
+        let selections = [
+            PropertySelection::EMPTY,
+            PropertySelection::one(PropertyKeyId(11)),
+            PropertySelection::one(PropertyKeyId(19)),
+            PropertySelection::one(PropertyKeyId(99)),
+            PropertySelection::try_from_slice(&[PropertyKeyId(19), PropertyKeyId(11)]).unwrap(),
+            PropertySelection::try_from_slice(&[PropertyKeyId(31), PropertyKeyId(5)]).unwrap(),
+        ];
+        for keys in selections {
             for cut in 0..bytes.len() {
                 assert!(matches!(
-                    select_column(&bytes[..cut], key),
+                    select_columns(&bytes[..cut], keys),
                     Err(EdgePropertyPatchError::Truncated { .. })
                 ));
             }
             let mut extra = bytes.clone();
             extra.push(0);
             assert_eq!(
-                select_column(&extra, key),
+                select_columns(&extra, keys),
                 Err(EdgePropertyPatchError::TrailingBytes { extra: 1 })
             );
             for at in 0..bytes.len() {
                 let mut changed = bytes.clone();
                 changed[at] ^= 1;
                 assert!(matches!(
-                    read_admitted_property_column(&KEY, NS, &changed, id, None, key),
+                    read_admitted_property_columns(&KEY, NS, &changed, id, None, keys),
                     Err(EdgePropertyPatchError::IdentityMismatch { .. })
                 ));
             }
@@ -1254,7 +1292,7 @@ mod selected_row_tests {
                 (KEY, DatabaseSecurityNamespaceId([0x98; 32])),
             ] {
                 assert!(matches!(
-                    read_admitted_property_column(&secret, namespace, &bytes, id, None, key),
+                    read_admitted_property_columns(&secret, namespace, &bytes, id, None, keys),
                     Err(EdgePropertyPatchError::IdentityMismatch { .. })
                 ));
             }
@@ -1266,9 +1304,9 @@ mod selected_row_tests {
         for replacement in [11_u64, 7] {
             let mut malformed = bytes.clone();
             malformed[second_key..second_key + 8].copy_from_slice(&replacement.to_le_bytes());
-            for key in [PropertyKeyId(11), PropertyKeyId(19), PropertyKeyId(99)] {
+            for keys in selections {
                 assert_eq!(
-                    select_column(&malformed, key),
+                    select_columns(&malformed, keys),
                     Err(EdgePropertyPatchError::NonCanonicalRow { at: 1 })
                 );
             }
@@ -1276,22 +1314,22 @@ mod selected_row_tests {
         let mut empty = bytes[..second].to_vec();
         empty.extend_from_slice(&0_u32.to_le_bytes());
         empty.extend_from_slice(&encode_property_patch(&rows[2..]).unwrap()[10..]);
-        for key in [PropertyKeyId(5), PropertyKeyId(31), PropertyKeyId(99)] {
+        for keys in selections {
             assert_eq!(
-                select_column(&empty, key),
+                select_columns(&empty, keys),
                 Err(EdgePropertyPatchError::EmptyRow { at: 1 })
             );
         }
         let mut wrong_format = bytes.clone();
         wrong_format[4..6].copy_from_slice(&99_u16.to_le_bytes());
         assert_eq!(
-            select_column(&wrong_format, PropertyKeyId(99)),
+            select_columns(&wrong_format, PropertySelection::EMPTY),
             Err(EdgePropertyPatchError::UnsupportedFormat { format: 99 })
         );
         let mut wrong_count = bytes;
         wrong_count[6..10].copy_from_slice(&256_u32.to_le_bytes());
         assert_eq!(
-            select_column(&wrong_count, PropertyKeyId(99)),
+            select_columns(&wrong_count, PropertySelection::EMPTY),
             Err(EdgePropertyPatchError::ImplausibleRowCount { declared: 256 })
         );
     }
@@ -1309,7 +1347,7 @@ mod selected_row_tests {
             )
             .unwrap(),
         );
-        let rows = vec![
+        let mut rows = vec![
             vec![
                 (PropertyKeyId(3), timestamp.clone().into()),
                 (PropertyKeyId(7), CanonicalScalar::Int(101).into()),
@@ -1325,6 +1363,12 @@ mod selected_row_tests {
             ],
             vec![(PropertyKeyId(7), CanonicalScalar::Int(103).into())],
         ];
+        for (at, row) in rows.iter_mut().enumerate() {
+            row.push((
+                PropertyKeyId(u64::MAX),
+                CanonicalScalar::Int(at as i64).into(),
+            ));
+        }
         let bytes = encode_property_patch(&rows).unwrap();
         let id = EdgePropertyPatchVersion(property_patch_id(&KEY, NS, &bytes));
         assert_eq!(
@@ -1333,20 +1377,47 @@ mod selected_row_tests {
         );
         resolver.calls.set(0);
         resolver.reject.set(true);
-        for key in [PropertyKeyId(7), PropertyKeyId(99)] {
+        for keys in [
+            PropertySelection::EMPTY,
+            PropertySelection::one(PropertyKeyId(7)),
+            PropertySelection::one(PropertyKeyId(99)),
+            PropertySelection::try_from_slice(&[
+                PropertyKeyId(u64::MAX),
+                PropertyKeyId(7),
+                PropertyKeyId(99),
+            ])
+            .unwrap(),
+        ] {
             let expected: Vec<EdgePropertyRow> = rows
                 .iter()
                 .map(|row| {
                     row.iter()
-                        .filter(|(candidate, _)| *candidate == key)
+                        .filter(|(candidate, _)| keys.contains(*candidate))
                         .cloned()
                         .collect()
                 })
                 .collect();
             assert_eq!(
-                read_admitted_property_column(&KEY, NS, &bytes, id, Some(&resolver), key).unwrap(),
+                read_admitted_property_columns(&KEY, NS, &bytes, id, Some(&resolver), keys)
+                    .unwrap(),
                 expected
             );
+            for (row, expected) in expected.iter().enumerate() {
+                assert_eq!(
+                    read_admitted_property_row(
+                        &KEY,
+                        NS,
+                        &bytes,
+                        id,
+                        Some(&resolver),
+                        row,
+                        Some(keys)
+                    )
+                    .unwrap()
+                    .as_ref(),
+                    Some(expected),
+                );
+            }
         }
         assert_eq!(
             resolver.calls.get(),
@@ -1354,14 +1425,27 @@ mod selected_row_tests {
             "unselected artifacts are not decoded"
         );
         assert!(
-            read_admitted_property_column(&KEY, NS, &bytes, id, Some(&resolver), PropertyKeyId(3),)
-                .is_err()
+            read_admitted_property_columns(
+                &KEY,
+                NS,
+                &bytes,
+                id,
+                Some(&resolver),
+                PropertySelection::one(PropertyKeyId(3)),
+            )
+            .is_err()
         );
         assert!(decode_property_patch_with_resolver(&bytes, &resolver).is_err());
         resolver.reject.set(false);
-        let selected =
-            read_admitted_property_column(&KEY, NS, &bytes, id, Some(&resolver), PropertyKeyId(3))
-                .unwrap();
+        let selected = read_admitted_property_columns(
+            &KEY,
+            NS,
+            &bytes,
+            id,
+            Some(&resolver),
+            PropertySelection::one(PropertyKeyId(3)),
+        )
+        .unwrap();
         assert_eq!(
             selected,
             vec![vec![rows[0][0].clone()], vec![rows[1][0].clone()], vec![]]

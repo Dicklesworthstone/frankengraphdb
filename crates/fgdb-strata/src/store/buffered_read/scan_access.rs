@@ -209,11 +209,11 @@ impl<V: Vfs> BufferedPartition<V> {
         .map_err(BufferedReadError::from)
     }
 
-    async fn block_property_column(
+    async fn block_property_columns(
         &mut self,
         cx: &QueryCx,
         at: usize,
-        property: PropertyKeyId,
+        keys: PropertySelection,
         admission: Admission,
     ) -> Result<Vec<EdgePropertyRow>, BufferedReadError> {
         let key = self.blocks[at].properties.ok_or(BufferError::InvalidLoad)?;
@@ -225,13 +225,13 @@ impl<V: Vfs> BufferedPartition<V> {
                 admission,
             )
             .await?;
-        crate::edge_props::read_admitted_property_column(
+        crate::edge_props::read_admitted_property_columns(
             self.store.k_oid.expose(),
             self.store.namespace,
             bytes.as_ref(),
             crate::edge_props::EdgePropertyPatchVersion(key.object()),
             self.store.decode_resolver(),
-            property,
+            keys,
         )
         .map_err(StoreError::MalformedEdgePropertyPatch)
         .map_err(BufferedReadError::from)
@@ -242,6 +242,7 @@ impl<V: Vfs> BufferedPartition<V> {
         cx: &QueryCx,
         at: usize,
         locator: u8,
+        keys: Option<PropertySelection>,
         admission: Admission,
     ) -> Result<EdgePropertyRow, BufferedReadError> {
         let row = usize::from(locator)
@@ -263,6 +264,7 @@ impl<V: Vfs> BufferedPartition<V> {
             crate::edge_props::EdgePropertyPatchVersion(key.object()),
             self.store.decode_resolver(),
             row,
+            keys,
         )
         .map_err(StoreError::MalformedEdgePropertyPatch)
         .map_err(BufferedReadError::from)?
@@ -348,13 +350,13 @@ impl<V: Vfs> BufferedPartition<V> {
                 })
                 .await?
             }
-            EdgePropertyAccess::Property(property) => {
+            EdgePropertyAccess::Properties(keys) => {
                 let (entries, locators) = self.block_keys(cx, at, Admission::ScanBypass).await?;
                 let properties = if let Some(locators) = locators {
                     // The same sidecar visit is admitted before its pin.
                     work.step(cx, observe)?;
                     let rows = self
-                        .block_property_column(cx, at, property, Admission::ScanBypass)
+                        .block_property_columns(cx, at, keys, Admission::ScanBypass)
                         .await?;
                     crate::edge_props::validate_block_patch_consistency(&locators, rows.len())
                         .map_err(StoreError::MalformedEdgePropertyPatch)
@@ -425,27 +427,25 @@ impl<V: Vfs> BufferedPartition<V> {
         .map(|row| row.map(BufferedVertexTopology))
     }
 
-    // Select history before decoding this key. The partial owner preserves
+    // Select history before decoding these keys. The partial owner preserves
     // both winner metadata and absent/NULL semantics without a complete map.
-    pub(crate) async fn edge_scan_vertex_property<C: Send>(
+    pub(crate) async fn edge_scan_vertex_properties<C: Send>(
         &mut self,
         cx: &QueryCx,
         vid: VId,
-        key: PropertyKeyId,
+        keys: PropertySelection,
         as_of: CommitSeq,
         work: &mut EdgeScanWork,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<BufferedVertexProperty>, BufferedScanError<C>> {
-        self.edge_scan_vertex_with_access(
-            cx,
-            vid,
-            as_of,
-            VertexPointAccess::Properties(Some(key)),
-            work,
-            observe,
-        )
-        .await
-        .map(|row| row.map(BufferedVertexProperty))
+    ) -> Result<Option<BufferedVertexProperties>, BufferedScanError<C>> {
+        let access = if keys.is_empty() {
+            VertexPointAccess::Topology
+        } else {
+            VertexPointAccess::Properties(Some(keys))
+        };
+        self.edge_scan_vertex_with_access(cx, vid, as_of, access, work, observe)
+            .await
+            .map(|row| row.map(BufferedVertexProperties))
     }
 
     async fn edge_scan_vertex_with_access<C: Send>(

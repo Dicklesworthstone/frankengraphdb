@@ -5,7 +5,7 @@
 #![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, PropertySelection, RelationId};
 use fgdb_strata::edge_props::encode_property_patch;
 use fgdb_strata::root::{BlockRef, PartitionRoot, PatchRef};
 use fgdb_strata::store::{
@@ -555,7 +555,7 @@ fn edge_point_and_adjacency_routes_keep_publication_winners_before_liveness() {
 }
 
 #[test]
-fn vertex_selected_property_scan_matches_history_and_seeded_points() {
+fn vertex_selected_properties_scan_matches_history_and_seeded_points() {
     run(|contexts, dir| async move {
         let (store, id) = vertex_scan_fixture(&contexts, &dir).await;
         let cx = contexts.query();
@@ -578,7 +578,18 @@ fn vertex_selected_property_scan_matches_history_and_seeded_points() {
                 }
                 expected
             };
-            for key in [PropertyKeyId(11), PropertyKeyId(99)] {
+            for keys in [
+                PropertySelection::EMPTY,
+                PropertySelection::one(PropertyKeyId(11)),
+                PropertySelection::one(PropertyKeyId(99)),
+                PropertySelection::try_from_slice(&[
+                    PropertyKeyId(u64::MAX),
+                    PropertyKeyId(99),
+                    PropertyKeyId(11),
+                    PropertyKeyId(11),
+                ])
+                .unwrap(),
+            ] {
                 let selected: Vec<_> = expected
                     .iter()
                     .map(|(vid, row)| {
@@ -593,7 +604,7 @@ fn vertex_selected_property_scan_matches_history_and_seeded_points() {
                                     row.labels.clone(),
                                     row.props
                                         .iter()
-                                        .filter(|(candidate, _)| *candidate == key)
+                                        .filter(|(candidate, _)| keys.contains(*candidate))
                                         .cloned()
                                         .collect::<Vec<_>>(),
                                 )
@@ -606,7 +617,7 @@ fn vertex_selected_property_scan_matches_history_and_seeded_points() {
                     let mut scan = view.vertex_scan(&cx, CommitSeq(cut)).unwrap();
                     let mut actual = Vec::new();
                     while let Some(candidate) = scan
-                        .next_property_candidate_with(&cx, key, &mut |event| {
+                        .next_properties_candidate_with(&cx, keys, &mut |event| {
                             if let BufferedScanEvent::Identity(vid) = event {
                                 admitted.push(vid);
                             }
@@ -618,7 +629,7 @@ fn vertex_selected_property_scan_matches_history_and_seeded_points() {
                         actual.push((
                             candidate.vid,
                             candidate.row.map(|row| {
-                                assert!(row.properties().len() <= 1);
+                                assert!(row.properties().len() <= keys.len());
                                 (
                                     row.vid(),
                                     row.birth_ordinal(),
@@ -632,7 +643,7 @@ fn vertex_selected_property_scan_matches_history_and_seeded_points() {
                     }
                     actual
                 };
-                assert_eq!(actual, selected, "cut {cut}, key {key:?}");
+                assert_eq!(actual, selected, "cut {cut}, keys {keys:?}");
                 assert_eq!(
                     admitted,
                     selected.iter().map(|(vid, _)| *vid).collect::<Vec<_>>(),
@@ -644,7 +655,7 @@ fn vertex_selected_property_scan_matches_history_and_seeded_points() {
                     .into_join_scan();
                 for (vid, expected) in &selected {
                     let candidate = seeded
-                        .vertex_property_candidate_with(&cx, *vid, key, &mut |_| Ok::<_, ()>(()))
+                        .vertex_properties_candidate_with(&cx, *vid, keys, &mut |_| Ok::<_, ()>(()))
                         .await
                         .unwrap()
                         .unwrap();
@@ -671,7 +682,7 @@ fn vertex_selected_property_scan_matches_history_and_seeded_points() {
                     );
                 }
                 let absent = seeded
-                    .vertex_property_candidate_with(&cx, VId(99), key, &mut |_| Ok::<_, ()>(()))
+                    .vertex_properties_candidate_with(&cx, VId(99), keys, &mut |_| Ok::<_, ()>(()))
                     .await
                     .unwrap()
                     .unwrap();
@@ -697,7 +708,7 @@ fn vertex_selected_property_scan_matches_history_and_seeded_points() {
 }
 
 #[test]
-fn vertex_property_topology_and_complete_pulls_keep_distinct_owners_and_reuse_heads() {
+fn vertex_properties_topology_and_complete_pulls_keep_distinct_owners_and_reuse_heads() {
     run(|contexts, dir| async move {
         let commit = contexts.commit();
         let cx = contexts.query();
@@ -717,7 +728,7 @@ fn vertex_property_topology_and_complete_pulls_keep_distinct_owners_and_reuse_he
                             .unwrap(),
                         ),
                     ),
-                    (PropertyKeyId(13), CanonicalScalar::Null.into()),
+                    (PropertyKeyId(u64::MAX), CanonicalScalar::Null.into()),
                 ],
                 ..scan_vertex(vid, 1, None, 0)
             })
@@ -750,19 +761,34 @@ fn vertex_property_topology_and_complete_pulls_keep_distinct_owners_and_reuse_he
             .await
             .unwrap();
         let before = view.stats().bypasses;
+        let selected = PropertySelection::try_from_slice(&[
+            PropertyKeyId(u64::MAX),
+            PropertyKeyId(11),
+            PropertyKeyId(11),
+        ])
+        .unwrap();
+        let mut capacity = selected;
+        for key in 100..114 {
+            capacity.insert(PropertyKeyId(key)).unwrap();
+        }
+        assert_eq!(capacity.len(), PropertySelection::CAPACITY);
         let mut scan = view.vertex_scan(&cx, CommitSeq(1)).unwrap();
         let mut observe = |_| Ok::<_, ()>(());
-        let unpolled = scan.next_property_candidate_with(&cx, PropertyKeyId(11), &mut observe);
+        let unpolled = scan.next_properties_candidate_with(&cx, selected, &mut observe);
         drop(unpolled);
         let first = scan
-            .next_property_candidate_with(&cx, PropertyKeyId(11), &mut observe)
+            .next_properties_candidate_with(&cx, selected, &mut observe)
             .await
             .unwrap()
             .unwrap()
             .row
             .unwrap();
         let second = scan
-            .next_property_candidate_with(&cx, PropertyKeyId(12), &mut observe)
+            .next_properties_candidate_with(
+                &cx,
+                PropertySelection::one(PropertyKeyId(12)),
+                &mut observe,
+            )
             .await
             .unwrap()
             .unwrap()
@@ -777,21 +803,29 @@ fn vertex_property_topology_and_complete_pulls_keep_distinct_owners_and_reuse_he
             .unwrap();
         let fourth = scan.next(&cx).await.unwrap().unwrap();
         let fifth = scan
-            .next_property_candidate_with(&cx, PropertyKeyId(99), &mut observe)
+            .next_properties_candidate_with(
+                &cx,
+                PropertySelection::one(PropertyKeyId(99)),
+                &mut observe,
+            )
             .await
             .unwrap()
             .unwrap()
             .row
             .unwrap();
         let sixth = scan
-            .next_property_candidate_with(&cx, PropertyKeyId(13), &mut observe)
+            .next_properties_candidate_with(
+                &cx,
+                PropertySelection::one(PropertyKeyId(u64::MAX)),
+                &mut observe,
+            )
             .await
             .unwrap()
             .unwrap()
             .row
             .unwrap();
         let seventh = scan
-            .next_property_candidate_with(&cx, PropertyKeyId(11), &mut observe)
+            .next_properties_candidate_with(&cx, capacity, &mut observe)
             .await
             .unwrap()
             .unwrap()
@@ -799,7 +833,10 @@ fn vertex_property_topology_and_complete_pulls_keep_distinct_owners_and_reuse_he
             .unwrap();
         assert!(scan.next(&cx).await.unwrap().is_none());
         assert_eq!(first.vid(), VId(1));
-        assert_eq!(first.properties(), &rows[0].props[..1]);
+        assert_eq!(
+            first.properties(),
+            &[rows[0].props[0].clone(), rows[0].props[2].clone()]
+        );
         assert_eq!(second.vid(), VId(2));
         assert_eq!(second.properties(), &rows[1].props[1..2]);
         assert_eq!(third.vid(), VId(3));
@@ -810,12 +847,18 @@ fn vertex_property_topology_and_complete_pulls_keep_distinct_owners_and_reuse_he
         assert_eq!(sixth.vid(), VId(6));
         assert_eq!(
             sixth.properties(),
-            &[(PropertyKeyId(13), CanonicalScalar::Null.into())]
+            &[(PropertyKeyId(u64::MAX), CanonicalScalar::Null.into())]
         );
         assert_eq!(seventh.vid(), VId(7));
-        assert_eq!(seventh.properties(), &rows[6].props[..1]);
+        assert_eq!(
+            seventh.properties(),
+            &[rows[6].props[0].clone(), rows[6].props[2].clone()]
+        );
         assert!(first.charged_bytes() < fourth.charged_bytes());
-        assert_eq!(first.charged_bytes(), seventh.charged_bytes());
+        // The decoder may reserve up to min(selected keys, stored keys)
+        // slots. Even the maximum key set omits the unrelated owned payload.
+        assert!(first.charged_bytes() <= seventh.charged_bytes());
+        assert!(seventh.charged_bytes() < fourth.charged_bytes());
         drop(scan);
         assert_eq!(
             view.stats().bypasses - before,
@@ -837,7 +880,7 @@ fn vertex_property_topology_and_complete_pulls_keep_distinct_owners_and_reuse_he
 }
 
 #[test]
-fn vertex_property_refusal_at_every_candidate_and_work_boundary_fuses_and_refunds() {
+fn vertex_properties_refusal_at_every_candidate_and_work_boundary_fuses_and_refunds() {
     run(|contexts, dir| async move {
         let (store, id) = vertex_scan_fixture(&contexts, &dir).await;
         let cx = contexts.query();
@@ -847,11 +890,13 @@ fn vertex_property_refusal_at_every_candidate_and_work_boundary_fuses_and_refund
             .await
             .unwrap();
         let baseline = pool.used();
+        let keys = PropertySelection::try_from_slice(&[PropertyKeyId(11), PropertyKeyId(u64::MAX)])
+            .unwrap();
         let mut events = Vec::new();
         {
             let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
             while scan
-                .next_property_candidate_with(&cx, PropertyKeyId(11), &mut |event| {
+                .next_properties_candidate_with(&cx, keys, &mut |event| {
                     events.push(event);
                     Ok::<_, ()>(())
                 })
@@ -865,7 +910,7 @@ fn vertex_property_refusal_at_every_candidate_and_work_boundary_fuses_and_refund
             let mut observed = Vec::new();
             loop {
                 let result = scan
-                    .next_property_candidate_with(&cx, PropertyKeyId(11), &mut |event| {
+                    .next_properties_candidate_with(&cx, keys, &mut |event| {
                         if observed.len() == stop {
                             return Err(stop);
                         }
@@ -891,12 +936,11 @@ fn vertex_property_refusal_at_every_candidate_and_work_boundary_fuses_and_refund
                     .count(),
             );
             assert!(
-                scan.next_property_candidate_with(&cx, PropertyKeyId(99), &mut |_| -> Result<
-                    (),
-                    (),
-                > {
-                    panic!("failed selected scan must be inert")
-                })
+                scan.next_properties_candidate_with(
+                    &cx,
+                    PropertySelection::one(PropertyKeyId(99)),
+                    &mut |_| -> Result<(), ()> { panic!("failed selected scan must be inert") }
+                )
                 .await
                 .unwrap()
                 .is_none(),
@@ -909,7 +953,7 @@ fn vertex_property_refusal_at_every_candidate_and_work_boundary_fuses_and_refund
         let mut seeded = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
         assert!(matches!(
             seeded
-                .vertex_property_candidate_with(&cx, VId(1), PropertyKeyId(11), &mut |event| {
+                .vertex_properties_candidate_with(&cx, VId(1), keys, &mut |event| {
                     assert_eq!(event, BufferedScanEvent::Identity(VId(1)));
                     Err(7)
                 })

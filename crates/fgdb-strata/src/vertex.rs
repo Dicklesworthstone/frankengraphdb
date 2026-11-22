@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use fgdb_delta_types::{LabelId, PropertyKeyId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, PropertySelection};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{
     CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar, CanonicalScalarResolver,
@@ -737,8 +737,8 @@ pub(crate) fn decode_admitted_patch_topology(
 enum PatchPropertyAccess {
     Decode,
     DecodeVertex(VId),
-    DecodeVertexProperty(VId, PropertyKeyId),
-    DecodeRow(usize, Option<PropertyKeyId>),
+    DecodeVertexProperties(VId, PropertySelection),
+    DecodeRow(usize, Option<PropertySelection>),
     SkipAdmitted,
 }
 
@@ -779,21 +779,21 @@ fn decode_patch_fields(
             PatchPropertyAccess::Decode => true,
             PatchPropertyAccess::DecodeVertex(selected) => selected == vid,
             PatchPropertyAccess::DecodeRow(selected, None) => selected == at,
-            PatchPropertyAccess::DecodeVertexProperty(_, _)
+            PatchPropertyAccess::DecodeVertexProperties(_, _)
             | PatchPropertyAccess::DecodeRow(_, Some(_))
             | PatchPropertyAccess::SkipAdmitted => false,
         };
-        let selected_key = match properties {
-            PatchPropertyAccess::DecodeVertexProperty(selected, key) if selected == vid => {
-                Some(key)
+        let selected_keys = match properties {
+            PatchPropertyAccess::DecodeVertexProperties(selected, keys) if selected == vid => {
+                Some(keys)
             }
-            PatchPropertyAccess::DecodeRow(selected, key) if selected == at => key,
+            PatchPropertyAccess::DecodeRow(selected, keys) if selected == at => keys,
             _ => None,
         };
         let mut props = if decode_properties {
             Vec::with_capacity(prop_count.min(MAX_PATCH_ROWS) as usize)
-        } else if selected_key.is_some() && prop_count != 0 {
-            Vec::with_capacity(1)
+        } else if let Some(keys) = selected_keys {
+            Vec::with_capacity(keys.len().min(prop_count as usize))
         } else {
             Vec::new()
         };
@@ -809,7 +809,7 @@ fn decode_patch_fields(
                     return Err(VertexPatchError::NonCanonicalProps { at });
                 }
                 previous_key = Some(key);
-                if selected_key == Some(key) {
+                if selected_keys.is_some_and(|keys| keys.contains(key)) {
                     props.push((key, decode_property_value(at, encoded, resolver)?));
                 }
             }
@@ -995,18 +995,18 @@ pub(crate) fn read_admitted_patch_for_vertex(
     )
 }
 
-/// Read one identity's selected property after complete immutable admission.
+/// Read one identity's selected properties after complete immutable admission.
 /// The point reader uses this only when authenticated routing and the patch's
 /// validated sequence span prove that the identity can have at most one row.
 /// Every other row retains topology with its property values unread.
-pub(crate) fn read_admitted_patch_for_vertex_property(
+pub(crate) fn read_admitted_patch_for_vertex_properties(
     k_oid: &[u8; 32],
     namespace: DatabaseSecurityNamespaceId,
     bytes: &[u8],
     expected: VertexPatchVersion,
     resolver: Option<&dyn CanonicalScalarResolver>,
     vid: VId,
-    key: PropertyKeyId,
+    keys: PropertySelection,
 ) -> Result<VertexPatchRows, VertexPatchError> {
     read_patch_fields(
         k_oid,
@@ -1014,7 +1014,7 @@ pub(crate) fn read_admitted_patch_for_vertex_property(
         bytes,
         expected,
         resolver,
-        PatchPropertyAccess::DecodeVertexProperty(vid, key),
+        PatchPropertyAccess::DecodeVertexProperties(vid, keys),
     )
 }
 
@@ -1042,7 +1042,7 @@ pub(crate) fn read_admitted_patch_topology(
 /// Read the properties of one exact row in a completely admitted patch.
 ///
 /// Authentication, framing, labels, lifetimes and the complete property-key
-/// order remain checked. `key` narrows that row to one property; None reads
+/// order remain checked. `keys` narrows that row to selected properties; None reads
 /// all of its properties. Other versions of the same identity stay unread.
 /// Skipped value bytes inherit semantic validation from complete admission.
 /// The caller binds the row ordinal to its already-selected historical winner
@@ -1054,7 +1054,7 @@ pub(crate) fn read_admitted_patch_for_row(
     expected: VertexPatchVersion,
     resolver: Option<&dyn CanonicalScalarResolver>,
     row: usize,
-    key: Option<PropertyKeyId>,
+    keys: Option<PropertySelection>,
 ) -> Result<VertexPatchRows, VertexPatchError> {
     read_patch_fields(
         k_oid,
@@ -1062,7 +1062,7 @@ pub(crate) fn read_admitted_patch_for_row(
         bytes,
         expected,
         resolver,
-        PatchPropertyAccess::DecodeRow(row, key),
+        PatchPropertyAccess::DecodeRow(row, keys),
     )
 }
 
@@ -1602,7 +1602,10 @@ mod admitted_topology_tests {
                         decode_patch_fields(
                             &bytes,
                             None,
-                            PatchPropertyAccess::DecodeRow(row, property),
+                            PatchPropertyAccess::DecodeRow(
+                                row,
+                                property.map(PropertySelection::one)
+                            ),
                         ),
                         Err(error.clone()),
                     );
@@ -1636,7 +1639,7 @@ mod admitted_topology_tests {
     }
 
     #[test]
-    fn selected_property_matches_complete_histories_including_absence_and_null() {
+    fn selected_properties_match_complete_histories_including_absence_and_null() {
         let key = [0x53; 32];
         let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
         let values = format_values()
@@ -1666,11 +1669,28 @@ mod admitted_topology_tests {
                 .map(|(bytes, id)| read_patch(&key, namespace, bytes, *id).unwrap())
                 .collect();
             for vid in [VId(0), VId(101), VId(u128::MAX)] {
-                for property in [
+                for selection in [
                     None,
-                    Some(PropertyKeyId(41)),
-                    Some(PropertyKeyId(59)),
-                    Some(PropertyKeyId(99)),
+                    Some(PropertySelection::EMPTY),
+                    Some(PropertySelection::one(PropertyKeyId(41))),
+                    Some(PropertySelection::one(PropertyKeyId(59))),
+                    Some(PropertySelection::one(PropertyKeyId(99))),
+                    Some(
+                        PropertySelection::try_from_slice(&[
+                            PropertyKeyId(59),
+                            PropertyKeyId(41),
+                            PropertyKeyId(59),
+                        ])
+                        .unwrap(),
+                    ),
+                    Some(
+                        PropertySelection::try_from_slice(&[
+                            PropertyKeyId(u64::MAX),
+                            PropertyKeyId(59),
+                            PropertyKeyId(99),
+                        ])
+                        .unwrap(),
+                    ),
                 ] {
                     for cut in [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, u64::MAX] {
                         let selected: Vec<_> = encoded
@@ -1685,7 +1705,7 @@ mod admitted_topology_tests {
                                     .map(|(at, _)| at);
                                 let selected = match winner {
                                     Some(at) => read_admitted_patch_for_row(
-                                        &key, namespace, bytes, *id, None, at, property,
+                                        &key, namespace, bytes, *id, None, at, selection,
                                     ),
                                     None => {
                                         read_admitted_patch_topology(&key, namespace, bytes, *id)
@@ -1700,12 +1720,12 @@ mod admitted_topology_tests {
                                     let mut expected = complete.clone();
                                     expected.props.retain(|(candidate, _)| {
                                         winner == Some(at)
-                                            && property
-                                                .is_none_or(|property| *candidate == property)
+                                            && selection
+                                                .is_none_or(|keys| keys.contains(*candidate))
                                     });
                                     assert_eq!(*selected, expected);
-                                    if property.is_some() {
-                                        assert!(selected.props.len() <= 1);
+                                    if let Some(keys) = selection {
+                                        assert!(selected.props.len() <= keys.len());
                                     }
                                     if winner != Some(at) {
                                         assert_eq!(selected.props.capacity(), 0);
@@ -1717,13 +1737,13 @@ mod admitted_topology_tests {
                         let mut expected = merge_vertex(&complete, vid, CommitSeq(cut));
                         if let Some(row) = &mut expected {
                             row.props.retain(|(candidate, _)| {
-                                property.is_none_or(|property| *candidate == property)
+                                selection.is_none_or(|keys| keys.contains(*candidate))
                             });
                         }
                         assert_eq!(
                             merge_vertex(&selected, vid, CommitSeq(cut)),
                             expected,
-                            "identity {vid:?}, property {property:?}, cut {cut}",
+                            "identity {vid:?}, selection {selection:?}, cut {cut}",
                         );
                     }
                 }
@@ -1755,9 +1775,16 @@ mod admitted_topology_tests {
         let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
         let id = VertexPatchVersion(vertex_patch_id(&key, namespace, &bytes));
         for property in [PropertyKeyId(59), PropertyKeyId(99)] {
-            let selected =
-                read_admitted_patch_for_row(&key, namespace, &bytes, id, None, 0, Some(property))
-                    .unwrap();
+            let selected = read_admitted_patch_for_row(
+                &key,
+                namespace,
+                &bytes,
+                id,
+                None,
+                0,
+                Some(PropertySelection::one(property)),
+            )
+            .unwrap();
             assert_eq!(resolver.calls.get(), after_admission);
             for (at, (selected, complete)) in selected.iter().zip(complete.iter()).enumerate() {
                 let expected: Vec<_> = complete
@@ -1777,7 +1804,7 @@ mod admitted_topology_tests {
                 id,
                 None,
                 0,
-                Some(PropertyKeyId(41)),
+                Some(PropertySelection::one(PropertyKeyId(41))),
             )
             .is_err(),
             "the selected value still requires its real pinned artifacts",
@@ -1789,7 +1816,7 @@ mod admitted_topology_tests {
             id,
             Some(&resolver),
             0,
-            Some(PropertyKeyId(41)),
+            Some(PropertySelection::one(PropertyKeyId(41))),
         )
         .unwrap();
         assert_eq!(selected[0].props.as_slice(), &complete[0].props[..1]);
@@ -1841,7 +1868,7 @@ mod admitted_topology_tests {
                 id,
                 Some(&resolver),
                 1,
-                property,
+                property.map(PropertySelection::one),
             )
             .unwrap();
             assert_eq!(resolver.calls.get(), before);
@@ -1867,14 +1894,20 @@ mod admitted_topology_tests {
     }
 
     #[test]
-    fn selected_property_keeps_complete_framing_key_order_and_authentication() {
+    fn selected_properties_keep_complete_framing_key_order_and_authentication() {
         let key = [0x53; 32];
         let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
         let expected = rows(CanonicalScalar::Int(7).into());
         let bytes = encode_patch(&expected).unwrap();
         let id = VertexPatchVersion(vertex_patch_id(&key, namespace, &bytes));
-        for property in [PropertyKeyId(41), PropertyKeyId(59), PropertyKeyId(99)] {
-            let access = PatchPropertyAccess::DecodeRow(0, Some(property));
+        for keys in [
+            PropertySelection::EMPTY,
+            PropertySelection::one(PropertyKeyId(41)),
+            PropertySelection::one(PropertyKeyId(59)),
+            PropertySelection::one(PropertyKeyId(99)),
+            PropertySelection::try_from_slice(&[PropertyKeyId(59), PropertyKeyId(41)]).unwrap(),
+        ] {
+            let access = PatchPropertyAccess::DecodeRow(0, Some(keys));
             for end in 0..bytes.len() {
                 assert!(matches!(
                     decode_patch_fields(&bytes[..end], None, access),
@@ -1906,7 +1939,7 @@ mod admitted_topology_tests {
             // when the requested key is the first property or is absent.
             changed[second_key + 8 + 4 + 1] ^= 1;
             assert!(matches!(
-                read_admitted_patch_for_row(&key, namespace, &changed, id, None, 0, Some(property),),
+                read_admitted_patch_for_row(&key, namespace, &changed, id, None, 0, Some(keys),),
                 Err(VertexPatchError::IdentityMismatch { .. }),
             ));
             for (wrong_key, wrong_namespace) in [
@@ -1921,7 +1954,7 @@ mod admitted_topology_tests {
                         id,
                         None,
                         0,
-                        Some(property),
+                        Some(keys),
                     ),
                     Err(VertexPatchError::IdentityMismatch { .. }),
                 ));

@@ -20,7 +20,7 @@ use crate::tiered::buffer::BufferError;
 use crate::tiered::memory::{MemoryCharge, MemoryError};
 use crate::vertex::VertexRow;
 use asupersync::fs::Vfs;
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{PropertyKeyId, PropertySelection, RelationId};
 use fgdb_types::{CanonicalPropertyValue, CommitSeq, EId, QueryCx};
 use std::cmp::Reverse;
 
@@ -59,24 +59,27 @@ impl core::fmt::Debug for BufferedEdgeTopology {
     }
 }
 
-/// One authenticated visible edge and the requested property's value, if any.
+/// One authenticated visible edge and its requested property values, if any.
 /// The owned reservation covers only this selected image; omitted properties
 /// are never exposed as a complete stored edge. Endpoint visibility remains
 /// the caller's responsibility, exactly as for topology candidates.
-pub struct BufferedEdgeProperty(BufferedValue<BufferedEdge>);
+pub struct BufferedEdgeProperties(BufferedValue<BufferedEdge>);
 
-impl BufferedEdgeProperty {
+impl BufferedEdgeProperties {
     pub fn entry(&self) -> &AdjacencyEntry {
         &self.0.entry
     }
 
-    pub fn value(&self) -> Option<&CanonicalPropertyValue> {
-        self.0.props.first().map(|(_, value)| value)
+    pub fn value(&self, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
+        self.0
+            .props
+            .binary_search_by_key(&key, |(key, _)| *key)
+            .ok()
+            .map(|at| &self.0.props[at].1)
     }
 
-    /// Borrow only the requested key, if present. This is not a complete
-    /// property map: the slice contains at most one entry, and a present NULL
-    /// remains distinct from the empty slice for a missing key.
+    /// Borrow only requested keys that are present. This is not a complete
+    /// property map, and a present NULL remains distinct from a missing key.
     pub fn properties(&self) -> &[(PropertyKeyId, CanonicalPropertyValue)] {
         &self.0.props
     }
@@ -86,16 +89,16 @@ impl BufferedEdgeProperty {
     }
 }
 
-impl core::fmt::Debug for BufferedEdgeProperty {
+impl core::fmt::Debug for BufferedEdgeProperties {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("BufferedEdgeProperty([REDACTED])")
+        f.write_str("BufferedEdgeProperties([REDACTED])")
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EdgePropertyAccess {
     Read,
-    Property(PropertyKeyId),
+    Properties(PropertySelection),
     Skip,
 }
 
@@ -155,18 +158,18 @@ impl core::fmt::Debug for BufferedEdgeTopologyEndpoints {
     }
 }
 
-/// One selected edge property and both visible endpoint identities/labels at
+/// Selected edge properties and both visible endpoint identities/labels at
 /// the cursor's cut. The distinct field types retain the projection boundary:
 /// neither the edge nor either endpoint is a complete stored property record.
 /// A self-loop shares its one endpoint owner.
-pub struct BufferedEdgePropertyEndpoints {
-    edge: BufferedEdgeProperty,
+pub struct BufferedEdgePropertiesEndpoints {
+    edge: BufferedEdgeProperties,
     source: BufferedVertexTopology,
     target: Option<BufferedVertexTopology>,
 }
 
-impl BufferedEdgePropertyEndpoints {
-    pub fn edge(&self) -> &BufferedEdgeProperty {
+impl BufferedEdgePropertiesEndpoints {
+    pub fn edge(&self) -> &BufferedEdgeProperties {
         &self.edge
     }
 
@@ -179,9 +182,9 @@ impl BufferedEdgePropertyEndpoints {
     }
 }
 
-impl core::fmt::Debug for BufferedEdgePropertyEndpoints {
+impl core::fmt::Debug for BufferedEdgePropertiesEndpoints {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("BufferedEdgePropertyEndpoints([REDACTED])")
+        f.write_str("BufferedEdgePropertiesEndpoints([REDACTED])")
     }
 }
 
@@ -682,18 +685,18 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                         .1
                         .as_ref()
                         .map_or_else(Vec::new, |props| props.props_of(original)),
-                    EdgePropertyAccess::Property(key) => active
-                        .image
-                        .1
-                        .as_ref()
-                        .and_then(|props| {
+                    EdgePropertyAccess::Properties(keys) => {
+                        active.image.1.as_ref().map_or_else(Vec::new, |props| {
                             let row = props.props_ref(original);
-                            row.binary_search_by_key(&key, |(key, _)| *key)
-                                .ok()
-                                .map(|at| row[at].clone())
+                            let mut selected = Vec::with_capacity(keys.len().min(row.len()));
+                            for key in keys.keys() {
+                                if let Ok(at) = row.binary_search_by_key(key, |(key, _)| *key) {
+                                    selected.push(row[at].clone());
+                                }
+                            }
+                            selected
                         })
-                        .into_iter()
-                        .collect(),
+                    }
                     EdgePropertyAccess::Skip => Vec::new(),
                 };
             }
@@ -763,28 +766,33 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             })
     }
 
-    /// Resolve the same complete EId history while materializing only one
-    /// property per stored sidecar row. Every selected extent and sidecar is
+    /// Resolve the same complete EId history while materializing only requested
+    /// properties per stored sidecar row. Every selected extent and sidecar is
     /// authenticated; all framing, key order and locator checks remain active.
     /// Missing newer properties overwrite older values, and an invisible winner
     /// remains a candidate with no row. The opaque result distinguishes a
     /// missing key from a present NULL without exposing partial edge records.
     ///
-    /// Property keys, full rows and topology pulls may be interleaved. A partial
-    /// active image satisfies only the same key or topology; full-row and
-    /// different-key requests refault through their ordinary admitted path.
-    pub async fn next_property_candidate_with<C: Send>(
+    /// Property selections, full rows and topology pulls may be interleaved.
+    /// A partial active image satisfies only the same selection or topology;
+    /// other requests refault through their ordinary admitted path.
+    pub async fn next_properties_candidate_with<C: Send>(
         &mut self,
         cx: &QueryCx,
-        key: PropertyKeyId,
+        keys: PropertySelection,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeProperty>>, BufferedScanError<C>> {
-        self.next_candidate_with_access(cx, EdgePropertyAccess::Property(key), observe)
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeProperties>>, BufferedScanError<C>> {
+        let access = if keys.is_empty() {
+            EdgePropertyAccess::Skip
+        } else {
+            EdgePropertyAccess::Properties(keys)
+        };
+        self.next_candidate_with_access(cx, access, observe)
             .await
             .map(|candidate| {
                 candidate.map(|candidate| BufferedEdgeCandidate {
                     eid: candidate.eid,
-                    row: candidate.row.map(BufferedEdgeProperty),
+                    row: candidate.row.map(BufferedEdgeProperties),
                 })
             })
     }
@@ -878,31 +886,33 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         }))
     }
 
-    /// Resolve one selected edge property with same-cut endpoint identities
+    /// Resolve selected edge properties with same-cut endpoint identities
     /// and labels. The returned images materialize only the requested edge
-    /// field and endpoint topology. Every selected sidecar remains authenticated,
-    /// including when the requested key is absent from that sidecar. Native
+    /// fields and endpoint topology. Every selected sidecar remains authenticated,
+    /// including when requested keys are absent from that sidecar. Native
     /// base-image admission keeps its existing complete validation and residency.
     ///
     /// Missing keys never fall back to older versions. Invisible or excluded
     /// edges still retain candidate admission without reading endpoints. Any
     /// source/control failure drops the complete root position, as with full
     /// records and topology pulls.
-    pub async fn next_property_with_endpoints<C: Send>(
+    pub async fn next_properties_with_endpoints<C: Send>(
         &mut self,
         cx: &QueryCx,
         relation: Option<RelationId>,
-        key: PropertyKeyId,
+        keys: PropertySelection,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertyEndpoints>>, BufferedScanError<C>>
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertiesEndpoints>>, BufferedScanError<C>>
     {
         let Some(mut state) = self.state.take() else {
             return Ok(None);
         };
-        let Some(candidate) = self
-            .advance(&mut state, cx, EdgePropertyAccess::Property(key), observe)
-            .await?
-        else {
+        let access = if keys.is_empty() {
+            EdgePropertyAccess::Skip
+        } else {
+            EdgePropertyAccess::Properties(keys)
+        };
+        let Some(candidate) = self.advance(&mut state, cx, access, observe).await? else {
             return Ok(None);
         };
         let row = if let Some(edge) = candidate
@@ -912,8 +922,8 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             let (source, target) = self
                 .resolve_topology_vertices(cx, &edge.entry, observe)
                 .await?;
-            Some(BufferedEdgePropertyEndpoints {
-                edge: BufferedEdgeProperty(edge),
+            Some(BufferedEdgePropertiesEndpoints {
+                edge: BufferedEdgeProperties(edge),
                 source,
                 target,
             })

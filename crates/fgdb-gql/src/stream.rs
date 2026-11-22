@@ -29,7 +29,7 @@ use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
     GqlQueryPolicy,
 };
-use fgdb_delta_types::{LabelId, PropertyKeyId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, PropertySelection};
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::iter::FusedIterator;
 use std::sync::Arc;
@@ -54,18 +54,24 @@ pub use record::VertexScanRecord;
 pub enum VertexScanPropertyDemand {
     /// No vertex property is read.
     Topology,
-    /// Every property read names this key on the one scanned vertex.
-    VertexProperty(PropertyKeyId),
-    /// Multiple keys, a graph probe, or an unproved program.
+    /// Every property read belongs to this bounded set on the scanned vertex.
+    Properties(PropertySelection),
+    /// The key bound is exceeded, a graph probe, or an unproved program.
     Complete,
 }
 
 impl VertexScanPropertyDemand {
     fn with_vertex_property(self, key: PropertyKeyId) -> Self {
         match self {
-            Self::Topology => Self::VertexProperty(key),
-            Self::VertexProperty(previous) if previous == key => self,
-            Self::VertexProperty(_) | Self::Complete => Self::Complete,
+            Self::Topology => Self::Properties(PropertySelection::one(key)),
+            Self::Properties(mut selected) => {
+                if selected.insert(key).is_ok() {
+                    Self::Properties(selected)
+                } else {
+                    Self::Complete
+                }
+            }
+            Self::Complete => Self::Complete,
         }
     }
 }
@@ -136,8 +142,9 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
 
     /// Prove the fields used by every local predicate and projection cell.
     /// Boolean programs include all eager operands, even inputs of unselected
-    /// scalar branches. Repeated uses of one exact key share a selected field;
-    /// a second key, graph probe or unknown operation requires complete records.
+    /// scalar branches. Repeated uses of an exact key share a selected field;
+    /// a key-set overflow, graph probe or unknown operation requires complete
+    /// records. The bounded selection itself needs no allocation.
     ///
     /// The local compiler proves every accepted binding and projected property
     /// belongs to slot zero, the one physical vertex. This proof never removes,

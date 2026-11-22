@@ -126,38 +126,52 @@ headroom fell below the bounded compiler-start threshold. No full
 incremental-query coverage or W6 completion is claimed;
 `fgdb-w6-zset-circuits-kjv` and `fgdb-epic-w6-65w` remain open.
 
-### Selected vertex-property buffered queries — qualification pending
+### Bounded multi-property buffered queries — qualification pending
 
-Vertex-local scan plans now distinguish topology, one exact vertex-property
-key, and complete-record demand. Every local predicate, eager Boolean operand,
+Vertex-local and single-edge scan plans now distinguish topology, a bounded
+set of exact property keys, and complete-record demand. The shared inline
+PropertySelection contains up to 16 sorted, deduplicated full-width keys;
+empty selects no properties. Every local predicate, eager Boolean operand,
 projection cell and hidden sort/aggregate input contributes to that proof.
-Repeated uses of one key share the selected field; a second key, graph probe
-or unproved operation retains complete-record admission.
+Repeated uses share a selected field. A seventeenth distinct key, graph probe,
+endpoint-property demand or unproved operation retains complete-record admission
+instead of dropping a requested field.
 
-The buffered facade applies the proof to ordinary and identity-seeded inputs,
-including external sorting and aggregation. The ordered FGSV merge selects
-the complete same-cut history winner before decoding its requested field.
-Positional materialization reuses the active patch workspace and transfers
-the value into an independently charged opaque owner. It does not re-run a
-point-history search for each scan row. Seeded topology and selected-property
-pulls use the same existing point resolver and cumulative controls.
+The buffered facade applies the proof to ordinary and identity-seeded vertex
+inputs, plus external sorting and aggregation. The ordered FGSV merge chooses
+the complete same-cut history winner before decoding all requested fields in
+one pass. Positional materialization reuses the active patch workspace; seeded
+pulls resolve history once for the complete selection. Both return independently
+charged opaque partial owners. Selection changes cannot turn a partial owner
+into a complete property map or revive a missing field from an older version.
+
+Edge sidecars decode the selected columns across admitted block histories in
+one pass. Native suffix reads select one winning row before decoding its fields.
+Native base reads meter each key search and use bounded inline positions to
+measure and reserve selected payloads before cloning them. The Prism weight
+reader uses the same selected-field owner. Existing scalar point APIs remain
+single-key operations. Complete extent authentication and structural validation
+remain required even when values are omitted.
 
 Regression sources cover full-width keys, absent versus actual NULL, removed
 properties, retired identities, historical labels, mixed complete/projected
 pulls, pinned cuts through compaction, resolver-bound values, corruption,
 every refusal/cancellation boundary and reservation ownership. Public tests
-exercise a 96-cell selected projection with only 4 MiB remaining, complete
-fallback for a second field, external sort, duplicate identity seeds and
-COUNT/SUM/AVG inputs.
+exercise a 96-cell two-property vertex projection with only 4 MiB remaining,
+two-property external sort, duplicate identity seeds and COUNT/SUM/AVG inputs.
+The edge public regression requests two small fields through native base and
+suffix history with only 3 MiB remaining, despite an unrelated 12 KiB property.
+Explicitly demanding that payload still charges it. Decoder and compiler tests
+cover empty, duplicate, full-width and 16-key selections, exact 17-key fallback,
+missing versus stored NULL, malformed skipped fields and cancellation prefixes.
 
-All twelve changed Rust files pass individual pinned Rustfmt checks;
-whitespace checks and independent source review are complete. Static-only UBS
-exited 0 with no critical findings; added-line review found no introduced
-production finding. Its AST rule pack is unavailable and Cargo phases are
-excluded, so this remains limited static evidence. Compilation, runtime assertions, Clippy and full exact-tree
-qualification remain **UNRUN** under repeated executor resets and unstable
-build-resource headroom. No performance benchmark is claimed. Complete root
-admission and whole-extent authentication remain required, and broad
+All 25 changed Rust files pass individual pinned Rustfmt checks;
+whitespace checks and independent production/test source reviews are complete.
+Static-only UBS exited 0 with no critical findings; Cargo phases were excluded
+and the AST rule pack was unavailable, so this is limited static evidence.
+Compilation, runtime assertions, Clippy and full exact-tree qualification remain
+**UNRUN** under insufficient shared memory headroom. No performance benchmark is
+claimed. Whole native base residency and complete root admission remain, and broad
 `fgdb-w3-properties-gou` and `fgdb-w3-buffer-g2v` remain open.
 
 ### Streaming aggregates over collected neighborhoods — qualification pending
@@ -290,16 +304,16 @@ with the landing evidence rather than inferred from source review.
 
 ### Selected edge-property buffered queries — qualification pending
 
-The single-edge compiler now exposes one complete field-demand proof:
-topology only, one exact edge-property key, or complete records. Repeated uses
-of the same key across filters, projections, hidden sort cells and aggregate
-inputs share the selected source. A second edge key, any endpoint property,
+The single-edge compiler exposes one complete field-demand proof:
+topology only, up to 16 exact edge-property keys, or complete records. Repeated uses
+of the same keys across filters, projections, hidden sort cells and aggregate
+inputs share the selected source. Exceeding the key bound, any endpoint property,
 joined/probed plan or unrecognized program retains complete-record admission.
 Boolean inputs include eager operands in unselected scalar branches.
 
 The buffered facade connects this proof to Strata's authenticated selected-key
 reader for ordinary, seeded, sorted and aggregate single-edge inputs. A distinct
-owned record carries only that edge field and both endpoints' same-cut labels
+owned record carries only those edge fields and both endpoints' same-cut labels
 and identities. It cannot escape as a complete property map. Self-loops share
 one endpoint owner; missing keys, true NULL, property removal, source failures,
 candidate/work limits, cancellation and independent output guards preserve their
@@ -315,9 +329,10 @@ Compiler and storage regression sources cover exact full-width key identity,
 hidden demands, selected corruption, absent/NULL/removal semantics, historical
 endpoint labels, ownership, cancellation and work limits. Public regressions
 exercise pinned and compacted history in every direction, aggregate results,
-a 3 MiB remaining read allowance with large unrelated payloads, and complete
-fallback for additional required fields. The implementation is recorded in
-`b9e5d3b`; the qualification receipt below states the checks actually completed.
+a 3 MiB remaining read allowance with large unrelated payloads, multi-key native
+base/suffix histories and charged admission of additional required payloads.
+The original single-key implementation is recorded in `b9e5d3b`; the bounded
+multi-property extension and its qualification are described above.
 The broader `fgdb-w3-properties-gou` and `fgdb-w3-tier-r-0tj` remain open.
 
 ### Boolean filters over topology-only buffered records — qualification pending

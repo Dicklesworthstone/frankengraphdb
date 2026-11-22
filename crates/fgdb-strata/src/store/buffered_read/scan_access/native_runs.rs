@@ -506,20 +506,25 @@ impl<V: Vfs> BufferedPartition<V> {
         work.step(cx, observe)?;
         let props = match access {
             EdgePropertyAccess::Read => {
-                self.block_property_row(cx, source.block, source.locator, Admission::ScanBypass)
-                    .await?
-            }
-            EdgePropertyAccess::Property(property) => self
-                .block_property_value(
+                self.block_property_row(
                     cx,
                     source.block,
                     source.locator,
-                    property,
+                    None,
                     Admission::ScanBypass,
                 )
                 .await?
-                .map(|value| vec![(property, value)])
-                .unwrap_or_default(),
+            }
+            EdgePropertyAccess::Properties(keys) => {
+                self.block_property_row(
+                    cx,
+                    source.block,
+                    source.locator,
+                    Some(keys),
+                    Admission::ScanBypass,
+                )
+                .await?
+            }
             EdgePropertyAccess::Skip => unreachable!("topology-only row returned above"),
         };
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;

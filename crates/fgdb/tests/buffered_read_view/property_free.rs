@@ -580,6 +580,7 @@ fn selected_vertex_query(text: &str) -> PreparedGraphPattern<GraphValueRow> {
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(SELECTED_VERTEX_KEY)),
+        (GraphSymbolKind::Property, "r") => Some(GraphSymbol::Property(PropertyKeyId(u64::MAX))),
         _ => None,
     })
     .unwrap()
@@ -729,7 +730,7 @@ fn selected_vertex_queries_keep_full_width_keys_nulls_labels_and_pinned_history(
                     assert_eq!(actual, resident.value, "resident parity: {text} at {cut}");
                 }
             }
-            // Switching to complete demand after selected pulls must recover
+            // Adding another demanded field after selected pulls must recover
             // the actual large field, never a partial cached property map.
             let complete = selected_vertex_query("MATCH (n) RETURN n,n.q,n.p");
             let expected = reference
@@ -757,32 +758,48 @@ fn selected_vertex_query_omits_unrelated_payload_charges_and_retains_output_owne
     let ((), report) = run_async_under_lab(0x6275_6617, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
-        let (vfs, _writer) = selected_vertex_fixture(&contexts).await;
+        let (vfs, mut writer) = selected_vertex_fixture(&contexts).await;
+        let mut third = WriteBatch::new(RELATION);
+        for (vid, value) in [(SELECTED_VERTICES[0], 101), (SELECTED_VERTICES[1], 55)] {
+            third.set_vertex_property(
+                vid,
+                PropertyKeyId(u64::MAX),
+                Some(CanonicalScalar::Int(value)),
+            );
+        }
+        assert_eq!(
+            writer.write(&contexts.commit(), third).await.unwrap(),
+            CommitSeq(3)
+        );
         let memory = pool();
         let mut view = open_selected_vertices(&contexts, &vfs, &memory).await;
         let columns = std::iter::once("n".to_owned())
-            .chain((1..96).map(|at| format!("n.q AS copy_{at}")))
+            .chain((1..96).map(|at| {
+                let field = if at % 2 == 1 { "q" } else { "r" };
+                format!("n.{field} AS copy_{at}")
+            }))
             .collect::<Vec<_>>()
             .join(",");
         let occupied = memory
             .reserve(&cx, memory.available() - 4 * 1024 * 1024)
             .unwrap();
-        let prepared = selected_vertex_query(&format!("MATCH (n:L) WHERE n.q>=5 RETURN {columns}"));
-        let (rows, stats) = collect(&mut view, &cx, &prepared, CommitSeq(2)).await;
+        let prepared = selected_vertex_query(&format!(
+            "MATCH (n:L) WHERE n.q>=5 AND n.r>0 RETURN {columns}"
+        ));
+        let (rows, stats) = collect(&mut view, &cx, &prepared, CommitSeq(3)).await;
         assert_eq!(stats.snapshot_records, 3);
         assert_eq!(rows.len(), 2);
-        for (row, (vid, value)) in rows
-            .iter()
-            .zip([(SELECTED_VERTICES[0], 11), (SELECTED_VERTICES[1], 5)])
-        {
+        for (row, (vid, q, r)) in rows.iter().zip([
+            (SELECTED_VERTICES[0], 11, 101),
+            (SELECTED_VERTICES[1], 5, 55),
+        ]) {
             assert_eq!(row.get(0), Some(&GraphValue::Vertex(vid)));
-            assert!(
-                row.values()[1..]
-                    .iter()
-                    .all(|cell| { *cell == GraphValue::Scalar(CanonicalScalar::Int(value)) })
-            );
+            for (at, cell) in row.values().iter().enumerate().skip(1) {
+                let value = if at % 2 == 1 { q } else { r };
+                assert_eq!(*cell, GraphValue::Scalar(CanonicalScalar::Int(value)));
+            }
         }
-        // Complete output admission must charge the 12 KiB property for every
+        // Requesting the large property must charge its 12 KiB for every
         // cell: 96 * 4 * 12 KiB already exceeds the remaining 4 MiB.
         for text in [
             format!("MATCH (n:L) RETURN {columns},n.p"),
@@ -842,6 +859,10 @@ fn selected_vertex_query_omits_unrelated_payload_charges_and_retains_output_owne
         assert_eq!(
             held.get(1),
             Some(&GraphValue::Scalar(CanonicalScalar::Int(11)))
+        );
+        assert_eq!(
+            held.get(2),
+            Some(&GraphValue::Scalar(CanonicalScalar::Int(101)))
         );
         drop(held);
         assert_eq!(memory.used(), 0);

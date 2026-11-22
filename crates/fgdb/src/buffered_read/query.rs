@@ -19,7 +19,7 @@ use fgdb_gql::stream::{
 };
 use fgdb_gql::{GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::store::{
-    BufferedScanError, BufferedScanEvent, BufferedVertexProperty, BufferedVertexScan,
+    BufferedScanError, BufferedScanEvent, BufferedVertexProperties, BufferedVertexScan,
     BufferedVertexTopology,
 };
 use fgdb_strata::tiered::edge_scan::BufferedEdgeJoinScan;
@@ -146,7 +146,7 @@ impl AsyncVertexScanRecord for BufferedQueryRecord {
 enum BufferedVertexFields {
     Complete(BufferedValue<VertexRow>),
     Topology(BufferedVertexTopology),
-    Property(BufferedVertexProperty),
+    Property(BufferedVertexProperties),
 }
 
 struct BufferedVertexQueryRecord {
@@ -425,9 +425,9 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for BufferedVertexQuerySource<'_, '_,
                 }),
             BufferedVertexInput::Scan {
                 scan,
-                property_demand: VertexScanPropertyDemand::VertexProperty(key),
+                property_demand: VertexScanPropertyDemand::Properties(selection),
             } => scan
-                .next_property_candidate_with(self.cx, *key, &mut observe)
+                .next_properties_candidate_with(self.cx, *selection, &mut observe)
                 .await
                 .map(|candidate| {
                     candidate.map(|candidate| {
@@ -471,8 +471,8 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for BufferedVertexQuerySource<'_, '_,
                                 )
                             })
                         }),
-                    VertexScanPropertyDemand::VertexProperty(key) => scan
-                        .vertex_property_candidate_with(self.cx, vid, *key, &mut observe)
+                    VertexScanPropertyDemand::Properties(selection) => scan
+                        .vertex_properties_candidate_with(self.cx, vid, *selection, &mut observe)
                         .await
                         .map(|candidate| {
                             candidate.map(|candidate| {

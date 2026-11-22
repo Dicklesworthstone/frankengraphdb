@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::store::{
-    BufferedScanEvent, BufferedVertexCandidate, BufferedVertexProperty, BufferedVertexScanState,
+    BufferedScanEvent, BufferedVertexCandidate, BufferedVertexProperties, BufferedVertexScanState,
 };
 use fgdb_types::VId;
 
@@ -213,17 +213,18 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         result.map(|row| Some(BufferedVertexCandidate { vid, row }))
     }
 
-    /// Resolve one selected key only after this vertex's visible history
+    /// Resolve selected keys only after this vertex's visible history
     /// winner is known. The returned partial owner retains the same-cut labels
     /// and distinguishes an absent key from a stored NULL. Every history and
     /// materialization event shares this driver's cumulative source allowance.
-    pub async fn vertex_property_candidate_with<C: Send>(
+    pub async fn vertex_properties_candidate_with<C: Send>(
         &mut self,
         cx: &QueryCx,
         vid: VId,
-        key: PropertyKeyId,
+        keys: PropertySelection,
         observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<BufferedVertexCandidate<BufferedVertexProperty>>, BufferedScanError<C>> {
+    ) -> Result<Option<BufferedVertexCandidate<BufferedVertexProperties>>, BufferedScanError<C>>
+    {
         let Some(mut driver) = self.driver.take() else {
             return Ok(None);
         };
@@ -234,10 +235,10 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         let result = driver
             .root
             .partition
-            .edge_scan_vertex_property(
+            .edge_scan_vertex_properties(
                 cx,
                 vid,
-                key,
+                keys,
                 self.as_of,
                 &mut driver.root.work,
                 &mut |event| {
@@ -366,17 +367,17 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         result
     }
 
-    /// Root counterpart of next_property_candidate_with with same-cut
+    /// Root counterpart of next_properties_candidate_with with same-cut
     /// endpoint topology. Independent incidence and vertex reads keep their
     /// complete-record demand and share the same cumulative work allowance.
     /// Error or a dropped polled future closes the whole driver.
-    pub async fn next_property_with_endpoints<C: Send>(
+    pub async fn next_properties_with_endpoints<C: Send>(
         &mut self,
         cx: &QueryCx,
         relation: Option<RelationId>,
-        key: PropertyKeyId,
+        keys: PropertySelection,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertyEndpoints>>, BufferedScanError<C>>
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertiesEndpoints>>, BufferedScanError<C>>
     {
         let Some(mut driver) = self.driver.take() else {
             return Ok(None);
@@ -385,7 +386,7 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         let used = &mut self.work;
         let result = driver
             .root
-            .next_property_with_endpoints(cx, relation, key, &mut |event| {
+            .next_properties_with_endpoints(cx, relation, keys, &mut |event| {
                 observe(event)?;
                 if event == BufferedEdgeScanEvent::Work {
                     *used = used.saturating_add(1);

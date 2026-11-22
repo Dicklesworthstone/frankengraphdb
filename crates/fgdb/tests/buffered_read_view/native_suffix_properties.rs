@@ -288,9 +288,11 @@ fn property_faults_follow_visible_demand_and_fail_terminally() {
                     .unwrap();
                 for eid in [0, 42, 101, 102, 103, 104, u128::MAX] {
                     let candidate = scan
-                        .next_property_candidate_with(&cx, key, &mut |_| {
-                            Ok::<_, std::convert::Infallible>(())
-                        })
+                        .next_properties_candidate_with(
+                            &cx,
+                            fgdb_delta_types::PropertySelection::one(key),
+                            &mut |_| Ok::<_, std::convert::Infallible>(()),
+                        )
                         .await
                         .unwrap()
                         .unwrap();
@@ -308,15 +310,17 @@ fn property_faults_follow_visible_demand_and_fail_terminally() {
                                 }
                                 _ => None,
                             };
-                            assert_eq!(actual.value(), expected.as_ref());
+                            assert_eq!(actual.value(key), expected.as_ref());
                         }
                         _ => panic!("property visibility mismatch for {eid} at {cut}"),
                     }
                 }
                 assert!(
-                    scan.next_property_candidate_with(&cx, key, &mut |_| {
-                        Ok::<_, std::convert::Infallible>(())
-                    })
+                    scan.next_properties_candidate_with(
+                        &cx,
+                        fgdb_delta_types::PropertySelection::one(key),
+                        &mut |_| { Ok::<_, std::convert::Infallible>(()) }
+                    )
                     .await
                     .unwrap()
                     .is_none()

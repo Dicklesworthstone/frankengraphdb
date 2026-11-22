@@ -114,7 +114,7 @@ mod pack_tests;
 pub use buffered_read::{
     BufferedEdge, BufferedPartition, BufferedReadCx, BufferedReadError, BufferedReadLimits,
     BufferedScanError, BufferedScanEvent, BufferedValue, BufferedVertexCandidate,
-    BufferedVertexProperty, BufferedVertexScan, BufferedVertexTopology,
+    BufferedVertexProperties, BufferedVertexScan, BufferedVertexTopology,
 };
 
 /// Directory holding a database's Strata blocks.

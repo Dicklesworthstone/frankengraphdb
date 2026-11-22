@@ -90,6 +90,7 @@ fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Label, "Root") => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(11))),
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(u64::MAX))),
         _ => None,
     }
 }
@@ -1050,6 +1051,7 @@ fn selected_vertex_fields_reach_external_sort_seeded_inputs_and_aggregates() {
                 vec![],
                 vec![
                     (P, CanonicalScalar::Int(value)),
+                    (PropertyKeyId(u64::MAX), CanonicalScalar::Int(value * 10)),
                     (
                         PropertyKeyId((1_u64 << 40) | P.0),
                         CanonicalScalar::ucs_basic_text(&"x".repeat(12 * 1024)).unwrap(),
@@ -1067,19 +1069,27 @@ fn selected_vertex_fields_reach_external_sort_seeded_inputs_and_aggregates() {
             .reserve(&cx, source_pool.available() - 4 * 1024 * 1024)
             .unwrap();
         let columns = (0..96)
-            .map(|at| format!("n.p AS cell_{at}"))
+            .map(|at| {
+                let field = if at % 2 == 0 { "p" } else { "q" };
+                format!("n.{field} AS cell_{at}")
+            })
             .collect::<Vec<_>>()
             .join(",");
         let expected = |values: &[i64]| {
             values
                 .iter()
                 .map(|value| {
-                    GraphValueRow::from_owned_values(vec![
-                        GraphValue::Scalar(CanonicalScalar::Int(
-                            *value
-                        ));
-                        96
-                    ])
+                    GraphValueRow::from_owned_values(
+                        (0..96)
+                            .map(|at| {
+                                GraphValue::Scalar(CanonicalScalar::Int(if at % 2 == 0 {
+                                    *value
+                                } else {
+                                    *value * 10
+                                }))
+                            })
+                            .collect(),
+                    )
                     .canonical_bytes()
                     .unwrap()
                 })
@@ -1088,7 +1098,7 @@ fn selected_vertex_fields_reach_external_sort_seeded_inputs_and_aggregates() {
         let (rows, cut, stats) = ordered_parameters(
             &mut view,
             &cx,
-            &format!("MATCH (n) RETURN {columns} ORDER BY cell_0 DESC"),
+            &format!("MATCH (n) RETURN {columns} ORDER BY cell_1 DESC"),
             &GqlParameters::new(),
             policy(),
             8,
@@ -1112,8 +1122,8 @@ fn selected_vertex_fields_reach_external_sort_seeded_inputs_and_aggregates() {
             )
             .unwrap();
         let text = format!(
-            "UNWIND $ids AS wanted MATCH (n) WHERE n=wanted \
-             RETURN {columns} ORDER BY cell_0 DESC"
+            "UNWIND $ids AS wanted MATCH (n) WHERE n=wanted AND n.q>=70 \
+             RETURN {columns} ORDER BY cell_1 DESC"
         );
         let logical = PreparedGraphSetText::prepare(&text, resolve)
             .unwrap()
@@ -1142,7 +1152,7 @@ fn selected_vertex_fields_reach_external_sort_seeded_inputs_and_aggregates() {
         let rows = aggregate(
             &mut view,
             &cx,
-            "MATCH (n) RETURN count(n.p) AS c,sum(n.p) AS s,avg(n.p) AS a",
+            "MATCH (n) RETURN count(n.p) AS c,sum(n.p+n.q) AS s,avg(n.q) AS a",
             policy(),
         )
         .await
@@ -1153,8 +1163,8 @@ fn selected_vertex_fields_reach_external_sort_seeded_inputs_and_aggregates() {
                 vec![],
                 vec![
                     GraphAggregateValue::Count(2),
-                    GraphAggregateValue::Integer(16),
-                    GraphAggregateValue::Average(GraphExactAverage::new(16, 2).unwrap()),
+                    GraphAggregateValue::Integer(176),
+                    GraphAggregateValue::Average(GraphExactAverage::new(160, 2).unwrap()),
                 ],
             )]
         );

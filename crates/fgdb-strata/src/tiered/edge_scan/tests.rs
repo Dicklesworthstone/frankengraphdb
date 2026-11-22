@@ -1042,7 +1042,12 @@ fn topology_skips_sidecar_faults_but_authenticates_topology_and_initial_admissio
                 let mut selected = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
                 assert!(matches!(
                     selected
-                        .next_property_with_endpoints(&cx, None, key, &mut |_| Ok::<_, ()>(()))
+                        .next_properties_with_endpoints(
+                            &cx,
+                            None,
+                            PropertySelection::one(key),
+                            &mut |_| Ok::<_, ()>(())
+                        )
                         .await,
                     Err(BufferedScanError::Read(BufferedReadError::Buffer(
                         BufferError::ChecksumMismatch
@@ -1610,7 +1615,12 @@ fn missing_endpoints_are_errors_only_for_visible_selected_edges() {
                 let mut failed = false;
                 loop {
                     match scan
-                        .next_property_with_endpoints(&cx, relation, key, &mut |_| Ok::<_, ()>(()))
+                        .next_properties_with_endpoints(
+                            &cx,
+                            relation,
+                            PropertySelection::one(key),
+                            &mut |_| Ok::<_, ()>(()),
+                        )
                         .await
                     {
                         Ok(Some(_)) => {}
@@ -1807,18 +1817,22 @@ fn selected_property_candidates_preserve_history_and_mode_upgrades() {
                 let mut admitted = Vec::new();
                 let mut rows = Vec::new();
                 while let Some(candidate) = scan
-                    .next_property_candidate_with(&cx, key, &mut |event| {
-                        if let BufferedEdgeScanEvent::Identity(eid) = event {
-                            admitted.push(eid);
-                        }
-                        Ok::<_, ()>(())
-                    })
+                    .next_properties_candidate_with(
+                        &cx,
+                        PropertySelection::one(key),
+                        &mut |event| {
+                            if let BufferedEdgeScanEvent::Identity(eid) = event {
+                                admitted.push(eid);
+                            }
+                            Ok::<_, ()>(())
+                        },
+                    )
                     .await
                     .unwrap()
                 {
                     ids.push(candidate.eid);
                     if let Some(row) = candidate.row {
-                        rows.push((*row.entry(), row.value().cloned()));
+                        rows.push((*row.entry(), row.value(key).cloned()));
                     }
                 }
                 assert_eq!(
@@ -1854,14 +1868,16 @@ fn selected_property_candidates_preserve_history_and_mode_upgrades() {
             }
         }
 
-        use EdgePropertyAccess::{Property, Read, Skip};
+        use EdgePropertyAccess::{Properties, Read, Skip};
+        let selected = PropertySelection::one(P);
+        let missing = PropertySelection::one(absent);
         let cases = [
-            [Property(P), Property(absent), Read],
-            [Read, Property(absent), Property(P)],
-            [Skip, Property(P), Property(absent)],
-            [Property(P), Skip, Property(P)],
-            [Property(absent), Property(P), Read],
-            [Property(absent), Read, Property(absent)],
+            [Properties(selected), Properties(missing), Read],
+            [Read, Properties(missing), Properties(selected)],
+            [Skip, Properties(selected), Properties(missing)],
+            [Properties(selected), Skip, Properties(selected)],
+            [Properties(missing), Properties(selected), Read],
+            [Properties(missing), Read, Properties(missing)],
         ];
         for (case, modes) in cases.into_iter().enumerate() {
             let mut scan = view.edge_scan_relation(&cx, CommitSeq(5), S).unwrap();
@@ -1879,23 +1895,17 @@ fn selected_property_candidates_preserve_history_and_mode_upgrades() {
                             candidate.row.map(|row| (row.entry, row.props.clone())),
                         )
                     }
-                    Property(key) => {
+                    Properties(keys) => {
                         let candidate = scan
-                            .next_property_candidate_with(&cx, key, &mut |_| Ok::<_, ()>(()))
+                            .next_properties_candidate_with(&cx, keys, &mut |_| Ok::<_, ()>(()))
                             .await
                             .unwrap()
                             .unwrap();
                         (
                             candidate.eid,
-                            candidate.row.map(|row| {
-                                (
-                                    *row.entry(),
-                                    row.value()
-                                        .cloned()
-                                        .map(|value| vec![(key, value)])
-                                        .unwrap_or_default(),
-                                )
-                            }),
+                            candidate
+                                .row
+                                .map(|row| (*row.entry(), row.properties().to_vec())),
                         )
                     }
                     Skip => {
@@ -1918,7 +1928,9 @@ fn selected_property_candidates_preserve_history_and_mode_upgrades() {
                     .unwrap();
                 match mode {
                     Read => {}
-                    Property(key) => expected.props.retain(|(candidate, _)| *candidate == key),
+                    Properties(keys) => expected
+                        .props
+                        .retain(|(candidate, _)| keys.contains(*candidate)),
                     Skip => expected.props.clear(),
                 }
                 assert_eq!(
@@ -1935,10 +1947,15 @@ fn selected_property_candidates_preserve_history_and_mode_upgrades() {
                 }
             }
             assert!(
-                scan.next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
-                    .await
-                    .unwrap()
-                    .is_none()
+                scan.next_properties_candidate_with(&cx, PropertySelection::one(P), &mut |_| Ok::<
+                    _,
+                    (),
+                >(
+                    ()
+                ))
+                .await
+                .unwrap()
+                .is_none()
             );
             drop(scan);
             assert_eq!(pool.used(), baseline);
@@ -1966,9 +1983,13 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
         let interrupted = cx.with_checkpoint_probe(probe.clone());
         let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
         assert!(matches!(
-            scan.next_property_candidate_with(&interrupted, P, &mut |_| -> Result<(), ()> {
-                panic!("the first checkpoint must refuse before source consumption")
-            })
+            scan.next_properties_candidate_with(
+                &interrupted,
+                PropertySelection::one(P),
+                &mut |_| -> Result<(), ()> {
+                    panic!("the first checkpoint must refuse before source consumption")
+                }
+            )
             .await,
             Err(BufferedScanError::Read(_))
         ));
@@ -1982,12 +2003,12 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
         let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
         {
             let mut observe = |_| Ok::<_, ()>(());
-            drop(scan.next_property_candidate_with(&cx, P, &mut observe));
+            drop(scan.next_properties_candidate_with(&cx, PropertySelection::one(P), &mut observe));
         }
         assert_eq!(scan.work_used(), 0);
         assert!(!scan.is_finished());
         assert!(matches!(
-            scan.next_property_candidate_with(&cx, P, &mut |event| {
+            scan.next_properties_candidate_with(&cx, PropertySelection::one(P), &mut |event| {
                 if event == BufferedEdgeScanEvent::Identity(EId(0)) {
                     Err(7)
                 } else {
@@ -2007,7 +2028,7 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
             let work = {
                 let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
                 while scan
-                    .next_property_candidate_with(&cx, key, &mut |_| {
+                    .next_properties_candidate_with(&cx, PropertySelection::one(key), &mut |_| {
                         total += 1;
                         Ok::<_, usize>(())
                     })
@@ -2023,11 +2044,15 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
                 let mut seen = 0;
                 loop {
                     match scan
-                        .next_property_candidate_with(&cx, key, &mut |_| {
-                            let at = seen;
-                            seen += 1;
-                            if at == stop { Err(stop) } else { Ok(()) }
-                        })
+                        .next_properties_candidate_with(
+                            &cx,
+                            PropertySelection::one(key),
+                            &mut |_| {
+                                let at = seen;
+                                seen += 1;
+                                if at == stop { Err(stop) } else { Ok(()) }
+                            },
+                        )
                         .await
                     {
                         Ok(Some(_)) => {}
@@ -2041,9 +2066,11 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
                 }
                 assert!(scan.is_finished());
                 assert!(
-                    scan.next_property_candidate_with(&cx, key, &mut |_| -> Result<(), ()> {
-                        panic!("fused selected-property source")
-                    })
+                    scan.next_properties_candidate_with(
+                        &cx,
+                        PropertySelection::one(key),
+                        &mut |_| -> Result<(), ()> { panic!("fused selected-property source") }
+                    )
                     .await
                     .unwrap()
                     .is_none()
@@ -2057,7 +2084,11 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
                 let mut refused = false;
                 loop {
                     match scan
-                        .next_property_candidate_with(&cx, key, &mut |_| Ok::<_, ()>(()))
+                        .next_properties_candidate_with(
+                            &cx,
+                            PropertySelection::one(key),
+                            &mut |_| Ok::<_, ()>(()),
+                        )
                         .await
                     {
                         Ok(Some(_)) => {}
@@ -2086,7 +2117,7 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
 }
 
 #[test]
-fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload() {
+fn selected_properties_rows_clear_old_values_and_retain_only_requested_payloads() {
     run(|contexts, path| async move {
         let commit = contexts.commit();
         let cx = contexts.query();
@@ -2099,9 +2130,22 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
         .await
         .unwrap();
         let unrelated = PropertyKeyId(10); // Before P: selecting the first value would be wrong.
+        let high = PropertyKeyId(u64::MAX);
+        let selected_keys = PropertySelection::try_from_slice(&[high, P, high]).unwrap();
+        let mut capacity_keys = selected_keys;
+        for key in 100..114 {
+            capacity_keys.insert(PropertyKeyId(key)).unwrap();
+        }
+        assert_eq!(capacity_keys.len(), PropertySelection::CAPACITY);
         let wide =
             || CanonicalPropertyValue::from(CanonicalScalar::bytes(vec![0x6d; 2048]).unwrap());
-        let properties = |value: CanonicalPropertyValue| vec![(unrelated, wide()), (P, value)];
+        let properties = |value: CanonicalPropertyValue| {
+            vec![
+                (unrelated, wide()),
+                (P, value),
+                (high, CanonicalScalar::Null.into()),
+            ]
+        };
         let definitions = [
             (
                 vec![
@@ -2195,7 +2239,9 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
             let mut scan = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
             let mut found = Vec::new();
             while let Some(candidate) = scan
-                .next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+                .next_properties_candidate_with(&cx, PropertySelection::one(P), &mut |_| {
+                    Ok::<_, ()>(())
+                })
                 .await
                 .unwrap()
             {
@@ -2209,7 +2255,7 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
                     row.entry().retired_at,
                     (cut < 3 && changed).then_some(CommitSeq(3))
                 );
-                found.push((candidate.eid, row.value().cloned()));
+                found.push((candidate.eid, row.value(P).cloned()));
             }
             assert_eq!(
                 found,
@@ -2234,19 +2280,24 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
                 .into_join_scan();
             let mut joined = Vec::new();
             while let Some(candidate) = projected
-                .next_property_with_endpoints(&cx, Some(R), P, &mut |_| Ok::<_, ()>(()))
+                .next_properties_with_endpoints(
+                    &cx,
+                    Some(R),
+                    PropertySelection::one(P),
+                    &mut |_| Ok::<_, ()>(()),
+                )
                 .await
                 .unwrap()
             {
                 let row = candidate.row.unwrap();
                 assert_eq!(
                     row.edge().properties().len(),
-                    usize::from(row.edge().value().is_some())
+                    usize::from(row.edge().value(P).is_some())
                 );
                 assert!(row.edge().properties().iter().all(|(key, _)| *key == P));
                 assert_eq!(row.source_vertex().vid(), row.edge().entry().src);
                 assert_eq!(row.target_vertex().vid(), row.edge().entry().dst);
-                joined.push((candidate.eid, row.edge().value().cloned()));
+                joined.push((candidate.eid, row.edge().value(P).cloned()));
             }
             assert_eq!(
                 joined, found,
@@ -2254,6 +2305,45 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
             );
             drop(projected);
             assert_eq!(pool.used(), baseline);
+
+            for keys in [selected_keys, capacity_keys, PropertySelection::EMPTY] {
+                let mut projected = view
+                    .edge_scan(&cx, CommitSeq(cut))
+                    .unwrap()
+                    .into_join_scan();
+                let mut actual = Vec::new();
+                while let Some(candidate) = projected
+                    .next_properties_with_endpoints(&cx, Some(R), keys, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap()
+                {
+                    let row = candidate.row.unwrap();
+                    if row.edge().entry().src == row.edge().entry().dst {
+                        assert!(std::ptr::eq(row.source_vertex(), row.target_vertex()));
+                    }
+                    assert_eq!(row.edge().value(unrelated), None);
+                    actual.push((candidate.eid, row.edge().properties().to_vec()));
+                }
+                let expected: Vec<_> = found
+                    .iter()
+                    .map(|(eid, value)| {
+                        let properties = if keys.is_empty() {
+                            Vec::new()
+                        } else {
+                            value
+                                .as_ref()
+                                .map(|value| {
+                                    vec![(P, value.clone()), (high, CanonicalScalar::Null.into())]
+                                })
+                                .unwrap_or_default()
+                        };
+                        (*eid, properties)
+                    })
+                    .collect();
+                assert_eq!(actual, expected, "cut {cut}, keys {keys:?}");
+                drop(projected);
+                assert_eq!(pool.used(), baseline);
+            }
         }
 
         let mut complete = view.edge_scan(&cx, CommitSeq(1)).unwrap();
@@ -2265,17 +2355,18 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
             .row
             .unwrap();
         let full_charge = full.charged_bytes();
-        // A full active image can serve a selected pull, but only P may escape.
+        // A full active image serves a selected pull without leaking the wide value.
         let next = complete
-            .next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+            .next_properties_candidate_with(&cx, selected_keys, &mut |_| Ok::<_, ()>(()))
             .await
             .unwrap()
             .unwrap()
             .row
             .unwrap();
         assert_eq!(next.entry().eid, EId(1));
+        assert_eq!(next.properties().len(), 2);
         assert_eq!(
-            next.value(),
+            next.value(P),
             Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
         );
         drop(next);
@@ -2284,22 +2375,23 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
         assert_eq!(pool.used(), baseline);
         let mut selected = view.edge_scan(&cx, CommitSeq(1)).unwrap();
         let held = selected
-            .next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+            .next_properties_candidate_with(&cx, capacity_keys, &mut |_| Ok::<_, ()>(()))
             .await
             .unwrap()
             .unwrap()
             .row
             .unwrap();
         assert_eq!(held.entry().eid, EId(0));
+        assert_eq!(held.properties().len(), 2);
         assert_eq!(
-            held.value(),
+            held.value(P),
             Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0)))
         );
         assert!(
             held.charged_bytes() + 2048 <= full_charge,
             "unrelated payload stays unmaterialized"
         );
-        assert_eq!(format!("{held:?}"), "BufferedEdgeProperty([REDACTED])");
+        assert_eq!(format!("{held:?}"), "BufferedEdgeProperties([REDACTED])");
         drop(selected);
         assert_eq!(pool.used(), baseline + held.charged_bytes());
         drop(view);
@@ -2350,12 +2442,17 @@ fn selected_property_endpoint_images_share_historical_labels_and_owners() {
                 let mut admissions = Vec::new();
                 let mut rows = Vec::new();
                 while let Some(candidate) = scan
-                    .next_property_with_endpoints(&cx, None, key, &mut |event| {
-                        if let BufferedEdgeScanEvent::Identity(eid) = event {
-                            admissions.push(eid);
-                        }
-                        Ok::<_, ()>(())
-                    })
+                    .next_properties_with_endpoints(
+                        &cx,
+                        None,
+                        PropertySelection::one(key),
+                        &mut |event| {
+                            if let BufferedEdgeScanEvent::Identity(eid) = event {
+                                admissions.push(eid);
+                            }
+                            Ok::<_, ()>(())
+                        },
+                    )
                     .await
                     .unwrap()
                 {
@@ -2406,7 +2503,9 @@ fn selected_property_endpoint_images_share_historical_labels_and_owners() {
 
         let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
         let held = scan
-            .next_property_with_endpoints(&cx, Some(S), P, &mut |_| Ok::<_, ()>(()))
+            .next_properties_with_endpoints(&cx, Some(S), PropertySelection::one(P), &mut |_| {
+                Ok::<_, ()>(())
+            })
             .await
             .unwrap()
             .unwrap()
@@ -2430,7 +2529,7 @@ fn selected_property_endpoint_images_share_historical_labels_and_owners() {
         assert_eq!(held.source_vertex().labels(), [LabelId(10), LabelId(11)]);
         assert_eq!(
             format!("{held:?}"),
-            "BufferedEdgePropertyEndpoints([REDACTED])"
+            "BufferedEdgePropertiesEndpoints([REDACTED])"
         );
         drop(held);
         assert_eq!(pool.used(), 0);
@@ -2438,7 +2537,7 @@ fn selected_property_endpoint_images_share_historical_labels_and_owners() {
 }
 
 #[test]
-fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() {
+fn selected_properties_endpoint_controls_close_the_driver_without_leaking_state() {
     run(|contexts, path| async move {
         let (store, id) = fixture(&contexts, &path, false).await;
         let cx = contexts.query();
@@ -2448,10 +2547,11 @@ fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() 
             .await
             .unwrap();
         let baseline = pool.used();
+        let keys = PropertySelection::try_from_slice(&[P, PropertyKeyId(u64::MAX)]).unwrap();
         let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
         {
             let mut observe = |_| Ok::<_, ()>(());
-            drop(scan.next_property_with_endpoints(&cx, None, P, &mut observe));
+            drop(scan.next_properties_with_endpoints(&cx, None, keys, &mut observe));
         }
         assert_eq!(scan.work_used(), 0);
         assert!(!scan.is_closed());
@@ -2459,7 +2559,10 @@ fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() 
             std::sync::Arc::new(fgdb_types::context::SimulationCheckpointProbe::new(Some(1)));
         let interrupted = cx.with_checkpoint_probe(probe.clone());
         assert!(matches!(
-            scan.next_property_with_endpoints(&interrupted, None, P, &mut |_| -> Result<(), ()> {
+            scan.next_properties_with_endpoints(&interrupted, None, keys, &mut |_| -> Result<
+                (),
+                (),
+            > {
                 panic!("cancellation precedes the first selected source event")
             })
             .await,
@@ -2475,7 +2578,7 @@ fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() 
         let work = {
             let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
             while scan
-                .next_property_with_endpoints(&cx, None, P, &mut |_| {
+                .next_properties_with_endpoints(&cx, None, keys, &mut |_| {
                     total += 1;
                     Ok::<_, usize>(())
                 })
@@ -2501,7 +2604,7 @@ fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() 
             let mut seen = 0;
             loop {
                 match scan
-                    .next_property_with_endpoints(&cx, None, P, &mut |_| {
+                    .next_properties_with_endpoints(&cx, None, keys, &mut |_| {
                         let at = seen;
                         seen += 1;
                         if at == stop { Err(stop) } else { Ok(()) }
@@ -2543,7 +2646,7 @@ fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() 
             let mut refused = false;
             loop {
                 match scan
-                    .next_property_with_endpoints(&cx, None, P, &mut |_| Ok::<_, ()>(()))
+                    .next_properties_with_endpoints(&cx, None, keys, &mut |_| Ok::<_, ()>(()))
                     .await
                 {
                     Ok(Some(_)) => {}

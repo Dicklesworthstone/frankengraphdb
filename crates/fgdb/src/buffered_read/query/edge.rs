@@ -23,7 +23,7 @@ use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::store::BufferedScanError;
 use fgdb_strata::tiered::edge_scan::{
     BufferedEdgeCandidate, BufferedEdgeDirection, BufferedEdgeEndpoints, BufferedEdgeJoinScan,
-    BufferedEdgePropertyEndpoints, BufferedEdgeScanEvent, BufferedEdgeTopologyEndpoints,
+    BufferedEdgePropertiesEndpoints, BufferedEdgeScanEvent, BufferedEdgeTopologyEndpoints,
 };
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -45,7 +45,7 @@ struct Record {
 enum Image {
     Complete(BufferedEdgeEndpoints),
     Topology(BufferedEdgeTopologyEndpoints),
-    Property(BufferedEdgePropertyEndpoints),
+    Property(BufferedEdgePropertiesEndpoints),
 }
 
 impl From<BufferedEdgeEndpoints> for Image {
@@ -60,8 +60,8 @@ impl From<BufferedEdgeTopologyEndpoints> for Image {
     }
 }
 
-impl From<BufferedEdgePropertyEndpoints> for Image {
-    fn from(image: BufferedEdgePropertyEndpoints) -> Self {
+impl From<BufferedEdgePropertiesEndpoints> for Image {
+    fn from(image: BufferedEdgePropertiesEndpoints) -> Self {
         Self::Property(image)
     }
 }
@@ -257,13 +257,13 @@ impl<V: Vfs + Clone> AsyncEdgeScanSource for Source<'_, '_, V> {
                 })?;
             return self.admit_record(candidate);
         }
-        if let EdgeScanPropertyDemand::EdgeProperty(key) = self.property_demand {
+        if let EdgeScanPropertyDemand::Properties(selection) = self.property_demand {
             let candidate = self
                 .cx
-                .with_restriction_async(self.scan.next_property_with_endpoints(
+                .with_restriction_async(self.scan.next_properties_with_endpoints(
                     self.cx,
                     relation,
-                    key,
+                    selection,
                     &mut |event| {
                         control(match event {
                             BufferedEdgeScanEvent::Work => AsyncEdgeScanEvent::Work,

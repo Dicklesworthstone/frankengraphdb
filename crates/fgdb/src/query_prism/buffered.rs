@@ -14,7 +14,7 @@ use crate::query::{
     procedure_options, push_prism_staged, sealed_usage_count,
 };
 use asupersync::fs::Vfs;
-use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{PropertySelection, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
@@ -31,7 +31,7 @@ use fgdb_prism::{
 use fgdb_strata::store::{BufferedScanError, BufferedScanEvent};
 use fgdb_strata::tiered::buffer::BufferError;
 use fgdb_strata::tiered::edge_scan::{
-    BufferedEdgeCandidate, BufferedEdgeProperty, BufferedEdgeScanEvent, BufferedEdgeTopology,
+    BufferedEdgeCandidate, BufferedEdgeProperties, BufferedEdgeScanEvent, BufferedEdgeTopology,
 };
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -42,7 +42,7 @@ type Error = FnxReadError<BufferedReadError, Cancel>;
 type QueryFailure = GqlQueryError<GqlError, Cancel>;
 
 enum ProjectionSourceEdge {
-    Property(BufferedEdgeProperty),
+    Property(BufferedEdgeProperties),
     Topology(BufferedEdgeTopology),
 }
 
@@ -864,14 +864,18 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                         })
                     };
                     if let Some(key) = property {
-                        scan.next_property_candidate_with(cx, key, &mut observe)
-                            .await
-                            .map(|candidate| {
-                                candidate.map(|candidate| BufferedEdgeCandidate {
-                                    eid: candidate.eid,
-                                    row: candidate.row.map(ProjectionSourceEdge::Property),
-                                })
+                        scan.next_properties_candidate_with(
+                            cx,
+                            PropertySelection::one(key),
+                            &mut observe,
+                        )
+                        .await
+                        .map(|candidate| {
+                            candidate.map(|candidate| BufferedEdgeCandidate {
+                                eid: candidate.eid,
+                                row: candidate.row.map(ProjectionSourceEdge::Property),
                             })
+                        })
                     } else {
                         scan.next_topology_candidate_with(cx, &mut observe)
                             .await
@@ -911,7 +915,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                         1.0
                     } else {
                         let value = match &row {
-                            ProjectionSourceEdge::Property(row) => row.value(),
+                            ProjectionSourceEdge::Property(row) => {
+                                property.and_then(|key| row.value(key))
+                            }
                             ProjectionSourceEdge::Topology(_) => None,
                         };
                         selection

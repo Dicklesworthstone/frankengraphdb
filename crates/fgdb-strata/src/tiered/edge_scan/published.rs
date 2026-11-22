@@ -345,41 +345,56 @@ async fn row<V: Vfs, C: Send>(
                     });
             }
         };
-        let selected = match access {
-            EdgePropertyAccess::Read => visible.properties,
-            EdgePropertyAccess::Property(key) => {
-                let mut low = 0;
-                let mut high = visible.properties.len();
-                while low < high {
-                    work.step(cx, observe)?;
-                    let middle = low + (high - low) / 2;
-                    if visible.properties[middle].0 < key {
-                        low = middle + 1;
-                    } else {
-                        high = middle;
+        // Selected keys need at most one inline position each. Resolve their
+        // canonical order before reserving/cloning the result; never copy a
+        // complete native property row merely to discard unrelated values.
+        let mut selected = [0usize; PropertySelection::CAPACITY];
+        let selected_len = match access {
+            EdgePropertyAccess::Read => visible.properties.len(),
+            EdgePropertyAccess::Properties(keys) => {
+                let mut len = 0;
+                for &key in keys.keys() {
+                    let mut low = 0;
+                    let mut high = visible.properties.len();
+                    while low < high {
+                        work.step(cx, observe)?;
+                        let middle = low + (high - low) / 2;
+                        if visible.properties[middle].0 < key {
+                            low = middle + 1;
+                        } else {
+                            high = middle;
+                        }
+                    }
+                    if visible
+                        .properties
+                        .get(low)
+                        .is_some_and(|property| property.0 == key)
+                    {
+                        selected[len] = low;
+                        len += 1;
                     }
                 }
-                match visible
-                    .properties
-                    .get(low)
-                    .filter(|property| property.0 == key)
-                {
-                    Some(property) => std::slice::from_ref(property),
-                    None => &[],
-                }
+                len
             }
-            EdgePropertyAccess::Skip => &[],
+            EdgePropertyAccess::Skip => 0,
+        };
+        let property_at = |ordinal| {
+            let at = match access {
+                EdgePropertyAccess::Read => ordinal,
+                EdgePropertyAccess::Properties(_) | EdgePropertyAccess::Skip => selected[ordinal],
+            };
+            &visible.properties[at]
         };
         // A sealed property row is not constrained to one Tier-D object.
         // Measure the borrowed immutable owner before cloning any selected
         // payload; keep explicit vector/copy slack and check the completed
         // record through the ordinary retained-ownership path below.
-        let mut bytes = selected
-            .len()
+        let mut bytes = selected_len
             .checked_mul(size_of::<(PropertyKeyId, CanonicalPropertyValue)>())
             .and_then(|bytes| bytes.checked_add(size_of::<BufferedEdge>()))
             .ok_or(BufferedReadError::SizeOverflow)?;
-        for (_, value) in selected {
+        for ordinal in 0..selected_len {
+            let (_, value) = property_at(ordinal);
             let owned = value
                 .owned_heap_bytes_controlled(&mut || work.step(cx, observe))?
                 .ok_or(BufferedReadError::SizeOverflow)?;
@@ -394,12 +409,12 @@ async fn row<V: Vfs, C: Send>(
         work.step(cx, observe)?;
         let charge = partition.reserve_scan_bytes(cx, bytes)?;
         let mut props = Vec::new();
-        props.try_reserve_exact(selected.len()).map_err(|_| {
+        props.try_reserve_exact(selected_len).map_err(|_| {
             BufferedReadError::Memory(MemoryError::AllocationFailed { requested: bytes })
         })?;
-        for property in selected {
+        for ordinal in 0..selected_len {
             work.step(cx, observe)?;
-            props.push(property.clone());
+            props.push(property_at(ordinal).clone());
         }
         Some(
             BufferedValue::from_reserved(

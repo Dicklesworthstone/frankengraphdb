@@ -260,9 +260,14 @@ fn joined_and_probed_edge_plans_keep_complete_property_demand() {
 
 #[test]
 fn selected_edge_demand_unifies_all_local_uses_without_aliasing_keys() {
-    use EdgeScanPropertyDemand::{Complete, EdgeProperty, Topology};
-    let p = EdgeProperty(PropertyKeyId(1));
-    let q = EdgeProperty(PropertyKeyId((1_u64 << 40) | 1));
+    use EdgeScanPropertyDemand::{Complete, Properties, Topology};
+    use fgdb_delta_types::PropertySelection;
+    let p = Properties(PropertySelection::one(PropertyKeyId(1)));
+    let q = Properties(PropertySelection::one(PropertyKeyId((1_u64 << 40) | 1)));
+    let both = Properties(
+        PropertySelection::try_from_slice(&[PropertyKeyId(1), PropertyKeyId((1_u64 << 40) | 1)])
+            .unwrap(),
+    );
     for (text, expected) in [
         ("MATCH (a)-[r:R]->(b) RETURN r,a,b", Topology),
         ("MATCH (a)-[r:R]->(b) RETURN r,r.p", p),
@@ -277,15 +282,15 @@ fn selected_edge_demand_unifies_all_local_uses_without_aliasing_keys() {
         ),
         ("MATCH (a)-[r:R]->(b) WHERE r.p>1 OR r.p<0 RETURN r,r.p", p),
         ("MATCH (a)-[r:R]->(b) WHERE true OR r.p=1 RETURN r", p),
-        ("MATCH (a)-[r:R]->(b) RETURN r,r.p,r.q", Complete),
-        ("MATCH (a)-[r:R]->(b) WHERE r.q=1 RETURN r,r.p", Complete),
+        ("MATCH (a)-[r:R]->(b) RETURN r,r.p,r.q", both),
+        ("MATCH (a)-[r:R]->(b) WHERE r.q=1 RETURN r,r.p", both),
         (
             "MATCH (a)-[r:R]->(b) WHERE false AND r.q=1 RETURN r,r.p",
-            Complete,
+            both,
         ),
         (
             "MATCH (a)-[r:R]->(b) WHERE coalesce(CASE WHEN true THEN 1 ELSE r.q END,0)=1 RETURN r,r.p",
-            Complete,
+            both,
         ),
         (
             "MATCH (a)-[r:R]->(b) WHERE true OR a.p=1 RETURN r,r.p",
@@ -309,9 +314,55 @@ fn selected_edge_demand_unifies_all_local_uses_without_aliasing_keys() {
 }
 
 #[test]
+fn selected_edge_demand_bounds_distinct_full_width_keys_without_truncating() {
+    use fgdb_delta_types::PropertySelection;
+    for distinct in [PropertySelection::CAPACITY, PropertySelection::CAPACITY + 1] {
+        let fields = (0..distinct)
+            .rev()
+            .chain([0, distinct - 1, 0])
+            .enumerate()
+            .map(|(column, key)| format!("r.k{key} AS cell_{column}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = PreparedGraphText::prepare(
+            &format!("MATCH (a)-[r:R]->(b) RETURN r,{fields}"),
+            |kind, name| match kind {
+                GraphSymbolKind::Property => name
+                    .strip_prefix('k')
+                    .and_then(|key| key.parse::<u64>().ok())
+                    .map(|key| GraphSymbol::Property(PropertyKeyId((key << 40) | 7))),
+                _ => symbols(kind, name),
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let before = query.plan().canonical_bytes();
+        let ordinary = EdgeScanPlan::compile(query.plan()).unwrap();
+        let asynchronous = AsyncEdgeScanPlan::compile(query.plan()).unwrap();
+        let expected = if distinct == PropertySelection::CAPACITY {
+            let keys: Vec<_> = (0..distinct as u64)
+                .map(|key| PropertyKeyId((key << 40) | 7))
+                .collect();
+            EdgeScanPropertyDemand::Properties(PropertySelection::try_from_slice(&keys).unwrap())
+        } else {
+            EdgeScanPropertyDemand::Complete
+        };
+        assert_eq!(ordinary.property_demand(), expected);
+        assert_eq!(asynchronous.property_demand(), expected);
+        assert_eq!(query.plan().canonical_bytes(), before);
+    }
+}
+
+#[test]
 fn selected_edge_demand_includes_private_sort_properties_before_limit_zero() {
-    use EdgeScanPropertyDemand::{Complete, EdgeProperty, Topology};
-    let p = EdgeProperty(PropertyKeyId(1));
+    use EdgeScanPropertyDemand::{Complete, Properties, Topology};
+    use fgdb_delta_types::PropertySelection;
+    let p = Properties(PropertySelection::one(PropertyKeyId(1)));
+    let both = Properties(
+        PropertySelection::try_from_slice(&[PropertyKeyId(1), PropertyKeyId((1_u64 << 40) | 1)])
+            .unwrap(),
+    );
     for (text, expected) in [
         ("MATCH (a)-[r:R]->(b) RETURN r ORDER BY r LIMIT 0", Topology),
         ("MATCH (a)-[r:R]->(b) RETURN r ORDER BY r.p LIMIT 0", p),
@@ -325,7 +376,7 @@ fn selected_edge_demand_includes_private_sort_properties_before_limit_zero() {
         ),
         (
             "MATCH (a)-[r:R]->(b) WHERE r.q>0 RETURN r ORDER BY r.p LIMIT 0",
-            Complete,
+            both,
         ),
         (
             "MATCH (a)-[r:R]->(b) RETURN r,r.p ORDER BY a.p LIMIT 0",
@@ -342,9 +393,14 @@ fn selected_edge_demand_includes_private_sort_properties_before_limit_zero() {
 
 #[test]
 fn selected_edge_aggregate_demand_covers_grouping_having_and_hidden_arguments() {
-    use EdgeScanPropertyDemand::{Complete, EdgeProperty, Topology};
-    let p = EdgeProperty(PropertyKeyId(1));
-    let q = EdgeProperty(PropertyKeyId((1_u64 << 40) | 1));
+    use EdgeScanPropertyDemand::{Complete, Properties, Topology};
+    use fgdb_delta_types::PropertySelection;
+    let p = Properties(PropertySelection::one(PropertyKeyId(1)));
+    let q = Properties(PropertySelection::one(PropertyKeyId((1_u64 << 40) | 1)));
+    let both = Properties(
+        PropertySelection::try_from_slice(&[PropertyKeyId(1), PropertyKeyId((1_u64 << 40) | 1)])
+            .unwrap(),
+    );
     for (text, expected) in [
         ("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS rows", Topology),
         ("MATCH (a)-[r:R]->(b) RETURN COUNT(r.p) AS present", p),
@@ -368,7 +424,7 @@ fn selected_edge_aggregate_demand_covers_grouping_having_and_hidden_arguments() 
         ),
         (
             "MATCH (a)-[r:R]->(b) RETURN SUM(r.p) AS total HAVING SUM(r.q)>0",
-            Complete,
+            both,
         ),
         (
             "MATCH (a)-[r:R]->(b) WHERE true OR a.p=1 RETURN SUM(r.p) AS total",

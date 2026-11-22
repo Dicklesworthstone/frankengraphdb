@@ -200,7 +200,7 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
                         row: candidate.row.map(IncidenceProjection::Endpoints),
                     }
                 }
-                EdgePropertyAccess::Skip | EdgePropertyAccess::Property(_) => {
+                EdgePropertyAccess::Skip | EdgePropertyAccess::Properties(_) => {
                     // Only complete Read images may escape as full endpoints.
                     // A partial property image can prove visibility only.
                     let candidate = driver
