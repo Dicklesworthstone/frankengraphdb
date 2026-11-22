@@ -60,10 +60,9 @@ hidden demands, selected corruption, absent/NULL/removal semantics, historical
 endpoint labels, ownership, cancellation and work limits. Public regressions
 exercise pinned and compacted history in every direction, aggregate results,
 a 3 MiB remaining read allowance with large unrelated payloads, and complete
-fallback for additional required fields. These assertions, Rustfmt, compilation,
-Clippy, UBS and full exact-tree proof remain **UNRUN** because the executor is
-unavailable. The open `fgdb-w3-properties-gou` and `fgdb-w3-tier-r-0tj` need
-the recorded qualification and exact-ID Beads progress export when it returns.
+fallback for additional required fields. The implementation is recorded in
+`b9e5d3b`; the qualification receipt below states the checks actually completed.
+The broader `fgdb-w3-properties-gou` and `fgdb-w3-tier-r-0tj` remain open.
 
 ### Boolean filters over topology-only buffered records — qualification pending
 
@@ -80,12 +79,37 @@ remain conservative. Source visibility, candidate/work accounting, cancellation,
 arithmetic errors and independent result reservations keep their existing owners.
 
 The increment adds compiler demand cases and public buffered-query regression
-sources. Manual source review is complete; compilation, runtime assertions,
-pinned formatting, Clippy, UBS and full exact-tree proof remain **UNRUN** because
-the executor became unavailable after repeated temporary-filesystem resets.
-The broader `fgdb-w3-properties-gou` and `fgdb-w3-tier-r-0tj` remain open. Their progress
-comments and exact-ID `scripts/br_sync.sh` export must be completed when the
-executor returns; no tracked Beads state or qualification claim is advanced here.
+sources. The implementation is recorded in `55955b3`; its runtime qualification
+and the broader property-storage and Tier-R contracts remain open.
+
+### Buffered field-demand qualification receipt — 2026-11-22
+
+Independent source reviews of both field-demand increments found no remaining
+source blocker. All twelve changed Rust files pass the pinned nightly's
+individual Rustfmt checks, and whitespace checks pass. The bounded static UBS
+scan of those files exited 0 with no critical findings. Its ast-grep rule pack
+was unavailable, and its explicit `--no-cargo` mode did not run compiler,
+Clippy or dependency checks; this is limited static evidence, not a full gate.
+
+The real RCH force-local command
+`cargo check --locked --offline -p fgdb-gql --all-targets` exited 137 during
+dependency compilation. Its last diagnostic was the bare word `Killed`; it
+did not identify the killed process or establish a product failure. The attempt
+used the exact pinned foundations, nightly 2026-08-31, one Cargo job,
+`-Z threads=1`, no incremental compilation and zero debug info. Its source was
+`b9e5d3b` plus only the seven formatter changes (Rust/manifest diff SHA-256
+`36bc33c24236e75bb7887d63a411f816b10d40bc777b93229a4f07e9f1cba9c2`).
+No changed-crate compiler verdict or new runtime assertion was reached.
+The executor subsequently disconnected again before exact-tree proof could
+start. Clippy, runtime qualification and the complete proof remain open.
+
+Progress comments were added through `br` for open `fgdb-w3-properties-gou`
+and `fgdb-w3-tier-r-0tj`. The required exact-ID export was rejected with exit 65:
+`br 0.2.16` reordered all 1,421 records and also changed 13 unrelated records
+semantically. The rejected export, database and exact comments were preserved;
+only the exporter-authored tracked changes were restored to the byte-exact
+HEAD stream. The canonical Beads export remains pending. Neither broad issue
+is closed, and no unrelated record normalization is included in these changes.
 
 ### Managed read-only transaction batches — qualification pending
 

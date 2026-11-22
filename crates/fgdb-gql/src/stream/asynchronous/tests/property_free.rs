@@ -133,7 +133,10 @@ fn aggregate_property_access_tracks_its_actual_input_not_just_visible_results() 
         ("MATCH (n) RETURN COUNT(*) AS rows", false),
         ("MATCH (n:L) RETURN COUNT(n) AS rows", false),
         ("MATCH (n) WHERE id(n)>=0 RETURN COUNT(*) AS rows", false),
-        ("MATCH (n) WHERE 1/0=0 RETURN COUNT(*) AS rows LIMIT 0", false),
+        (
+            "MATCH (n) WHERE 1/0=0 RETURN COUNT(*) AS rows LIMIT 0",
+            false,
+        ),
         (
             "MATCH (n) WHERE true OR n.p=1 RETURN COUNT(*) AS rows LIMIT 0",
             true,

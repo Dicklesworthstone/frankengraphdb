@@ -177,7 +177,8 @@ impl EdgeScanPlan {
             match column {
                 ValueProjection::Vertex { .. }
                 | ValueProjection::Path {
-                    function: GraphPathFunction::Value
+                    function:
+                        GraphPathFunction::Value
                         | GraphPathFunction::Length
                         | GraphPathFunction::Nodes
                         | GraphPathFunction::Edges

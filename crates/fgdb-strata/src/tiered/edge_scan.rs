@@ -937,7 +937,8 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         cx: &QueryCx,
         edge: &AdjacencyEntry,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<(BufferedVertexTopology, Option<BufferedVertexTopology>), BufferedScanError<C>> {
+    ) -> Result<(BufferedVertexTopology, Option<BufferedVertexTopology>), BufferedScanError<C>>
+    {
         let source = self
             .partition
             .edge_scan_vertex_topology(cx, edge.src, self.as_of, &mut self.work, observe)
@@ -948,13 +949,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         } else {
             Some(
                 self.partition
-                    .edge_scan_vertex_topology(
-                        cx,
-                        edge.dst,
-                        self.as_of,
-                        &mut self.work,
-                        observe,
-                    )
+                    .edge_scan_vertex_topology(cx, edge.dst, self.as_of, &mut self.work, observe)
                     .await?
                     .ok_or(BufferedReadError::DanglingEndpoint)?,
             )

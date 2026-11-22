@@ -369,7 +369,10 @@ fn boolean_edge_queries_skip_unused_sidecars_but_keep_eager_property_reads() {
                 bodies.insert(path.clone(), vfs.read(&path).await.unwrap());
             }
         }
-        assert!(!bodies.is_empty(), "the fixture has actual property sidecars");
+        assert!(
+            !bodies.is_empty(),
+            "the fixture has actual property sidecars"
+        );
         for path in bodies.keys() {
             vfs.write(path, b"damaged unused Boolean-query sidecar")
                 .await
@@ -398,12 +401,7 @@ fn boolean_edge_queries_skip_unused_sidecars_but_keep_eager_property_reads() {
                 let text = format!("MATCH (a)-[r:R]->(b) WHERE {predicate} RETURN r,a,b");
                 let prepared = query(&text);
                 let mut cursor = view
-                    .stream_graph_edges_governed_at(
-                        &cx,
-                        &prepared,
-                        CommitSeq(cut),
-                        query_policy(),
-                    )
+                    .stream_graph_edges_governed_at(&cx, &prepared, CommitSeq(cut), query_policy())
                     .unwrap();
                 let mut rows = Vec::new();
                 while let Some(row) = cursor.next().await {

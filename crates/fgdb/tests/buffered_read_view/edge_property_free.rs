@@ -662,9 +662,7 @@ fn selected_edge_properties_preserve_history_orientation_labels_and_removal() {
         );
         writer.compact(&contexts.commit()).await.unwrap();
 
-        for ((native, mut pinned), memory) in
-            [false, true].into_iter().zip(pinned).zip(&memories)
-        {
+        for ((native, mut pinned), memory) in [false, true].into_iter().zip(pinned).zip(&memories) {
             let mut current = open(&contexts, &vfs, memory, native.then(small_run_limits)).await;
             for (view, frontier) in [(&mut pinned, 3), (&mut current, 4)] {
                 for cut in 0..=frontier {
@@ -679,8 +677,7 @@ fn selected_edge_properties_preserve_history_orientation_labels_and_removal() {
                             };
                             let prepared =
                                 selected_query(&format!("MATCH {pattern} RETURN r,a,b,r.q"));
-                            let (rows, stats) =
-                                collect(view, &cx, &prepared, CommitSeq(cut)).await;
+                            let (rows, stats) = collect(view, &cx, &prepared, CommitSeq(cut)).await;
                             let mut expected = Vec::new();
                             if cut > 0 && !(labelled && cut >= 4) {
                                 for (eid, src, dst, value) in [
@@ -717,9 +714,8 @@ fn selected_edge_properties_preserve_history_orientation_labels_and_removal() {
                         }
                     }
                 }
-                let missing = selected_query(
-                    "MATCH (a)-[r:R]->(b) WHERE r.q IS NULL RETURN r,a,b,r.q",
-                );
+                let missing =
+                    selected_query("MATCH (a)-[r:R]->(b) WHERE r.q IS NULL RETURN r,a,b,r.q");
                 let (rows, _) = collect(view, &cx, &missing, CommitSeq(frontier)).await;
                 if frontier == 3 {
                     assert!(rows.is_empty());
@@ -743,9 +739,15 @@ fn selected_edge_properties_preserve_history_orientation_labels_and_removal() {
                     .await
                     .unwrap(),
                     if frontier == 3 {
-                        vec![GraphAggregateValue::Count(2), GraphAggregateValue::Integer(20)]
+                        vec![
+                            GraphAggregateValue::Count(2),
+                            GraphAggregateValue::Integer(20),
+                        ]
                     } else {
-                        vec![GraphAggregateValue::Count(1), GraphAggregateValue::Integer(21)]
+                        vec![
+                            GraphAggregateValue::Count(1),
+                            GraphAggregateValue::Integer(21),
+                        ]
                     }
                 );
             }
@@ -839,7 +841,10 @@ fn selected_edge_property_queries_fit_without_unrelated_payloads_and_keep_output
             let held = cursor.next().await.unwrap().unwrap();
             drop(cursor);
             drop(view);
-            assert!(memory.used() > 0, "selected output owns its independent guard");
+            assert!(
+                memory.used() > 0,
+                "selected output owns its independent guard"
+            );
             assert_eq!(held.row().values()[0], GraphValue::Edge(EId(0)));
             assert_eq!(
                 held.row().values()[1],

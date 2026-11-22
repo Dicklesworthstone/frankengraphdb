@@ -63,9 +63,18 @@ fn local_edge_property_demand_preserves_labels_identity_and_path_values() {
         ),
         ("MATCH (a)-[r:R]->(b) WHERE r.p=1 RETURN r,a,b", true),
         ("MATCH (a)-[r:R]->(b) WHERE a.p=b.p RETURN r,a,b", true),
-        ("MATCH (a)-[r:R]->(b) WHERE true OR a.p=1 RETURN r,a,b", true),
-        ("MATCH (a)-[r:R]->(b) WHERE true OR b.p=1 RETURN r,a,b", true),
-        ("MATCH (a)-[r:R]->(b) WHERE true OR r.p=1 RETURN r,a,b", true),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE true OR a.p=1 RETURN r,a,b",
+            true,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE true OR b.p=1 RETURN r,a,b",
+            true,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE true OR r.p=1 RETURN r,a,b",
+            true,
+        ),
         (
             "MATCH (a)-[r:R]->(b) WHERE false AND r.p=1 RETURN r,a,b",
             true,
@@ -266,10 +275,7 @@ fn selected_edge_demand_unifies_all_local_uses_without_aliasing_keys() {
             "MATCH p=(a)-[r:R]->(b) WHERE r.p>0 RETURN r,r.p,length(p)",
             p,
         ),
-        (
-            "MATCH (a)-[r:R]->(b) WHERE r.p>1 OR r.p<0 RETURN r,r.p",
-            p,
-        ),
+        ("MATCH (a)-[r:R]->(b) WHERE r.p>1 OR r.p<0 RETURN r,r.p", p),
         ("MATCH (a)-[r:R]->(b) WHERE true OR r.p=1 RETURN r", p),
         ("MATCH (a)-[r:R]->(b) RETURN r,r.p,r.q", Complete),
         ("MATCH (a)-[r:R]->(b) WHERE r.q=1 RETURN r,r.p", Complete),

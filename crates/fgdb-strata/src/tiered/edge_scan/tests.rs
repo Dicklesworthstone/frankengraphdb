@@ -1039,10 +1039,7 @@ fn topology_skips_sidecar_faults_but_authenticates_topology_and_initial_admissio
             ));
             drop(full);
             for key in [P, PropertyKeyId(12)] {
-                let mut selected = view
-                    .edge_scan(&cx, CommitSeq(5))
-                    .unwrap()
-                    .into_join_scan();
+                let mut selected = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
                 assert!(matches!(
                     selected
                         .next_property_with_endpoints(&cx, None, key, &mut |_| Ok::<_, ()>(()))
@@ -2252,8 +2249,7 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
                 joined.push((candidate.eid, row.edge().value().cloned()));
             }
             assert_eq!(
-                joined,
-                found,
+                joined, found,
                 "endpoint projection must preserve missing versus NULL"
             );
             drop(projected);
@@ -2408,10 +2404,7 @@ fn selected_property_endpoint_images_share_historical_labels_and_owners() {
             }
         }
 
-        let mut scan = view
-            .edge_scan(&cx, CommitSeq(5))
-            .unwrap()
-            .into_join_scan();
+        let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
         let held = scan
             .next_property_with_endpoints(&cx, Some(S), P, &mut |_| Ok::<_, ()>(()))
             .await
@@ -2455,10 +2448,7 @@ fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() 
             .await
             .unwrap();
         let baseline = pool.used();
-        let mut scan = view
-            .edge_scan(&cx, CommitSeq(5))
-            .unwrap()
-            .into_join_scan();
+        let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
         {
             let mut observe = |_| Ok::<_, ()>(());
             drop(scan.next_property_with_endpoints(&cx, None, P, &mut observe));
@@ -2483,10 +2473,7 @@ fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() 
 
         let mut total = 0;
         let work = {
-            let mut scan = view
-                .edge_scan(&cx, CommitSeq(5))
-                .unwrap()
-                .into_join_scan();
+            let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
             while scan
                 .next_property_with_endpoints(&cx, None, P, &mut |_| {
                     total += 1;
@@ -2510,10 +2497,7 @@ fn selected_property_endpoint_controls_close_the_driver_without_leaking_state() 
                 .await
                 .unwrap();
             let baseline = pool.used();
-            let mut scan = view
-                .edge_scan(&cx, CommitSeq(5))
-                .unwrap()
-                .into_join_scan();
+            let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
             let mut seen = 0;
             loop {
                 match scan
