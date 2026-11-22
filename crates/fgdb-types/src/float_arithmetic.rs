@@ -10,6 +10,9 @@
 //! [`ExactBinary64Sum`] is the aggregate counterpart: it accumulates binary64
 //! and integer inputs exactly and rounds once, so SUM and AVG are the
 //! correctly rounded exact sum and mean whatever order the inputs arrive in.
+//! [`ExactBinary64Moments`] extends that representation to exact squared sums
+//! and a once-rounded standard deviation, including integer inputs whose low
+//! bits binary64 cannot represent.
 //! The `transcendental` child builds pinned exp, ln, log10 and trigonometric
 //! kernels from these operations alone.
 
@@ -653,6 +656,236 @@ impl ExactBinary64Sum {
     }
 }
 
+// A finite input in units of 2^-1074 needs at most 2098 bits. With fewer
+// than 2^64 inputs, both n * sum(x^2) and sum(x)^2 need at most 4324 bits.
+// Two extra bits for midpoint comparison still fit in 68 unsigned limbs.
+const MOMENT_LIMBS: usize = 2 * SUM_LIMBS;
+
+/// Exact first and second moments of finite binary64 and i64 inputs.
+///
+/// Standard deviation is sqrt((n * sum(x^2) - sum(x)^2) / (n * (n - ddof))),
+/// with ddof zero for a population or one for a sample. Every operation before
+/// the final square-root rounding is integer-exact. Large offsets, cancellation,
+/// subnormal spreads and intermediate squares beyond binary64 range therefore
+/// do not lose information. The final result rounds once to nearest, ties to
+/// even; a genuinely overflowing result refuses. Fewer than two sample values
+/// or an empty population return positive zero.
+///
+/// Storage and finalization work are bounded independently of the input count.
+/// There is no allocation, sorting, native floating arithmetic or ambient
+/// rounding-mode dependency. Failed additions leave the accumulator unchanged.
+/// As with [`ExactBinary64Sum`], Debug does not expose input-derived values.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExactBinary64Moments {
+    sum: ExactBinary64Sum,
+    squares: [u64; MOMENT_LIMBS],
+    count: u64,
+}
+
+impl Default for ExactBinary64Moments {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Debug for ExactBinary64Moments {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ExactBinary64Moments([REDACTED])")
+    }
+}
+
+impl ExactBinary64Moments {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            sum: ExactBinary64Sum::new(),
+            squares: [0; MOMENT_LIMBS],
+            count: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn add(&mut self, input: CanonicalF64) -> Result<(), FloatArithmeticError> {
+        Number::read(input)?;
+        let count = self
+            .count
+            .checked_add(1)
+            .ok_or(FloatArithmeticError::Overflow)?;
+        let (significand, offset) = Self::parts(input.to_bits());
+        self.add_square(u128::from(significand).pow(2), 2 * offset);
+        self.sum.add(input);
+        self.count = count;
+        Ok(())
+    }
+
+    pub fn add_integer(&mut self, input: i64) -> Result<(), FloatArithmeticError> {
+        let count = self
+            .count
+            .checked_add(1)
+            .ok_or(FloatArithmeticError::Overflow)?;
+        self.add_square(
+            u128::from(input.unsigned_abs()).pow(2),
+            2 * SUM_BASE.unsigned_abs(),
+        );
+        self.sum.add_integer(i128::from(input));
+        self.count = count;
+        Ok(())
+    }
+
+    fn parts(bits: u64) -> (u64, u32) {
+        let encoded = ((bits >> 52) & 0x7ff) as u32;
+        if encoded == 0 {
+            (bits & FRACTION, 0)
+        } else {
+            ((bits & FRACTION) | HIDDEN, encoded - 1)
+        }
+    }
+
+    fn add_square(&mut self, square: u128, offset: u32) {
+        let index = (offset / 64) as usize;
+        let shift = offset % 64;
+        let low = square << shift;
+        let high = if shift == 0 {
+            0
+        } else {
+            (square >> (128 - shift)) as u64
+        };
+        let words = [low as u64, (low >> 64) as u64, high];
+        let mut carry = false;
+        for (at, limb) in self.squares[index..].iter_mut().enumerate() {
+            if at >= words.len() && !carry {
+                break;
+            }
+            let (value, first) = limb.overflowing_add(words.get(at).copied().unwrap_or(0));
+            let (value, second) = value.overflowing_add(u64::from(carry));
+            *limb = value;
+            carry = first || second;
+        }
+        debug_assert!(
+            !carry,
+            "the checked input count bounds the exact square sum"
+        );
+    }
+
+    /// Read a sample (`true`) or population (`false`) standard deviation.
+    pub fn standard_deviation(&self, sample: bool) -> Result<CanonicalF64, FloatArithmeticError> {
+        let divisor = self.count.saturating_sub(u64::from(sample));
+        if divisor == 0 {
+            return Ok(value(0));
+        }
+
+        let mut numerator = [0_u64; MOMENT_LIMBS];
+        let mut carry = 0_u128;
+        for (output, square) in numerator.iter_mut().zip(self.squares) {
+            let product = u128::from(square) * u128::from(self.count) + carry;
+            *output = product as u64;
+            carry = product >> 64;
+        }
+        debug_assert_eq!(carry, 0);
+
+        let (_, sum) = self.sum.magnitude();
+        let mut sum_squared = [0_u64; MOMENT_LIMBS];
+        for (i, left) in sum.iter().copied().enumerate() {
+            let mut carry = 0_u128;
+            for (j, right) in sum.iter().copied().enumerate() {
+                let product =
+                    u128::from(left) * u128::from(right) + u128::from(sum_squared[i + j]) + carry;
+                sum_squared[i + j] = product as u64;
+                carry = product >> 64;
+            }
+            sum_squared[i + SUM_LIMBS] = carry as u64;
+        }
+        let mut borrow = false;
+        for (output, square) in numerator.iter_mut().zip(sum_squared) {
+            let (difference, first) = output.overflowing_sub(square);
+            let (difference, second) = difference.overflowing_sub(u64::from(borrow));
+            *output = difference;
+            borrow = first || second;
+        }
+        debug_assert!(!borrow, "exact centered square sums are nonnegative");
+        if numerator.iter().all(|limb| *limb == 0) {
+            return Ok(value(0));
+        }
+        let denominator = u128::from(self.count) * u128::from(divisor);
+
+        // Positive finite binary64 bit patterns have numerical order. Locate
+        // the greatest value whose exact square is no greater than the exact
+        // variance, without first rounding or even representing the variance
+        // as a float. This takes at most 63 fixed-size comparisons.
+        let mut low = 0;
+        let mut high = 0x7fef_ffff_ffff_ffff_u64;
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            let (significand, offset) = Self::parts(middle);
+            if Self::compare_square(significand, 2 * offset, denominator, &numerator).is_le() {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+
+        // The midpoint above floor is (2*significand + 1)*2^(offset-1).
+        // Compare its square against four times the variance numerator; this
+        // includes half-subnormal ties and the overflow midpoint above MAX.
+        let mut carry = 0;
+        for limb in &mut numerator {
+            let next = *limb >> 62;
+            *limb = (*limb << 2) | carry;
+            carry = next;
+        }
+        debug_assert_eq!(carry, 0);
+        let (significand, offset) = Self::parts(low);
+        let midpoint =
+            Self::compare_square(2 * significand + 1, 2 * offset, denominator, &numerator);
+        if midpoint.is_lt() || (midpoint.is_eq() && low & 1 != 0) {
+            low += 1;
+        }
+        if low == 0x7ff0_0000_0000_0000 {
+            Err(FloatArithmeticError::Overflow)
+        } else {
+            Ok(value(low))
+        }
+    }
+
+    // Compare significand^2 * denominator * 2^offset with numerator. At
+    // most 54 significand bits times a 128-bit denominator occupy four words.
+    fn compare_square(
+        significand: u64,
+        offset: u32,
+        denominator: u128,
+        numerator: &[u64; MOMENT_LIMBS],
+    ) -> core::cmp::Ordering {
+        let square = u128::from(significand).pow(2);
+        let left = [square as u64, (square >> 64) as u64];
+        let right = [denominator as u64, (denominator >> 64) as u64];
+        let mut product = [0_u64; 4];
+        for (i, left) in left.into_iter().enumerate() {
+            let mut carry = 0_u128;
+            for (j, right) in right.into_iter().enumerate() {
+                let value =
+                    u128::from(left) * u128::from(right) + u128::from(product[i + j]) + carry;
+                product[i + j] = value as u64;
+                carry = value >> 64;
+            }
+            product[i + 2] = carry as u64;
+        }
+        let mut scaled = [0_u64; MOMENT_LIMBS];
+        let index = (offset / 64) as usize;
+        let shift = offset % 64;
+        for (at, word) in product.into_iter().enumerate() {
+            scaled[index + at] |= word << shift;
+            if shift != 0 {
+                scaled[index + at + 1] |= word >> (64 - shift);
+            }
+        }
+        scaled.iter().rev().cmp(numerator.iter().rev())
+    }
+}
+
 /// Round `(-1)^negative * (magnitude + tail) * 2^base` once, where `tail` is a
 /// nonzero fraction below bit zero when `sticky`. The top 126 bits plus one
 /// jammed sticky bit carry every bit that can decide nearest-even rounding.
@@ -695,6 +928,178 @@ mod tests {
     }
     fn f(number: f64) -> CanonicalF64 {
         CanonicalF64::new(number)
+    }
+
+    #[test]
+    fn exact_moments_preserve_integer_and_mixed_domain_low_bits() {
+        for base in [0, 1_i64 << 53, i64::MAX - 1, i64::MIN] {
+            let mut moments = ExactBinary64Moments::new();
+            moments.add_integer(base).unwrap();
+            moments.add_integer(base + 1).unwrap();
+            assert_eq!(moments.count(), 2);
+            assert_eq!(moments.standard_deviation(false), Ok(f(0.5)), "{base}");
+            assert_eq!(moments.standard_deviation(true), Ok(f(0.5_f64.sqrt())));
+        }
+        let mut mixed = ExactBinary64Moments::new();
+        mixed.add_integer(9_007_199_254_740_993).unwrap();
+        mixed.add(f(9_007_199_254_740_992.0)).unwrap();
+        mixed.add_integer(9_007_199_254_740_994).unwrap();
+        assert_eq!(
+            mixed.standard_deviation(false),
+            Ok(bits(0x3fea_20bd_700c_2c3e))
+        );
+        assert_eq!(mixed.standard_deviation(true), Ok(f(1.0)));
+
+        let mut extremes = ExactBinary64Moments::new();
+        for value in [i64::MAX, i64::MAX - 1, i64::MIN] {
+            extremes.add_integer(value).unwrap();
+        }
+        assert_eq!(
+            extremes.standard_deviation(false),
+            Ok(bits(0x43de_2b7d_ddfe_fa66))
+        );
+        assert_eq!(
+            extremes.standard_deviation(true),
+            Ok(bits(0x43e2_79a7_4590_331c))
+        );
+    }
+
+    #[test]
+    fn exact_moments_match_independent_rational_square_root_vectors() {
+        // Independently generated from Python Fraction's exact input ratios
+        // and a 1600-digit Decimal square root. Each selected output was also
+        // checked against both adjacent binary64 midpoint squares as exact
+        // Fractions; these are once-rounded roots, not rounded variances.
+        let cases = [
+            (
+                [0.1, 0.2, 0.3],
+                [0x3fb4_e6fd_f33c_f031, 0x3fb9_9999_9999_9999],
+            ),
+            (
+                [1e308, 1e308, -1e308],
+                [0x7fe0_c855_b8dd_8bf8, 0x7fe4_8dea_00e0_163c],
+            ),
+            (
+                [1e-308, -1e-308, 2e-308],
+                [0x0008_f7ed_96a8_8bc1, 0x000a_fbed_1797_0748],
+            ),
+            (
+                [1e308, 1e308, f64::from_bits(1e308_f64.to_bits() + 1)],
+                [0x7c8e_2b7d_ddfe_fa66, 0x7c92_79a7_4590_331c],
+            ),
+            (
+                [
+                    1.0,
+                    f64::from_bits(1.0_f64.to_bits() + 1),
+                    f64::from_bits(1.0_f64.to_bits() + 2),
+                ],
+                [0x3caa_20bd_700c_2c3e, 0x3cb0_0000_0000_0000],
+            ),
+            (
+                [1e100, 1.0, -1e100],
+                [0x54ad_dd25_3dbb_d8fa, 0x54b2_49ad_2594_c37d],
+            ),
+        ];
+        for (inputs, expected) in cases {
+            for order in [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ] {
+                let mut moments = ExactBinary64Moments::new();
+                for at in order {
+                    moments.add(f(inputs[at])).unwrap();
+                }
+                for sample in [false, true] {
+                    assert_eq!(
+                        moments.standard_deviation(sample),
+                        Ok(bits(expected[usize::from(sample)])),
+                        "inputs={inputs:?} order={order:?} sample={sample}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_moments_round_subnormal_ties_and_only_final_overflow() {
+        let mut empty = ExactBinary64Moments::new();
+        assert_eq!(empty.standard_deviation(false), Ok(f(0.0)));
+        assert_eq!(empty.standard_deviation(true), Ok(f(0.0)));
+        empty.add(f(f64::MAX)).unwrap();
+        assert_eq!(empty.standard_deviation(true), Ok(f(0.0)));
+        empty.add(f(f64::MAX)).unwrap();
+        assert_eq!(empty.standard_deviation(false), Ok(f(0.0)));
+        assert_eq!(empty.standard_deviation(true), Ok(f(0.0)));
+
+        for (input, population, sample) in [(1, 0, 1), (3, 2, 2), (5, 2, 4)] {
+            let mut pair = ExactBinary64Moments::new();
+            pair.add(bits(input)).unwrap();
+            pair.add(f(0.0)).unwrap();
+            assert_eq!(pair.standard_deviation(false), Ok(bits(population)));
+            assert_eq!(pair.standard_deviation(true), Ok(bits(sample)));
+        }
+        let mut opposite = ExactBinary64Moments::new();
+        opposite.add(f(f64::MAX)).unwrap();
+        opposite.add(f(-f64::MAX)).unwrap();
+        assert_eq!(opposite.standard_deviation(false), Ok(f(f64::MAX)));
+        assert_eq!(
+            opposite.standard_deviation(true),
+            Err(FloatArithmeticError::Overflow)
+        );
+    }
+
+    #[test]
+    fn exact_moments_pair_laws_cover_the_finite_exponent_range() {
+        let mut state = 0x6d6f_6d65_6e74_7301_u64;
+        for _ in 0..2048 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let input = bits(state & 0x7fef_ffff_ffff_ffff);
+            // For {0, x}, the exact population deviation is |x|/2, a
+            // single correctly-rounded IEEE division. For {-x, x}, it is
+            // exactly |x|, even when the squared values exceed f64::MAX.
+            let mut half = ExactBinary64Moments::new();
+            half.add(f(0.0)).unwrap();
+            half.add(input).unwrap();
+            assert_eq!(
+                half.standard_deviation(false),
+                Ok(f(input.get() / 2.0)),
+                "{state:016x}"
+            );
+            let mut whole = ExactBinary64Moments::new();
+            whole.add(input.checked_neg().unwrap()).unwrap();
+            whole.add(input).unwrap();
+            assert_eq!(whole.standard_deviation(false), Ok(input), "{state:016x}");
+        }
+    }
+
+    #[test]
+    fn exact_moments_refuse_invalid_additions_atomically() {
+        let mut moments = ExactBinary64Moments::new();
+        moments.add_integer(7).unwrap();
+        let before = moments.clone();
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                moments.add(f(invalid)),
+                Err(FloatArithmeticError::NonFinite)
+            );
+            assert_eq!(moments, before);
+        }
+        // This state is the reachable accumulation of u64::MAX zeroes.
+        let mut full = ExactBinary64Moments::new();
+        full.count = u64::MAX;
+        let before = full.clone();
+        assert_eq!(full.add(f(1.0)), Err(FloatArithmeticError::Overflow));
+        assert_eq!(full, before);
+        assert_eq!(full.add_integer(1), Err(FloatArithmeticError::Overflow));
+        assert_eq!(full, before);
+        assert_eq!(full.standard_deviation(false), Ok(f(0.0)));
+        assert_eq!(format!("{moments:?}"), "ExactBinary64Moments([REDACTED])");
     }
 
     #[test]

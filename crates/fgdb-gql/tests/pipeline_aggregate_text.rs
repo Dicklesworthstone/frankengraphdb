@@ -2013,6 +2013,128 @@ fn standard_deviations_aggregate_like_percentiles() {
     );
 }
 
+#[test]
+fn standard_deviations_keep_exact_spreads_across_numeric_ranges_and_native_facades() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalF64;
+    let float = |number| CanonicalScalar::Float(CanonicalF64::new(number));
+    let cases = [
+        (
+            vec![
+                CanonicalScalar::Int(i64::MAX),
+                CanonicalScalar::Int(i64::MAX - 1),
+            ],
+            [0x3fe6_a09e_667f_3bcd, 0x3fe0_0000_0000_0000],
+        ),
+        (
+            vec![
+                CanonicalScalar::Int(9_007_199_254_740_993),
+                float(9_007_199_254_740_992.0),
+            ],
+            [0x3fe6_a09e_667f_3bcd, 0x3fe0_0000_0000_0000],
+        ),
+        (
+            vec![float(1e308), float(1e308), CanonicalScalar::Null],
+            [0, 0],
+        ),
+        (
+            vec![float(1e308), float(1e308), float(-1e308)],
+            [0x7fe4_8dea_00e0_163c, 0x7fe0_c855_b8dd_8bf8],
+        ),
+        (
+            vec![float(1e-308), float(-1e-308), float(2e-308)],
+            [0x000a_fbed_1797_0748, 0x0008_f7ed_96a8_8bc1],
+        ),
+        (vec![float(f64::from_bits(1)), float(0.0)], [1, 0]),
+        (vec![float(f64::from_bits(3)), float(0.0)], [2, 2]),
+    ];
+    for (mut input, expected) in cases {
+        for reverse in [false, true] {
+            if reverse {
+                input.reverse();
+            }
+            for text in [
+                "MATCH (n) RETURN stDev(n.p) AS sd, stDevP(n.p) AS sdp",
+                "MATCH (n) WITH n.p AS x RETURN stDev(x) AS sd, stDevP(x) AS sdp",
+                "MATCH (n) RETURN CASE WHEN count(n.p)>0 THEN stDev(n.p) ELSE 0 END AS sd, coalesce(stDevP(n.p),0) AS sdp",
+            ] {
+                let prepared = if text.contains(" WITH ") {
+                    query(text)
+                } else {
+                    fgdb_gql::PreparedGraphAggregateText::prepare(text, symbols)
+                        .unwrap()
+                        .bind_parameters(&GqlParameters::new())
+                        .unwrap()
+                };
+                let result = run(&prepared, &input, wide());
+                assert_eq!(result.value.len(), 1, "{text}");
+                let actual: Vec<_> = result.value[0]
+                    .values()
+                    .iter()
+                    .map(|value| match value.as_value() {
+                        Some(GraphValue::Scalar(CanonicalScalar::Float(value))) => value.to_bits(),
+                        other => panic!("expected a deviation float, got {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(actual, expected, "{text}, reverse={reverse}");
+            }
+        }
+    }
+}
+
+#[test]
+fn exact_deviation_admission_and_real_overflow_remain_terminal() {
+    use fgdb_types::CanonicalF64;
+    let prepared = query("MATCH (n) WITH n.p AS x RETURN stDev(x) AS sd, stDevP(x) AS sdp");
+    let values = [i64::MAX - 2, i64::MAX - 1, i64::MAX].map(CanonicalScalar::Int);
+    let measured = run(&prepared, &values, wide());
+    let exact = GqlQueryPolicy::new(
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    );
+    assert_eq!(run(&prepared, &values, exact), measured);
+    for policy in [
+        GqlQueryPolicy::new(
+            100_000,
+            100_000,
+            measured.evaluator.work_units - 1,
+            5_000_000,
+        ),
+        GqlQueryPolicy::new(
+            100_000,
+            100_000,
+            5_000_000,
+            measured.evaluator.scratch_entries - 1,
+        ),
+    ] {
+        assert!(try_run(&prepared, &values, policy).is_err());
+    }
+    let extremes =
+        [f64::MAX, -f64::MAX].map(|value| CanonicalScalar::Float(CanonicalF64::new(value)));
+    // The population result is finite even though each square and the
+    // exact variance exceed binary64 range; only the sample root overflows.
+    let population = query("MATCH (n) WITH n.p AS x RETURN stDevP(x) AS sd");
+    assert_eq!(
+        run(&population, &extremes, wide()).value[0].values()[0].as_value(),
+        Some(&fgdb_gql::algebra::GraphValue::Scalar(
+            CanonicalScalar::Float(CanonicalF64::new(f64::MAX))
+        ))
+    );
+    let error = try_run(&prepared, &extremes, wide()).unwrap_err();
+    assert!(format!("{error:?}").contains("Overflow"), "{error:?}");
+    let hidden =
+        query("MATCH (n) WITH n.p AS x RETURN CASE WHEN true THEN 7 ELSE stDev(x) END AS sd");
+    assert!(try_run(&hidden, &extremes, wide()).is_ok());
+    let invalid = [CanonicalScalar::Int(1), CanonicalScalar::Bool(true)];
+    let error = try_run(&prepared, &invalid, wide()).unwrap_err();
+    assert!(
+        format!("{error:?}").contains("IncompatibleOperands"),
+        "{error:?}"
+    );
+}
+
 mod collection_parameter_inference {
     use super::*;
     use fgdb_gql::algebra::GraphValue;

@@ -4027,11 +4027,12 @@ pub(crate) fn value_function<E>(
     }
 }
 
-/// openCypher stDev (`sample`) and stDevP over a collected list. The numbers
-/// sort by their binary64 values first, so neither the mean nor the sum of
-/// squared deviations depends on the collection's order; both use checked
-/// binary64 operations. NULL members are skipped, a non-number is a typed
-/// error, and too few numbers give 0.0, as Neo4j answers.
+/// openCypher stDev (`sample`) and stDevP over a collected list. Exact first
+/// and second moments preserve integer low bits and tiny spreads around large
+/// offsets. Only the final standard deviation rounds to binary64; neither
+/// input order nor intermediate floating overflow changes the answer. NULL
+/// members are skipped, a non-number is a typed error, and too few numbers
+/// give 0.0. The summary retains no second collection or sorting workspace.
 fn standard_deviation<E>(
     sample: bool,
     argument: &GraphValue,
@@ -4039,7 +4040,7 @@ fn standard_deviation<E>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
     use crate::GraphIntegerErrorKind as Kind;
-    use fgdb_types::CanonicalF64;
+    use fgdb_types::{CanonicalF64, ExactBinary64Moments};
     let failure = |kind| ProjectionFailure::Arithmetic {
         column,
         error: GraphIntegerError {
@@ -4051,55 +4052,50 @@ fn standard_deviation<E>(
     let Some(members) = list_members(argument, control).map_err(ProjectionFailure::Control)? else {
         return Err(failure(Kind::IncompatibleOperands));
     };
-    let mut numbers: Vec<CanonicalF64> = Vec::with_capacity(members.len());
+    let mut count = 0_u64;
     for member in members.iter() {
-        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
         match member {
             GraphValue::Scalar(CanonicalScalar::Null) => {}
-            GraphValue::Scalar(CanonicalScalar::Int(value)) => {
-                numbers.push(CanonicalF64::from_i64_rounded(*value));
+            GraphValue::Scalar(CanonicalScalar::Int(_) | CanonicalScalar::Float(_)) => {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| failure(Kind::Overflow))?;
             }
-            GraphValue::Scalar(CanonicalScalar::Float(value)) => numbers.push(*value),
             _ => return Err(failure(Kind::IncompatibleOperands)),
         }
     }
     control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-    let zero = CanonicalF64::from_i64_rounded(0);
-    let divisor = numbers.len().saturating_sub(usize::from(sample));
-    if divisor == 0 {
-        return Ok(GraphValue::Scalar(CanonicalScalar::Float(zero)));
+    if count <= u64::from(sample) {
+        return Ok(GraphValue::Scalar(CanonicalScalar::Float(
+            CanonicalF64::from_i64_rounded(0),
+        )));
     }
-    let mut comparisons = 0_u64;
-    numbers.sort_by(|left, right| {
-        comparisons += 1;
-        left.cmp(right)
-    });
-    for _ in 0..comparisons {
+    // Admission precedes constructing the fixed-size accumulator. The first
+    // pass preserves complete type checking and the too-few-input contract,
+    // including the existing sample-singleton treatment of non-finite floats.
+    for _ in
+        0..core::mem::size_of::<ExactBinary64Moments>().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+    {
+        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+    }
+    let mut moments = ExactBinary64Moments::new();
+    for member in members.iter() {
         control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+        match member {
+            GraphValue::Scalar(CanonicalScalar::Int(value)) => {
+                moments.add_integer(*value).map_err(arithmetic)?;
+            }
+            GraphValue::Scalar(CanonicalScalar::Float(value)) => {
+                moments.add(*value).map_err(arithmetic)?;
+            }
+            _ => {}
+        }
     }
-    // The list bound keeps both counts far inside i64.
-    let count = CanonicalF64::from_i64_rounded(numbers.len() as i64);
-    let mut sum = zero;
-    for number in &numbers {
-        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
-        sum = sum.checked_add(*number).map_err(arithmetic)?;
-    }
-    let mean = sum.checked_div(count).map_err(arithmetic)?;
-    let mut squares = zero;
-    for number in &numbers {
-        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
-        let deviation = number.checked_sub(mean).map_err(arithmetic)?;
-        squares = deviation
-            .checked_mul(deviation)
-            .and_then(|square| squares.checked_add(square))
-            .map_err(arithmetic)?;
-    }
-    let variance = squares
-        .checked_div(CanonicalF64::from_i64_rounded(divisor as i64))
-        .map_err(arithmetic)?;
-    Ok(GraphValue::Scalar(CanonicalScalar::Float(
-        variance.checked_sqrt().map_err(arithmetic)?,
-    )))
+    control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+    let deviation = moments.standard_deviation(sample).map_err(arithmetic)?;
+    control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+    Ok(GraphValue::Scalar(CanonicalScalar::Float(deviation)))
 }
 
 /// openCypher percentileDisc and percentileCont over `[collected, p]`

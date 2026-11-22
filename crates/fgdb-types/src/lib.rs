@@ -38,7 +38,7 @@ pub use decimal::{
 };
 pub use decimal_text::{DecimalParseError, MAX_DECIMAL_TEXT_BYTES};
 pub use embedded_txn::{EmbeddedTxnCompletion, EmbeddedTxnState};
-pub use float_arithmetic::{ExactBinary64Sum, FloatArithmeticError};
+pub use float_arithmetic::{ExactBinary64Moments, ExactBinary64Sum, FloatArithmeticError};
 pub use ids::{
     BranchId, CommitSeq, CommitSeqExhausted, DatabaseId, DatabaseSecurityNamespaceId, EId, GraphId,
     IssuerId, KeyEpoch, LogicalCommandSeq, ObjectId, PrincipalId, RevocationIndex,
