@@ -177,6 +177,148 @@ fn scalar_vertex(value: Option<i64>, vertex: Option<u128>) -> GraphValueRow {
     ])
 }
 
+/// Deferred predicates belong to the OPTIONAL clause even without a preceding
+/// WITH. A later filter over the left join would lose the unmatched rows; a
+/// fresh uncorrelated body would lose both identity and occurrence semantics.
+#[test]
+fn optional_value_predicates_without_with_preserve_each_incoming_occurrence() {
+    for (predicate, selected) in [
+        ("b IN [a]", [false, false, false, true]),
+        ("NOT b IN [a]", [true, true, true, false]),
+        ("b IN [a] OR a.score = 10", [true, true, false, true]),
+        ("b IN [a] OR NULL", [false, false, false, true]),
+        ("b IN []", [false; EDGES.len()]),
+        ("b IN [NULL]", [false; EDGES.len()]),
+    ] {
+        let mut expected = Vec::new();
+        for a in 1..=4 {
+            let mut matched = false;
+            for (index, &(source, _, target)) in EDGES.iter().enumerate() {
+                if source == VId(a) && selected[index] {
+                    expected.push(vertices(&[Some(a), Some(target.0)]));
+                    matched = true;
+                }
+            }
+            if !matched {
+                expected.push(vertices(&[Some(a), None]));
+            }
+        }
+        expected.sort();
+        for boundary in ["", " WITH *"] {
+            let statement = format!(
+                "MATCH (a){boundary} OPTIONAL MATCH (a)-[:R]->(b) \
+                 WHERE {predicate} RETURN a,b"
+            );
+            let mut actual = rows(&statement);
+            actual.sort();
+            assert_eq!(actual, expected, "{statement}");
+        }
+    }
+}
+
+#[test]
+fn optional_value_predicates_preserve_the_unit_and_nullable_scope_boundaries() {
+    for predicate in ["n IN []", "n IN [NULL]"] {
+        let statement = format!("OPTIONAL MATCH (n) WHERE {predicate} RETURN n");
+        assert_eq!(rows(&statement), vec![vertices(&[None])]);
+    }
+    assert_eq!(
+        rows("OPTIONAL MATCH (n) WHERE n IN [n] RETURN n"),
+        (1..=4).map(|n| vertices(&[Some(n)])).collect::<Vec<_>>()
+    );
+    let mut expected = (1..=4)
+        .map(|n| vertices(&[Some(n), None, None]))
+        .collect::<Vec<_>>();
+    expected.sort();
+    let mut actual = rows(
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b IN [] \
+         OPTIONAL MATCH (c) WHERE c IN [b] RETURN a,b,c",
+    );
+    actual.sort();
+    assert_eq!(
+        actual, expected,
+        "a nullable import never becomes a fresh graph binding"
+    );
+}
+
+#[test]
+fn optional_value_predicates_filter_whole_comma_patterns_before_null_extension() {
+    let mut expected = Vec::new();
+    for a in 1..=4 {
+        let before = expected.len();
+        for &(source, _, target) in &EDGES {
+            if source == VId(a) {
+                expected.push(vertices(&[Some(a), Some(target.0), Some(target.0)]));
+            }
+        }
+        if expected.len() == before {
+            expected.push(vertices(&[Some(a), None, None]));
+        }
+    }
+    expected.sort();
+    let mut actual = rows(
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b),(c) \
+         WHERE c IN [b] RETURN a,b,c",
+    );
+    actual.sort();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn optional_value_predicates_keep_late_errors_and_cancellation() {
+    let text = "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) \
+                WHERE b IN [a] OR a.score = 10 RETURN a,b";
+    let query = bind(text);
+    let checkpoints = Cell::new(0);
+    let successful = run(&query, wide(), None, &Cell::new(0), || {
+        checkpoints.set(checkpoints.get() + 1);
+        Ok(())
+    })
+    .unwrap();
+    assert!(checkpoints.get() > 2);
+    for stop in [1, checkpoints.get() / 2, checkpoints.get()] {
+        let reached = Cell::new(0);
+        assert!(
+            run(&query, wide(), None, &Cell::new(0), || {
+                reached.set(reached.get() + 1);
+                if reached.get() == stop {
+                    Err(99)
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err(),
+            "cancellation boundary {stop}"
+        );
+        assert_eq!(reached.get(), stop);
+    }
+    for failure in [2, 3] {
+        assert!(run(&query, wide(), Some(failure), &Cell::new(0), || Ok(())).is_err());
+    }
+    assert_eq!(
+        run(&query, wide(), None, &Cell::new(0), || Ok(()))
+            .unwrap()
+            .value,
+        successful.value,
+        "failed invocations never mutate the prepared relation"
+    );
+    for suffix in ["", " LIMIT 0"] {
+        let statement = format!(
+            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) \
+             WHERE b IN [a] OR 1 / (b.score - 30) = 0 RETURN a,b{suffix}"
+        );
+        assert!(run(&bind(&statement), wide(), None, &Cell::new(0), || Ok(())).is_err());
+    }
+    assert!(
+        rows(
+            "MATCH (a {score:999}) OPTIONAL MATCH (b) \
+             WHERE b IN [a] OR 1/0 = 0 RETURN a,b LIMIT 0"
+        )
+        .is_empty(),
+        "no incoming occurrence means no optional body evaluation"
+    );
+}
+
 #[test]
 fn optional_parts_match_an_independent_parallel_edge_and_absence_oracle() {
     let mut expected = Vec::new();
@@ -789,6 +931,51 @@ fn optional_graph_predicates_filter_candidates_before_null_extension() {
 }
 
 #[test]
+fn optional_existence_combinations_filter_inside_direct_and_call_scopes() {
+    type Keep = fn(u128, u128, bool) -> bool;
+    let cases: [(&str, Keep); 2] = [
+        (
+            "EXISTS { MATCH (b)-[:R]->(c) WHERE c.score > b.score } OR a.score = 20",
+            |a, _, exists| exists || a == 2,
+        ),
+        (
+            "NOT (EXISTS { MATCH (b)-[:R]->(c) WHERE c.score > b.score } OR b.score = 30)",
+            |_, b, exists| !(exists || b == 3),
+        ),
+    ];
+    for (predicate, keep) in cases {
+        let mut expected = Vec::new();
+        for a in 1..=4 {
+            let before = expected.len();
+            for &(source, _, target) in &EDGES {
+                let exists = EDGES
+                    .iter()
+                    .any(|&(from, _, to)| from == target && to > target);
+                if source == VId(a) && keep(a, target.0, exists) {
+                    expected.push(vertices(&[Some(a), Some(target.0)]));
+                }
+            }
+            if expected.len() == before {
+                expected.push(vertices(&[Some(a), None]));
+            }
+        }
+        expected.sort();
+        let optional = format!("OPTIONAL MATCH (a)-[:R]->(b) WHERE {predicate}");
+        for statement in [
+            format!("MATCH (a) {optional} RETURN a,b"),
+            format!("MATCH (a) CALL (a) {{ {optional} RETURN b }} RETURN a,b"),
+        ] {
+            let prepared = PreparedGraphSetText::prepare(&statement, symbols)
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            assert_eq!(prepared.columns(), &["a", "b"], "{statement}");
+            let mut actual = rows(&statement);
+            actual.sort();
+            assert_eq!(actual, expected, "{statement}");
+        }
+    }
+}
+
+#[test]
 fn optional_subqueries_keep_duplicate_imports_nulls_and_private_scopes() {
     // Both WITH and returning CALL carry the same vertex; the optional body
     // must not consume the containing RETURN or erase duplicate input rows.
@@ -1159,6 +1346,57 @@ mod carried_metadata {
         .into_iter()
         .map(|row| row.values().to_vec())
         .collect()
+    }
+
+    #[test]
+    fn optional_compound_labels_keep_unknown_labels_false_and_null_elements_unknown() {
+        for (predicate, keep) in [
+            ("b:L OR b:Unknown", [true, true, true, true]),
+            ("NOT b:Unknown", [true, true, true, true]),
+            ("NOT (b:L:Unknown)", [true, true, true, true]),
+            ("b:L XOR b:Unknown", [true, true, true, true]),
+            ("b:Unknown OR a.score = 10", [true, true, false, false]),
+            ("b:Unknown OR b.score = NULL", [false; EDGES.len()]),
+        ] {
+            let mut expected = Vec::new();
+            for a in 1..=4 {
+                let before = expected.len();
+                for (index, &(source, _, target)) in EDGES.iter().enumerate() {
+                    if source == VId(a) && keep[index] {
+                        expected.push(vec![GraphValue::Vertex(VId(a)), GraphValue::Vertex(target)]);
+                    }
+                }
+                if expected.len() == before {
+                    expected.push(vec![GraphValue::Vertex(VId(a)), null()]);
+                }
+            }
+            expected.sort();
+            let statement =
+                format!("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE {predicate} RETURN a,b");
+            let mut actual = values(&statement);
+            actual.sort();
+            assert_eq!(actual, expected, "{statement}");
+        }
+
+        let statement = "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE NOT b:L \
+                         OPTIONAL MATCH (c) WHERE NOT b:L RETURN a,b,c";
+        let reads = RefCell::new(Vec::new());
+        let mut actual = execute(&prepare(statement), wide(), &reads, None, || Ok(()))
+            .unwrap()
+            .value;
+        actual.sort();
+        let mut expected = (1..=4)
+            .map(|a| vertices(&[Some(a), None, None]))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(actual, expected);
+        assert!(
+            reads.borrow().iter().all(|(element, kind)| {
+                matches!(element, ElementId::Vertex(VId(2 | 3)))
+                    && *kind == GraphElementMetadata::Labels
+            }),
+            "a NULL label operand never reads another element's metadata"
+        );
     }
 
     #[test]

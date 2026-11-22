@@ -1083,8 +1083,8 @@ fn a_where_label_conjunct_is_the_inline_label() {
 /// same template as writing that `WITH *`, also before a later MATCH or
 /// OPTIONAL MATCH (TCK Match7 [25]), which then joins the filtered rows. A
 /// flat conjunction keeps its inline label, byte for byte. An OPTIONAL
-/// MATCH's own WHERE belongs to its left join, so there a compound label test
-/// still refuses, as does a name no clause binds.
+/// MATCH's own WHERE instead belongs inside its correlated Apply, before null
+/// extension. A name no clause binds still refuses.
 #[test]
 fn a_compound_where_label_test_filters_after_an_implicit_with_star() {
     let template = |text: &str| {
@@ -1121,9 +1121,25 @@ fn a_compound_where_label_test_filters_after_an_implicit_with_star() {
     ] {
         assert_eq!(template(conjunct), template(inline), "{conjunct}");
     }
+    for predicate in [
+        "b:L OR b.n = 1",
+        "NOT b:L",
+        "(b:L)",
+        "NOT (b:L:M) AND b.n > 0",
+        "b:L OR a:L",
+        "b:Unknown OR a:L",
+        "r:R OR b:L",
+    ] {
+        let implicit =
+            format!("MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) WHERE {predicate} RETURN a,r,b");
+        let explicit = format!(
+            "MATCH (a) WITH * OPTIONAL MATCH (a)-[r:R]->(b) WHERE {predicate} RETURN a,r,b"
+        );
+        assert_eq!(template(&implicit), template(&explicit), "{predicate}");
+    }
     for text in [
-        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b:L OR b.n = 1 RETURN b",
         "MATCH (a) WHERE b:L OR a.n = 1 RETURN a",
+        "MATCH (a) OPTIONAL MATCH (b) WHERE missing:L OR b.n = 1 RETURN a,b",
     ] {
         assert!(
             fgdb_gql::PreparedGraphSetText::prepare(text, symbols).is_err(),

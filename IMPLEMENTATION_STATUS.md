@@ -12,6 +12,26 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Clause-local OPTIONAL MATCH expression predicates — qualification pending
+
+The native read compiler now routes a top-level OPTIONAL MATCH's expression
+predicate through its existing correlated Apply without requiring an explicit
+preceding WITH. The predicate evaluates inside the optional body before null
+extension. Incoming identities and values, parallel-edge multiplicities and
+unmatched rows therefore keep their existing owners. Leading OPTIONAL MATCH
+also retains its unit input. The bounded PreparedGraphText facade keeps its
+existing syntax boundary; PreparedNativeRead and the native public dispatchers
+own the composition.
+
+Regression sources cover Boolean label tests, imported values, unknown labels,
+three-valued logic, comma patterns, existence predicates, cancellation and late
+errors including LIMIT 0. Public cases compare a physically masked graph with
+capability-authorized execution and reuse a prepared query across pinned and
+updated label snapshots. Pinned changed-source formatting and whitespace checks
+pass. Runtime and exact-tree qualification remain pending while the offline
+pinned build runs under intermittent executor I/O stalls.
+The broader `fgdb-qo3jv` remains open.
+
 ### Streaming restoration of derived checkpoints — qualification pending
 
 Beacon and Ripple checkpoint restoration now consume authenticated Chronicle

@@ -408,6 +408,147 @@ fn label_tests_under_or_and_not_are_three_valued_label_membership() {
     });
 }
 
+/// Clause-local WHERE decides whether the optional match has a witness. It
+/// must not discard the outer row when every candidate fails the label test.
+/// This oracle enumerates the fixture's edges directly, preserving parallel
+/// witnesses and adding exactly one NULL extension for an unmatched root.
+#[test]
+fn optional_compound_labels_filter_witnesses_before_null_extension() {
+    run(async |commit, cx| {
+        let db = open(commit).await;
+        type Keep = fn(u128, u128) -> bool;
+        let cases: [(&str, Keep); 8] = [
+            ("b:A OR b:B", |_, b| is(A, b) || is(B, b)),
+            ("NOT (b:A)", |_, b| !is(A, b)),
+            ("NOT (b:A OR b:B)", |_, b| !is(A, b) && !is(B, b)),
+            ("a:A AND (b:B OR b:A)", |a, b| {
+                is(A, a) && (is(B, b) || is(A, b))
+            }),
+            ("(b:A) XOR (b:B)", |_, b| is(A, b) ^ is(B, b)),
+            // No vertex owns w: FALSE OR UNKNOWN is UNKNOWN, and its
+            // negation is still UNKNOWN rather than a surviving witness.
+            ("NOT (b:A OR b.w = 1)", |_, _| false),
+            ("b:A OR b.w IS NULL", |_, _| true),
+            ("b:A:B OR a:B", |a, b| (is(A, b) && is(B, b)) || is(B, a)),
+        ];
+        for (predicate, keep) in cases {
+            let mut expected = Vec::new();
+            for a in 1..=12 {
+                let mut matched = false;
+                for &(eid, from, b) in R_EDGES {
+                    if from == a && keep(a, b) {
+                        matched = true;
+                        expected.push(vec![
+                            GraphValue::Vertex(VId(a)),
+                            GraphValue::Edge(EId(eid)),
+                            GraphValue::Vertex(VId(b)),
+                        ]);
+                    }
+                }
+                if !matched {
+                    expected.push(vec![
+                        GraphValue::Vertex(VId(a)),
+                        GraphValue::Scalar(CanonicalScalar::Null),
+                        GraphValue::Scalar(CanonicalScalar::Null),
+                    ]);
+                }
+            }
+            expected.sort();
+            let text =
+                format!("MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) WHERE {predicate} RETURN a, r, b");
+            let mut actual = query(&db, cx, &text);
+            actual.sort();
+            assert_eq!(actual, expected, "{text}");
+        }
+    });
+}
+
+#[test]
+fn optional_compound_labels_use_the_selected_snapshot_after_label_updates() {
+    use fgdb::PreparedNativeRead;
+
+    run(async |commit, cx| {
+        let mut db = open(commit).await;
+        let pinned = db.pinned_read_view().unwrap();
+        let text = "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) \
+                    WHERE b:A OR b:B RETURN a, r, b";
+        let parameters = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(text, &parameters, symbols).unwrap();
+        let normalize = |result: QueryResult| {
+            let QueryResult::Rows { rows, .. } = result else {
+                panic!("optional match returns rows");
+            };
+            let mut values: Vec<Vec<_>> = rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| match cell {
+                            QueryValue::Value(value) => value,
+                            other => panic!("expected an element value: {other:?}"),
+                        })
+                        .collect()
+                })
+                .collect();
+            values.sort();
+            values
+        };
+        let mut before = query(&db, cx, text);
+        before.sort();
+        let mut change = WriteBatch::new(R);
+        change.set_vertex_label(VId(2), A, false);
+        change.set_vertex_label(VId(5), B, false);
+        change.set_vertex_label(VId(10), A, true);
+        db.write(commit, change).await.unwrap();
+
+        for historical in [
+            prepared
+                .execute_in_view(&pinned, cx, &parameters, policy())
+                .unwrap(),
+            pinned
+                .query(cx, text, &parameters, symbols, policy())
+                .unwrap(),
+        ] {
+            assert_eq!(normalize(historical), before);
+        }
+        let mut expected = Vec::new();
+        for a in 1..=12 {
+            let mut matched = false;
+            for &(eid, from, b) in R_EDGES {
+                let selected = match b {
+                    2 | 5 => false,
+                    10 => true,
+                    _ => is(A, b) || is(B, b),
+                };
+                if from == a && selected {
+                    matched = true;
+                    expected.push(vec![
+                        GraphValue::Vertex(VId(a)),
+                        GraphValue::Edge(EId(eid)),
+                        GraphValue::Vertex(VId(b)),
+                    ]);
+                }
+            }
+            if !matched {
+                expected.push(vec![
+                    GraphValue::Vertex(VId(a)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ]);
+            }
+        }
+        expected.sort();
+        let mut current = query(&db, cx, text);
+        current.sort();
+        assert_ne!(current, before, "the fixture changes optional witnesses");
+        assert_eq!(current, expected);
+        assert_eq!(
+            normalize(prepared.execute(&db, cx, &parameters, policy()).unwrap()),
+            expected,
+            "the reusable template selects the supplied generation"
+        );
+    });
+}
+
 /// The smallest snapshot-record budget `text` is admitted under.
 fn least_records(db: &Database<MemVfs>, cx: &QueryCx, text: &str) -> u64 {
     let admitted = |records| {

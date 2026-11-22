@@ -602,6 +602,114 @@ fn optional_and_negative_existence_observe_the_visible_graph() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// Hidden labels on a visible vertex cannot create or suppress an optional
+/// witness. Compare with a separately stored graph containing only the signed
+/// projection, rather than using another predicate over the unmasked source.
+#[test]
+fn optional_compound_label_filters_match_a_physically_masked_graph() {
+    let ((), report) = run_async_under_lab(0x5ec0_1011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let db = database(&commit).await;
+        let mut visible =
+            Database::open_memory(&commit, DatabaseKeys::new([0x45; 32], NS, [0x73; 32]))
+                .await
+                .unwrap();
+        let mut initial = WriteBatch::new(RelationId(1));
+        for (id, p) in [(1, 10), (3, 30)] {
+            initial.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(p))],
+            );
+        }
+        for (eid, from, to) in [(12, 1, 3), (13, 1, 3), (14, 3, 1)] {
+            initial.add_edge(
+                EId(eid),
+                VId(from),
+                VId(to),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+            );
+        }
+        visible.write(&commit, initial).await.unwrap();
+        let issuer = authority(1011, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let normalize = |result: fgdb::QueryResult| {
+            let fgdb::QueryResult::Rows { rows, .. } = result else {
+                panic!("optional match returns rows");
+            };
+            let mut rows: Vec<Vec<_>> = rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| match cell {
+                            GraphAggregateValue::Value(value) => value,
+                            other => panic!("expected an element value: {other:?}"),
+                        })
+                        .collect()
+                })
+                .collect();
+            rows.sort();
+            rows
+        };
+        for (predicate, has_witnesses) in [
+            ("b:H OR a:H", false),
+            ("NOT (b:H)", true),
+            ("b:H OR b:L", true),
+            ("b:H AND b:L", false),
+            ("NOT (b:L)", false),
+            ("a:L AND NOT (b:H)", true),
+        ] {
+            let text =
+                format!("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE {predicate} RETURN a,b");
+            let read_native = |database: &Database<MemVfs>| {
+                normalize(
+                    database
+                        .query_authorized(
+                            &cx,
+                            &issuer,
+                            &token,
+                            BRANCH,
+                            &text,
+                            &GqlParameters::new(),
+                            symbols,
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap(),
+                )
+            };
+            let actual = read_native(&db);
+            let masked = read_native(&visible);
+            assert_eq!(actual, masked, "{text}");
+            let expected = if has_witnesses {
+                vec![
+                    vec![vertex(1), vertex(3)],
+                    vec![vertex(1), vertex(3)],
+                    vec![vertex(3), vertex(1)],
+                ]
+            } else {
+                vec![vec![vertex(1), null()], vec![vertex(3), null()]]
+            };
+            assert_eq!(actual, expected, "{text}");
+
+            let mut session = db
+                .authorized_read_session(&cx, &issuer, &token, BRANCH, symbols, policy(), || 100)
+                .unwrap();
+            let parameters = GqlParameters::new();
+            let prepared = session.prepare(&cx, &text, &parameters).unwrap();
+            let result = session.execute(&cx, &prepared, &parameters).unwrap();
+            assert_eq!(
+                normalize(result),
+                expected,
+                "authorized prepared facade: {text}"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn history_is_resolved_before_scope_and_compaction_preserves_authorized_answers() {
     let ((), report) = run_async_under_lab(0x5ec0_1003, |root| async move {

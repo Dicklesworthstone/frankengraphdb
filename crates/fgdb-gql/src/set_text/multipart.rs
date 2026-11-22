@@ -295,10 +295,11 @@ pub(crate) fn continuation_where_at(tokens: &[TextToken<'_>], offset: usize) -> 
     imported_where_at(tokens, offset, false)
 }
 
-/// As [`continuation_where_at`] for a top-level OPTIONAL MATCH. Its WHERE,
-/// when the graph predicate refused it and no implicit `WITH *` placed it,
-/// is re-read inside an optional Apply, before the clause's null extension
-/// (multipart_optional_apply).
+/// A top-level OPTIONAL MATCH's refused WHERE, including a leading optional
+/// clause and one directly following another MATCH. An explicit WITH is not
+/// required: the composition retry already preserves those clause boundaries.
+/// Re-read the predicate inside an optional Apply, before null extension;
+/// moving it after the left join would discard unmatched incoming rows.
 pub(crate) fn optional_where_at(tokens: &[TextToken<'_>], offset: usize) -> Option<usize> {
     imported_where_at(tokens, offset, true)
 }
@@ -329,7 +330,7 @@ fn imported_where_at(tokens: &[TextToken<'_>], offset: usize, optional: bool) ->
                     {
                         return Some(at);
                     }
-                    eligible = with
+                    eligible = (with || optional)
                         && token.word("MATCH")
                         && previous.is_some_and(|previous| previous.word("OPTIONAL")) == optional;
                     with |= token.word("WITH") || token.word("CALL");
