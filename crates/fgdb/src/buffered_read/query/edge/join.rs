@@ -100,14 +100,20 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
             bytes = bytes
                 .checked_add(1024)
                 .ok_or(EdgeScanSourceError::Source(BufferedReadError::SizeOverflow))?;
-            let image = &record.image;
-            let edge = image.edge();
-            let target = (edge.entry.src != edge.entry.dst).then(|| image.target_vertex());
+            let edge = record.edge();
+            let source = record
+                .vertex(edge.source)
+                .expect("admitted source endpoint");
+            let target = (edge.source != edge.target).then(|| {
+                record
+                    .vertex(edge.target)
+                    .expect("admitted target endpoint")
+            });
             for (_, value) in edge
-                .props
+                .properties
                 .iter()
-                .chain(image.source_vertex().props.iter())
-                .chain(target.into_iter().flat_map(|row| row.props.iter()))
+                .chain(source.properties.iter())
+                .chain(target.into_iter().flat_map(|row| row.properties.iter()))
             {
                 control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
                 let payload = value

@@ -1558,6 +1558,27 @@ fn missing_endpoints_are_errors_only_for_visible_selected_edges() {
             drop(scan);
             assert_eq!(pool.used(), baseline);
 
+            let mut scan = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
+            let mut failed = false;
+            loop {
+                match scan
+                    .next_topology_with_endpoints(&cx, relation, &mut |_| Ok::<_, ()>(()))
+                    .await
+                {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(BufferedScanError::Read(BufferedReadError::DanglingEndpoint)) => {
+                        failed = true;
+                        break;
+                    }
+                    other => panic!("unexpected topology endpoints {other:?}"),
+                }
+            }
+            assert_eq!(failed, refuses);
+            assert!(scan.is_finished());
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+
             // The topology-only count still proves both endpoint lifetimes.
             // It must refuse the same visible dangling edge as the complete
             // record stream, while an excluded relation stays unobserved.

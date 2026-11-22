@@ -98,6 +98,13 @@ pub struct AsyncEdgeScanPlan {
     columns: usize,
 }
 impl AsyncEdgeScanPlan {
+    /// Property demand of the complete local predicate and projection program,
+    /// including hidden cells retained for a blocking sort.
+    #[must_use]
+    pub fn requires_properties(&self) -> bool {
+        self.inner.requires_properties()
+    }
+
     /// The checked root selector, for source-level descriptor pruning before
     /// heap admission or payload reads. This conveys no authorization; the
     /// source must still enforce its own visibility and capability boundary.

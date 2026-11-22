@@ -661,7 +661,10 @@ fn a_selected_root_prunes_payload_faults_and_control_refusals_still_fuse_the_sou
                 .unwrap()
             {
                 if let Some(record) = candidate.record {
-                    let edge = record.image.edge();
+                    let Image::Complete(image) = &record.image else {
+                        panic!("independent join source retains complete fields");
+                    };
+                    let edge = image.edge();
                     rows.push((candidate.eid, edge.entry, edge.props.clone()));
                 }
             }

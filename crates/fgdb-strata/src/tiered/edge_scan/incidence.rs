@@ -257,6 +257,38 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         result
     }
 
+    /// Root counterpart of next_with_endpoints retaining topology and endpoint
+    /// labels only. Nested reads keep their independent complete-record demand;
+    /// projecting this root does not weaken any incident or vertex reader.
+    pub async fn next_topology_with_endpoints<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        relation: Option<RelationId>,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeTopologyEndpoints>>, BufferedScanError<C>>
+    {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        self.continuation = None;
+        let used = &mut self.work;
+        let result = driver
+            .root
+            .next_topology_with_endpoints(cx, relation, &mut |event| {
+                observe(event)?;
+                if event == BufferedEdgeScanEvent::Work {
+                    *used = used.saturating_add(1);
+                }
+                Ok(())
+            })
+            .await;
+        self.work = driver.root.work.used;
+        if result.is_ok() {
+            self.driver = Some(driver);
+        }
+        result
+    }
+
     /// The first historical incident EId strictly greater than `after`.
     /// Positions belong to the caller's traversal prefix, never to the root.
     /// Emit Identity exactly once before resolving the winning history, even

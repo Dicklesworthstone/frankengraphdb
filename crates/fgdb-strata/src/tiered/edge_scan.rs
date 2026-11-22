@@ -14,6 +14,7 @@ use crate::AdjacencyEntry;
 use crate::edge_props::BlockProps;
 use crate::store::{
     BufferedEdge, BufferedPartition, BufferedReadError, BufferedScanError, BufferedValue,
+    BufferedVertexTopology,
 };
 use crate::tiered::buffer::BufferError;
 use crate::tiered::memory::{MemoryCharge, MemoryError};
@@ -113,6 +114,37 @@ impl BufferedEdgeEndpoints {
 impl core::fmt::Debug for BufferedEdgeEndpoints {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("BufferedEdgeEndpoints([REDACTED])")
+    }
+}
+
+/// Edge topology and both visible endpoint identities/labels at one cut.
+/// Property payloads were not requested. Separate field types prevent this
+/// projection from escaping as complete edge or vertex records with missing
+/// properties. Each image retains its own source-pool reservation; a self-loop
+/// shares its one endpoint owner.
+pub struct BufferedEdgeTopologyEndpoints {
+    edge: BufferedEdgeTopology,
+    source: BufferedVertexTopology,
+    target: Option<BufferedVertexTopology>,
+}
+
+impl BufferedEdgeTopologyEndpoints {
+    pub fn edge(&self) -> &BufferedEdgeTopology {
+        &self.edge
+    }
+
+    pub fn source_vertex(&self) -> &BufferedVertexTopology {
+        &self.source
+    }
+
+    pub fn target_vertex(&self) -> &BufferedVertexTopology {
+        self.target.as_ref().unwrap_or(&self.source)
+    }
+}
+
+impl core::fmt::Debug for BufferedEdgeTopologyEndpoints {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BufferedEdgeTopologyEndpoints([REDACTED])")
     }
 }
 
@@ -762,6 +794,70 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             self.state = Some(state);
         }
         Ok(Some(candidate))
+    }
+
+    /// Resolve the same root identity and both same-cut endpoint histories,
+    /// retaining labels without decoding endpoint properties or faulting edge
+    /// sidecars. The typed projection cannot be used as a complete record.
+    /// Native run selection, candidate admission and all refusal/cleanup rules
+    /// are shared with the complete-record source.
+    pub async fn next_topology_with_endpoints<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        relation: Option<RelationId>,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeTopologyEndpoints>>, BufferedScanError<C>>
+    {
+        let Some(mut state) = self.state.take() else {
+            return Ok(None);
+        };
+        let Some(candidate) = self
+            .advance(&mut state, cx, EdgePropertyAccess::Skip, observe)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let row = if let Some(edge) = candidate
+            .row
+            .filter(|row| relation.is_none_or(|r| r == row.entry.relation))
+        {
+            let source = self
+                .partition
+                .edge_scan_vertex_topology(cx, edge.entry.src, self.as_of, &mut self.work, observe)
+                .await?
+                .ok_or(BufferedReadError::DanglingEndpoint)?;
+            let target = if edge.entry.src == edge.entry.dst {
+                None
+            } else {
+                Some(
+                    self.partition
+                        .edge_scan_vertex_topology(
+                            cx,
+                            edge.entry.dst,
+                            self.as_of,
+                            &mut self.work,
+                            observe,
+                        )
+                        .await?
+                        .ok_or(BufferedReadError::DanglingEndpoint)?,
+                )
+            };
+            self.work.step(cx, observe)?;
+            Some(BufferedEdgeTopologyEndpoints {
+                edge: BufferedEdgeTopology(edge),
+                source,
+                target,
+            })
+        } else {
+            None
+        };
+        if state.has_more() {
+            self.state = Some(state);
+        }
+        Ok(Some(BufferedEdgeCandidate {
+            eid: candidate.eid,
+            row,
+        }))
     }
 
     // Root and independently positioned incidence reads share the SAME visible

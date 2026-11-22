@@ -10,6 +10,8 @@ use fgdb_types::QueryCx;
 use fgdb_types::context::SimulationCheckpointProbe;
 use std::sync::Arc;
 
+#[path = "edge_property_free.rs"]
+mod edge_property_free;
 #[path = "native_suffix_properties.rs"]
 mod native_suffix_properties;
 

@@ -101,6 +101,47 @@ enum LocalOutput {
 }
 
 impl EdgeScanPlan {
+    /// Whether the complete compiled evaluator may inspect an edge or vertex
+    /// property. A false result permits a source to supply topology and labels
+    /// alone, while retaining its ordinary visibility, admission and controls.
+    /// Hidden ordering cells and aggregate inputs participate in this proof.
+    /// Joined/probed plans and Boolean programs conservatively require full
+    /// fields; an unrecognized instruction or projection never permits omission.
+    #[must_use]
+    pub fn requires_properties(&self) -> bool {
+        if self.joined.is_some()
+            || self
+                .instructions
+                .iter()
+                .any(|instruction| match instruction {
+                    GlaOperator::Select { predicates, .. } => predicates
+                        .iter()
+                        .any(|predicate| !matches!(predicate, VertexPredicate::HasLabel(_))),
+                    GlaOperator::VertexIdentity { .. } | GlaOperator::CapturePath { .. } => false,
+                    _ => true,
+                })
+        {
+            return true;
+        }
+        match self.projection.as_ref() {
+            GlaOperator::ProjectValues { columns } => columns.iter().any(|column| {
+                !matches!(
+                    column,
+                    ValueProjection::Vertex { .. }
+                        | ValueProjection::Path {
+                            function: GraphPathFunction::Value
+                                | GraphPathFunction::Length
+                                | GraphPathFunction::Nodes
+                                | GraphPathFunction::Edges
+                                | GraphPathFunction::Edge,
+                            ..
+                        }
+                )
+            }),
+            _ => true,
+        }
+    }
+
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         let ops = plan.operators();
         if ops.iter().any(|op| {

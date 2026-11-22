@@ -13,6 +13,13 @@ pub struct AsyncEdgeSpillAggregatePlan {
 }
 
 impl AsyncEdgeSpillAggregatePlan {
+    /// Whether any aggregate input, predicate or hidden result-clause operand
+    /// depends on edge or endpoint properties, before occurrence evaluation.
+    #[must_use]
+    pub fn requires_properties(&self) -> bool {
+        self.input.requires_properties()
+    }
+
     /// The checked input selector, before aggregate occurrence evaluation.
     pub fn root_relation(&self) -> EdgeRelation {
         self.input.root_relation()
