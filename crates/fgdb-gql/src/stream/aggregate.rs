@@ -55,6 +55,10 @@ impl core::error::Error for VertexAggregateBuildError {
 /// keys may be scalar properties, native vertex identities or checked computed
 /// values. Row-local expressions use the shared projection VM before grouping
 /// and argument DISTINCT. Plain operands retain their direct borrowed path.
+/// Correlated Collect scopes use the ordinary vertex cursor's indexed walker,
+/// with one governed neighborhood list per outer record. Collected operands
+/// pass through the same complete projection before grouping; they are never
+/// replaced by NULL or counted as additional public rows.
 /// HAVING, hidden/repeated columns, output expressions, output DISTINCT,
 /// ORDER BY and SKIP/LIMIT use the same completed-group stage as edge streams.
 /// COLLECT preserves the ordinary vertex visitor's ascending-identity order.
@@ -75,6 +79,7 @@ pub struct VertexAggregatePlan {
     input: VertexScanPlan<GraphValueRow>,
     aggregate: PreparedGraphAggregate,
     collects: bool,
+    collected_input: bool,
     pipeline: Option<InputPipeline>,
 }
 impl VertexAggregatePlan {
@@ -86,27 +91,24 @@ impl VertexAggregatePlan {
         }
         let (aggregate, pipeline) = InputPipeline::prepare_expanding(aggregate)
             .ok_or(VertexAggregateBuildError::RequiresPlainGlobalAggregate)?;
-        // This reducer projects directly from the root record. Its input
-        // contract does not carry the per-row lists produced by GLA Collect.
-        if let Some(operator) = aggregate
+        let collected_input = aggregate
             .input_pattern()
             .plan()
             .operators()
             .iter()
-            .position(|operator| matches!(operator, GlaOperator::Collect { .. }))
-        {
-            return Err(VertexAggregateBuildError::Scan(VertexScanBuildError {
-                operator,
-            }));
-        }
+            .any(|operator| {
+                matches!(operator, GlaOperator::ProjectValues { columns }
+                    if columns.iter().any(|column| matches!(column, ValueProjection::Collected { .. })))
+            });
         let collects = aggregate
             .aggregates()
             .iter()
             .any(|spec| NumericState::collects(spec.function()));
-        if collects && aggregate.input_projection().is_some() {
+        if collects && (aggregate.input_projection().is_some() || collected_input) {
             // Batch computed inputs consume the child's canonical sorted rows.
-            // Reuse the sealed identity-leading proof rather than assuming that
-            // a commutative numeric reducer's relaxed projection is ordered.
+            // Collected operands also take the complete owned-row path. Reuse
+            // the sealed identity-leading proof rather than assuming that a
+            // commutative numeric reducer's relaxed projection is ordered.
             VertexScanPlan::compile(aggregate.input_pattern().plan())
                 .map_err(VertexAggregateBuildError::Scan)?;
         }
@@ -122,6 +124,7 @@ impl VertexAggregatePlan {
                     && columns.iter().all(|column| match column {
                         ValueProjection::Vertex { slot }
                         | ValueProjection::Property { slot, .. } => slot.ordinal() == 0,
+                        ValueProjection::Collected { .. } => true,
                         _ => false,
                     })
             },
@@ -131,6 +134,7 @@ impl VertexAggregatePlan {
             input,
             aggregate,
             collects,
+            collected_input,
             pipeline,
         })
     }
@@ -383,20 +387,22 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         )
                         .map_err(lift)?
                 };
-                if accepted.is_none() {
+                let Some(collected) = accepted else {
                     continue;
-                }
+                };
                 // Computed and relational inputs own one source projection.
                 // The sealed collector retains ordinary property/null behavior
                 // and charges every copy; the shared VM then completes ALL
                 // computed columns before a group can see this occurrence.
                 let computed = if self.plan.aggregate.input_projection().is_some()
                     || self.plan.pipeline.is_some()
+                    || self.plan.collected_input
                 {
                     let input = project_input_row::<GraphValueRow, _>(
                         vid,
                         row,
                         &self.plan.input.projection,
+                        &collected,
                         &mut |event| meter.event(event).map_err(lift),
                     )?;
                     let projected = if let Some(pipeline) = &self.plan.pipeline {
@@ -518,6 +524,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             GraphAggregateRow::from_global_values(values)
         } else if self.plan.aggregate.input_projection().is_some()
             || self.plan.pipeline.is_some()
+            || self.plan.collected_input
             || self.plan.aggregate.has_streamed_output_stage()
             || self.plan.collects
             || keys
@@ -621,9 +628,10 @@ fn project_input_row<Row: VertexScanOutput, E: From<crate::GraphIntegerError>>(
     vid: VId,
     row: VertexScanRow<'_>,
     projection: &GlaOperator,
+    collected: &[Option<GraphValue>],
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
 ) -> Result<Row, E> {
-    Row::project(vid, row, projection, &[], control)
+    Row::project(vid, row, projection, collected, control)
 }
 
 pub(super) fn input_event(event: GlaExecutionEvent) -> VertexScanEvent {

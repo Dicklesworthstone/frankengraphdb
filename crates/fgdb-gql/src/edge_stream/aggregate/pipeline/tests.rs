@@ -478,6 +478,46 @@ impl VertexScanSource for Source {
         .map(Some)
         .map_err(VertexScanSourceError::Control)
     }
+
+    fn vertex_property<'a, C>(
+        &'a self,
+        id: VId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, VertexScanSourceError<Self::Error, C>>
+    {
+        control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+        if self.fault == Some(EId(id.0)) {
+            return Err(VertexScanSourceError::Source("vertex unavailable"));
+        }
+        Ok(usize::try_from(id.0)
+            .ok()
+            .and_then(|at| self.props.get(at))
+            .map(|properties| {
+                properties
+                    .iter()
+                    .find(|(candidate, _)| key == P && *candidate == key)
+                    .map(|(_, value)| value)
+            }))
+    }
+
+    fn next_probe_edge<C>(
+        &self,
+        endpoint: VId,
+        direction: GlaDirection,
+        after: Option<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
+        EdgeScanSource::next_incident_edge(self, endpoint, direction, after, control)
+    }
+
+    fn probe_edge<'a, C>(
+        &'a self,
+        eid: EId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EdgeScanRow<'a>>, EdgeExpansionSourceError<Self::Error, C>> {
+        EdgeScanSource::edge(self, eid, control).map_err(EdgeExpansionSourceError::Read)
+    }
 }
 
 fn vertex_cursor<C>(
@@ -513,6 +553,270 @@ fn eager_vertex(query: &PreparedGraphAggregate, source: &Source) -> Vec<GraphAgg
         )
         .unwrap()
         .value
+}
+
+fn eager_vertex_collections(
+    query: &PreparedGraphAggregate,
+    source: &Source,
+) -> Vec<GraphAggregateRow> {
+    query
+        .execute_governed_with_element_properties(
+            source.props.len() as u64 * 2,
+            (0..source.props.len()).map(|at| VId(at as u128)),
+            source
+                .props
+                .iter()
+                .enumerate()
+                .map(|(at, _)| (EId(at as u128), VId(0), R, Source::owner(at))),
+            |id, predicates| {
+                Ok::<_, ()>(source.props.get(id.0 as usize).is_some_and(|properties| {
+                    predicates.iter().all(|predicate| {
+                        predicate.matches_borrowed(
+                            [],
+                            properties
+                                .iter()
+                                .filter(|(key, _)| *key == P)
+                                .map(|(key, value)| (*key, value)),
+                        )
+                    })
+                }))
+            },
+            |id, key| {
+                Ok(source.props.get(id.0 as usize).and_then(|properties| {
+                    properties
+                        .iter()
+                        .find(|(candidate, _)| key == P && *candidate == key)
+                        .map(|(_, value)| value)
+                }))
+            },
+            |eid, key| {
+                Ok(source.props[eid.0 as usize]
+                    .iter()
+                    .find(|(candidate, _)| *candidate == key)
+                    .map(|(_, value)| value))
+            },
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap()
+        .value
+}
+
+#[test]
+fn vertex_neighborhood_aggregates_keep_bags_empty_lists_grouping_and_argument_distinct() {
+    // Four outgoing occurrences from root 0, including two parallel edges to
+    // vertex 1. The other three roots have empty neighborhoods, which are
+    // nonnull lists and form a distinct class of their own.
+    let values = [Some(8), Some(5), None, Some(5)];
+    let cases = [
+        (
+            "MATCH (n) RETURN sum(size([(n)-[:R]->(m) | m])) AS degree_total, count([(n)-[:R]->(m) | m]) AS lists, count(DISTINCT size([(n)-[:R]->(m) | m])) AS sizes",
+            vec![(
+                vec![],
+                vec![
+                    GraphAggregateValue::Integer(4),
+                    GraphAggregateValue::Count(4),
+                    GraphAggregateValue::Count(2),
+                ],
+            )],
+        ),
+        (
+            "MATCH (n) RETURN size([(n)-[:R]->(m) | m]) AS degree, count(*) AS nodes ORDER BY degree",
+            vec![
+                (
+                    vec![GraphValue::Scalar(CanonicalScalar::Int(0))],
+                    vec![GraphAggregateValue::Count(3)],
+                ),
+                (
+                    vec![GraphValue::Scalar(CanonicalScalar::Int(4))],
+                    vec![GraphAggregateValue::Count(1)],
+                ),
+            ],
+        ),
+        (
+            "MATCH (n) RETURN count(DISTINCT [(n)-[:R]->(m) | m]) AS lists, sum(size([(n)-[:R]->(m) | NULL])) AS null_members",
+            vec![(
+                vec![],
+                vec![
+                    GraphAggregateValue::Count(2),
+                    GraphAggregateValue::Integer(4),
+                ],
+            )],
+        ),
+        (
+            "MATCH (n) WITH n.hidden AS secret, size([(n)-[:R]->(m) WHERE m.hidden IS NULL | m]) AS degree WHERE secret IS NULL RETURN sum(degree) AS total",
+            vec![(vec![], vec![GraphAggregateValue::Integer(4)])],
+        ),
+    ];
+    for (text, expected) in cases {
+        let query = prepare(text);
+        let mut source = Source::new(&values);
+        for properties in &mut source.props {
+            properties.push((PropertyKeyId(2), CanonicalScalar::Int(99).into()));
+        }
+        let batch = eager_vertex_collections(&query, &source);
+        let rows = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows, batch, "{text}");
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.keys().to_vec(), row.values().to_vec()))
+                .collect::<Vec<_>>(),
+            expected,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn direct_collected_operands_keep_native_lists_and_reject_unproved_collection_output_order() {
+    use crate::GraphAggregate;
+    use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder};
+
+    let mut outer = GraphPatternBuilder::new();
+    outer.vertex("n").unwrap();
+    let mut inner = GraphPatternBuilder::new();
+    inner.vertex("n").unwrap().vertex("m").unwrap();
+    inner.edge("n", R, GlaDirection::Forward, "m").unwrap();
+    let input = outer
+        .prepare_values_with_clauses(
+            &[GraphMatchClause::collect(&inner, Some("m"))],
+            &[
+                GraphColumn::property("group", "n", P),
+                GraphColumn::collection("neighbors", 0),
+            ],
+            0,
+            None,
+        )
+        .unwrap()
+        .with_duplicates();
+    let query = PreparedGraphAggregate::prepare(
+        input.clone(),
+        &[0],
+        &[
+            GraphAggregate::count("lists", 1),
+            GraphAggregate::count_distinct("support", 1),
+        ],
+        0,
+        None,
+    )
+    .unwrap();
+    let source = Source::new(&[Some(1), Some(1), None, None]);
+    let batch = eager_vertex_collections(&query, &source);
+    let rows = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows, batch);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].keys(), &[GraphValue::Scalar(CanonicalScalar::Null)]);
+    assert_eq!(
+        rows[0].values(),
+        &[GraphAggregateValue::Count(2), GraphAggregateValue::Count(1)]
+    );
+    assert_eq!(
+        rows[1].keys(),
+        &[GraphValue::Scalar(CanonicalScalar::Int(1))]
+    );
+    assert_eq!(
+        rows[1].values(),
+        &[GraphAggregateValue::Count(2), GraphAggregateValue::Count(2)]
+    );
+
+    // A list-valued input is admitted to exact numeric/support reduction; that
+    // does not prove the input order of an order-sensitive outer COLLECT.
+    let ordered = PreparedGraphAggregate::prepare(
+        input,
+        &[],
+        &[GraphAggregate::collect("lists", 1)],
+        0,
+        None,
+    )
+    .unwrap();
+    assert!(VertexAggregatePlan::compile(&ordered).is_err());
+}
+
+#[test]
+fn vertex_neighborhood_aggregation_keeps_failure_budgets_and_cancellation_atomic() {
+    let query = prepare("MATCH (n) RETURN sum(size([(n)-[:R]->(m) | m])) AS total");
+    let values = [Some(8), Some(5), None, Some(5)];
+    let mut calls = 0;
+    let mut full = vertex_cursor(&query, Source::new(&values), wide(), || {
+        calls += 1;
+        Ok::<_, usize>(())
+    });
+    let expected = full.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let rows = full.row_stats();
+    let stats = full.evaluator_stats();
+    drop(full);
+    assert_eq!(expected[0].values(), &[GraphAggregateValue::Integer(4)]);
+    assert!(
+        rows.snapshot_records > values.len() as u64,
+        "probe histories share the source allowance"
+    );
+    let exact = GqlQueryPolicy::new(
+        rows.snapshot_records,
+        rows.result_rows,
+        stats.work_units,
+        stats.scratch_entries,
+    );
+    assert_eq!(
+        vertex_cursor(&query, Source::new(&values), exact, || Ok::<_, ()>(()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        expected
+    );
+    for policy in [
+        GqlQueryPolicy::new(rows.snapshot_records - 1, u64::MAX, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, 0, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, u64::MAX, stats.work_units - 1, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, stats.scratch_entries - 1),
+    ] {
+        let mut stream = vertex_cursor(&query, Source::new(&values), policy, || Ok::<_, ()>(()));
+        assert!(stream.next().unwrap().is_err());
+        assert_eq!(stream.row_stats().result_rows, 0);
+        assert_eq!(stream.state(), VertexScanState::Failed);
+        assert!(stream.next().is_none());
+    }
+    for stop in 1..=calls {
+        let source = Source::new(&values);
+        let drops = source.drops.clone();
+        let mut at = 0;
+        let mut stream = vertex_cursor(&query, source, wide(), || {
+            at += 1;
+            if at == stop { Err(stop) } else { Ok(()) }
+        });
+        let result = stream.by_ref().collect::<Result<Vec<_>, _>>();
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(value)) if value == stop));
+        assert_eq!(stream.state(), VertexScanState::Failed);
+        assert!(stream.next().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(stream);
+        assert_eq!(at, stop);
+    }
+    for limit in [0, 1] {
+        let query = prepare(&format!(
+            "MATCH (n) RETURN sum(size([(n)-[:R]->(m) | m])) AS total LIMIT {limit}"
+        ));
+        let mut source = Source::new(&values);
+        source.fault = Some(EId(2));
+        let mut stream = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()));
+        assert!(matches!(
+            stream.next(),
+            Some(Err(GqlQueryError::Source(GraphAggregateError::Source(_))))
+        ));
+        assert_eq!(stream.row_stats().result_rows, 0);
+        assert!(stream.next().is_none());
+    }
+    let mut closed = vertex_cursor(
+        &query,
+        Source::new(&values),
+        wide(),
+        || -> Result<(), ()> { panic!("closed collection source driven") },
+    );
+    closed.close();
+    assert!(closed.next().is_none());
+    assert_eq!(closed.row_stats().snapshot_records, 0);
 }
 
 const VERTEX_TEXT: &str = "MATCH (n) WITH n.p AS p,n.hidden AS secret \

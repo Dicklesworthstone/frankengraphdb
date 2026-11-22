@@ -12,6 +12,26 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Streaming aggregates over collected neighborhoods — qualification pending
+
+The vertex aggregate cursor now carries each root's collected neighborhood
+through the ordinary complete projection before grouping and reduction. Native
+pull queries can sum neighborhood sizes, count nonnull lists (including empty
+lists), count distinct lists and group by neighborhood-derived values. The
+existing indexed walker owns correlation, parallel-edge multiplicity, property
+visibility and per-root list construction; collected members are not additional
+outer rows. Order-sensitive outer COLLECT retains its identity-order admission.
+
+Regression sources compare the streamed path with the batch evaluator and
+hand-derived answers, including direct list-valued inputs, NULL list members,
+empty groups, hidden projection operands, pages, pinned snapshots, late errors,
+source failure, cancellation and cumulative work/scratch limits. Pinned
+changed-source formatting and whitespace checks pass. Static UBS exited 1 on an
+existing panic in the test-only source that detects bypassed admitted records;
+it found no introduced production-code critical issue. Cargo/Clippy were not
+part of that scan. Compiler, runtime and exact-tree qualification remain open;
+the broader pattern-comprehension work in `fgdb-1f8f7` is not closed.
+
 ### Authenticated durable-run admission from actual contents — qualification pending
 
 Buffered native reads now retain the actual encoded object capacity while

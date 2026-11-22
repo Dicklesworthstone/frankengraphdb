@@ -11,7 +11,7 @@ use fgdb_gql::scan_stream::ScanKind;
 use fgdb_gql::stream::VertexScanState;
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, GraphAggregateTextSlot,
-    GraphAggregateValue, RelationBind,
+    GraphAggregateValue, GraphIntegerErrorKind, GraphSetExecutionError, RelationBind,
 };
 use fgdb_types::{
     CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
@@ -370,6 +370,215 @@ fn native_identified_edge_collections_preserve_order_and_plain_collections_strea
                 .map(|row| row.unwrap().values().to_vec())
                 .collect();
             assert_eq!(streamed, rows, "{text}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_vertex_neighborhood_aggregates_share_batch_semantics_and_the_pinned_graph() {
+    let ((), report) = run_async_under_lab(0xc011_1004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        for (eid, from, to) in [
+            (10, VId(0), VId(1)),
+            (11, VId(0), VId(1)),
+            (12, VId(0), VId(2)),
+            (13, VId(1), HIGH),
+        ] {
+            batch.add_edge(EId(eid), from, to, vec![]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        let params = GqlParameters::new();
+        let integer =
+            |value| GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        for (text, expected) in [
+            (
+                "MATCH (n:L) RETURN sum(size([(n)-[:R]->(m) | m])) AS degree_total, count([(n)-[:R]->(m) | m]) AS lists, count(DISTINCT [(n)-[:R]->(m) | m]) AS support",
+                vec![vec![
+                    GraphAggregateValue::Integer(4),
+                    GraphAggregateValue::Count(4),
+                    GraphAggregateValue::Count(3),
+                ]],
+            ),
+            (
+                "MATCH (n:L) RETURN size([(n)-[:R]->(m) | m]) AS degree, count(*) AS nodes ORDER BY degree",
+                vec![
+                    vec![integer(0), GraphAggregateValue::Count(2)],
+                    vec![integer(1), GraphAggregateValue::Count(1)],
+                    vec![integer(3), GraphAggregateValue::Count(1)],
+                ],
+            ),
+            (
+                "MATCH (n:L) RETURN sum(size([p = (n)-[:R]->(m) | p])) AS paths, count(DISTINCT [(n)-[:R]->(m) | NULL]) AS null_lists",
+                vec![vec![
+                    GraphAggregateValue::Integer(4),
+                    GraphAggregateValue::Count(3),
+                ]],
+            ),
+            (
+                "MATCH (n:L) RETURN n.bucket AS bucket, count(*) AS nodes HAVING sum(size([(n)-[:R]->(m) | m])) > 0 ORDER BY sum(size([(n)-[:R]->(m) | m])) DESC, bucket",
+                vec![
+                    vec![integer(0), GraphAggregateValue::Count(2)],
+                    vec![integer(1), GraphAggregateValue::Count(2)],
+                ],
+            ),
+        ] {
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols()).unwrap();
+            let QueryResult::Rows { columns, rows } =
+                prepared.execute(&db, &cx, &params, wide()).unwrap()
+            else {
+                panic!("aggregate rows: {text}");
+            };
+            let mut stream = prepared
+                .stream_aggregate(&db, &cx, &params, wide())
+                .unwrap();
+            assert_eq!(stream.kind(), ScanKind::Vertex);
+            assert_eq!(stream.snapshot_seq(), CommitSeq(1));
+            assert_eq!(stream.row_stats().snapshot_records, 0);
+            assert_eq!(stream.columns(), columns);
+            assert_eq!(drain(&mut stream), rows, "{text}");
+            assert_eq!(rows, expected, "{text}");
+            assert_eq!(stream.row_stats().result_rows, expected.len() as u64);
+        }
+
+        let text = "MATCH (n:L) RETURN sum(size([(n)-[:R]->(m) | m])) AS degree_total";
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols()).unwrap();
+        let view = db.read_session().unwrap();
+        let mut paused = prepared
+            .stream_aggregate(&db, &cx, &params, wide())
+            .unwrap();
+        let mut edit = WriteBatch::new(R);
+        edit.add_edge(EId(14), HIGH, VId(2), vec![]);
+        db.write(&commit, edit).await.unwrap();
+        assert_eq!(
+            drain(&mut paused),
+            vec![vec![GraphAggregateValue::Integer(4)]]
+        );
+        assert_eq!(paused.snapshot_seq(), CommitSeq(1));
+        let mut pinned = prepared
+            .stream_aggregate_in_view(&view, &cx, &params, wide())
+            .unwrap();
+        assert_eq!(
+            drain(&mut pinned),
+            vec![vec![GraphAggregateValue::Integer(4)]]
+        );
+        let mut current = prepared
+            .stream_aggregate(&db, &cx, &params, wide())
+            .unwrap();
+        assert_eq!(
+            drain(&mut current),
+            vec![vec![GraphAggregateValue::Integer(5)]]
+        );
+        assert_eq!(current.snapshot_seq(), CommitSeq(2));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_vertex_neighborhood_aggregates_keep_empty_groups_pages_and_late_errors() {
+    let ((), report) = run_async_under_lab(0xc011_1005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        let text = "MATCH (n:L) RETURN sum(size([(n)-[:R]->(m) | m])) AS total, count([(n)-[:R]->(m) | m]) AS lists";
+        let mut empty = db
+            .query_aggregate_stream(&cx, text, &params, symbols(), wide())
+            .unwrap();
+        assert_eq!(
+            drain(&mut empty),
+            vec![vec![
+                GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                GraphAggregateValue::Count(0)
+            ]]
+        );
+        let grouped = "MATCH (n:L) RETURN size([(n)-[:R]->(m) | m]) AS degree, count(*) AS nodes ORDER BY degree";
+        let mut empty_groups = db
+            .query_aggregate_stream(&cx, grouped, &params, symbols(), wide())
+            .unwrap();
+        assert!(drain(&mut empty_groups).is_empty());
+
+        let mut batch = seed();
+        batch.add_edge(EId(10), VId(0), VId(1), vec![]);
+        batch.add_edge(EId(11), VId(0), VId(1), vec![]);
+        db.write(&commit, batch).await.unwrap();
+        for (suffix, expected) in [
+            ("LIMIT 0", vec![]),
+            (
+                "SKIP 1 LIMIT 1",
+                vec![vec![
+                    GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))),
+                    GraphAggregateValue::Count(1),
+                ]],
+            ),
+            ("SKIP 9 LIMIT 1", vec![]),
+        ] {
+            let text = format!("{grouped} {suffix}");
+            let prepared = PreparedNativeRead::prepare(&text, &params, symbols()).unwrap();
+            let QueryResult::Rows { rows, .. } =
+                prepared.execute(&db, &cx, &params, wide()).unwrap()
+            else {
+                panic!("aggregate rows");
+            };
+            let mut stream = prepared
+                .stream_aggregate(&db, &cx, &params, wide())
+                .unwrap();
+            assert_eq!(drain(&mut stream), rows, "{suffix}");
+            assert_eq!(rows, expected, "{suffix}");
+        }
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(
+            HIGH,
+            P,
+            Some(CanonicalScalar::ucs_basic_text("late nonnumeric operand").unwrap()),
+        );
+        edit.add_edge(EId(12), VId(1), VId(2), vec![]);
+        db.write(&commit, edit).await.unwrap();
+        for limit in [0, 1] {
+            let text = format!(
+                "MATCH (n:L) RETURN sum(size([(n)-[:R]->(m) | m])) AS degree_total, sum(n.p) AS total LIMIT {limit}"
+            );
+            let mut stream = db
+                .query_aggregate_stream(&cx, &text, &params, symbols(), wide())
+                .unwrap();
+            assert!(matches!(
+                stream.next(),
+                Some(Err(GqlQueryError::Source(
+                    GraphAggregateError::NonIntegerSum { .. }
+                )))
+            ));
+            assert_eq!(stream.row_stats().result_rows, 0);
+            assert_eq!(stream.state(), VertexScanState::Failed);
+            assert!(stream.next().is_none());
+        }
+        for limit in [0, 1] {
+            // The first one-hop witness contributes 10. Its two-hop extension
+            // then divides by zero inside the comprehension element. Neither
+            // an outer size() nor LIMIT 0 may discard that element evaluation.
+            let text = format!(
+                "MATCH (n:L) RETURN sum(size([p = (n)-[:R*1..2]->(m) | 10 / (2 - length(p))])) AS total LIMIT {limit}"
+            );
+            let prepared = PreparedNativeRead::prepare(&text, &params, symbols()).unwrap();
+            assert!(prepared.execute(&db, &cx, &params, wide()).is_err());
+            let mut stream = prepared
+                .stream_aggregate(&db, &cx, &params, wide())
+                .unwrap();
+            assert!(matches!(
+                stream.next(),
+                Some(Err(GqlQueryError::Source(
+                    GraphAggregateError::InputRelation(GraphSetExecutionError::Projection { error, .. })
+                        | GraphAggregateError::InputExpression { error, .. }
+                )))
+                    if error.kind == GraphIntegerErrorKind::DivisionByZero
+            ));
+            assert_eq!(stream.row_stats().result_rows, 0);
+            assert_eq!(stream.state(), VertexScanState::Failed);
+            assert!(stream.next().is_none());
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
