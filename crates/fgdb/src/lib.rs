@@ -7284,6 +7284,102 @@ mod shared_snapshot_payload_laws {
     }
 
     #[test]
+    fn relation_reads_match_whole_history_after_updates_retirement_compaction_and_reopen() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new([5; 32], DatabaseSecurityNamespaceId([6; 32]), [7; 32]);
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let wanted = RelationId(12);
+        let other = RelationId(3);
+        let absent = RelationId(4);
+        let p = PropertyKeyId(8);
+        let mut initial = WriteBatch::new(other);
+        for id in 1..=3 {
+            initial.create_vertex(VId(id), vec![], vec![]);
+        }
+        for id in 100..132 {
+            initial.add_edge(EId(id), VId(1), VId(3), vec![]);
+        }
+        runtime.block_on(db.write(&cx, initial)).unwrap();
+        let mut add = WriteBatch::new(wanted);
+        add.add_edge(EId(8), VId(1), VId(2), vec![(p, CanonicalScalar::Int(2))]);
+        add.add_edge(EId(6), VId(2), VId(2), vec![]);
+        let birth = runtime.block_on(db.write(&cx, add)).unwrap();
+        let pinned = db.pinned_read_view().unwrap();
+        let mut change = WriteBatch::new(wanted);
+        change.set_edge_property(EId(8), p, Some(CanonicalScalar::Int(41)));
+        change.delete_edge(EId(6));
+        let last = runtime.block_on(db.write(&cx, change)).unwrap();
+        let old = pinned.edges_by_relation_at(wanted, birth).unwrap();
+        assert_eq!(old.candidate_edges, 2);
+        assert_eq!(
+            old.edges.iter().map(|r| r.entry.eid).collect::<Vec<_>>(),
+            [EId(6), EId(8)]
+        );
+        assert_eq!(old.edges[1].props, [(p, CanonicalScalar::Int(2))]);
+        let current = db.edges_by_relation_at(wanted, last).unwrap();
+        assert_eq!(current.edges.len(), 1);
+        assert_eq!(current.edges[0].props, [(p, CanonicalScalar::Int(41))]);
+        assert!(current.candidate_edges > old.candidate_edges);
+        assert_eq!(
+            db.edges_by_relation_at(absent, last)
+                .unwrap()
+                .candidate_edges,
+            0
+        );
+        assert!(matches!(
+            pinned.edges_by_relation_at(absent, last),
+            Err(ReadError::BeyondFrontier { .. })
+        ));
+        assert!(matches!(
+            db.edges_by_relation_at(absent, CommitSeq(last.0 + 1)),
+            Err(ReadError::BeyondFrontier { .. })
+        ));
+
+        let check = |view: &EmbeddedReadView| {
+            for relation in [wanted, other, absent] {
+                let physical = view
+                    .snapshot
+                    .blocks
+                    .iter()
+                    .flat_map(|rows| rows.iter())
+                    .filter(|row| row.relation == relation)
+                    .count();
+                for seq in 0..=view.frontier().0 {
+                    let cut = CommitSeq(seq);
+                    let expected = view
+                        .edges_at(cut)
+                        .unwrap()
+                        .into_iter()
+                        .filter(|e| e.entry.relation == relation)
+                        .collect::<Vec<_>>();
+                    let got = view.edges_by_relation_at(relation, cut).unwrap();
+                    assert_eq!(got.candidate_edges, physical);
+                    assert_eq!(got.edges, expected, "relation {relation:?} at {cut:?}");
+                }
+            }
+        };
+        check(&db.pinned_read_view().unwrap());
+        runtime.block_on(db.compact(&cx)).unwrap();
+        check(&db.pinned_read_view().unwrap());
+        let vfs = db.vfs.clone();
+        let path = db.path().to_path_buf();
+        drop(db);
+        let reopened = runtime
+            .block_on(Database::open_read_view_with_vfs(&cx, vfs, &path, keys))
+            .unwrap();
+        assert!(reopened.snapshot.adjacency.get().is_none());
+        check(&reopened);
+        assert!(reopened.snapshot.adjacency.get().is_none());
+        assert_eq!(pinned.edges_by_relation_at(wanted, birth).unwrap(), old);
+        check(&pinned);
+    }
+
+    #[test]
     fn commits_share_payloads_with_pinned_views_across_history_compaction_and_reopen() {
         let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
         let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
