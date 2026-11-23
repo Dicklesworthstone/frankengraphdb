@@ -779,8 +779,9 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             query.incremental_filtered_aggregate_with_control(&mut |_| checkpoint())?
         {
             // A filtered aggregate belongs to one exact invocation tuple. Keep
-            // outer multiplicity out of the body, then restore every original
-            // occurrence only after its complete predicate/projection pipeline.
+            // outer multiplicity out of the body. Complete empty global groups
+            // for distinct arguments, run every post-group predicate/projection,
+            // then restore each surviving invocation's original occurrences.
             let left = self.compile(cx, plan.left, policy, checkpoint)?;
             let input_policy = group::input_policy(policy);
             let right = self.compile_group_input(cx, plan.right, input_policy, checkpoint)?;
@@ -833,9 +834,38 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             )?;
             let grouped = self.append_private(StandingQuery::Group(Box::new(state)));
             checkpoint()?;
+            let state = self.database.prepare_standing_projection(
+                cx,
+                arguments,
+                plan.invocations,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            let invocations = self.append_private(StandingQuery::Projection(Box::new(state)));
+            checkpoint()?;
             let state = self.database.prepare_standing_join_spec(
                 cx,
-                [outer, grouped],
+                [invocations, grouped],
+                &plan.complete,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            input = self.append_private(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+            for spec in plan.summary {
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    input,
+                    spec,
+                    input_policy,
+                    self.database.standing_queries.len(),
+                )?;
+                input = self.append_private(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [outer, input],
                 &plan.restore,
                 policy,
                 self.database.standing_queries.len(),

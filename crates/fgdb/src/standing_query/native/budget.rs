@@ -151,12 +151,14 @@ fn circuit(
     })? {
         // Match the shared invocation-domain circuit exactly: outer keys,
         // DISTINCT arguments, argument/RHS join, ordered body stages, Group,
-        // restoration join, and the public output projections.
+        // key-only invocation projection, empty-summary completion, post-group
+        // stages, restoration join, and the public output projections.
         let stages = plan
             .body
             .len()
             .checked_add(plan.output.len())
-            .and_then(|count| count.checked_add(5))
+            .and_then(|count| count.checked_add(plan.summary.len()))
+            .and_then(|count| count.checked_add(7))
             .and_then(|count| u64::try_from(count).ok())
             .ok_or(StandingQueryError::Unsupported)?;
         return circuit(cx, plan.left, scoped)?.combine(circuit(cx, plan.right, scoped)?, stages);

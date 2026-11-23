@@ -142,6 +142,22 @@ fn difference(before: &Bag, after: &Bag) -> Bag {
     delta
 }
 
+fn assert_summary_division_by_zero(error: StandingQueryError) {
+    assert!(
+        matches!(
+            &error,
+            StandingQueryError::Maintenance(StandingQueryFailure::OutputExpression {
+                error: fgdb_gql::GraphIntegerError {
+                    kind: fgdb_gql::GraphIntegerErrorKind::DivisionByZero,
+                    ..
+                },
+                ..
+            })
+        ),
+        "the admitted summary must execute its projection and raise division by zero: {error:?}",
+    );
+}
+
 fn check(
     db: &Database<MemVfs>,
     cx: &QueryCx,
@@ -756,9 +772,31 @@ fn saved(queries: &[StandingQuery]) -> Vec<Saved> {
 }
 
 #[test]
-fn each_count_and_average_registration_and_rebuild_checkpoint_preserves_existing_circuits() {
+fn each_scalar_summary_registration_and_rebuild_checkpoint_preserves_existing_circuits() {
     let ((), report) = run_async_under_lab(0x636e_7005, |root| async move {
-        for text in [CALL_COUNT.to_owned(), scalar_call_text("avg(id(b))")] {
+        for (text, expected) in [
+            (
+                CALL_COUNT.to_owned(),
+                expected_bags(&[(1, 0), (3, 1), (5, 0)])[1].clone(),
+            ),
+            (
+                scalar_call_text("avg(id(b))"),
+                scalar_call_bag([vertex(None), floating(4.0), vertex(None)]),
+            ),
+            (
+                continued_summary_text(
+                    "WITH count(*) AS n,sum(id(b)) AS s RETURN n+1 AS degree,s+1 AS total",
+                ),
+                continued_summary_bag(&[(1, 1, None), (3, 2, Some(5)), (5, 1, None)]),
+            ),
+            (
+                continued_summary_text(
+                    "WITH count(*) AS n,sum(id(b)) AS s WHERE n>0 \
+                     RETURN n+1 AS degree,s+1 AS total",
+                ),
+                continued_summary_bag(&[(3, 2, Some(5))]),
+            ),
+        ] {
             let c = PurposeContexts::narrow_runtime_root(&root);
             let cx = c.query();
             let commit = c.commit();
@@ -861,11 +899,6 @@ fn each_count_and_average_registration_and_rebuild_checkpoint_preserves_existing
             let mut change = WriteBatch::new(R);
             change.delete_vertex(VId(2));
             db.write(&commit, change).await.unwrap();
-            let expected = if text == CALL_COUNT {
-                expected_bags(&[(1, 0), (3, 1), (5, 0)])[1].clone()
-            } else {
-                scalar_call_bag([vertex(None), floating(4.0), vertex(None)])
-            };
             check(&db, &cx, &text, &query, &handle, &expected, policy());
             db.standing_native_query(&cx, &sibling, policy()).unwrap();
         }
@@ -1236,19 +1269,33 @@ fn post_summary_calls_maintain_computed_rows_filters_and_local_distinct() {
         let parameters = GqlParameters::new();
         let prefix = "MATCH (a:L) UNWIND [7,7] AS token WITH token,a CALL (a) { ";
         let statements = [
-            format!("{prefix}MATCH (a)-[:R]->(b:M) WITH count(*) AS n WHERE n > 1 RETURN n+1 AS degree }} RETURN token,a,degree"),
-            format!("{prefix}MATCH (a)-[:R]->(b:M) WITH count(*) AS n,sum(id(b)) AS s WHERE n = 0 OR s >= 4 RETURN coalesce(s,7) AS total,n+1 AS degree }} RETURN token,a,total,degree"),
-            format!("{prefix}MATCH (a)-[:R]->(b:M) WITH count(*) AS n WITH DISTINCT NULL AS absent RETURN absent }} RETURN token,a,absent"),
-            format!("{prefix}MATCH (a)-[:R]->(b:M) RETURN count(*)+1 AS degree }} RETURN token,a,degree"),
+            format!(
+                "{prefix}MATCH (a)-[:R]->(b:M) WITH count(*) AS n WHERE n > 1 RETURN n+1 AS degree }} RETURN token,a,degree"
+            ),
+            format!(
+                "{prefix}MATCH (a)-[:R]->(b:M) WITH count(*) AS n,sum(id(b)) AS s WHERE n = 0 OR s >= 4 RETURN coalesce(s,7) AS total,n+1 AS degree }} RETURN token,a,total,degree"
+            ),
+            format!(
+                "{prefix}MATCH (a)-[:R]->(b:M) WITH count(*) AS n WITH DISTINCT NULL AS absent RETURN absent }} RETURN token,a,absent"
+            ),
+            format!(
+                "{prefix}MATCH (a)-[:R]->(b:M) RETURN count(*)+1 AS degree }} RETURN token,a,degree"
+            ),
         ];
         let mut queries = Vec::new();
         for text in statements {
             let prepared = PreparedNativeRead::prepare(&text, &parameters, symbols).unwrap();
             let (nodes, _) = prepared.subscription_footprint(&cx, &parameters).unwrap();
             let first = db.standing_queries.len();
-            let handle = prepared.register_standing(&mut db, &cx, &parameters, policy()).unwrap();
+            let handle = prepared
+                .register_standing(&mut db, &cx, &parameters, policy())
+                .unwrap();
             assert!(nodes >= (db.standing_queries.len() - first) as u64);
-            assert!(db.standing_queries[first..].iter().any(|query| matches!(query, StandingQuery::Group(_))));
+            assert!(
+                db.standing_queries[first..]
+                    .iter()
+                    .any(|query| matches!(query, StandingQuery::Group(_)))
+            );
             queries.push((text.clone(), bind(&text), handle));
         }
         // Counts and sums are literal fixture answers. Formatting the returned
@@ -1282,8 +1329,12 @@ fn post_summary_calls_maintain_computed_rows_filters_and_local_distinct() {
             let from = db.frontier().unwrap();
             let mut change = WriteBatch::new(R);
             match phase {
-                0 => change.delete_edge(EId(11)),
-                1 => change.add_edge(EId(15), VId(5), VId(2), vec![]),
+                0 => {
+                    change.delete_edge(EId(11));
+                }
+                1 => {
+                    change.add_edge(EId(15), VId(5), VId(2), vec![]);
+                }
                 2 => {
                     change.delete_edge(EId(12));
                     change.delete_edge(EId(13));
@@ -1293,8 +1344,12 @@ fn post_summary_calls_maintain_computed_rows_filters_and_local_distinct() {
                     change.add_edge(EId(17), VId(3), VId(2), vec![]);
                     change.add_edge(EId(18), VId(1), VId(4), vec![]);
                 }
-                4 => change.delete_vertex(VId(2)),
-                5 => change.set_vertex_label(VId(3), L, false),
+                4 => {
+                    change.delete_vertex(VId(2));
+                }
+                5 => {
+                    change.set_vertex_label(VId(3), L, false);
+                }
                 _ => unreachable!(),
             };
             db.write(&commit, change).await.unwrap();
@@ -1321,7 +1376,10 @@ fn post_summary_calls_maintain_computed_rows_filters_and_local_distinct() {
                 GqlQueryPolicy::new(100_000, 100_000, 0, 50_000_000),
                 GqlQueryPolicy::new(100_000, 100_000, 50_000_000, 0),
             ] {
-                assert!(db.register_standing_native(&cx, text, &parameters, symbols, refused).is_err());
+                assert!(
+                    db.register_standing_native(&cx, text, &parameters, symbols, refused)
+                        .is_err()
+                );
                 assert_eq!(saved(&db.standing_queries), before);
             }
         }
@@ -1339,20 +1397,54 @@ fn post_summary_projection_errors_cannot_publish_or_hide_behind_final_pages() {
         db.write(&commit, seed()).await.unwrap();
         let parameters = GqlParameters::new();
         let safe = "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b:M) WITH count(*) AS n WHERE n > 0 RETURN 12/n AS quotient } RETURN a,quotient";
-        let handle = db.register_standing_native(&cx, safe, &parameters, symbols, policy()).unwrap();
-        let rows = bag([(row(vec![vertex(Some(1)), integer(6)]), 1), (row(vec![vertex(Some(3)), integer(12)]), 1)]);
+        let handle = db
+            .register_standing_native(&cx, safe, &parameters, symbols, policy())
+            .unwrap();
+        let rows = bag([
+            (row(vec![vertex(Some(1)), integer(6)]), 1),
+            (row(vec![vertex(Some(3)), integer(12)]), 1),
+        ]);
         check(&db, &cx, safe, &bind(safe), &handle, &rows, policy());
-        let before = saved(&db.standing_queries);
-        for tail in ["", " LIMIT 0", " LIMIT 1"] {
+        for (tail, expected) in [
+            ("", rows.clone()),
+            (" ORDER BY quotient LIMIT 0", Bag::new()),
+            (
+                " ORDER BY quotient LIMIT 1",
+                bag([(row(vec![vertex(Some(1)), integer(6)]), 1)]),
+            ),
+        ] {
+            let guarded = format!("{safe}{tail}");
+            let positive = db
+                .register_standing_native(&cx, &guarded, &parameters, symbols, policy())
+                .unwrap();
+            check(
+                &db,
+                &cx,
+                &guarded,
+                &bind(&guarded),
+                &positive,
+                &expected,
+                policy(),
+            );
+            let before = saved(&db.standing_queries);
             for body in [
                 "WITH count(*) AS n RETURN 12/n AS quotient",
                 "WITH count(*) AS n WITH n,12/0 AS discarded WHERE false RETURN n AS quotient",
             ] {
-                let text = format!("MATCH (a:L) WITH a CALL (a) {{ MATCH (a)-[:R]->(b:M) {body} }} RETURN a,quotient{tail}");
-                assert!(db.execute_graph_set_governed(&cx, &bind(&text), policy()).is_err());
+                let text = format!(
+                    "MATCH (a:L) WITH a CALL (a) {{ MATCH (a)-[:R]->(b:M) {body} }} RETURN a,quotient{tail}"
+                );
+                assert!(
+                    db.execute_graph_set_governed(&cx, &bind(&text), policy())
+                        .is_err()
+                );
                 let prepared = PreparedNativeRead::prepare(&text, &parameters, symbols).unwrap();
                 prepared.subscription_footprint(&cx, &parameters).unwrap();
-                assert!(prepared.register_standing(&mut db, &cx, &parameters, policy()).is_err());
+                assert_summary_division_by_zero(
+                    prepared
+                        .register_standing(&mut db, &cx, &parameters, policy())
+                        .unwrap_err(),
+                );
                 assert_eq!(saved(&db.standing_queries), before);
             }
         }
@@ -2079,6 +2171,558 @@ fn mixed_aggregate_tuples_maintain_distinct_body_support_and_complete_deltas() {
             db.rebuild_standing_query(&cx, handle, policy()).unwrap();
             check(&db, &cx, text, query, handle, rows, policy());
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn continued_summary_text(body: &str) -> String {
+    format!(
+        "MATCH (a:L) UNWIND [7,7] AS token WITH token,a \
+         CALL (a) {{ MATCH (a)-[:R]->(b:M) {body} }} RETURN token,a,degree,total"
+    )
+}
+
+// Degree and total below are already transformed fixture answers. This helper
+// only formats their public schema and the two original occurrences.
+fn continued_summary_bag(entries: &[(u128, i64, Option<i64>)]) -> Bag {
+    bag(entries.iter().map(|&(owner, degree, total)| {
+        (
+            row(vec![
+                integer(7),
+                vertex(Some(owner)),
+                integer(degree),
+                total.map_or(vertex(None), integer),
+            ]),
+            2,
+        )
+    }))
+}
+
+#[test]
+fn correlated_summary_continuations_keep_empty_groups_duplicates_and_exact_deltas() {
+    let ((), report) = run_async_under_lab(0x7361_7015, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xf8)).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut queries = Vec::new();
+        for (body, filtered) in [
+            ("RETURN count(*)+1 AS degree,sum(id(b))+1 AS total", false),
+            (
+                "WITH count(*) AS n,sum(id(b)) AS s RETURN n+1 AS degree,s+1 AS total",
+                false,
+            ),
+            (
+                "WITH count(*) AS n,sum(id(b)) AS s WHERE n>0 \
+                 RETURN n+1 AS degree,s+1 AS total",
+                true,
+            ),
+            (
+                "WITH count(*) AS n,sum(id(b)) AS s \
+                 WITH n+1 AS degree,s+1 AS total WHERE degree>1 RETURN degree,total",
+                true,
+            ),
+        ] {
+            let text = continued_summary_text(body);
+            let parameters = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(&text, &parameters, symbols).unwrap();
+            let (nodes, _) = prepared.subscription_footprint(&cx, &parameters).unwrap();
+            let first = db.standing_queries.len();
+            let handle = prepared
+                .register_standing(&mut db, &cx, &parameters, policy())
+                .unwrap();
+            assert!(nodes >= u64::try_from(db.standing_queries.len() - first).unwrap());
+            assert_eq!(
+                db.standing_queries[first..]
+                    .iter()
+                    .filter(|query| matches!(query, StandingQuery::Group(_)))
+                    .count(),
+                1,
+                "the complete tuple shares one maintained group: {text}",
+            );
+            queries.push((text.clone(), bind(&text), handle, usize::from(filtered)));
+        }
+        let mut expected = [
+            continued_summary_bag(&[(1, 3, Some(5)), (3, 2, Some(5)), (5, 1, None)]),
+            continued_summary_bag(&[(1, 3, Some(5)), (3, 2, Some(5))]),
+        ];
+        for (text, query, handle, selected) in &queries {
+            check(
+                &db,
+                &cx,
+                text,
+                query,
+                handle,
+                &expected[*selected],
+                policy(),
+            );
+        }
+        for phase in 0..7 {
+            let from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(R);
+            match phase {
+                0 => {
+                    change.delete_edge(EId(11));
+                }
+                1 => {
+                    change.delete_edge(EId(12));
+                    change.add_edge(EId(15), VId(5), VId(2), vec![]);
+                }
+                2 => {
+                    change.set_vertex_label(VId(4), M, false);
+                }
+                3 => {
+                    change.set_vertex_label(VId(6), M, true);
+                    change.add_edge(EId(16), VId(1), VId(6), vec![]);
+                }
+                4 => {
+                    change.delete_vertex(VId(2));
+                }
+                5 => {
+                    change.set_vertex_label(VId(4), M, true);
+                }
+                6 => {
+                    change.delete_vertex(VId(5));
+                }
+                _ => unreachable!(),
+            }
+            db.write(&commit, change).await.unwrap();
+            let next = match phase {
+                0 => [
+                    continued_summary_bag(&[(1, 2, Some(3)), (3, 2, Some(5)), (5, 1, None)]),
+                    continued_summary_bag(&[(1, 2, Some(3)), (3, 2, Some(5))]),
+                ],
+                1 => [
+                    continued_summary_bag(&[(1, 1, None), (3, 2, Some(5)), (5, 2, Some(3))]),
+                    continued_summary_bag(&[(3, 2, Some(5)), (5, 2, Some(3))]),
+                ],
+                2 => [
+                    continued_summary_bag(&[(1, 1, None), (3, 1, None), (5, 2, Some(3))]),
+                    continued_summary_bag(&[(5, 2, Some(3))]),
+                ],
+                3 => [
+                    continued_summary_bag(&[(1, 2, Some(7)), (3, 1, None), (5, 3, Some(9))]),
+                    continued_summary_bag(&[(1, 2, Some(7)), (5, 3, Some(9))]),
+                ],
+                4 => [
+                    continued_summary_bag(&[(1, 2, Some(7)), (3, 1, None), (5, 2, Some(7))]),
+                    continued_summary_bag(&[(1, 2, Some(7)), (5, 2, Some(7))]),
+                ],
+                5 => {
+                    let rows =
+                        continued_summary_bag(&[(1, 2, Some(7)), (3, 2, Some(5)), (5, 2, Some(7))]);
+                    [rows.clone(), rows]
+                }
+                6 => {
+                    let rows = continued_summary_bag(&[(1, 2, Some(7)), (3, 2, Some(5))]);
+                    [rows.clone(), rows]
+                }
+                _ => unreachable!(),
+            };
+            for (text, query, handle, selected) in &queries {
+                check(&db, &cx, text, query, handle, &next[*selected], policy());
+                check_delta(
+                    &db,
+                    &cx,
+                    handle,
+                    from,
+                    &expected[*selected],
+                    &next[*selected],
+                );
+            }
+            expected = next;
+        }
+        for (text, query, handle, selected) in &queries {
+            db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+            check(
+                &db,
+                &cx,
+                text,
+                query,
+                handle,
+                &expected[*selected],
+                policy(),
+            );
+            check_delta(
+                &db,
+                &cx,
+                handle,
+                db.frontier().unwrap(),
+                &expected[*selected],
+                &expected[*selected],
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn correlated_summary_filters_precede_projection_errors_but_public_pages_do_not() {
+    let ((), report) = run_async_under_lab(0x7361_7016, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xf9)).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let guarded = concat!(
+            "MATCH (a:L) UNWIND [7,7] AS token WITH token,a ",
+            "CALL (a) { MATCH (a)-[:R]->(b:M) WITH count(*) AS n WHERE n>0 ",
+            "RETURN n AS degree,1/n AS hidden } RETURN token,a,degree"
+        );
+        let handle = db
+            .register_standing_native(&cx, guarded, &GqlParameters::new(), symbols, policy())
+            .unwrap();
+        let expected = bag([
+            (row(vec![integer(7), vertex(Some(1)), integer(2)]), 2),
+            (row(vec![integer(7), vertex(Some(3)), integer(1)]), 2),
+        ]);
+        check(
+            &db,
+            &cx,
+            guarded,
+            &bind(guarded),
+            &handle,
+            &expected,
+            policy(),
+        );
+        let paged = format!("{guarded} ORDER BY degree LIMIT 0");
+        let paged_handle = db
+            .register_standing_native(&cx, &paged, &GqlParameters::new(), symbols, policy())
+            .unwrap();
+        check(
+            &db,
+            &cx,
+            &paged,
+            &bind(&paged),
+            &paged_handle,
+            &Bag::new(),
+            policy(),
+        );
+        let before = saved(&db.standing_queries);
+        let broken = concat!(
+            "MATCH (a:L) UNWIND [7,7] AS token WITH token,a ",
+            "CALL (a) { MATCH (a)-[:R]->(b:M) WITH count(*) AS n ",
+            "RETURN n AS degree,1/n AS hidden } RETURN token,a,degree"
+        );
+        for candidate in [
+            broken.to_owned(),
+            format!("{broken} ORDER BY degree LIMIT 0"),
+        ] {
+            assert!(
+                db.execute_graph_set_governed(&cx, &bind(&candidate), policy())
+                    .is_err(),
+                "the empty invocation evaluates its complete summary projection",
+            );
+            let parameters = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(&candidate, &parameters, symbols).unwrap();
+            prepared.subscription_footprint(&cx, &parameters).unwrap();
+            assert_summary_division_by_zero(
+                prepared
+                    .register_standing(&mut db, &cx, &parameters, policy())
+                    .unwrap_err(),
+            );
+            assert_eq!(saved(&db.standing_queries), before);
+        }
+        let from = db.frontier().unwrap();
+        let mut change = WriteBatch::new(R);
+        change.delete_edge(EId(11));
+        change.delete_edge(EId(12));
+        db.write(&commit, change).await.unwrap();
+        let next = bag([(row(vec![integer(7), vertex(Some(3)), integer(1)]), 2)]);
+        check(&db, &cx, guarded, &bind(guarded), &handle, &next, policy());
+        check_delta(&db, &cx, &handle, from, &expected, &next);
+        db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
+        check(&db, &cx, guarded, &bind(guarded), &handle, &next, policy());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn correlated_summary_continuations_charge_public_occurrences_and_stage_atomically() {
+    let ((), report) = run_async_under_lab(0x7361_7017, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xfa)).await.unwrap();
+        let mut initial = WriteBatch::new(R);
+        initial.create_vertex(VId(1), vec![L], vec![]);
+        initial.create_vertex(VId(2), vec![M], vec![]);
+        for edge in 10..74 {
+            initial.add_edge(EId(edge), VId(1), VId(2), vec![]);
+        }
+        db.write(&commit, initial).await.unwrap();
+        let text = continued_summary_text(
+            "WITH count(*) AS n,sum(id(b)) AS s WHERE n>0 \
+             RETURN n+1 AS degree,s+1 AS total",
+        );
+        let query = bind(&text);
+        let two = GqlQueryPolicy::new(1_000, 2, 50_000_000, 50_000_000);
+        let expected = continued_summary_bag(&[(1, 65, Some(129))]);
+        let handle = db
+            .register_standing_native(&cx, &text, &GqlParameters::new(), symbols, two)
+            .unwrap();
+        check(&db, &cx, &text, &query, &handle, &expected, two);
+        let before = saved(&db.standing_queries);
+        for refused in [
+            GqlQueryPolicy::new(1_000, 1, 50_000_000, 50_000_000),
+            GqlQueryPolicy::new(1_000, 2, 0, 50_000_000),
+            GqlQueryPolicy::new(1_000, 2, 50_000_000, 0),
+        ] {
+            assert!(
+                db.register_standing_native(&cx, &text, &GqlParameters::new(), symbols, refused)
+                    .is_err()
+            );
+            assert_eq!(saved(&db.standing_queries), before);
+            assert!(db.rebuild_standing_query(&cx, &handle, refused).is_err());
+            assert_eq!(saved(&db.standing_queries), before);
+            check(&db, &cx, &text, &query, &handle, &expected, two);
+        }
+        let suppressed = continued_summary_text(
+            "WITH count(*) AS n,sum(id(b)) AS s WHERE n>100 \
+             RETURN n+1 AS degree,s+1 AS total",
+        );
+        let hidden = db
+            .register_standing_native(&cx, &suppressed, &GqlParameters::new(), symbols, two)
+            .unwrap();
+        check(
+            &db,
+            &cx,
+            &suppressed,
+            &bind(&suppressed),
+            &hidden,
+            &Bag::new(),
+            two,
+        );
+        db.rebuild_standing_query(&cx, &hidden, two).unwrap();
+        // The outer source still needs its two-row admission even when the
+        // completed summary is filtered away. Preserve that existing boundary.
+        let before = saved(&db.standing_queries);
+        let zero = GqlQueryPolicy::new(1_000, 0, 50_000_000, 50_000_000);
+        assert!(db.rebuild_standing_query(&cx, &hidden, zero).is_err());
+        assert_eq!(saved(&db.standing_queries), before);
+        check(&db, &cx, &text, &query, &handle, &expected, two);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn optional_summary_bag(
+    entries: impl IntoIterator<Item = (u128, Option<i64>, Option<i64>)>,
+) -> Bag {
+    bag(entries.into_iter().map(|(owner, degree, total)| {
+        (
+            row(vec![
+                integer(7),
+                vertex(Some(owner)),
+                degree.map_or(vertex(None), integer),
+                total.map_or(vertex(None), integer),
+            ]),
+            2,
+        )
+    }))
+}
+
+#[test]
+fn optional_summary_calls_distinguish_empty_aggregates_from_filtered_absence() {
+    let ((), report) = run_async_under_lab(0x7361_7018, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xfb)).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut queries = Vec::new();
+        for body in [
+            "RETURN count(*) AS degree,sum(id(b)) AS total",
+            "WITH count(*) AS n,sum(id(b)) AS s RETURN n+1 AS degree,s+1 AS total",
+            "WITH count(*) AS n,sum(id(b)) AS s WHERE n>0 RETURN n+1 AS degree,s+1 AS total",
+            "WITH sum(id(b)) AS total WHERE total IS NULL RETURN 7 AS degree,total",
+        ] {
+            let text = format!(
+                "MATCH (a:L) UNWIND [7,7] AS token WITH token,a \
+                 OPTIONAL CALL (a) {{ MATCH (a)-[:R]->(b:M) {body} }} \
+                 RETURN token,a,degree,total"
+            );
+            let parameters = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(&text, &parameters, symbols).unwrap();
+            let (nodes, _) = prepared.subscription_footprint(&cx, &parameters).unwrap();
+            let first = db.standing_queries.len();
+            let handle = prepared
+                .register_standing(&mut db, &cx, &parameters, policy())
+                .unwrap();
+            assert!(nodes >= u64::try_from(db.standing_queries.len() - first).unwrap());
+            queries.push((text.clone(), bind(&text), handle));
+        }
+        // Counts and sums are literal answers for each committed fixture. Only
+        // the visible scalar expressions and optional NULL extension follow.
+        let expected =
+            |groups: &[(u128, i64, Option<i64>)]| {
+                [
+                    optional_summary_bag(
+                        groups
+                            .iter()
+                            .map(|&(owner, count, sum)| (owner, Some(count), sum)),
+                    ),
+                    optional_summary_bag(groups.iter().map(|&(owner, count, sum)| {
+                        (owner, Some(count + 1), sum.map(|sum| sum + 1))
+                    })),
+                    optional_summary_bag(groups.iter().map(|&(owner, count, sum)| {
+                        if count == 0 {
+                            (owner, None, None)
+                        } else {
+                            (owner, Some(count + 1), sum.map(|sum| sum + 1))
+                        }
+                    })),
+                    optional_summary_bag(
+                        groups
+                            .iter()
+                            .map(|&(owner, _, sum)| (owner, sum.is_none().then_some(7), None)),
+                    ),
+                ]
+            };
+        let mut previous = expected(&[(1, 2, Some(4)), (3, 1, Some(4)), (5, 0, None)]);
+        for ((text, query, handle), rows) in queries.iter().zip(&previous) {
+            check(&db, &cx, text, query, handle, rows, policy());
+        }
+        for phase in 0..6 {
+            let from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(R);
+            match phase {
+                0 => {
+                    change.delete_edge(EId(11));
+                }
+                1 => {
+                    change.delete_edge(EId(12));
+                    change.delete_edge(EId(13));
+                }
+                2 => {
+                    change.add_edge(EId(15), VId(5), VId(2), vec![]);
+                }
+                3 => {
+                    change.add_edge(EId(16), VId(1), VId(4), vec![]);
+                    change.add_edge(EId(17), VId(1), VId(4), vec![]);
+                }
+                4 => {
+                    change.delete_vertex(VId(2));
+                }
+                5 => {
+                    change.set_vertex_label(VId(3), L, false);
+                }
+                _ => unreachable!(),
+            }
+            db.write(&commit, change).await.unwrap();
+            let next = match phase {
+                0 => expected(&[(1, 1, Some(2)), (3, 1, Some(4)), (5, 0, None)]),
+                1 => expected(&[(1, 0, None), (3, 0, None), (5, 0, None)]),
+                2 => expected(&[(1, 0, None), (3, 0, None), (5, 1, Some(2))]),
+                3 => expected(&[(1, 2, Some(8)), (3, 0, None), (5, 1, Some(2))]),
+                4 => expected(&[(1, 2, Some(8)), (3, 0, None), (5, 0, None)]),
+                5 => expected(&[(1, 2, Some(8)), (5, 0, None)]),
+                _ => unreachable!(),
+            };
+            for (((text, query, handle), before), after) in queries.iter().zip(&previous).zip(&next)
+            {
+                check(&db, &cx, text, query, handle, after, policy());
+                check_delta(&db, &cx, handle, from, before, after);
+            }
+            previous = next;
+        }
+        for ((text, query, handle), rows) in queries.iter().zip(&previous) {
+            db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+            check(&db, &cx, text, query, handle, rows, policy());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn optional_summary_calls_keep_nullable_invocations_and_do_not_mask_projection_errors() {
+    let ((), report) = run_async_under_lab(0x7361_7019, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xfc)).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let text = concat!(
+            "MATCH (a:L) WITH a OPTIONAL MATCH (a)-[:R]->(b:M) WITH a,b ",
+            "OPTIONAL CALL (b) { MATCH (b)-[:R]->(c:M) ",
+            "WITH count(*) AS n WHERE n>0 RETURN 12/n AS quotient } RETURN a,b,quotient"
+        );
+        let handle = db
+            .register_standing_native(&cx, text, &GqlParameters::new(), symbols, policy())
+            .unwrap();
+        let query = bind(text);
+        let missing = bag([
+            (row(vec![vertex(Some(1)), vertex(Some(2)), vertex(None)]), 2),
+            (row(vec![vertex(Some(3)), vertex(Some(4)), vertex(None)]), 1),
+            (row(vec![vertex(Some(5)), vertex(None), vertex(None)]), 1),
+        ]);
+        check(&db, &cx, text, &query, &handle, &missing, policy());
+        let from = db.frontier().unwrap();
+        let mut change = WriteBatch::new(R);
+        change.add_edge(EId(20), VId(2), VId(4), vec![]);
+        change.add_edge(EId(21), VId(2), VId(4), vec![]);
+        db.write(&commit, change).await.unwrap();
+        let active = bag([
+            (row(vec![vertex(Some(1)), vertex(Some(2)), integer(6)]), 2),
+            (row(vec![vertex(Some(3)), vertex(Some(4)), vertex(None)]), 1),
+            (row(vec![vertex(Some(5)), vertex(None), vertex(None)]), 1),
+        ]);
+        check(&db, &cx, text, &query, &handle, &active, policy());
+        check_delta(&db, &cx, &handle, from, &missing, &active);
+        for tail in ["", " ORDER BY degree LIMIT 0"] {
+            let guarded = format!(
+                "MATCH (a:L) WITH a OPTIONAL CALL (a) {{ MATCH (a)-[:R]->(b:M) \
+                 WITH count(*) AS n WHERE n>0 RETURN n AS degree,12/n AS hidden }} RETURN a,degree{tail}"
+            );
+            let positive = db
+                .register_standing_native(&cx, &guarded, &GqlParameters::new(), symbols, policy())
+                .unwrap();
+            let expected = if tail.is_empty() {
+                bag([
+                    (row(vec![vertex(Some(1)), integer(2)]), 1),
+                    (row(vec![vertex(Some(3)), integer(1)]), 1),
+                    (row(vec![vertex(Some(5)), vertex(None)]), 1),
+                ])
+            } else {
+                Bag::new()
+            };
+            check(
+                &db,
+                &cx,
+                &guarded,
+                &bind(&guarded),
+                &positive,
+                &expected,
+                policy(),
+            );
+            let before = saved(&db.standing_queries);
+            let broken = format!(
+                "MATCH (a:L) WITH a OPTIONAL CALL (a) {{ MATCH (a)-[:R]->(b:M) \
+                 WITH count(*) AS n RETURN n AS degree,12/n AS hidden }} RETURN a,degree{tail}"
+            );
+            assert!(
+                db.execute_graph_set_governed(&cx, &bind(&broken), policy())
+                    .is_err()
+            );
+            let parameters = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(&broken, &parameters, symbols).unwrap();
+            prepared.subscription_footprint(&cx, &parameters).unwrap();
+            assert_summary_division_by_zero(
+                prepared
+                    .register_standing(&mut db, &cx, &parameters, policy())
+                    .unwrap_err(),
+            );
+            assert_eq!(saved(&db.standing_queries), before);
+        }
+        let from = db.frontier().unwrap();
+        let mut change = WriteBatch::new(R);
+        change.delete_edge(EId(20));
+        change.delete_edge(EId(21));
+        db.write(&commit, change).await.unwrap();
+        check(&db, &cx, text, &query, &handle, &missing, policy());
+        check_delta(&db, &cx, &handle, from, &active, &missing);
+        db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
+        check(&db, &cx, text, &query, &handle, &missing, policy());
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

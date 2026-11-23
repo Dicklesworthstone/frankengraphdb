@@ -891,6 +891,9 @@ struct FilteredCircuit {
     join: IncrementalRowJoin,
     body: Vec<IncrementalRowProjection>,
     group: IncrementalGroupAggregate<PreparedGraphSetAggregate>,
+    invocations: IncrementalRowProjection,
+    complete: IncrementalRowJoin,
+    summary: Vec<IncrementalRowProjection>,
     restore: IncrementalRowJoin,
     output: Vec<IncrementalRowProjection>,
 }
@@ -912,6 +915,13 @@ impl FilteredCircuit {
                 .map(IncrementalRowProjection::new)
                 .collect(),
             group: IncrementalGroupAggregate::new(recipe.group, &schema).unwrap(),
+            invocations: IncrementalRowProjection::new(recipe.invocations),
+            complete: IncrementalRowJoin::new(recipe.complete),
+            summary: recipe
+                .summary
+                .into_iter()
+                .map(IncrementalRowProjection::new)
+                .collect(),
             restore: IncrementalRowJoin::new(recipe.restore),
             output: recipe
                 .output
@@ -962,9 +972,25 @@ impl FilteredCircuit {
         }
         let values = ZSet::from_updates(values, LIMBS, &mut |_| Ok::<_, ()>(())).unwrap();
         let _ = grouped.commit();
+        let invocations = self
+            .invocations
+            .prepare(&arguments, LIMBS, None, &mut |_| Ok::<_, ()>(()))
+            .map_err(|_| ())?
+            .commit();
+        delta = self
+            .complete
+            .prepare(&invocations, &values, LIMBS, None, &mut |_| Ok::<_, ()>(()))
+            .map_err(|_| ())?
+            .commit();
+        for stage in &mut self.summary {
+            delta = stage
+                .prepare(&delta, LIMBS, None, &mut |_| Ok::<_, ()>(()))
+                .map_err(|_| ())?
+                .commit();
+        }
         delta = self
             .restore
-            .prepare(&outer, &values, LIMBS, None, &mut |_| Ok::<_, ()>(()))
+            .prepare(&outer, &delta, LIMBS, None, &mut |_| Ok::<_, ()>(()))
             .map_err(|_| ())?
             .commit();
         for stage in &mut self.output {
@@ -1169,7 +1195,8 @@ fn filtered_count_recipe_retains_the_complete_input_and_all_cancellation_points(
     assert_eq!(recipe.left, &outer());
     assert_eq!(recipe.right, &right());
     assert_eq!(recipe.arguments.quantifier(), GraphSetQuantifier::Distinct);
-    assert_eq!(recipe.restore.kind(), RowJoinKind::Left);
+    assert_eq!(recipe.complete.kind(), RowJoinKind::Left);
+    assert_eq!(recipe.restore.kind(), RowJoinKind::Inner);
     let mut input = recipe
         .left
         .clone()
@@ -1981,7 +2008,11 @@ fn mixed_summary_calls_keep_reordered_and_selected_outputs_after_complete_conver
             .into_iter()
             .map(|(source, weight)| {
                 let mut cells = source.values()[..3].to_vec();
-                cells.extend(positions.iter().map(|column| source.values()[3 + column].clone()));
+                cells.extend(
+                    positions
+                        .iter()
+                        .map(|column| source.values()[3 + column].clone()),
+                );
                 (row(cells), weight)
             })
             .collect();
@@ -2037,7 +2068,10 @@ fn transformed_summary(profile: usize) -> PreparedGraphSet {
         }
         2 => (*right)
             .project(
-                vec![GraphSetProjection::new("absent", GraphSetValue::Value(scalar(None)))],
+                vec![GraphSetProjection::new(
+                    "absent",
+                    GraphSetValue::Value(scalar(None)),
+                )],
                 GraphSetQuantifier::Distinct,
             )
             .unwrap()
@@ -2066,7 +2100,11 @@ fn transformed_oracle(
                 return None;
             }
             let mut cells = source.values()[..3].to_vec();
-            cells.push(if profile == 2 { scalar(None) } else { scalar(Some(count + 1)) });
+            cells.push(if profile == 2 {
+                scalar(None)
+            } else {
+                scalar(Some(count + 1))
+            });
             Some((row(cells), weight))
         })
         .collect()
@@ -2086,17 +2124,27 @@ fn post_summary_stages_preserve_all_1024_weighted_transitions_and_empty_global_g
                 let next = transformed_oracle(&next_left, &next_right, profile);
                 let mut circuit = FilteredCircuit::new(&query);
                 circuit.tick(&old_left, &old_right).unwrap();
-                assert_eq!(plain(circuit.rows()), old, "profile {profile}, before {before}");
+                assert_eq!(
+                    plain(circuit.rows()),
+                    old,
+                    "profile {profile}, before {before}"
+                );
                 let delta = circuit
                     .tick(
                         &difference(&next_left, &old_left),
                         &difference(&next_right, &old_right),
                     )
                     .unwrap();
-                assert_eq!(plain(circuit.rows()), next, "profile {profile}, after {after}");
+                assert_eq!(
+                    plain(circuit.rows()),
+                    next,
+                    "profile {profile}, after {after}"
+                );
                 assert_eq!(
                     delta,
-                    bag(next.into_iter().chain(old.into_iter().map(|(row, weight)| (row, -weight))))
+                    bag(next
+                        .into_iter()
+                        .chain(old.into_iter().map(|(row, weight)| (row, -weight))))
                 );
             }
         }
@@ -2116,11 +2164,24 @@ fn post_summary_recipes_keep_schema_identity_and_every_construction_checkpoint()
             })
             .unwrap()
             .unwrap();
-        assert_eq!(recipe.restore.kind(), RowJoinKind::Left);
-        assert!(recipe.output.iter().all(|stage| stage.quantifier() == GraphSetQuantifier::All));
+        assert_eq!(recipe.complete.kind(), RowJoinKind::Left);
+        assert_eq!(recipe.restore.kind(), RowJoinKind::Inner);
+        assert!(
+            recipe
+                .output
+                .iter()
+                .all(|stage| stage.quantifier() == GraphSetQuantifier::All)
+        );
         let output = recipe.output.last().unwrap();
         assert_eq!(output.column_types(), query.column_types());
-        assert_eq!(output.columns().collect::<Vec<_>>(), query.columns().iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            output.columns().collect::<Vec<_>>(),
+            query
+                .columns()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
         for stop in 1..=calls {
             let mut seen = 0;
             let result = query.incremental_filtered_aggregate_with_control(&mut |_| {
@@ -2156,7 +2217,9 @@ fn post_summary_errors_keep_stage_order_and_cannot_hide_checked_count_overflow()
         };
         let mut body = *right;
         if filter_first {
-            body = body.filter(&[GraphSetPredicateOp::Truth(Some(false))]).unwrap();
+            body = body
+                .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                .unwrap();
         }
         body = body
             .project(
@@ -2168,7 +2231,9 @@ fn post_summary_errors_keep_stage_order_and_cannot_hide_checked_count_overflow()
             )
             .unwrap();
         if !filter_first {
-            body = body.filter(&[GraphSetPredicateOp::Truth(Some(false))]).unwrap();
+            body = body
+                .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                .unwrap();
         }
         body = body
             .project(
@@ -2185,7 +2250,10 @@ fn post_summary_errors_keep_stage_order_and_cannot_hide_checked_count_overflow()
             activated.unwrap();
             assert!(circuit.rows().is_empty());
         } else {
-            assert!(activated.is_err(), "discarded expression executes before its later filter");
+            assert!(
+                activated.is_err(),
+                "discarded expression executes before its later filter"
+            );
         }
     }
     // Replacing a complete global count with NULL still evaluates and converts
@@ -2221,4 +2289,225 @@ fn native_post_summary_expressions_and_filters_keep_reader_and_page_boundaries()
             .unwrap();
         assert!(!has_filtered_aggregate(&query), "{text}");
     }
+}
+
+fn optional_transformed_summary(profile: usize) -> PreparedGraphSet {
+    let SetNode::Apply {
+        left,
+        right,
+        imports,
+        ..
+    } = transformed_summary(profile).node
+    else {
+        unreachable!()
+    };
+    (*left).optional_apply(*right, imports).unwrap()
+}
+
+fn optional_transformed_oracle(
+    left: &ZSet<GraphValueRow>,
+    right: &ZSet<GraphValueRow>,
+    profile: usize,
+) -> Bag {
+    filtered_oracle(left, right, 0)
+        .into_iter()
+        .map(|(source, weight)| {
+            let GraphValue::Scalar(CanonicalScalar::Int(count)) = source.values()[3] else {
+                unreachable!()
+            };
+            let retained = match profile {
+                1 => count > 3,
+                3 => count == 0,
+                _ => true,
+            };
+            let mut cells = source.values()[..3].to_vec();
+            cells.push(if !retained || profile == 2 {
+                scalar(None)
+            } else {
+                scalar(Some(count + 1))
+            });
+            (row(cells), weight)
+        })
+        .collect()
+}
+
+#[test]
+fn optional_post_summary_null_extension_matches_1024_weighted_transitions() {
+    for profile in 0..4 {
+        let query = optional_transformed_summary(profile);
+        let recipe = query
+            .incremental_filtered_aggregate_with_control(&mut allow)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recipe.complete.kind(), RowJoinKind::Left);
+        assert_eq!(recipe.restore.kind(), RowJoinKind::Left);
+        for before in 0..16 {
+            for after in 0..16 {
+                let old_left = filtered_left(before & 3);
+                let old_right = filtered_right(before >> 2);
+                let next_left = filtered_left(after & 3);
+                let next_right = filtered_right(after >> 2);
+                let old = optional_transformed_oracle(&old_left, &old_right, profile);
+                let next = optional_transformed_oracle(&next_left, &next_right, profile);
+                let mut circuit = FilteredCircuit::new(&query);
+                circuit.tick(&old_left, &old_right).unwrap();
+                assert_eq!(
+                    plain(circuit.rows()),
+                    old,
+                    "optional profile {profile}, before {before}"
+                );
+                let delta = circuit
+                    .tick(
+                        &difference(&next_left, &old_left),
+                        &difference(&next_right, &old_right),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    plain(circuit.rows()),
+                    next,
+                    "optional profile {profile}, after {after}"
+                );
+                assert_eq!(
+                    delta,
+                    bag(next
+                        .into_iter()
+                        .chain(old.into_iter().map(|(row, weight)| (row, -weight))))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn post_summary_work_domain_is_distinct_invocations_before_outer_restoration() {
+    let left = bag([
+        (row(vec![scalar(Some(3)), vertex(1), vertex(8)]), 1000),
+        (row(vec![scalar(Some(3)), vertex(2), vertex(8)]), 2000),
+    ]);
+    let mut circuit = FilteredCircuit::new(&optional_transformed_summary(2));
+    circuit.tick(&left, &filtered_right(3)).unwrap();
+    // Owner is not imported. Both distinct outer rows therefore invoke one
+    // summary, and their 3000 occurrences are restored only AFTER that tail.
+    for stage in &circuit.summary {
+        assert_eq!(stage.rows().len(), 1);
+        assert_eq!(stage.rows().iter().next().unwrap().1.to_i128(), Some(1));
+    }
+    assert_eq!(
+        plain(circuit.rows()),
+        optional_transformed_oracle(&left, &filtered_right(3), 2)
+    );
+    circuit
+        .tick(
+            &bag([(row(vec![scalar(Some(3)), vertex(1), vertex(8)]), -999)]),
+            &ZSet::new(),
+        )
+        .unwrap();
+    for stage in &circuit.summary {
+        assert_eq!(stage.rows().len(), 1);
+        assert_eq!(stage.rows().iter().next().unwrap().1.to_i128(), Some(1));
+    }
+}
+
+#[test]
+fn optional_no_import_summary_completes_only_live_invocations_and_keeps_errors() {
+    let body = counted(arguments(Vec::new()).cross_join(right()).unwrap());
+    for filtered in [false, true] {
+        let mut right = body.clone();
+        if filtered {
+            right = right
+                .filter(&[GraphSetPredicateOp::Compare {
+                    left: GraphSetOperand::Column(0),
+                    comparison: IntegerComparison::Greater,
+                    right: GraphSetOperand::Literal(
+                        crate::GqlScalarParameter::new(CanonicalScalar::Int(0)).unwrap(),
+                    ),
+                }])
+                .unwrap();
+        }
+        let query = outer().optional_apply(right, Vec::new()).unwrap();
+        let mut circuit = FilteredCircuit::new(&query);
+        circuit.tick(&ZSet::new(), &ZSet::new()).unwrap();
+        assert!(circuit.rows().is_empty());
+        let left = bag([(row(vec![scalar(None), vertex(1), vertex(8)]), 2)]);
+        circuit.tick(&left, &ZSet::new()).unwrap();
+        assert_eq!(
+            plain(circuit.rows()),
+            BTreeMap::from([(
+                row(vec![
+                    scalar(None),
+                    vertex(1),
+                    vertex(8),
+                    scalar(if filtered { None } else { Some(0) })
+                ]),
+                2,
+            )])
+        );
+        let right = bag([(row(vec![vertex(5), vertex(9)]), 1)]);
+        circuit.tick(&ZSet::new(), &right).unwrap();
+        assert_eq!(
+            plain(circuit.rows()),
+            BTreeMap::from([(
+                row(vec![scalar(None), vertex(1), vertex(8), scalar(Some(1))]),
+                2,
+            )])
+        );
+    }
+    let failure = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Literal(Some(12)),
+            GraphIntegerOp::Column(0),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+        ])
+        .unwrap(),
+    );
+    let body = body
+        .project(
+            vec![GraphSetProjection::new("bad", failure)],
+            GraphSetQuantifier::All,
+        )
+        .unwrap();
+    let mut circuit = FilteredCircuit::new(&outer().optional_apply(body, Vec::new()).unwrap());
+    assert!(
+        circuit.tick(&filtered_left(3), &ZSet::new()).is_err(),
+        "optional NULL extension cannot swallow an invoked expression error"
+    );
+}
+
+#[test]
+fn repeated_imports_keep_the_existing_complete_summary_width_boundary() {
+    let arguments = arguments(vec![GraphSetColumnType::Vertex; 12]);
+    let right = right();
+    let join = RowJoinSpec::new(arguments.column_types(), right.column_types(), &[(0, 0)]).unwrap();
+    let names: Vec<_> = (0..8).map(|index| format!("count{index}")).collect();
+    let summaries: Vec<_> = names
+        .iter()
+        .map(|name| GraphAggregate::count_rows(name))
+        .collect();
+    let body = arguments
+        .join(right, join)
+        .unwrap()
+        .group_by(&[], &summaries)
+        .unwrap();
+    let query = outer().optional_apply(body, vec![1; 12]).unwrap();
+    let recipe = query
+        .incremental_filtered_aggregate_with_control(&mut allow)
+        .unwrap()
+        .unwrap();
+    // The old outer restoration fits: 3 outer + 24 key + 24 group key + 8
+    // summaries = 59 columns. Carrying the twelve imported argument copies
+    // into completion instead would need 68 and incorrectly refuse this plan.
+    assert_eq!(recipe.arguments.column_types().len(), 36);
+    assert_eq!(recipe.invocations.column_types().len(), 24);
+    assert_eq!(recipe.complete.width(), 56);
+    assert_eq!(recipe.restore.width(), 59);
+    let mut circuit = FilteredCircuit::new(&query);
+    circuit
+        .tick(
+            &bag([(row(vec![scalar(Some(7)), vertex(5), vertex(8)]), 2)]),
+            &bag([(row(vec![vertex(5), vertex(9)]), 3)]),
+        )
+        .unwrap();
+    let mut expected = vec![scalar(Some(7)), vertex(5), vertex(8)];
+    expected.extend((0..8).map(|_| scalar(Some(3))));
+    assert_eq!(plain(circuit.rows()), BTreeMap::from([(row(expected), 2)]));
 }

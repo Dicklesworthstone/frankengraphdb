@@ -12,6 +12,39 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Optional correlated aggregate calls — qualification pending
+
+The maintained correlated-summary circuit now admits `OPTIONAL CALL` for its
+existing reader-free global aggregate subset. It completes each distinct
+invocation's empty global group before applying ordered row projections,
+filters and DISTINCT, then restores the original outer occurrences. An empty
+COUNT yields zero; a summary removed by a later filter instead yields optional
+NULL exports. A surviving all-NULL summary retains its private invocation key.
+Expression failures remain errors, and a tail removed by an earlier filter is
+not evaluated again on the fabricated optional row.
+
+Post-group work uses the distinct invocation domain. Private keys survive
+projections and DISTINCT; a key-only completion input preserves the previous
+width boundary for repeated imports. Native registration and its resource
+preflight account for all additional owners. Existing admission of the original
+outer source is unchanged. Aggregate-internal exact-domain HAVING/output
+transforms, per-invocation pages, grouped summaries and reader/ordinal effects
+retain their prior refusal.
+
+Regression sources add 1,024 independently calculated optional weighted
+transitions, no-import activation, duplicate and nullable invocations, first/last
+support retractions, exact delivered deltas, rebuild, cancellation checkpoints,
+width limits and atomic quota refusals. Ordered LIMIT 0/1 error cases have
+matching successful controls and require the exact arithmetic failure. The
+concurrent inner-call continuation tests remain present, with their inconsistent
+WriteBatch match-arm types repaired.
+
+Pinned changed-source formatting and whitespace checks pass, and independent
+source review is complete. Compilation, runtime assertions and full exact-tree
+qualification remain pending under `fgdb-w6-zset-circuits-kjv` and
+`fgdb-qualify-integrated-nov22-maz0p`; no W6 completion or measured performance
+claim is made.
+
 ### Maintained aggregates, streamed subscriptions, and recovery integrity — qualification pending
 
 The correlated incremental compiler now admits ordered, reader-free projections
