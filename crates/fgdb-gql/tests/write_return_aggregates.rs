@@ -373,6 +373,19 @@ fn computed_write_ordering_ranks_completed_groups_and_keeps_private_cells_privat
             .canonical_bytes(),
     );
 
+    let named = prepare("UNWIND [3,1,2] AS x CREATE (:Item) RETURN x AS value ORDER BY value");
+    for text in [
+        "UNWIND [3,1,2] AS x CREATE (:Item) RETURN x AS value ORDER BY x",
+        "UNWIND [3,1,2] AS x CREATE (:Item) RETURN `x` AS value ORDER BY x",
+    ] {
+        let repeated = prepare(text);
+        assert_eq!(repeated.canonical_bytes(), named.canonical_bytes());
+        assert_eq!(
+            rows(create(&repeated, policy(3), || Ok(())).unwrap().returning()),
+            vec![vec![int(1)], vec![int(2)], vec![int(3)]],
+        );
+    }
+
     // An output alias takes precedence over the pre-write graph binding.
     let shadowed = prepare("UNWIND [3,1,2] AS x CREATE (n {p:x}) RETURN n.p AS n ORDER BY n+1");
     assert_eq!(shadowed.columns(), &["n"]);
@@ -469,6 +482,7 @@ fn computed_write_ordering_preserves_failures_and_shared_resource_boundaries() {
 #[test]
 fn computed_write_ordering_cannot_capture_unreturned_bindings() {
     for text in [
+        "UNWIND [1,2] AS x CREATE (:Item) RETURN x+1 AS value ORDER BY x",
         "CREATE (n:Item {p:1,q:2}) RETURN n.p AS p ORDER BY n.q+1",
         "CREATE (n:Item {p:1,q:2}) RETURN DISTINCT n.p AS p ORDER BY n.q+1",
         "CREATE (n:Item {p:1}) RETURN count(*) AS c ORDER BY n.p+1",

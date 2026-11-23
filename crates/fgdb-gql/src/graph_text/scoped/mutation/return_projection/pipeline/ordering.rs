@@ -217,9 +217,8 @@ impl<'a> Parser<'a> {
                     let TokenKind::Word(word) = parser.current.kind else {
                         return Ok(None);
                     };
-                    if parser.elements.contains(&word)
-                        || matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
-                    {
+                    let next = parser.lexer.clone().next()?.kind;
+                    if parser.elements.contains(&word) || matches!(next, TokenKind::Punct(b'(')) {
                         return Ok(None);
                     }
                     if let Some(column) = schema.iter().position(|(name, _)| name.text == word) {
@@ -238,7 +237,23 @@ impl<'a> Parser<'a> {
                         parser.advance()?;
                         return Ok(Some(column));
                     }
-                    parser.sourced_key(sources)
+                    if matches!(next, TokenKind::Punct(b'.')) {
+                        return parser.sourced_key(sources);
+                    }
+                    // A bare input returned under an alias is also a repeated
+                    // source spelling. Only the projected cell is available.
+                    let column = sources.iter().position(|source| {
+                        source.text == word
+                            || source
+                                .text
+                                .strip_prefix('`')
+                                .and_then(|name| name.strip_suffix('`'))
+                                == Some(word)
+                    });
+                    if column.is_some() {
+                        parser.advance()?;
+                    }
+                    Ok(column)
                 },
                 0,
             )

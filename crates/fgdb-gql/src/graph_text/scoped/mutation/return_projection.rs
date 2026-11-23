@@ -2072,6 +2072,9 @@ impl<'a> Parser<'a> {
         required: GqlParameterType,
         at: usize,
     ) -> Result<(), GraphPatternTextError> {
+        if self.inherited_parameter_names.contains(name) {
+            self.check_declared_parameter(name, required, at)?;
+        }
         if self.parameter_inference.as_ref().is_some_and(|inference| {
             inference
                 .borrow()

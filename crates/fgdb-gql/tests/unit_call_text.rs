@@ -88,6 +88,20 @@ fn scoped_write_import_names_cannot_be_redeclared_or_inherited_by_empty_calls() 
 }
 
 #[test]
+fn post_write_continuations_need_their_owned_row_without_an_ambient_call_frame() {
+    let chain = prepare("CALL() { CREATE (:F) RETURN 1 AS n } RETURN n");
+    let owned = chain.read_input().unwrap();
+    let arguments = fgdb_gql::PreparedGraphSet::arguments(
+        owned.columns().to_vec(),
+        owned.column_types().to_vec(),
+    )
+    .unwrap();
+    assert!(chain.accepts_read_continuation(&owned));
+    assert!(!chain.accepts_read_continuation(&owned.clone().cross_join(arguments).unwrap()));
+    assert!(!chain.accepts_read_continuation(&owned.clone().cross_join(owned).unwrap()));
+}
+
+#[test]
 fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
     use fgdb_delta_types::ElementId;
     use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
@@ -156,6 +170,12 @@ fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
              RETURN x+y AS value UNION ALL WITH 3 AS y RETURN x+y AS value } RETURN value",
             vec![9, 10],
             vec![7],
+        ),
+        (
+            "WITH 3 AS y,7 AS x CALL(x,y) { CREATE (:F {p:x-y}) RETURN x-y AS value \
+             UNION ALL WITH 2 AS n RETURN x-y+n AS value } RETURN value",
+            vec![4, 6],
+            vec![4],
         ),
         (
             "WITH 7 AS x CALL(x) { WITH 0 AS ignored \
@@ -436,8 +456,8 @@ fn call_union_framing_preserves_identifier_operands_aliases_and_native_read_clas
          UNION ALL RETURN 2 AS union } RETURN union",
         "CALL() { WITH 3 AS delete CREATE (:F) RETURN delete \
          UNION ALL RETURN 2 AS delete } RETURN delete",
-        "CALL() { WITH 3 AS `not` CREATE (:F) RETURN `not` \
-         UNION ALL RETURN 2 AS `not` } RETURN `not`",
+        "CALL() { WITH 3 AS `local value` CREATE (:F) RETURN `local value` AS value \
+         UNION ALL RETURN 2 AS value } RETURN value",
         "CALL() { WITH 3 AS on RETURN on \
          UNION ALL CREATE (:F) RETURN 2 AS on } RETURN on",
         "CALL() { WITH 3 AS starts RETURN starts \
@@ -453,6 +473,29 @@ fn call_union_framing_preserves_identifier_operands_aliases_and_native_read_clas
     ] {
         prepare(text);
     }
+    // The framer must see the next arm after a delimited operand. The
+    // variable grammar separately refuses a delimited grammar keyword.
+    let text = "CALL() { WITH 3 AS `not` CREATE (:F) RETURN `not` \
+                UNION ALL RETURN 2 AS `not` } RETURN `not`";
+    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+    assert!(
+        PreparedGraphWriteChainText::is_chain(
+            "CALL() { RETURN `not` UNION ALL CREATE (:F) RETURN 2 AS value }",
+        )
+        .unwrap()
+    );
+    let fgdb_gql::GraphWriteChainTextError::Insert(error) =
+        PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols).unwrap_err()
+    else {
+        panic!("the write head must preserve the variable parser's refusal");
+    };
+    assert!(matches!(
+        error.kind,
+        fgdb_gql::GraphInsertTextErrorKind::Query(fgdb_gql::GraphPatternTextErrorKind::Expected(
+            "a delimited identifier that is not a keyword",
+        )),
+    ));
+    assert_eq!(error.offset, text.find("`not`").unwrap());
     for text in [
         "CALL { WITH 1 AS union,2 AS delete RETURN union+delete AS value } RETURN value",
         "CALL { WITH 1 AS union,2 AS delete RETURN 2*union+delete AS value } RETURN value",
@@ -609,6 +652,72 @@ fn call_union_arms_refuse_scope_schema_and_parameter_contract_drift() {
         .unwrap();
     assert_ne!(first, second);
     assert_eq!(first, retained);
+}
+
+#[test]
+fn call_union_list_parameters_retain_their_domain_across_unconstrained_uses() {
+    let inferred = "CALL() { UNWIND $arg AS x RETURN $arg AS value \
+                    UNION ALL CREATE (:F) RETURN $arg AS value } RETURN value";
+    let declared = "CALL() { CREATE (:F {p:$arg}) RETURN 1 AS value \
+                    UNION ALL UNWIND $arg AS x RETURN 1 AS value } RETURN value";
+    for (text, declarations) in [
+        (inferred, &[][..]),
+        (declared, &[("arg", GqlParameterType::List)][..]),
+    ] {
+        let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+            text,
+            RelationId(1),
+            declarations,
+            symbols,
+        )
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let schema = template.parameter_schema();
+        assert_eq!(schema.len(), 1);
+        assert_eq!(schema[0].parameter_type, GqlParameterType::List);
+        assert!(
+            template
+                .bind_parameters(&GqlParameters::new().with_int64("arg", 1).unwrap())
+                .is_err()
+        );
+        template
+            .bind_parameters(&GqlParameters::new().with_list("arg", vec![]).unwrap())
+            .unwrap();
+    }
+}
+
+#[test]
+fn call_union_rejects_incompatible_list_and_page_parameters_in_both_orders() {
+    use fgdb_gql::{
+        GraphInsertTextErrorKind, GraphPatternTextErrorKind::ConflictingParameterTypes,
+        GraphSetTextErrorKind, GraphWriteChainTextError,
+    };
+    let write = "CREATE (:F) RETURN 1 AS value LIMIT $arg";
+    let read = "UNWIND $arg AS member RETURN 1 AS value";
+    for (first, second) in [(write, read), (read, write)] {
+        let text = format!("CALL() {{ {first} UNION ALL {second} }} RETURN value");
+        let error =
+            PreparedGraphWriteChainText::prepare(&text, RelationId(1), symbols).unwrap_err();
+        let offset = match error {
+            GraphWriteChainTextError::Insert(error)
+                if matches!(
+                    error.kind,
+                    GraphInsertTextErrorKind::Query(ConflictingParameterTypes)
+                ) =>
+            {
+                error.offset
+            }
+            GraphWriteChainTextError::Read(error)
+                if matches!(
+                    error.kind,
+                    GraphSetTextErrorKind::Pattern(ConflictingParameterTypes)
+                ) =>
+            {
+                error.offset
+            }
+            other => panic!("expected a parameter conflict for {text}: {other:?}"),
+        };
+        assert_eq!(offset, text.rfind("$arg").unwrap());
+    }
 }
 
 #[test]

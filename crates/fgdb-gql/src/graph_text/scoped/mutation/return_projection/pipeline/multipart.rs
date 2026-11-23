@@ -3380,6 +3380,7 @@ impl<'a> Parser<'a> {
         let boundary = self.boundary_reads.clone();
         let call_scope = self.call_scope.clone();
         let parameter_types = self.parameter_types.clone();
+        let inherited_parameter_names = self.inherited_parameter_names.clone();
         let parameter_aliases = self.parameter_aliases.clone();
         let parameter_inference = self.parameter_inference.clone();
         let parse = |deferred: &[usize], implicit: &[usize]| -> Result<_, GraphSetTextError> {
@@ -3390,6 +3391,9 @@ impl<'a> Parser<'a> {
             parser.parameter_inference.clone_from(&parameter_inference);
             if incoming.is_some() {
                 parser.parameter_types.clone_from(&parameter_types);
+                parser
+                    .inherited_parameter_names
+                    .clone_from(&inherited_parameter_names);
                 parser = parser.resume_after(boundary.clone(), &[], at)?;
             }
             parser.deferred_wheres = deferred.to_vec();

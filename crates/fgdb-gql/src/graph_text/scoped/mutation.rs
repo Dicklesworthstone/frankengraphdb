@@ -2397,9 +2397,12 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<Self, GraphPatternTextError> {
         for spec in parameters.iter().filter(|spec| !spec.is_statement_time()) {
-            self.parameter_types
-                .entry(spec.name.clone())
-                .or_insert(spec.parameter_type);
+            if let std::collections::btree_map::Entry::Vacant(slot) =
+                self.parameter_types.entry(spec.name.clone())
+            {
+                self.inherited_parameter_names.insert(spec.name.clone());
+                slot.insert(spec.parameter_type);
+            }
         }
         self.lexer.at = at;
         self.lexer.tokens = 0;

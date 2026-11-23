@@ -1079,6 +1079,8 @@ struct Parser<'a> {
     /// must never make a newly parsed `()` correlate with an ancestor node.
     outer_anonymous: Vec<&'a str>,
     parameter_types: BTreeMap<String, GqlParameterType>,
+    /// Undeclared argument types fixed by a preceding write step or CALL arm.
+    inherited_parameter_names: BTreeSet<String>,
     /// A WITH alias retains the origin of a bare parameter, keyed by its
     /// actual binding occurrence rather than its spelling. Collection-only
     /// uses can constrain that origin without confusing shadowed bindings.
@@ -1366,6 +1368,7 @@ impl<'a> Parser<'a> {
             scope_count: 0,
             outer_anonymous: Vec::new(),
             parameter_types: BTreeMap::new(),
+            inherited_parameter_names: BTreeSet::new(),
             parameter_aliases: BTreeMap::new(),
             parameter_inference: None,
             flexible_page_parameters: BTreeSet::new(),

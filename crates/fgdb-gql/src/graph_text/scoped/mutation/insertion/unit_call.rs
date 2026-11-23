@@ -268,9 +268,9 @@ impl PreparedGraphCallText {
                         .into());
                     }
                     let read = body.bind_parameters(&own)?;
-                    if !imported
-                        .is_some_and(|(columns, types)| read.has_one_owned_input(columns, types))
-                        || read.check_parent_depth().is_err()
+                    if !imported.is_some_and(|(columns, types)| {
+                        read.has_one_owned_call_input(columns, types)
+                    }) || read.check_parent_depth().is_err()
                     {
                         return Err(expected(
                             self.input.first.return_at,
@@ -358,13 +358,12 @@ impl<'a> CallPreparation<'a> {
         resolve: &mut impl GraphSymbolResolver,
     ) -> Result<(), GraphWriteChainTextError> {
         let range = &self.ranges[self.arm];
-        // Each arm infers its own uses against the common prefix. finish_arm
-        // merges those constraints only after the arm has been prepared.
-        let prefix_parameters = &self.parser.syntax.parameters;
+        // Bare projections reuse an earlier arm's type. resume_after keeps
+        // these inferred types distinct from explicit nullable declarations.
         let mut parser =
             Parser::new_with_parameter_types(&self.statement[..range.end], declarations)?
                 .with_zones(resolve.time_zones())
-                .resume_after(None, prefix_parameters, range.start)?;
+                .resume_after(None, &self.parameters, range.start)?;
         self.imports = if let Some(imports) = &self.scoped_imports {
             imports.clone()
         } else if parser.unit_call_legacy_imports(&self.outer)? {
@@ -393,7 +392,7 @@ impl<'a> CallPreparation<'a> {
             at: parser.current.at,
             row,
             boundary: None,
-            parameters: prefix_parameters.clone(),
+            parameters: self.parameters.clone(),
             call_scope,
         });
         Ok(())
