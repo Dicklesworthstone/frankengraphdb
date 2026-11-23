@@ -1022,9 +1022,12 @@ mod staged_procedures {
     type Fault = GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
     type Receipt = (GraphInsertStats, GqlQueryExecution<GraphValueRow>);
 
-    // The old direct shortcut must disappear, the first edge's weight must
-    // change, and a new second hop must exist before the algorithm reads.
+    // The scoped writer can increase a permitted weight. The newly created
+    // two-hop path must beat the updated direct edge before publication.
     const PREFIX: &str = "MATCH (a:Visible {p:10})-[old:R]->(b:Visible {p:20}) \
+        SET old.p=4 WITH a,b MATCH (a)-[shortcut:R]->(c:Visible {p:30}) \
+        SET shortcut.p=11 WITH a,b,c CREATE (b)-[:R {p:3}]->(c) WITH a ";
+    const DELETE_PREFIX: &str = "MATCH (a:Visible {p:10})-[old:R]->(b:Visible {p:20}) \
         SET old.p=4 WITH a,b MATCH (a)-[shortcut:R]->(c:Visible {p:30}) \
         DELETE shortcut WITH a,b,c CREATE (b)-[:R {p:3}]->(c) WITH a ";
     const WEIGHTED: &str = "CALL fnx.single_source_dijkstra_path_length(\
@@ -1156,6 +1159,40 @@ mod staged_procedures {
                 ]
             })
             .collect()
+    }
+
+    #[test]
+    fn staged_procedures_observe_edge_retirement_under_complete_property_authority() {
+        lab(0xc4a1_2321, |contexts| async move {
+            let graph = "CALL hybrid.search(seeds => [1], max_hops => 2, eligible => [3], \
+                graph_candidates => 3, k => 1) YIELD node,graph_hops RETURN node,graph_hops";
+            let hops = vec![vec![
+                GraphValue::Vertex(VId(3)),
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+            ]];
+            for (read, expected) in [(WEIGHTED, distances(&[0.0, 4.0, 7.0])), (graph, hops)] {
+                let program = chain(&format!("{DELETE_PREFIX}{read}"));
+                for hidden in [false, true] {
+                    let refused = execute(&contexts, &program, hidden, capability(3), policy(3))
+                        .await
+                        .unwrap_err();
+                    assert_eq!(authorization(&refused), Some(Error::ScopeDenied));
+                    let mut grant = capability(3);
+                    grant.properties = Scope::All;
+                    let (stats, rows) = execute(&contexts, &program, hidden, grant, policy(3))
+                        .await
+                        .unwrap();
+                    assert_eq!(stats.created_edges, 1);
+                    assert_eq!(
+                        rows.value
+                            .iter()
+                            .map(|row| row.values().to_vec())
+                            .collect::<Vec<_>>(),
+                        expected
+                    );
+                }
+            }
+        });
     }
 
     #[test]
@@ -1466,6 +1503,17 @@ mod staged_procedures {
     }
 }
 
+fn search_error<'a>(
+    mut error: &'a (dyn core::error::Error + 'static),
+) -> Option<&'a fgdb::HybridCallError> {
+    loop {
+        if let Some(search) = error.downcast_ref::<fgdb::HybridCallError>() {
+            return Some(search);
+        }
+        error = error.source()?;
+    }
+}
+
 mod staged_hybrid {
     use super::*;
     use fgdb_gql::algebra::GraphValueRow;
@@ -1479,7 +1527,6 @@ mod staged_hybrid {
     const Y: PropertyKeyId = PropertyKeyId(5);
     const PREFIX: &str = "MATCH (a:Visible {p:10}),(c:Visible {p:30}) \
         SET a.body='graph',a.x=0,c.body='graph' WITH a,c \
-        MATCH (a)-[shortcut:R]->(c) DELETE shortcut WITH a,c \
         MATCH (b:Visible {p:20}) CREATE (b)-[:R]->(c) WITH a ";
     const LANES: &str = "text => 'graph', text_property => 'body', \
         vector => [0,0], vector_properties => ['x','y'], \
@@ -1546,7 +1593,6 @@ mod staged_hybrid {
             seed.create_vertex(VId(id), vec![L], fields);
         }
         seed.add_edge(EId(1), VId(1), VId(2), vec![]);
-        seed.add_edge(EId(2), VId(1), VId(3), vec![]);
         if hidden {
             seed.create_vertex(
                 VId(90),
@@ -1643,40 +1689,53 @@ mod staged_hybrid {
     #[test]
     fn fusion_reads_staged_fields_and_topology_inside_the_authorized_corpus() {
         lab(0xc4a1_2121, |contexts| async move {
-            for ann in ["", ", ann => 32"] {
-                let program = prepare(&format!(
-                    "{PREFIX}CALL hybrid.search({LANES}{ann}) {OUTPUT}"
-                ));
-                let expected = execute(&contexts, &program, false, capability(3), policy(3))
-                    .await
-                    .unwrap();
-                assert_eq!(expected.0.created_vertices, 0);
-                assert_eq!(expected.0.created_edges, 1);
-                assert_eq!(expected.1.value.len(), 3);
-                for (at, row) in expected.1.value.iter().enumerate() {
-                    let rank = at as i64 + 1;
-                    assert_eq!(
-                        &row.values()[..8],
-                        &[
-                            GraphValue::Vertex(VId(rank as u128)),
-                            int(rank * 10),
-                            GraphValue::Scalar(text("graph")),
-                            int(rank),
-                            int(rank),
-                            int(rank),
-                            int(at as i64),
-                            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(
-                                (at * at) as f64
-                            ))),
-                        ]
-                    );
-                }
+            let program = prepare(&format!("{PREFIX}CALL hybrid.search({LANES}) {OUTPUT}"));
+            let expected = execute(&contexts, &program, false, capability(3), policy(3))
+                .await
+                .unwrap();
+            assert_eq!(expected.0.created_vertices, 0);
+            assert_eq!(expected.0.created_edges, 1);
+            assert_eq!(expected.1.value.len(), 3);
+            for (at, row) in expected.1.value.iter().enumerate() {
+                let rank = at as i64 + 1;
                 assert_eq!(
-                    execute(&contexts, &program, true, capability(3), policy(3))
-                        .await
-                        .unwrap(),
-                    expected,
-                    "hidden malformed fields, documents and shortcuts cannot change ranks or resource use"
+                    &row.values()[..8],
+                    &[
+                        GraphValue::Vertex(VId(rank as u128)),
+                        int(rank * 10),
+                        GraphValue::Scalar(text("graph")),
+                        int(rank),
+                        int(rank),
+                        int(rank),
+                        int(at as i64),
+                        GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(
+                            (at * at) as f64
+                        ))),
+                    ]
+                );
+            }
+            assert_eq!(
+                execute(&contexts, &program, true, capability(3), policy(3))
+                    .await
+                    .unwrap(),
+                expected,
+                "hidden malformed fields, documents and shortcuts cannot change ranks or resource use"
+            );
+            let ann = prepare(&format!(
+                "{PREFIX}CALL hybrid.search({LANES}, ann => 32) {OUTPUT}"
+            ));
+            for hidden in [false, true] {
+                let error = execute(&contexts, &ann, hidden, capability(3), policy(3))
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(
+                        search_error(&error),
+                        Some(fgdb::HybridCallError::Combination(
+                            "authorized transaction search requires exact vector retrieval"
+                        ))
+                    ),
+                    "{error:?}"
                 );
             }
         });
@@ -1849,10 +1908,18 @@ mod staged_hybrid {
                 ),
                 (
                     "text => 'graph', text_property => 'p', seeds => [1], graph_access => 'indexed'",
-                    "requires materialized graph_access",
+                    "seeds need an explicit max_hops",
                 ),
                 (
                     "seeds => [1], graph_access => 'demand'",
+                    "seeds need an explicit max_hops",
+                ),
+                (
+                    "text => 'graph', text_property => 'p', seeds => [1], max_hops => 2, graph_access => 'indexed'",
+                    "requires materialized graph_access",
+                ),
+                (
+                    "seeds => [1], max_hops => 2, graph_access => 'demand'",
                     "requires materialized graph_access",
                 ),
             ] {
@@ -5130,11 +5197,9 @@ mod staged_hybrid_contracts {
     type Fault = GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
     type Receipt = (GraphInsertStats, GqlQueryExecution<GraphValueRow>);
 
-    // The selected document initially fails the text predicate. Its direct
-    // graph shortcut is removed and replaced with a path through an ineligible
-    // middle vertex before retrieval; the vector coordinate also changes.
-    const PREFIX: &str = "MATCH (a:Visible {p:10})-[shortcut:R]->(target:Visible {p:30}) \
-         DELETE shortcut WITH a,target MATCH (middle:Visible {p:20}) \
+    // The document has no visible path from the seed until the write adds
+    // the second hop. Its text and vector coordinate also change.
+    const PREFIX: &str = "MATCH (a:Visible {p:10}),(target:Visible {p:30}),(middle:Visible {p:20}) \
          CREATE (middle)-[:R]->(target) WITH a,target \
          SET target.body='graph', target.x=0 WITH a,target ";
     const SEARCH: &str = "CALL hybrid.search(text => 'graph', text_property => 'body', \
@@ -5205,7 +5270,6 @@ mod staged_hybrid_contracts {
             batch.create_vertex(VId(id), vec![L], properties);
         }
         batch.add_edge(EId(1), VId(1), VId(2), vec![]);
-        batch.add_edge(EId(2), VId(1), VId(3), vec![]);
         if hidden {
             batch.create_vertex(
                 VId(90),
@@ -5325,19 +5389,6 @@ mod staged_hybrid_contracts {
             .iter()
             .map(|row| row.values().to_vec())
             .collect()
-    }
-
-    fn search_error<'a>(
-        error: &'a (dyn core::error::Error + 'static),
-    ) -> Option<&'a fgdb::HybridCallError> {
-        let mut cause = Some(error);
-        while let Some(error) = cause {
-            if let Some(search) = error.downcast_ref::<fgdb::HybridCallError>() {
-                return Some(search);
-            }
-            cause = error.source();
-        }
-        None
     }
 
     #[test]
@@ -5906,6 +5957,7 @@ fn narrowed_mutation_matches_seed_property_roots_with_and_without_return() {
                             }
                         }
                         db.write(&commit, seed).await.unwrap();
+                        let pinned = db.pinned_read_view().unwrap();
                         let before = (
                             db.frontier().unwrap(),
                             db.vertices().unwrap(),
@@ -5988,12 +6040,14 @@ fn narrowed_mutation_matches_seed_property_roots_with_and_without_return() {
                         } else {
                             measured = Some(stats);
                         }
-                        for old in &before.1 {
+                        let commit_seq = fgdb_types::CommitSeq(before.0.0 + 1);
+                        let mut historical = before.1.clone();
+                        for (old, retained) in before.1.iter().zip(&mut historical) {
                             let mut expected = old.clone();
                             if old.vid == VId(2) {
-                                // SET creates a new property version, not a new
-                                // vertex birth. Keep its original creation
-                                // sequence and birth ordinal across the commit.
+                                // The two versions share a birth ordinal and meet at commit_seq.
+                                retained.retired_at = Some(commit_seq);
+                                expected.created_at = commit_seq;
                                 expected
                                     .props
                                     .iter_mut()
@@ -6003,6 +6057,8 @@ fn narrowed_mutation_matches_seed_property_roots_with_and_without_return() {
                             }
                             assert_eq!(db.vertex(old.vid).unwrap().unwrap(), expected);
                         }
+                        assert_eq!(pinned.vertices().unwrap(), before.1);
+                        assert_eq!(db.vertices_at(before.0).unwrap(), historical);
                         let created = db
                             .vertices()
                             .unwrap()
@@ -6010,16 +6066,16 @@ fn narrowed_mutation_matches_seed_property_roots_with_and_without_return() {
                             .filter(|vertex| !before.1.iter().any(|old| old.vid == vertex.vid))
                             .collect::<Vec<_>>();
                         assert_eq!(created.len(), 1);
+                        assert_eq!(created[0].created_at, commit_seq);
                         assert_eq!(
                             created[0].props,
                             vec![(P, CanonicalScalar::Int(100).into())]
                         );
                         assert_eq!(db.edges().unwrap(), before.2);
+                        assert_eq!(db.frontier().unwrap(), commit_seq);
                         assert_eq!(
                             completion,
-                            EmbeddedTxnCompletion::WriteCommitted {
-                                commit_seq: fgdb_types::CommitSeq(before.0.0 + 1),
-                            },
+                            EmbeddedTxnCompletion::WriteCommitted { commit_seq },
                         );
                         assert_eq!(txn.outstanding_obligations(), 0);
                     }

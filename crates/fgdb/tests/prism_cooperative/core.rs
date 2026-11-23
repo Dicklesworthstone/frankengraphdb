@@ -168,7 +168,7 @@ fn compressed_core_admits_exact_workspace_work_and_output_before_peeling() {
 }
 
 #[test]
-fn compressed_core_handles_empty_isolated_populations_and_refuses_loops_and_directed_inputs() {
+fn compressed_core_handles_isolates_and_directed_inputs_and_refuses_kept_loops() {
     let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -233,29 +233,58 @@ fn compressed_core_handles_empty_isolated_populations_and_refuses_loops_and_dire
             ))
         ));
         for direction in [Directedness::Directed, Directedness::Reversed] {
-            let mut invalid = opt;
-            invalid.projection.directedness = direction;
-            let error = db
-                .execute_fnx_sealed(
-                    &cx,
-                    &call,
-                    invalid,
-                    memory(),
-                    SealedLimits {
-                        max_image_bytes: 0,
-                        ..SealedLimits::default()
-                    },
-                )
-                .await
-                .unwrap_err();
+            let mut directed = options(direction);
+            let no_image = SealedLimits {
+                max_image_bytes: 0,
+                ..SealedLimits::default()
+            };
             assert!(matches!(
-                error,
-                FnxSealedReadError::Execution(FnxSealedExecutionError::Execution(
-                    FnxExecutionError::GraphKind {
+                db.execute_fnx_sealed(&cx, &FnxCallSpec::triangles(), directed, memory(), no_image)
+                    .await,
+                Err(FnxSealedReadError::Execution(
+                    FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind {
                         required: FnxGraphKind::Undirected
-                    }
+                    })
                 ))
             ));
+            assert!(matches!(
+                db.execute_fnx_sealed(&cx, &call, directed, memory(), no_image).await,
+                Err(FnxSealedReadError::Seal(error)) if error.is_admission_limit()
+            ));
+            assert!(matches!(
+                db.execute_fnx_sealed(&cx, &call, directed, memory(), SealedLimits::default())
+                    .await,
+                Err(FnxSealedReadError::Execution(
+                    FnxSealedExecutionError::Execution(FnxExecutionError::SelfLoopRefused)
+                ))
+            ));
+            directed.projection.self_loops = SelfLoopPolicy::Drop;
+            let graph = projection(&db, &cx, directed).await;
+            let expected = call
+                .execute_sealed(&cx, &graph, directed.execution_limits, memory())
+                .unwrap();
+            // Reciprocal arcs keep 0 and 1 in the 2-core after both tail vertices peel.
+            assert_eq!(
+                expected.rows,
+                [
+                    vec![FnxValue::Integer(2), FnxValue::Vertex(VId(0))],
+                    vec![FnxValue::Integer(2), FnxValue::Vertex(VId(1))],
+                    vec![FnxValue::Integer(1), FnxValue::Vertex(VId(2))],
+                    vec![FnxValue::Integer(1), FnxValue::Vertex(VId(u128::MAX))],
+                ]
+            );
+            let actual = call
+                .execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    directed.execution_limits,
+                    memory(),
+                    quantum(7),
+                    yield_now,
+                )
+                .await
+                .unwrap();
+            compare_execution(&actual, &expected);
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });

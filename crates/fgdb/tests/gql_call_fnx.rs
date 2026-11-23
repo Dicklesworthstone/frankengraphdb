@@ -208,6 +208,12 @@ fn procedure_error(error: QueryError) -> Result<ProcedureError, QueryError> {
             ))) => Ok(error),
             other => Err(QueryError::TransactionSet(Box::new(other))),
         },
+        QueryError::TransactionAggregate(error) => match *error {
+            GqlQueryError::Source(fgdb_gql::GraphAggregateError::InputRelation(
+                GraphSetExecutionError::Source(WriteTxnError::Gql(GqlError::Procedure(error))),
+            )) => Ok(error),
+            other => Err(QueryError::TransactionAggregate(Box::new(other))),
+        },
         other => Err(other),
     }
 }
@@ -2028,6 +2034,8 @@ fn late_procedure_selected_set_failure_restores_the_existing_transaction() {
     run_transaction(async |commit, cx, txcx| {
         let mut db = open(commit).await;
         let basis = db.frontier().unwrap();
+        let pinned = db.pinned_read_view().unwrap();
+        let original = pinned.vertices().unwrap();
         let mut txn = db.begin(txcx).unwrap();
         let mut prefix = WriteBatch::new(R);
         prefix.set_vertex_property(VId(6), P, Some(CanonicalScalar::Int(600)));
@@ -2072,8 +2080,28 @@ fn late_procedure_selected_set_failure_restores_the_existing_transaction() {
         assert_eq!(txn.staged_effect_digest().unwrap(), before);
         assert_eq!(txn.vertices(&db).unwrap(), expected);
         assert_eq!(db.frontier().unwrap(), basis);
-        txn.finish(&mut db, commit).await.unwrap();
-        assert_eq!(db.vertices().unwrap(), expected);
+        let published = fgdb_types::CommitSeq(basis.0 + 1);
+        assert_eq!(
+            txn.finish(&mut db, commit).await.unwrap(),
+            fgdb_types::EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: published
+            }
+        );
+        let mut committed = expected;
+        committed
+            .iter_mut()
+            .find(|row| row.vid == VId(6))
+            .unwrap()
+            .created_at = published;
+        assert_eq!(db.vertices().unwrap(), committed);
+        let mut historical = original.clone();
+        historical
+            .iter_mut()
+            .find(|row| row.vid == VId(6))
+            .unwrap()
+            .retired_at = Some(published);
+        assert_eq!(db.vertices_at(basis).unwrap(), historical);
+        assert_eq!(pinned.vertices().unwrap(), original);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }

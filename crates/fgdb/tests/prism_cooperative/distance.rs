@@ -437,9 +437,19 @@ fn compressed_load_preserves_history_flow_bits_quanta_and_every_live_cancellatio
         let kept = projection(&db, &cx, opt).await;
         assert!(matches!(call.execute_sealed(&cx, &kept, opt.execution_limits, memory()),
             Err(FnxSealedExecutionError::Execution(FnxExecutionError::SelfLoopRefused))));
+        let path = small_database(&contexts.commit(), 3, false).await;
         for direction in [Directedness::Directed, Directedness::Reversed] {
-            assert!(matches!(call.validate_sealed_projection(direction), Err(FnxSealedExecutionError::Execution(
-                FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected }))));
+            let opt = options(direction);
+            let graph = projection(&path, &cx, opt).await;
+            let expected = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
+            // In either orientation exactly one ordered endpoint pair passes through vertex 1.
+            assert_eq!(expected.rows, [
+                vec![FnxValue::Vertex(VId(0)), FnxValue::Score(0.0)],
+                vec![FnxValue::Vertex(VId(1)), FnxValue::Score(0.5)],
+                vec![FnxValue::Vertex(VId(2)), FnxValue::Score(0.0)],
+            ]);
+            compare_execution(&call.execute_sealed_cooperative(&cx, &graph, opt.execution_limits,
+                memory(), quantum(1), yield_now).await.unwrap(), &expected);
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });

@@ -174,6 +174,18 @@ async fn element_spool(
     allowance: GqlQueryPolicy,
     run_rows: usize,
 ) -> Result<ElementSpoolResult, NativeSpoolError> {
+    element_spool_with_run_limit(view, cx, prepared, params, allowance, run_rows, 64).await
+}
+
+async fn element_spool_with_run_limit(
+    view: &EmbeddedReadView,
+    cx: &fgdb_types::QueryCx,
+    prepared: &PreparedNativeRead,
+    params: &GqlParameters,
+    allowance: GqlQueryPolicy,
+    run_rows: usize,
+    max_runs: usize,
+) -> Result<ElementSpoolResult, NativeSpoolError> {
     let pool = MemoryPool::new(256_000, 0).unwrap();
     let mut source = scratch(cx, &pool).await;
     let mut destination = scratch(cx, &pool).await;
@@ -190,7 +202,7 @@ async fn element_spool(
             2,
             32,
             run_rows,
-            64,
+            max_runs,
             127,
             4096,
             100,
@@ -478,10 +490,28 @@ mod resident_property_seeds {
                 scalar(CanonicalScalar::Null),
             ]);
             let prepared = PreparedNativeRead::prepare(TEXT, &params, symbols).unwrap();
-            for run_rows in [1, 8] {
-                let actual = element_spool(&view, &cx, &prepared, &params, policy(), run_rows)
-                    .await
-                    .unwrap();
+            // The scan sorts all 66 input vertices before matching collection
+            // keys. A one-row run therefore needs an allowance of exactly 66.
+            for cap in [64, 65] {
+                let result =
+                    element_spool_with_run_limit(&view, &cx, &prepared, &params, policy(), 1, cap)
+                        .await;
+                assert!(
+                    matches!(result, Err(NativeSpoolError::SortRunLimit { required: 66, limit }) if limit == cap)
+                );
+            }
+            for (run_rows, cap) in [(1, 66), (8, 64)] {
+                let actual = element_spool_with_run_limit(
+                    &view,
+                    &cx,
+                    &prepared,
+                    &params,
+                    policy(),
+                    run_rows,
+                    cap,
+                )
+                .await
+                .unwrap();
                 assert_eq!(actual.rows, rows(&[1, 2, 65, 65, 66]));
                 assert_eq!(actual.stats.snapshot_records, 66);
             }
@@ -491,10 +521,18 @@ mod resident_property_seeds {
                 scalar(CanonicalScalar::Int(7)),
                 scalar(CanonicalScalar::Null),
             ]);
-            for (run_rows, records) in [(1, 66), (8, 2)] {
-                let actual = element_spool(&view, &cx, &prepared, &params, policy(), run_rows)
-                    .await
-                    .unwrap();
+            for (run_rows, cap, records) in [(1, 66, 66), (8, 64, 2)] {
+                let actual = element_spool_with_run_limit(
+                    &view,
+                    &cx,
+                    &prepared,
+                    &params,
+                    policy(),
+                    run_rows,
+                    cap,
+                )
+                .await
+                .unwrap();
                 assert_eq!(actual.rows, rows(&[1, 2]));
                 assert_eq!(actual.stats.snapshot_records, records);
             }

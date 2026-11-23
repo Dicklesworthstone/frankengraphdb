@@ -1817,8 +1817,21 @@ fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits(
         assert_eq!(cutoff.execute_sealed_cooperative(&cx, &graph,
             FnxExecutionLimits { max_result_rows: 1, ..opt.execution_limits }, memory(),
             quantum(1), yield_now).await.unwrap().rows.len(), 1);
-        for call in [FnxCallSpec::triangles(),
-            FnxCallSpec::clustering_coefficient(), degree_call()] {
+        let degree = degree_call();
+        let expected = degree.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
+        assert_eq!(expected.rows, [
+            vec![FnxValue::Score(0.5), FnxValue::Vertex(VId(0))],
+            vec![FnxValue::Score(1.0), FnxValue::Vertex(VId(1))],
+            vec![FnxValue::Score(0.5), FnxValue::Vertex(VId(2))],
+        ]);
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+        let (actual, pending) = drive(degree.execute_sealed_cooperative(
+            &controlled, &graph, opt.execution_limits, memory(), quantum(1), yield_now,
+        ), &probe, 1);
+        compare_execution(&actual.unwrap(), &expected);
+        assert!(pending > 0);
+        for call in [FnxCallSpec::triangles(), FnxCallSpec::clustering_coefficient()] {
             assert!(call.supports_cooperative_sealed_execution());
             // Supported kernels still reject incompatible directed projections
             // at preflight, rather than yielding or silently changing semantics.
@@ -1828,7 +1841,11 @@ fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits(
                 opt.execution_limits, memory(), quantum(1),
                 || -> std::future::Ready<()> { panic!("invalid projection must not yield") })
                 .await.unwrap_err();
-            assert_eq!(actual.to_string(), expected.to_string());
+            for error in [expected, actual] {
+                assert!(matches!(error, FnxSealedExecutionError::Execution(
+                    FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected }
+                )));
+            }
         }
         for absent in [
             FnxCallSpec::single_source_shortest_path_length(VId(u128::MAX), None),
