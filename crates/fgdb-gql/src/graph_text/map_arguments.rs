@@ -484,6 +484,7 @@ macro_rules! text_offsets {
 text_offsets!(
     super::GraphPatternTextError,
     crate::GraphSetTextError,
+    crate::GraphPipelineAggregateTextError,
     crate::GraphInsertTextError,
     crate::GraphMutationTextError,
     crate::GraphVertexMergeTextError,
@@ -1146,6 +1147,9 @@ mod tests {
             offset: later,
             kind: super::super::GraphPatternTextErrorKind::UnknownVariable,
         };
+        let mut aggregate = crate::GraphPipelineAggregateTextError::from(error.clone());
+        lowered.restore(&mut aggregate);
+        assert_eq!(aggregate.offset, text.find("n.zz").unwrap());
         lowered.restore(&mut error);
         assert_eq!(error.offset, text.find("n.zz").unwrap());
 

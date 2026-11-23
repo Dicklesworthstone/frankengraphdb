@@ -24,6 +24,7 @@
 //! POST /v1/databases/<name>/read-transaction (up to 32 reads, one native read owner)
 //! POST /v1/databases/<name>/compact        (Admin only, empty body)
 //! POST /v1/databases/<name>/scrub          (Admin only, empty body)
+//! POST /v1/databases/<name>/seal           (Admin only, relation and optional retain_from)
 //!      Authorization: Bearer <hex capability token>
 //!      {"statement": "<gql>", "parameters": {"name": <json>, ...}}
 //!      {"statement": "<write script>", "argument_sets": [{"name": <json>}, ...]}

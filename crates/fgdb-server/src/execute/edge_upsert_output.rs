@@ -14,15 +14,6 @@ mod admission;
 /// Hydrated metadata uses the identical borrowed admission as ordinary native
 /// RETURN cells. No representation is copied before its depth, payload and
 /// signed work have been admitted by the still-private write owner.
-pub(crate) fn metadata(
-    input: &fgdb_gql::algebra::GraphValue,
-    work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
-) -> Result<WireValue, Refusal> {
-    metadata_checked(input, &mut |units| {
-        work(units).map_err(|error| write_refusal(&error))
-    })
-}
-
 pub(crate) fn metadata_checked(
     input: &fgdb_gql::algebra::GraphValue,
     work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
