@@ -2464,6 +2464,7 @@ mod tests {
                                                 value.to_bits()
                                             }
                                             FnxValue::Integer(value) => *value,
+                                            FnxValue::Boolean(value) => u64::from(*value),
                                         };
                                 }
                             }

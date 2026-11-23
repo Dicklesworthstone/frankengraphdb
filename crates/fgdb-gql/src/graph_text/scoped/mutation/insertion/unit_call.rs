@@ -822,10 +822,16 @@ impl<'a> Parser<'a> {
                         )? =>
                 {
                     if !nonempty {
-                        return Err(expected(token.at, "a nonempty UNION arm"));
+                        return Err(error(
+                            token.at,
+                            GraphPatternTextErrorKind::Expected("a nonempty UNION arm"),
+                        ));
                     }
                     if arms.len() + 1 >= crate::MAX_GRAPH_SET_DEPTH {
-                        return Err(expected(token.at, "bounded CALL UNION arm count"));
+                        return Err(error(
+                            token.at,
+                            GraphPatternTextErrorKind::Expected("bounded CALL UNION arm count"),
+                        ));
                     }
                     let next = lexer.clone().next()?;
                     let quantifier = match next.kind {
@@ -840,7 +846,12 @@ impl<'a> Parser<'a> {
                         _ => crate::GraphSetQuantifier::Distinct,
                     };
                     if union_quantifier.is_some_and(|previous| previous != quantifier) {
-                        return Err(expected(token.at, "one quantifier across CALL UNION arms"));
+                        return Err(error(
+                            token.at,
+                            GraphPatternTextErrorKind::Expected(
+                                "one quantifier across CALL UNION arms",
+                            ),
+                        ));
                     }
                     union_quantifier = Some(quantifier);
                     arms.push(CallArmRange {

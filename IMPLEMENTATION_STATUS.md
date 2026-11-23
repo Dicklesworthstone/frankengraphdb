@@ -12,6 +12,52 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Maintained aggregates, streamed subscriptions, and recovery integrity — qualification pending
+
+The correlated incremental compiler now admits ordered, reader-free projections
+and filters after global aggregate tuples. Empty COUNT/NULL restoration,
+complete-tuple overflow checks, outer invocation identity and bag multiplicity
+precede those stages. Subquery-local DISTINCT remains per invocation. Explicit
+aggregate-owned wide-domain HAVING, grouped correlated summaries and effectful
+stages remain outside this slice; the implementation uses the existing
+incremental operators rather than whole-query replay.
+
+The FGP SDK exposes `ChangeChunk` and `subscribe_streaming`; the CLI consumes
+and flushes each validated frame before requesting the next. A callback refusal
+cancels once, suppresses later callbacks/grants and drains with protocol checks
+intact. Application checkpoints advance only on accepted complete batches.
+The collected API deliberately retains a complete batch. These are session-local
+checkpoints, not durable reconnect/resume tokens, and the robot schema is unchanged.
+
+Beacon checkpoint admission now reconciles current text postings and vector lanes
+with live documents, enforces segment generation order, rejects count-derived
+allocations unsupported by remaining bytes, and preserves legitimate Unicode
+lowercase expansion and stale segments. Strata overlays now require the sealed
+base and suffix to share the admitted root, publication and verified horizon.
+Only the authenticated store walk can mint a suffix receipt; caller-owned
+reopened tuples cannot manufacture one. A carried run may retain its older
+original source root. This closes an authority gap, not the remaining overlay
+memory-admission work.
+
+Regression sources cover corrupted postings, scores and phrases after restore,
+Unicode expansion, cancellation/truncation, foreign-root overlays, subscription
+credit windows and sink failures, 1,024 weighted aggregate transitions, native
+commit deltas, rebuilds and quota rollback. Independent source reviews found no
+blocking issue. Pinned formatting and whitespace checks completed for Beacon,
+Strata and subscriptions; the aggregate whitespace check completed, but its
+formatter terminal status was lost during executor failure. The focused Beacon
+Cargo test exited 101 while retrieving pinned asupersync (HTTP/2 truncation, then
+proxy CONNECT 403), before compilation or assertions. Compiler/runtime and
+exact-tree qualification remain UNRUN.
+
+The ordinary-build source errors identified in the November 22 audit are also
+repaired: CALL UNION scanner errors use the declared pattern-error type, and the
+Prism test checksum handles the Boolean result variant. This has not yet been
+confirmed by a completed compiler run. Follow-up remains open under
+`fgdb-gql-prism-compile-gd65n`, `fgdb-qualify-integrated-nov22-maz0p`,
+`fgdb-rc1111-persistent-tier-r-7hsan`, `fgdb-rc1111-durable-watermarks-c1g98`,
+`fgdb-w6-sub-delivery-qol`, and `fgdb-w6-zset-circuits-kjv`.
+
 ### Intermediate DISTINCT in resident aggregate streams — qualification pending
 
 Vertex and edge aggregate cursors now admit scan-local WITH DISTINCT stages
