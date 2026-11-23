@@ -227,20 +227,17 @@ impl<V: Vfs + Clone> Database<V> {
                                 source_limits.max_root_bytes,
                             ));
                         if let Some((base, verified_through)) = post_seal_run.await? {
-                            let source: crate::SendFuture<'_, _> =
-                                Box::pin(published.store.reopen_with_vertices_bounded(
+                            let source: crate::SendFuture<'_, _> = Box::pin(
+                                published.store.reopen_with_vertices_and_post_seal_bounded(
                                     query_cx,
                                     published.root_id,
                                     as_of,
                                     source_limits,
-                                ));
-                            let (adjacency, patches) = source.await?;
-                            let post_seal = fgdb_strata::store::PostSealBlocks::from_reopened_all(
-                                published.root_id,
-                                &adjacency,
-                                relation,
-                                verified_through,
+                                    relation,
+                                    verified_through,
+                                ),
                             );
+                            let (adjacency, patches, post_seal) = source.await?;
                             let partition = fgdb_strata::tiered::sealed::SealedDeltaOverlay::build(
                                 query_cx,
                                 base,

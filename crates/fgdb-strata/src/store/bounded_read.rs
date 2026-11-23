@@ -208,6 +208,16 @@ pub type ReopenedAdjacency = (
 
 /// Root-authenticated post-seal Tier-D delta blocks (`last_seq > after_seq`)
 /// for a single relation, minted only after full root and history admission.
+/// An ordinary reopened tuple cannot be used to manufacture this receipt.
+///
+/// ```compile_fail,E0624
+/// use fgdb_strata::{PartitionRootVersion, store::{PostSealBlocks, ReopenedAdjacency}};
+/// use fgdb_delta_types::RelationId;
+/// use fgdb_types::{CommitSeq, QueryCx};
+/// fn forge(cx: &QueryCx, root: PartitionRootVersion, rows: &ReopenedAdjacency) {
+///     let _ = PostSealBlocks::from_reopened_all(cx, root, rows, RelationId(1), CommitSeq(0));
+/// }
+/// ```
 #[derive(Debug)]
 pub struct PostSealBlocks {
     pub(crate) source_root: crate::PartitionRootVersion,
@@ -219,19 +229,21 @@ pub struct PostSealBlocks {
 }
 
 impl PostSealBlocks {
-    /// Extract post-seal blocks for `relation` (`last_seq > after_seq`) from a
-    /// complete authenticated `ReopenedAdjacency` tuple (used by composed read
-    /// owners that already needed all relations' blocks for `EmbeddedReadView`).
-    pub fn from_reopened_all(
+    // Only a completed store walk may mint this proof. ReopenedAdjacency is
+    // public, mutable owned data, so accepting one through a public constructor
+    // would let a caller relabel or replace authenticated history.
+    fn from_reopened_all(
+        cx: &QueryCx,
         source_root: crate::PartitionRootVersion,
         adjacency: &ReopenedAdjacency,
         relation: fgdb_delta_types::RelationId,
         after_seq: CommitSeq,
-    ) -> Self {
+    ) -> Result<Self, RootReadError> {
         let (root, all_blocks, all_props) = adjacency;
         let mut blocks = Vec::new();
         let mut props = Vec::new();
         for (block, block_props) in all_blocks.iter().zip(all_props) {
+            cx.checkpoint().map_err(RootReadError::Interrupted)?;
             if block
                 .first()
                 .is_some_and(|entry| entry.relation == relation)
@@ -241,14 +253,15 @@ impl PostSealBlocks {
                 props.push(block_props.clone());
             }
         }
-        Self {
+        cx.checkpoint().map_err(RootReadError::Interrupted)?;
+        Ok(Self {
             source_root,
             publication: root.published_at,
             relation,
             after_seq,
             blocks,
             props,
-        }
+        })
     }
 }
 
@@ -711,6 +724,34 @@ impl<V: Vfs> BlockStore<V> {
         )
         .await
         .map(|(source, patches)| (source.adjacency, patches))
+    }
+
+    /// Retain the complete admitted source and mint a post-seal receipt in
+    /// the SAME authenticated walk. The receipt owns its selected blocks, so
+    /// later mutation of the returned ordinary rows cannot alter its proof.
+    /// Composed readers can therefore reuse all relations without another
+    /// root walk or a public constructor accepting caller-supplied history.
+    pub async fn reopen_with_vertices_and_post_seal_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: fgdb_delta_types::RelationId,
+        after_seq: CommitSeq,
+    ) -> Result<
+        (
+            ReopenedAdjacency,
+            Vec<crate::vertex::VertexPatchRows>,
+            PostSealBlocks,
+        ),
+        RootReadError,
+    > {
+        let (adjacency, patches) = self
+            .reopen_with_vertices_bounded(cx, id, requested_cut, limits)
+            .await?;
+        let post_seal = PostSealBlocks::from_reopened_all(cx, id, &adjacency, relation, after_seq)?;
+        Ok((adjacency, patches, post_seal))
     }
 
     /// Authenticate the complete source while retaining only vertex history.

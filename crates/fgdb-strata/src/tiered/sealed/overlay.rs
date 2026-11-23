@@ -96,7 +96,23 @@ impl SealedDeltaOverlay {
     ) -> Result<Self, SealedError> {
         cx.checkpoint().map_err(SealedError::Interrupted)?;
         let relation = base.header().relation;
-        let floor = base.header().scope.floor;
+        let anchor = base.partition().anchor();
+        // The base and suffix must have been admitted under the SAME root.
+        // A relation name and caller-supplied horizon do not prove ancestry:
+        // another root can carry a different run for that relation at the
+        // same sequence. Check the opaque store-minted envelope before any
+        // incoming-index construction or suffix materialization. The original
+        // run's source root may differ legitimately after intervening writes.
+        if anchor.relation() != Some(relation)
+            || anchor.admitted_envelope_root() != Some(envelope_root)
+            || anchor.admitted_publication() != envelope_publication
+            || anchor.verified_through() != verified_through
+            || anchor.scope().publication > verified_through
+            || verified_through >= envelope_publication
+        {
+            return Err(SealedError::ImageMismatch);
+        }
+        let floor = anchor.scope().floor;
         if as_of < floor || as_of <= verified_through || as_of > envelope_publication {
             return Err(SealedError::SnapshotOutsideAnchor {
                 requested: as_of,

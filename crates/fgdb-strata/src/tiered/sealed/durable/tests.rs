@@ -133,6 +133,106 @@ fn collect(cx: &QueryCx, source: &SealedPartition, src: VId, seq: u64) -> Rows {
     rows
 }
 
+#[test]
+fn post_seal_overlay_binds_both_sources_to_one_admitted_envelope() {
+    run(0x5ea1_2026, |cx| {
+        use super::super::SealedDeltaOverlay;
+
+        let limits = SealedLimits::default();
+        let (partition, origins, _) = source(false);
+        let unbound = AdjRunSegment::from_sealed(&cx, &partition, &origins, limits).unwrap();
+        let root = PartitionRootVersion(ObjectId([0xa1; 32]));
+        let foreign_root = PartitionRootVersion(ObjectId([0xb2; 32]));
+        let publication = CommitSeq(7);
+        let verified = CommitSeq(4);
+        let as_of = CommitSeq(5);
+        let added = AdjacencyEntry {
+            src: VId(1),
+            relation: RELATION,
+            dst: VId(2),
+            eid: EId(77),
+            created_at: as_of,
+            retired_at: None,
+        };
+        let suffix = crate::store::PostSealBlocks {
+            source_root: root,
+            publication,
+            relation: RELATION,
+            after_seq: verified,
+            blocks: vec![vec![added]],
+            props: vec![None],
+        };
+
+        // Matching public relation/sequence arguments alone are not evidence.
+        let refused = |base| {
+            assert!(matches!(
+                SealedDeltaOverlay::build(&cx, base, root, verified, as_of, &suffix, limits,),
+                Err(SealedError::ImageMismatch)
+            ));
+        };
+        refused(unbound.clone());
+        for (other_root, other_publication, other_verified) in [
+            (foreign_root, publication, verified),
+            (root, CommitSeq(6), verified),
+            (root, publication, CommitSeq(5)),
+        ] {
+            let mut wrong = unbound.clone();
+            wrong.bind_envelope(other_root, other_publication, other_verified);
+            refused(wrong);
+        }
+
+        let mut base = unbound;
+        base.bind_envelope(root, publication, verified);
+        // A carried run retains its older source root; the admitted envelope,
+        // rather than that original root, is what must agree with the suffix.
+        assert_ne!(base.header().scope.source_root, root);
+        let overlay =
+            SealedDeltaOverlay::build(&cx, base, root, verified, as_of, &suffix, limits).unwrap();
+        let materialized = overlay.materialize_partition(&cx, limits).unwrap();
+        let mut expected = vec![(added, Vec::new())];
+        expected.extend(collect(&cx, &partition, VId(1), verified.0));
+        assert_eq!(collect(&cx, &materialized, VId(1), as_of.0), expected);
+    });
+}
+
+#[test]
+fn post_seal_overlay_rejects_impossible_proof_horizons_before_materialization() {
+    run(0x5ea1_2027, |cx| {
+        use super::super::SealedDeltaOverlay;
+
+        let limits = SealedLimits::default();
+        let (partition, origins, _) = source(false);
+        let original = AdjRunSegment::from_sealed(&cx, &partition, &origins, limits).unwrap();
+        let root = PartitionRootVersion(ObjectId([0xa1; 32]));
+        for (publication, verified, as_of) in [(7, 3, 5), (4, 4, 5), (4, 5, 6)] {
+            let publication = CommitSeq(publication);
+            let verified = CommitSeq(verified);
+            let mut base = original.clone();
+            base.bind_envelope(root, publication, verified);
+            let suffix = crate::store::PostSealBlocks {
+                source_root: root,
+                publication,
+                relation: RELATION,
+                after_seq: verified,
+                blocks: Vec::new(),
+                props: Vec::new(),
+            };
+            assert!(matches!(
+                SealedDeltaOverlay::build(
+                    &cx,
+                    base,
+                    root,
+                    verified,
+                    CommitSeq(as_of),
+                    &suffix,
+                    limits,
+                ),
+                Err(SealedError::ImageMismatch)
+            ));
+        }
+    });
+}
+
 #[derive(Default)]
 struct DecodeAdmission {
     encoded: Vec<usize>,
