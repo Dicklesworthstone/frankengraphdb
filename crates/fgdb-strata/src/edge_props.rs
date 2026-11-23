@@ -247,23 +247,57 @@ impl core::fmt::Display for EdgePropertyPatchError {
 
 impl core::error::Error for EdgePropertyPatchError {}
 
-/// Canonically measure a row once for both sealing and compaction. A
-/// propertyless entry uses no patch row. Indivisible rows must fit alone.
-/// Returns the row bytes excluding the shared patch header. Write preparation
-/// uses the same admission before its effects can enter Chronicle.
-pub fn admitted_row_bytes(row: &EdgePropertyRow) -> Result<u64, EdgePropertyPatchError> {
+/// Canonically measure a borrowed row without allocating its encoded payload.
+/// A propertyless entry uses no patch row. Indivisible rows must fit alone,
+/// including the shared patch header. The returned size excludes that header.
+/// Write preparation, compaction and sealing share this admission. The
+/// borrowed slice lets callers check it before cloning a property row.
+pub fn admitted_row_bytes(
+    row: &[(PropertyKeyId, CanonicalPropertyValue)],
+) -> Result<u64, EdgePropertyPatchError> {
     if row.is_empty() {
         return Ok(0);
     }
-    let bytes = encode_property_patch(core::slice::from_ref(row))?.len() as u64;
+    validate_row(0, row)?;
     let limit = crate::store::MAX_STORED_OBJECT_BYTES;
+    // The row's u32 property count, followed by each u64 key, u32 value
+    // length and canonical value. The value owners already validate their
+    // complete encodings and cache collection sizes; no scratch encoding is
+    // needed merely to decide whether this row can be stored.
+    let mut bytes = PROPERTY_PATCH_HEADER_BYTES + 4;
+    for (_, value) in row {
+        let encoded_len = match value.as_scalar() {
+            Some(scalar) => scalar
+                .canonical_encoded_len()
+                .map_err(|error| EdgePropertyPatchError::ScalarEncode { at: 0, error })?,
+            None => value
+                .canonical_encoded_len()
+                .map_err(|error| EdgePropertyPatchError::PropertyValue { at: 0, error })?,
+        };
+        let encoded_len = u64::try_from(encoded_len).map_err(|_| {
+            EdgePropertyPatchError::RowExceedsStorageLimit {
+                bytes: u64::MAX,
+                limit,
+            }
+        })?;
+        bytes = bytes
+            .checked_add(8 + 4)
+            .and_then(|size| size.checked_add(encoded_len))
+            .ok_or(EdgePropertyPatchError::RowExceedsStorageLimit {
+                bytes: u64::MAX,
+                limit,
+            })?;
+    }
     if bytes > limit {
         return Err(EdgePropertyPatchError::RowExceedsStorageLimit { bytes, limit });
     }
     Ok(bytes - PROPERTY_PATCH_HEADER_BYTES)
 }
 
-fn validate_row(at: usize, row: &EdgePropertyRow) -> Result<(), EdgePropertyPatchError> {
+fn validate_row(
+    at: usize,
+    row: &[(PropertyKeyId, CanonicalPropertyValue)],
+) -> Result<(), EdgePropertyPatchError> {
     if row.is_empty() {
         return Err(EdgePropertyPatchError::EmptyRow { at });
     }
@@ -755,6 +789,98 @@ mod selected_row_tests {
                 .unwrap(),
             ),
         ]
+    }
+
+    #[test]
+    fn borrowed_row_admission_matches_canonical_bytes_across_formats() {
+        assert_eq!(admitted_row_bytes(&[]), Ok(0));
+        assert_eq!(
+            admitted_row_bytes(&[(PropertyKeyId(1), CanonicalScalar::Null.into())]),
+            Ok(17)
+        );
+        assert_eq!(
+            admitted_row_bytes(&[(PropertyKeyId(1), CanonicalScalar::Bool(true).into())]),
+            Ok(18)
+        );
+        assert_eq!(
+            admitted_row_bytes(&[(PropertyKeyId(1), CanonicalScalar::Int(i64::MIN).into())]),
+            Ok(25)
+        );
+
+        let limit = crate::store::MAX_STORED_OBJECT_BYTES;
+        for value in values().into_iter().chain([
+            CanonicalScalar::Null.into(),
+            CanonicalScalar::Bool(false).into(),
+            CanonicalScalar::Int(i64::MAX).into(),
+            CanonicalScalar::bytes(vec![0x57; 20_000]).unwrap().into(),
+        ]) {
+            for count in [1, 2, 17] {
+                let row: EdgePropertyRow = (0..count)
+                    .map(|key| (PropertyKeyId(key), value.clone()))
+                    .collect();
+                let encoded = encode_property_patch(core::slice::from_ref(&row)).unwrap();
+                let bytes = encoded.len() as u64;
+                let expected = if bytes > limit {
+                    Err(EdgePropertyPatchError::RowExceedsStorageLimit { bytes, limit })
+                } else {
+                    Ok(bytes - PROPERTY_PATCH_HEADER_BYTES)
+                };
+                assert_eq!(admitted_row_bytes(row.as_slice()), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_row_admission_keeps_exact_storage_boundary_and_key_validation() {
+        let limit = crate::store::MAX_STORED_OBJECT_BYTES;
+        let payload = usize::try_from(limit - PROPERTY_PATCH_HEADER_BYTES - 4).unwrap();
+        // A NULL field occupies 8 key + 4 length + 1 tag bytes. Replacing
+        // a NULL with a Bool adds one byte, giving an exact boundary fixture
+        // whose size is independently checked by the real encoder.
+        let mut row: EdgePropertyRow = (0..payload / 13)
+            .map(|key| (PropertyKeyId(key as u64), CanonicalScalar::Null.into()))
+            .collect();
+        for (_, value) in row.iter_mut().take(payload % 13) {
+            *value = CanonicalScalar::Bool(true).into();
+        }
+        assert_eq!(
+            encode_property_patch(core::slice::from_ref(&row))
+                .unwrap()
+                .len() as u64,
+            limit
+        );
+        assert_eq!(
+            admitted_row_bytes(&row),
+            Ok(limit - PROPERTY_PATCH_HEADER_BYTES)
+        );
+
+        row.last_mut().unwrap().1 = CanonicalScalar::Bool(true).into();
+        assert_eq!(
+            admitted_row_bytes(&row),
+            Err(EdgePropertyPatchError::RowExceedsStorageLimit {
+                bytes: limit + 1,
+                limit,
+            })
+        );
+
+        let last = row.len() - 1;
+        row[last].0 = row[last - 1].0;
+        assert_eq!(
+            admitted_row_bytes(&row),
+            Err(EdgePropertyPatchError::NonCanonicalRow { at: 0 })
+        );
+        assert_eq!(
+            encode_property_patch(&[row]),
+            Err(EdgePropertyPatchError::NonCanonicalRow { at: 0 })
+        );
+        let descending = [
+            (PropertyKeyId(9), CanonicalScalar::Int(1).into()),
+            (PropertyKeyId(8), CanonicalScalar::Int(2).into()),
+        ];
+        assert_eq!(
+            admitted_row_bytes(&descending),
+            Err(EdgePropertyPatchError::NonCanonicalRow { at: 0 })
+        );
     }
 
     #[test]
