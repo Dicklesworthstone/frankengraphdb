@@ -1225,6 +1225,142 @@ fn filtered_count_keeps_uninvoked_and_invoked_expression_errors_distinct() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn post_summary_calls_maintain_computed_rows_filters_and_local_distinct() {
+    let ((), report) = run_async_under_lab(0x7073_7010, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xe7)).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let parameters = GqlParameters::new();
+        let prefix = "MATCH (a:L) UNWIND [7,7] AS token WITH token,a CALL (a) { ";
+        let statements = [
+            format!("{prefix}MATCH (a)-[:R]->(b:M) WITH count(*) AS n WHERE n > 1 RETURN n+1 AS degree }} RETURN token,a,degree"),
+            format!("{prefix}MATCH (a)-[:R]->(b:M) WITH count(*) AS n,sum(id(b)) AS s WHERE n = 0 OR s >= 4 RETURN coalesce(s,7) AS total,n+1 AS degree }} RETURN token,a,total,degree"),
+            format!("{prefix}MATCH (a)-[:R]->(b:M) WITH count(*) AS n WITH DISTINCT NULL AS absent RETURN absent }} RETURN token,a,absent"),
+            format!("{prefix}MATCH (a)-[:R]->(b:M) RETURN count(*)+1 AS degree }} RETURN token,a,degree"),
+        ];
+        let mut queries = Vec::new();
+        for text in statements {
+            let prepared = PreparedNativeRead::prepare(&text, &parameters, symbols).unwrap();
+            let (nodes, _) = prepared.subscription_footprint(&cx, &parameters).unwrap();
+            let first = db.standing_queries.len();
+            let handle = prepared.register_standing(&mut db, &cx, &parameters, policy()).unwrap();
+            assert!(nodes >= (db.standing_queries.len() - first) as u64);
+            assert!(db.standing_queries[first..].iter().any(|query| matches!(query, StandingQuery::Group(_))));
+            queries.push((text.clone(), bind(&text), handle));
+        }
+        // Counts and sums are literal fixture answers. Formatting the returned
+        // expressions here does not invoke an engine or maintain a second graph.
+        let expected = |groups: &[(u128, i64, Option<i64>)]| {
+            let mut rows = [Bag::new(), Bag::new(), Bag::new(), Bag::new()];
+            for &(owner, count, sum) in groups {
+                let prefix = vec![integer(7), vertex(Some(owner))];
+                let mut computed = prefix.clone();
+                computed.push(integer(count + 1));
+                if count > 1 {
+                    rows[0].insert(row(computed.clone()), 2);
+                }
+                rows[3].insert(row(computed), 2);
+                if count == 0 || sum.is_some_and(|value| value >= 4) {
+                    let mut tuple = prefix.clone();
+                    tuple.extend([integer(sum.unwrap_or(7)), integer(count + 1)]);
+                    rows[1].insert(row(tuple), 2);
+                }
+                let mut absent = prefix;
+                absent.push(vertex(None));
+                rows[2].insert(row(absent), 2);
+            }
+            rows
+        };
+        let mut previous = expected(&[(1, 2, Some(4)), (3, 1, Some(4)), (5, 0, None)]);
+        for ((text, query, handle), rows) in queries.iter().zip(&previous) {
+            check(&db, &cx, text, query, handle, rows, policy());
+        }
+        for phase in 0..6 {
+            let from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(R);
+            match phase {
+                0 => change.delete_edge(EId(11)),
+                1 => change.add_edge(EId(15), VId(5), VId(2), vec![]),
+                2 => {
+                    change.delete_edge(EId(12));
+                    change.delete_edge(EId(13));
+                }
+                3 => {
+                    change.add_edge(EId(16), VId(3), VId(2), vec![]);
+                    change.add_edge(EId(17), VId(3), VId(2), vec![]);
+                    change.add_edge(EId(18), VId(1), VId(4), vec![]);
+                }
+                4 => change.delete_vertex(VId(2)),
+                5 => change.set_vertex_label(VId(3), L, false),
+                _ => unreachable!(),
+            };
+            db.write(&commit, change).await.unwrap();
+            let next = match phase {
+                0 => expected(&[(1, 1, Some(2)), (3, 1, Some(4)), (5, 0, None)]),
+                1 => expected(&[(1, 1, Some(2)), (3, 1, Some(4)), (5, 1, Some(2))]),
+                2 => expected(&[(1, 0, None), (3, 0, None), (5, 1, Some(2))]),
+                3 => expected(&[(1, 1, Some(4)), (3, 2, Some(4)), (5, 1, Some(2))]),
+                4 => expected(&[(1, 1, Some(4)), (3, 0, None), (5, 0, None)]),
+                5 => expected(&[(1, 1, Some(4)), (5, 0, None)]),
+                _ => unreachable!(),
+            };
+            for (((text, query, handle), old), rows) in queries.iter().zip(&previous).zip(&next) {
+                check(&db, &cx, text, query, handle, rows, policy());
+                check_delta(&db, &cx, handle, from, old, rows);
+            }
+            previous = next;
+        }
+        for ((text, query, handle), rows) in queries.iter().zip(&previous) {
+            db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+            check(&db, &cx, text, query, handle, rows, policy());
+            let before = saved(&db.standing_queries);
+            for refused in [
+                GqlQueryPolicy::new(100_000, 100_000, 0, 50_000_000),
+                GqlQueryPolicy::new(100_000, 100_000, 50_000_000, 0),
+            ] {
+                assert!(db.register_standing_native(&cx, text, &parameters, symbols, refused).is_err());
+                assert_eq!(saved(&db.standing_queries), before);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn post_summary_projection_errors_cannot_publish_or_hide_behind_final_pages() {
+    let ((), report) = run_async_under_lab(0x7073_7011, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xe8)).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let parameters = GqlParameters::new();
+        let safe = "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b:M) WITH count(*) AS n WHERE n > 0 RETURN 12/n AS quotient } RETURN a,quotient";
+        let handle = db.register_standing_native(&cx, safe, &parameters, symbols, policy()).unwrap();
+        let rows = bag([(row(vec![vertex(Some(1)), integer(6)]), 1), (row(vec![vertex(Some(3)), integer(12)]), 1)]);
+        check(&db, &cx, safe, &bind(safe), &handle, &rows, policy());
+        let before = saved(&db.standing_queries);
+        for tail in ["", " LIMIT 0", " LIMIT 1"] {
+            for body in [
+                "WITH count(*) AS n RETURN 12/n AS quotient",
+                "WITH count(*) AS n WITH n,12/0 AS discarded WHERE false RETURN n AS quotient",
+            ] {
+                let text = format!("MATCH (a:L) WITH a CALL (a) {{ MATCH (a)-[:R]->(b:M) {body} }} RETURN a,quotient{tail}");
+                assert!(db.execute_graph_set_governed(&cx, &bind(&text), policy()).is_err());
+                let prepared = PreparedNativeRead::prepare(&text, &parameters, symbols).unwrap();
+                prepared.subscription_footprint(&cx, &parameters).unwrap();
+                assert!(prepared.register_standing(&mut db, &cx, &parameters, policy()).is_err());
+                assert_eq!(saved(&db.standing_queries), before);
+            }
+        }
+        check(&db, &cx, safe, &bind(safe), &handle, &rows, policy());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 fn floating(value: f64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(value)))
 }

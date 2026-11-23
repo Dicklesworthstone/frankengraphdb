@@ -157,6 +157,58 @@ fn count_summary<'a, E>(
     Ok(Some(summary))
 }
 
+/// A global group emits one row per invocation before these row-local stages.
+/// Keep every projection and filter in order: even a column discarded by a
+/// later stage must evaluate, and a failed filter must not evaluate its tail.
+/// Aggregate-owned HAVING/output clauses retain their separate exact-domain
+/// contract; only ordinary row stages AFTER checked group conversion peel here.
+fn summary_stages<'a, E>(
+    query: &'a PreparedGraphSet,
+    stages: &mut Vec<Stage<'a>>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<&'a PreparedGraphSetAggregate>, E> {
+    control(GlaExecutionEvent::Work)?;
+    if !query.unadorned_incremental_node() {
+        return Ok(None);
+    }
+    match &query.node {
+        SetNode::Scope(input) => summary_stages(input, stages, control),
+        SetNode::Project {
+            input, projection, ..
+        } => {
+            let Some(summary) = summary_stages(input, stages, control)? else {
+                return Ok(None);
+            };
+            let mut identity = projection.len() == input.types.len();
+            for (column, cell) in projection.iter().enumerate() {
+                control(GlaExecutionEvent::Work)?;
+                if !cell.value().is_scan_local() {
+                    return Ok(None);
+                }
+                identity &= matches!(cell.value(), GraphSetValue::Column(input) if *input == column);
+            }
+            if !identity {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                stages.push(Stage::Project(query, projection));
+            }
+            Ok(Some(summary))
+        }
+        SetNode::Filter { input, .. } => {
+            let Some((_, code)) = query.incremental_filter() else {
+                return Ok(None);
+            };
+            let Some(summary) = summary_stages(input, stages, control)? else {
+                return Ok(None);
+            };
+            control(GlaExecutionEvent::ScratchEntry)?;
+            stages.push(Stage::Filter(code));
+            Ok(Some(summary))
+        }
+        SetNode::Aggregate(_) => scalar_summary(query, control),
+        _ => Ok(None),
+    }
+}
+
 impl PreparedGraphSet {
     /// Prove a reader-free global aggregate tuple with exact invocation identity.
     ///
@@ -178,8 +230,12 @@ impl PreparedGraphSet {
     /// NULL/distinct support, checked output conversion
     /// and retractions. AVG and extrema retain their native output domains.
     ///
-    /// Pages, grouped/transformed summaries, unsupported key domains and
-    /// reader/ordinal effects retain their conservative refusal.
+    /// Ordered reader-free projections and filters after the global summary
+    /// run after empty-group restoration and checked conversion. A subquery-
+    /// local DISTINCT is an identity on its at-most-one row; it never removes
+    /// duplicate outer occurrences. Pages, grouped summaries, aggregate-owned
+    /// output clauses, unsupported key domains and reader/ordinal effects
+    /// retain their conservative refusal.
     /// The optimized existing source-restriction recipe remains preferred.
     pub fn incremental_filtered_aggregate_with_control<E>(
         &self,
@@ -198,7 +254,8 @@ impl PreparedGraphSet {
         else {
             return Ok(None);
         };
-        let Some(summary) = scalar_summary(body_query, control)? else {
+        let mut output_stages = Vec::new();
+        let Some(summary) = summary_stages(body_query, &mut output_stages, control)? else {
             return Ok(None);
         };
         let mut stages = Vec::new();
@@ -432,7 +489,11 @@ impl PreparedGraphSet {
         let restore = restore.with_kind(RowJoinKind::Left);
         let aggregate_start = outer.column_types().len() + key_width;
         charge(left_width, control)?;
-        let mut values: Vec<_> = (0..left_width).map(GraphSetValue::Column).collect();
+        let mut values: Vec<_> = if output_stages.is_empty() {
+            (0..left_width).map(GraphSetValue::Column).collect()
+        } else {
+            Vec::new()
+        };
         for (column, (function, _)) in summary.aggregate_specs().enumerate() {
             charge(4, control)?;
             let aggregate_column = aggregate_start + column;
@@ -457,10 +518,65 @@ impl PreparedGraphSet {
             };
             values.push(restored);
         }
+        if !output_stages.is_empty() {
+            // The original summary occupies the unchanged public prefix for
+            // every expression VM. Carry the complete outer occurrence as a
+            // private suffix until the final output schema is restored.
+            values.extend((0..left_width).map(GraphSetValue::Column));
+        }
         let types: Vec<_> = restore.column_types().collect();
-        let Some(public) = project(&types, values, control)? else {
+        let Some(mut public) = project(&types, values, control)? else {
             return Ok(None);
         };
+        let mut output = Vec::new();
+        if !output_stages.is_empty() {
+            let mut width = summary.aggregate_specs().len();
+            let mut types = public.column_types().to_vec();
+            output.push(public);
+            for stage in output_stages {
+                control(GlaExecutionEvent::Work)?;
+                let step = match stage {
+                    Stage::Project(query, cells) => {
+                        charge(cells.len() + left_width, control)?;
+                        let mut values: Vec<_> =
+                            cells.iter().map(|cell| cell.value().clone()).collect();
+                        values.extend((width..width + left_width).map(GraphSetValue::Column));
+                        // Each invocation has at most one completed global
+                        // group, even after prior filters/projections. ALL
+                        // therefore implements body-local DISTINCT without
+                        // collapsing the restored outer bag's multiplicity.
+                        let Some(step) = project(&types, values, control)? else {
+                            return Ok(None);
+                        };
+                        if step.column_types().get(..cells.len()) != Some(query.types.as_slice()) {
+                            return Ok(None);
+                        }
+                        width = cells.len();
+                        step
+                    }
+                    Stage::Filter(code) => {
+                        charge(types.len() + code.len(), control)?;
+                        let Ok(step) =
+                            RowProjectionSpec::selection(types.clone(), names(types.len()), code)
+                        else {
+                            return Ok(None);
+                        };
+                        step
+                    }
+                };
+                types = step.column_types().to_vec();
+                output.push(step);
+            }
+            charge(left_width + width, control)?;
+            let values = (width..width + left_width)
+                .chain(0..width)
+                .map(GraphSetValue::Column)
+                .collect();
+            let Some(reordered) = project(&types, values, control)? else {
+                return Ok(None);
+            };
+            public = reordered;
+        }
         if public.column_types() != self.types.as_slice() {
             return Ok(None);
         }
@@ -472,6 +588,8 @@ impl PreparedGraphSet {
         ) else {
             return Ok(None);
         };
+        output.push(public);
+        output.push(named);
         control(GlaExecutionEvent::Work)?;
         Ok(Some(MaintainedFilteredAggregate {
             left,
@@ -484,7 +602,7 @@ impl PreparedGraphSet {
             group_columns,
             group_types,
             restore,
-            output: vec![public, named],
+            output,
         }))
     }
 
