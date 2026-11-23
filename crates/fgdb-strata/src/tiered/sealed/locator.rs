@@ -1163,55 +1163,61 @@ mod tests {
     fn query_cancellation_precedes_external_control_and_releases_the_build() {
         for stop_at_last in [false, true] {
             let ((), report) = run_async_under_lab(0x7c6_312, move |root| async move {
-                let cx = PurposeContexts::narrow_runtime_root(&root).query();
-                let source = fixture();
-                let bytes = SealedEdgeLocator::required_bytes(source.incidence_count()).unwrap();
-                let pool = MemoryPool::new(bytes, 0).unwrap();
-                let charge = pool.reserve(&cx, bytes).unwrap();
-                let mut steps = 0;
-                let index = SealedEdgeLocator::build_with(
-                    source.clone(),
-                    R,
-                    charge,
-                    &cx,
-                    &mut || {
-                        steps += 1;
-                        Ok(())
-                    },
-                    ControlledError::Source,
-                )
-                .unwrap();
-                drop(index);
-                let stop = if stop_at_last { steps } else { 12 };
-                let charge = pool.reserve(&cx, bytes).unwrap();
-                let mut checks = 0;
-                let result = SealedEdgeLocator::build_with(
-                    source,
-                    R,
-                    charge,
-                    &cx,
-                    &mut || {
-                        checks += 1;
-                        if checks == stop {
-                            root.set_cancel_reason(asupersync::CancelReason::new(
-                                asupersync::CancelKind::User,
-                            ));
-                        }
-                        Ok(())
-                    },
-                    ControlledError::Source,
-                );
-                assert!(matches!(
-                    result,
-                    Err(ControlledError::Source(SealedError::Interrupted(_)))
-                ));
-                assert_eq!(
-                    checks, stop,
-                    "caller control ran after QueryCx cancellation"
-                );
-                assert_eq!(pool.used(), 0);
+                let mut task = root
+                    .spawn(move |child| async move {
+                        let cx = PurposeContexts::narrow_runtime_root(&child).query();
+                        let source = fixture();
+                        let bytes =
+                            SealedEdgeLocator::required_bytes(source.incidence_count()).unwrap();
+                        let pool = MemoryPool::new(bytes, 0).unwrap();
+                        let charge = pool.reserve(&cx, bytes).unwrap();
+                        let mut steps = 0;
+                        let index = SealedEdgeLocator::build_with(
+                            source.clone(),
+                            R,
+                            charge,
+                            &cx,
+                            &mut || {
+                                steps += 1;
+                                Ok(())
+                            },
+                            ControlledError::Source,
+                        )
+                        .unwrap();
+                        drop(index);
+                        let stop = if stop_at_last { steps } else { 12 };
+                        let charge = pool.reserve(&cx, bytes).unwrap();
+                        let mut checks = 0;
+                        let result = SealedEdgeLocator::build_with(
+                            source,
+                            R,
+                            charge,
+                            &cx,
+                            &mut || {
+                                checks += 1;
+                                if checks == stop {
+                                    child.set_cancel_reason(asupersync::CancelReason::new(
+                                        asupersync::CancelKind::User,
+                                    ));
+                                }
+                                Ok(())
+                            },
+                            ControlledError::Source,
+                        );
+                        assert!(matches!(
+                            result,
+                            Err(ControlledError::Source(SealedError::Interrupted(_)))
+                        ));
+                        assert_eq!(
+                            checks, stop,
+                            "caller control ran after QueryCx cancellation"
+                        );
+                        assert_eq!(pool.used(), 0);
+                    })
+                    .unwrap();
+                assert_eq!(task.join(&root).await, Ok(()));
             });
-            assert!(report.invariant_violations.is_empty(), "{report:?}");
+            assert!(report.lab_test_passed(), "{report:?}");
         }
     }
 }
