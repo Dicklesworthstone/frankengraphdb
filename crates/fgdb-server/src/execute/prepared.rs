@@ -1097,7 +1097,6 @@ pub(super) async fn read_prepared_session_at<'a>(
     prepared: &PreparedRead,
     cuts: &[Option<fgdb_types::CommitSeq>],
 ) -> Result<(ReadSession<'a>, fgdb::AuthorizedPreparedRead), Refusal> {
-    let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
     let now = unix_millis();
@@ -1108,6 +1107,7 @@ pub(super) async fn read_prepared_session_at<'a>(
     let mut admission = capability
         .begin_read_at(TRUNK, now)
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let (view, generation) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     prepared.generation.check().map_err(Refusal::from)?;
     let symbols = symbols_at(&view, &db.symbols, cuts);
@@ -1166,7 +1166,6 @@ async fn read_prepared_inner(
     prepared: &PreparedRead,
     parameters: &[(String, WireValue)],
 ) -> Result<Answer, Refusal> {
-    let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let now = unix_millis();
     let capability = db
         .authority
@@ -1175,6 +1174,7 @@ async fn read_prepared_inner(
     capability
         .begin_read_at(TRUNK, now)
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let parameters: GqlParameters = convert::parameters(parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
