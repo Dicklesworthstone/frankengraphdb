@@ -423,11 +423,8 @@ impl RelationEdgeIndex {
         }
         let edges = winners
             .into_values()
-            .filter_map(|(_, block, row)| {
-                snapshot.blocks[block][row]
-                    .visible_at(as_of)
-                    .then(|| snapshot.edge_record_at_position(block, row))
-            })
+            .filter(|&(_, block, row)| snapshot.blocks[block][row].visible_at(as_of))
+            .map(|(_, block, row)| snapshot.edge_record_at_position(block, row))
             .collect();
         crate::RelationEdgeRead {
             edges,
