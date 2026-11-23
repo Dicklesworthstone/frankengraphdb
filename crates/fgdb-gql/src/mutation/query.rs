@@ -851,6 +851,10 @@ impl<'i, 'r, 'e, E> PostWriteReads<'i, 'r, 'e, E> {
 }
 
 impl<E> crate::set_ops::projection::ElementReader<E> for PostWriteReads<'_, '_, '_, E> {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.base.as_deref()?.call_arguments()
+    }
+
     fn property(
         &mut self,
         element: ElementId,
