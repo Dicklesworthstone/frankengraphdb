@@ -12,6 +12,45 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Authorized mixed demand retrieval — qualification pending
+
+Authenticated native CALLs can now join demand-driven graph traversal to
+compatible maintained text/vector lanes. The existing complete-incidence and
+complete-field visibility checks run before any registry lookup. Reuse requires
+the selected snapshot's exact frontier and an exact matching index definition;
+missing, historical, mismatched, approximate or failed-maintenance generations
+refuse without rebuilding a corpus or switching the requested source profile.
+
+The complete live vertex population spends the original signed node and native
+snapshot-record allowances once. Demand membership and incidence probes retain
+their work/scratch admission without charging the same population twice.
+Eligibility, empty output, k=0, cancellation and final authority checks remain
+active. Masked graph-only queries and staged transaction behavior are unchanged.
+This avoids query-time corpus construction; it does not establish a process-RSS
+bound, change the default database-open path or prove a measured speedup.
+
+Four embedded regression sources cover pinned/prepared/current reads, index
+removal, edge/property changes, complete-population quotas, cumulative UNION
+budgets, incompatible/missing generations and each authority mask independently.
+A served-database regression compares literal text/vector/graph ranks with the
+existing indexed profile, saves a checkpoint at sequence 9, replaces an edge at
+sequence 10, then reopens with zero source-staging allowance and checks the new
+neighbor. Source review caught and corrected a test grant which otherwise would
+have inherited the production constructor's deny-all default scopes.
+
+Pinned formatting and whitespace checks passed on the final corrected sources;
+two independent reviews found no further source-level issue. Compilation,
+runtime assertions, strict Clippy, UBS and complete exact-tree proof remain
+UNRUN after dependency-fetch failures, disk exhaustion and executor loss.
+Qualification is recorded locally as `fgdb-authorized-mixed-demand-nql3y`,
+related to `fgdb-w7-hybrid-99if` and `fgdb-rc1111-durable-watermarks-c1g98`;
+the integrated gate remains `fgdb-qualify-integrated-nov22-maz0p`.
+
+The exact-ID Beads export first ran out of space. After relocating the same
+checkout, the available exporter rewrote unrelated existing records and the
+attribution guard rejected the export. Both new records remain in progress
+locally. The rejected JSONL was not published, and no gate bypass or closure ran.
+
 ### Capability-scoped Bolt default database — qualification pending
 
 Implicit Bolt database selection now counts only selectors admitted by the
@@ -27,9 +66,12 @@ missing names, multiple admitted selectors, an empty server, malformed values
 and retired authority. Two independent source reviews, the pinned 2026-08-31
 formatter and `git diff --check` passed. Rust compilation, runtime tests,
 Clippy, UBS and exact-tree proof remain UNRUN. The pinned toolchain was found
-outside PATH, but offline Cargo resolution lacks the required foundation
-revision; an online fetch is still pending. The initial full-gate attempt
-detected concurrent source movement and returned nonzero.
+outside PATH. Cargo exited 101 before compiling this project: the required
+asupersync revision was absent offline and its online Git fetch repeatedly
+failed with invalid index-pack output while the workspace was out of space.
+The first full-gate attempt detected concurrent source movement and returned
+nonzero; the subsequent stable-tree attempt lost its executor before a
+terminal verdict.
 
 Qualification remains open in `fgdb-bolt-visible-default-q97kg`, related to
 `fgdb-w9-enforcement-j0fg`; the integrated gate stays tracked by

@@ -62,16 +62,19 @@
 //!
 //! `graph_access => 'demand'` resolves only probed vertex histories and
 //! reached incidences, without a full vertex directory, property projection or
-//! index build. Graph-only retrieval needs no index. Privileged immutable reads
-//! may also enable text/vector lanes when a compatible maintained exact index
-//! is pinned at the same cut; a missing, stale or mismatched generation refuses.
+//! index build. Graph-only retrieval needs no index. Privileged immutable and
+//! fully visible authorized reads may also enable text/vector lanes when a
+//! compatible maintained exact index is pinned at the same cut; a missing,
+//! stale or mismatched generation refuses.
 //! The endpoint restriction never changes the index corpus or BM25 statistics.
 //! Visible membership, incidences and kernel buffers share the source allowance;
-//! native scratch also reserves the output capacity. Node admission counts
-//! unique visible probes, not the whole corpus. Transactions retain graph-only
-//! demand over canonical staged membership and the native/staged incidence
-//! merge, with negative and edge-scan dependencies. Capability-scoped demand
-//! retains graph-only execution; a global corpus is never an authority grant.
+//! native scratch also reserves the output capacity. Privileged and graph-only
+//! node admission counts unique visible probes. Authorized mixed demand admits
+//! the complete live vertex population once against signed nodes and native
+//! source records, without scanning or rebuilding the corpus. Transactions
+//! retain graph-only demand over canonical staged membership and the native/
+//! staged incidence merge, with negative and edge-scan dependencies. Masked
+//! demand retains graph-only execution; a global corpus is never an authority grant.
 //! Explicit indexed/materialized accounting is unchanged. Storage itself
 //! remains resident; this does not claim spill or physical timing isolation.
 //!
@@ -871,6 +874,65 @@ impl<'a> HybridSearch<'a> {
         filter
             .finish(result)
             .map(|hits| (hits, filter.scratch_entries()))
+    }
+
+    /// Demand traversal with an already matched, fully visible exact corpus.
+    /// The authorized owner admits the whole live population on its original
+    /// permit before source access. Membership probes then spend work/scratch,
+    /// but cannot charge those same vertices to the signed node budget twice.
+    /// No registry lookup, source build or profile fallback occurs here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_demand_index_filtered(
+        &self,
+        eligible: Option<&[GraphValue]>,
+        remaining: GqlQueryPolicy,
+        snapshot: &Snapshot,
+        at: CommitSeq,
+        index: &fgdb_beacon::IndexSnapshot,
+        work: &RefCell<impl WorkControl>,
+        scan: Scan<'_>,
+        admit_population: impl FnOnce() -> Result<(), BeaconError>,
+    ) -> Result<(Vec<GraphHybridHit>, u64), BeaconError> {
+        if !self.uses_demand_graph() || self.query().is_graph_only() {
+            return Err(BeaconError::Invariant(
+                "maintained demand reuse requires enabled text or vector lanes",
+            ));
+        }
+        let filter = EndpointFilter::prepare(
+            eligible,
+            self.k,
+            remaining.evaluator.max_scratch_entries,
+            &mut SharedWork(work),
+        )?;
+        work.borrow_mut().charge(1)?;
+        let config = self.options.config_for_graph(self.query())?;
+        fgdb_beacon::read::Search::Hybrid(self.query().source_query())
+            .validate(&config, &mut SharedWork(work))?;
+        admit_population()?;
+        let result = self.demand_budgeted(remaining, filter.scratch_entries(), |options| {
+            demand::evaluate_prepared(
+                snapshot,
+                at,
+                options,
+                self.query(),
+                self.expansion(),
+                Some(index),
+                work,
+                scan,
+                |_| Ok(true),
+                |_| true,
+                |_| true,
+                || Ok(()),
+                |id| filter.admits(id, work),
+            )
+        });
+        filter.finish(result).and_then(|(hits, source_entries)| {
+            let scratch = filter
+                .scratch_entries()
+                .checked_add(source_entries)
+                .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
+            Ok((hits, scratch))
+        })
     }
 
     /// Both immutable hosts use this body, including the bool-predicate

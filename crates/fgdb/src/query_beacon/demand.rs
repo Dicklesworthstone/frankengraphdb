@@ -341,10 +341,13 @@ pub(crate) fn evaluate_privileged(
 }
 
 /// Prepared index, if any, and graph source already share one authority/cut.
+/// The caller has validated the requested lanes and exact index definition.
+/// Authorized callers additionally prove complete corpus visibility and admit
+/// its full vertex population before entering this demand-only source body.
 /// Every newly retained kernel entry spends the same demand scratch allowance
 /// as native membership and incidence state, including text/vector fusion.
 #[allow(clippy::too_many_arguments)]
-fn evaluate_prepared(
+pub(crate) fn evaluate_prepared(
     snapshot: &Snapshot,
     at: CommitSeq,
     options: &Options,

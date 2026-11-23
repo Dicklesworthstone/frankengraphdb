@@ -14,7 +14,7 @@ use fgdb_gql::{
 };
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts};
-use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
+use fgdb_warden::{Authority, Grant, LimitDimension, QueryLimits, Restriction, Scope};
 use std::sync::Arc;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x76; 32]);
@@ -701,7 +701,7 @@ fn native_mixed_demand_replays_parent_limits_and_every_live_checkpoint() {
 }
 
 #[test]
-fn authorized_and_staged_mixed_demand_never_borrow_a_privileged_corpus() {
+fn masked_and_staged_mixed_demand_never_borrow_a_privileged_corpus() {
     let ((), report) = run_async_under_lab(0xbeac_5505, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
@@ -814,6 +814,387 @@ fn authorized_and_staged_mixed_demand_never_borrow_a_privileged_corpus() {
             staged.value,
         );
         assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn mixed_authority(seed: u64) -> Authority {
+    Authority::new(
+        AuthKey::from_seed(seed),
+        NS,
+        "mixed-demand",
+        SchemaEpoch(0),
+        1,
+    )
+    .unwrap()
+}
+
+fn mixed_grant(nodes: u64) -> Grant {
+    let mut grant = Grant::read_only(
+        "main",
+        1000,
+        QueryLimits {
+            max_nodes: nodes,
+            max_work: 10_000_000,
+            max_rows: 100,
+        },
+    );
+    grant.labels = Scope::All;
+    grant.relations = Scope::All;
+    grant.properties = Scope::All;
+    grant
+}
+
+fn missing_authorized<T: core::fmt::Debug>(result: Result<T, crate::QueryError>) {
+    assert!(
+        matches!(
+            result,
+            Err(crate::QueryError::Set(GqlQueryError::Source(
+                GraphSetExecutionError::Source(GqlError::Procedure(ProcedureError::Search(
+                    HybridCallError::Index(BeaconError::InvalidQuery(
+                        "mixed demand search requires a compatible maintained exact index"
+                    ))
+                )))
+            )))
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn authorized_mixed_demand_reuses_lanes_and_preserves_the_pinned_graph_cut() {
+    let ((), report) = run_async_under_lab(0xbeac_5514, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = fixture(&c.commit(), 128, false).await;
+        let authority = mixed_authority(5514);
+        let token = authority.issue_at(&mixed_grant(132), 100).unwrap();
+        let mut cold = db
+            .authorized_read_session(&cx, &authority, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let handle = db
+            .register_beacon_index(&cx, &definition(), ReadPolicy::default())
+            .unwrap();
+        let mut pinned = db
+            .authorized_read_session(&cx, &authority, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let indexed = CALL.replace("graph_access => 'demand'", "graph_access => 'indexed'");
+        let args = parameters(true);
+        let cold_probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let expected = cold
+            .query(
+                &cx.with_checkpoint_probe(cold_probe.clone()),
+                &indexed,
+                &args,
+            )
+            .unwrap();
+        let warm_probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let actual = pinned
+            .query(&cx.with_checkpoint_probe(warm_probe.clone()), CALL, &args)
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert!(
+            warm_probe.calls() < cold_probe.calls(),
+            "mixed demand rebuilt the corpus or full directory: {} >= {}",
+            warm_probe.calls(),
+            cold_probe.calls()
+        );
+        let prepared = pinned.prepare(&cx, CALL, &args).unwrap();
+        assert_eq!(pinned.execute(&cx, &prepared, &args).unwrap(), expected);
+
+        let at = db.frontier().unwrap();
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(HIGH, X, Some(CanonicalScalar::Int(55)));
+        edit.delete_edge(EId(2));
+        edit.add_edge(EId(20), VId(0), HIGH, vec![]);
+        db.write(&c.commit(), edit).await.unwrap();
+        let current = db
+            .query_authorized(
+                &cx,
+                &authority,
+                &token,
+                "main",
+                CALL,
+                &args,
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap();
+        assert_ne!(current, expected);
+        assert_eq!(
+            current,
+            db.query_authorized(
+                &cx,
+                &authority,
+                &token,
+                "main",
+                &indexed,
+                &args,
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap()
+        );
+        missing_authorized(db.execute_graph_set_authorized_at(
+            &cx,
+            &authority,
+            &token,
+            "main",
+            &prepare(CALL, &args),
+            at,
+            policy(),
+            || 100,
+        ));
+        // Existing read sessions retain both the original graph and index.
+        assert_eq!(pinned.execute(&cx, &prepared, &args).unwrap(), expected);
+        db.unregister_beacon_index(&cx, &handle).unwrap();
+        missing_authorized(db.query_authorized(
+            &cx,
+            &authority,
+            &token,
+            "main",
+            CALL,
+            &args,
+            symbols,
+            policy(),
+            || 100,
+        ));
+        drop(db);
+        assert_eq!(pinned.execute(&cx, &prepared, &args).unwrap(), expected);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_mixed_demand_counts_the_whole_population_once_even_for_empty_output() {
+    let ((), report) = run_async_under_lab(0xbeac_5515, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = fixture(&c.commit(), 32, false).await;
+        // Neither the frozen index label nor an enabled modality includes
+        // this vertex. It still belongs to the signed live source population.
+        let mut outside = WriteBatch::new(R);
+        outside.create_vertex(VId(888), vec![], vec![]);
+        db.write(&c.commit(), outside).await.unwrap();
+        db.register_beacon_index(&cx, &definition(), ReadPolicy::default())
+            .unwrap();
+        let authority = mixed_authority(5515);
+        let token = authority.issue_at(&mixed_grant(37), 100).unwrap();
+        let short = token.attenuate(Restriction::MaxNodes(36)).unwrap();
+        let exact = GqlQueryPolicy::new(37, 100, 10_000_000, 1_000_000);
+        for statement in [
+            CALL.to_owned(),
+            CALL.replace("k => 1)", "k => 0)"),
+            CALL.replace("graph_weight => 100", "graph_weight => 0"),
+        ] {
+            for accept in [false, true] {
+                let plan = prepare(&statement, &parameters(accept));
+                let expected = db
+                    .execute_graph_set_governed(&cx, &plan, policy())
+                    .unwrap()
+                    .value;
+                assert_eq!(
+                    db.execute_graph_set_authorized(
+                        &cx,
+                        &authority,
+                        &token,
+                        "main",
+                        &plan,
+                        exact,
+                        || 100,
+                    )
+                    .unwrap(),
+                    expected,
+                    "demand membership must not recharge the admitted population"
+                );
+                assert!(matches!(
+                    db.execute_graph_set_authorized(
+                        &cx,
+                        &authority,
+                        &short,
+                        "main",
+                        &plan,
+                        exact,
+                        || 100,
+                    ),
+                    Err(crate::QueryError::Authorization(
+                        fgdb_warden::Error::LimitExceeded(LimitDimension::Nodes)
+                    ))
+                ));
+                for limited in [
+                    GqlQueryPolicy::new(36, 100, 10_000_000, 1_000_000),
+                    GqlQueryPolicy::new(37, 100, 0, 1_000_000),
+                    GqlQueryPolicy::new(37, 100, 10_000_000, 0),
+                ] {
+                    assert!(
+                        db.execute_graph_set_authorized(
+                            &cx,
+                            &authority,
+                            &token,
+                            "main",
+                            &plan,
+                            limited,
+                            || 100,
+                        )
+                        .is_err(),
+                        "empty output cannot bypass source, work or scratch admission"
+                    );
+                }
+            }
+        }
+        let twice = prepare(&format!("{CALL} UNION ALL {CALL}"), &parameters(true));
+        assert!(matches!(
+            db.execute_graph_set_authorized(
+                &cx,
+                &authority,
+                &token,
+                "main",
+                &twice,
+                policy(),
+                || 100,
+            ),
+            Err(crate::QueryError::Authorization(
+                fgdb_warden::Error::LimitExceeded(LimitDimension::Nodes)
+            ))
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_mixed_demand_refuses_missing_mismatched_ann_and_failed_indexes() {
+    let ((), report) = run_async_under_lab(0xbeac_5516, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = fixture(&c.commit(), 8, false).await;
+        let authority = mixed_authority(5516);
+        let token = authority.issue_at(&mixed_grant(100), 100).unwrap();
+        let args = parameters(true);
+        missing_authorized(db.execute_graph_set_authorized(
+            &cx,
+            &authority,
+            &token,
+            "main",
+            &prepare(CALL, &args),
+            policy(),
+            || 100,
+        ));
+        let handle = db
+            .register_beacon_index(
+                &cx,
+                &definition(),
+                ReadPolicy {
+                    max_work_units: 0,
+                    ..ReadPolicy::default()
+                },
+            )
+            .unwrap();
+        let mut pinned = db
+            .authorized_read_session(&cx, &authority, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let before = pinned.query(&cx, CALL, &args).unwrap();
+        for statement in [
+            CALL.replace("label => 'Doc', ", ""),
+            CALL.replace(
+                "vector_properties => ['x']",
+                "vector_properties => ['body']",
+            ),
+            CALL.replace("vector => [0]", "vector => [0], metric => 'dot'"),
+            CALL.replace("vector => [0]", "vector => [0], ann => 8"),
+        ] {
+            for accept in [false, true] {
+                let plan = prepare(&statement, &parameters(accept));
+                missing_authorized(db.execute_graph_set_authorized(
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    &plan,
+                    policy(),
+                    || 100,
+                ));
+            }
+        }
+        let mut edit = WriteBatch::new(R);
+        edit.delete_edge(EId(2));
+        db.write(&c.commit(), edit).await.unwrap();
+        assert!(
+            db.beacon_index_status(&cx, &handle)
+                .unwrap()
+                .failure
+                .is_some()
+        );
+        for accept in [false, true] {
+            missing_authorized(db.execute_graph_set_authorized(
+                &cx,
+                &authority,
+                &token,
+                "main",
+                &prepare(CALL, &parameters(accept)),
+                policy(),
+                || 100,
+            ));
+        }
+        assert_eq!(pinned.query(&cx, CALL, &args).unwrap(), before);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn each_authority_mask_keeps_mixed_demand_independent_of_registry_shape() {
+    let ((), report) = run_async_under_lab(0xbeac_5517, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = fixture(&c.commit(), 8, true).await;
+        let authority = mixed_authority(5517);
+        let full = authority.issue_at(&mixed_grant(100), 100).unwrap();
+        let args = parameters(true);
+        for restriction in [
+            Restriction::Labels(Scope::only([DOC])),
+            Restriction::Relations(Scope::only([R])),
+            Restriction::Properties(Scope::only([BODY, X])),
+        ] {
+            let scoped = full.attenuate(restriction).unwrap();
+            let mut cold = db
+                .authorized_read_session(
+                    &cx,
+                    &authority,
+                    &scoped,
+                    "main",
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap();
+            let handle = db
+                .register_beacon_index(&cx, &definition(), ReadPolicy::default())
+                .unwrap();
+            let mut warm = db
+                .authorized_read_session(
+                    &cx,
+                    &authority,
+                    &scoped,
+                    "main",
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap();
+            let cold_probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let warm_probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let baseline = cold
+                .query(&cx.with_checkpoint_probe(cold_probe.clone()), CALL, &args)
+                .unwrap_err();
+            let candidate = warm
+                .query(&cx.with_checkpoint_probe(warm_probe.clone()), CALL, &args)
+                .unwrap_err();
+            assert_eq!(format!("{candidate:?}"), format!("{baseline:?}"));
+            assert_eq!(warm_probe.calls(), cold_probe.calls());
+            assert!(!warm.is_closed());
+            db.unregister_beacon_index(&cx, &handle).unwrap();
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

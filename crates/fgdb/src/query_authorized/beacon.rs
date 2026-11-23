@@ -389,7 +389,52 @@ pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
     };
     let result = (|| {
         let query = search.query();
-        // Graph-enabled profiles retain their original selected-directory and
+        // Only complete visibility permits a maintained corpus to join demand
+        // topology. Masked scopes retain graph-only demand without inspecting
+        // registry shape or spending lookup work on hidden index definitions.
+        if search.uses_demand_graph()
+            && !query.is_graph_only()
+            && scope.sees_all_incidence()
+            && scope.sees_all_fields()
+        {
+            let (index, vertices) = maintained_index(
+                snapshot,
+                at,
+                scope,
+                execution,
+                search.options(),
+                Search::Hybrid(query.source_query()),
+                &work,
+            )?
+            .ok_or(BeaconError::InvalidQuery(
+                "mixed demand search requires a compatible maintained exact index",
+            ))?;
+            return search.execute_demand_index_filtered(
+                eligible,
+                remaining,
+                snapshot,
+                at,
+                &index,
+                &work,
+                beacon::Scan::Unmetered(&mut poll),
+                || {
+                    remaining
+                        .rows
+                        .check(fgdb_gql::GqlBudgetDimension::SnapshotRecords, vertices)
+                        .map_err(|error| {
+                            work.borrow_mut()
+                                .refuse(QueryError::Pattern(fgdb_gql::GqlQueryError::Rows(error)))
+                        })?;
+                    execution
+                        .borrow_mut()
+                        .nodes(vertices)
+                        .map_err(|error| work.borrow_mut().refuse(error))?;
+                    admitted.set(vertices);
+                    Ok(())
+                },
+            );
+        }
+        // Indexed graph profiles retain their selected-directory and
         // incidence admission. A maintained corpus cannot grant graph access.
         if search.uses_indexed_graph()
             && !query.graph_enabled()

@@ -2006,6 +2006,138 @@ fn configured_beacon_restart_restores_and_tails_without_rebuilding_the_corpus() 
 }
 
 #[test]
+fn configured_beacon_serves_mixed_demand_after_edge_only_checkpoint_catch_up() {
+    use fgdb_gql::GraphSymbolKind;
+    use fgdb_protocol::body::{Outcome, WireValue};
+    use fgdb_types::EId;
+
+    let ((), report) = run_async_under_lab(0x79a0_be0a, |root| async move {
+        let (server, token, path) =
+            served_with_config(&root, "beacon-mixed-demand-restart", |config| {
+                configure_beacon(config);
+                config
+                    .symbols
+                    .bind(GraphSymbolKind::Relation, "R", 1)
+                    .unwrap();
+            })
+            .await;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        {
+            let mut writer = server.databases["test"].db.write(&root).await.unwrap();
+            for id in 1..=8 {
+                writer
+                    .write(
+                        &contexts.commit(),
+                        beacon_document(id, if id == 1 { "needle" } else { "background" }),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let mut edges = WriteBatch::new(RelationId(1));
+            edges.add_edge(EId(101), VId(1), VId(2), vec![]);
+            assert_eq!(
+                writer.write(&contexts.commit(), edges).await.unwrap(),
+                CommitSeq(9)
+            );
+        }
+
+        let statement = "CALL hybrid.search(text => 'needle', text_property => 'body', \
+            vector => [1], vector_properties => ['x'], graph_access => 'demand', \
+            seeds => [1], relation => 'R', max_hops => 1, candidates => 1, \
+            graph_candidates => 1, graph_weight => 100, k => 2) \
+            YIELD node, graph_rank, text_rank, vector_rank \
+            RETURN node.x AS x, graph_rank, text_rank, vector_rank ORDER BY x";
+        let request = catalog_request(ExecuteMode::Read, statement);
+        let indexed = catalog_request(
+            ExecuteMode::Read,
+            &statement.replace("'demand'", "'indexed'"),
+        );
+        let expected = |neighbor: i64| {
+            vec![
+                vec![
+                    WireValue::Int(1),
+                    WireValue::Null,
+                    WireValue::Int(1),
+                    WireValue::Int(1),
+                ],
+                vec![
+                    WireValue::Int(neighbor),
+                    WireValue::Int(1),
+                    WireValue::Null,
+                    WireValue::Null,
+                ],
+            ]
+        };
+        let before = catalog_accept(
+            crate::execute::read(&root, &server.databases["test"], &token, &request).await,
+        );
+        assert_eq!(before.outcome, Outcome::Rows { seq: 9 });
+        assert_eq!(before.rows, expected(2));
+        let before_indexed = catalog_accept(
+            crate::execute::read(&root, &server.databases["test"], &token, &indexed).await,
+        );
+        assert_eq!(before.rows, before_indexed.rows);
+        server.finish_shutdown(&root).await;
+        drop(server);
+
+        // Only topology changes after the checkpoint. The restored retrieval
+        // corpus must join the new graph cut, without retaining the old edge.
+        let keys = DatabaseKeys::new(
+            [0x91; 32],
+            DatabaseSecurityNamespaceId([0x92; 32]),
+            [0x93; 32],
+        );
+        let mut database = Database::open(&contexts.commit(), &path, keys)
+            .await
+            .unwrap();
+        let mut edges = WriteBatch::new(RelationId(1));
+        edges.delete_edge(EId(101));
+        edges.add_edge(EId(102), VId(1), VId(3), vec![]);
+        assert_eq!(
+            database.write(&contexts.commit(), edges).await.unwrap(),
+            CommitSeq(10)
+        );
+        drop(database);
+
+        let reopened = reopen_beacon(&root, &path, |config| {
+            config
+                .symbols
+                .bind(GraphSymbolKind::Relation, "R", 1)
+                .unwrap();
+            // A full corpus rebuild cannot pass this allowance. The existing
+            // authenticated checkpoint and its edge-only suffix must suffice.
+            config.beacon_indexes[0].options.policy.max_staging_rows = 0;
+        })
+        .await;
+        let status = reopened
+            .database_beacon_status(&root, "test")
+            .await
+            .unwrap();
+        assert!(matches!(
+            status[0].restoration,
+            fgdb::DerivedCheckpointOutcome::CatchUp {
+                watermark_seq: CommitSeq(9),
+                head_seq: CommitSeq(10),
+                commits_replayed: 1,
+                ..
+            }
+        ));
+        assert!(status[0].status.failure.is_none());
+        let after = catalog_accept(
+            crate::execute::read(&root, &reopened.databases["test"], &token, &request).await,
+        );
+        assert_eq!(after.outcome, Outcome::Rows { seq: 10 });
+        assert_eq!(after.rows, expected(3));
+        let after_indexed = catalog_accept(
+            crate::execute::read(&root, &reopened.databases["test"], &token, &indexed).await,
+        );
+        assert_eq!(after.rows, after_indexed.rows);
+        reopened.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn configured_beacon_corruption_rebuilds_and_save_failure_keeps_serving() {
     let ((), report) = run_async_under_lab(0x79a0_be04, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
