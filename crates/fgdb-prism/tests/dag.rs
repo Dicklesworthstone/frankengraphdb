@@ -317,6 +317,13 @@ fn empty_predicate_is_one_boolean_and_cycles_never_publish_an_ordering_prefix() 
             Directedness::Directed,
             ParallelEdgePolicy::Reject,
         );
+        assert_eq!(
+            FnxCallSpec::is_directed_acyclic_graph()
+                .execute(&graph, limits(), || Ok::<(), Infallible>(()))
+                .unwrap()
+                .rows,
+            vec![vec![FnxValue::Boolean(false)]],
+        );
         let mut sink = Vec::new();
         assert!(matches!(
             FnxCallSpec::topological_sort().execute_into(

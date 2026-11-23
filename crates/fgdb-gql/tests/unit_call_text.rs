@@ -93,8 +93,8 @@ fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
     use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
     use fgdb_gql::insertion::{GraphInsertIntent, GraphInsertPolicy};
     use fgdb_gql::{
-        GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphElementReader,
-        GraphIntegerError, GraphSetSource, GraphWriteChainCursor, GraphWriteChainTask,
+        GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphElementReader, GraphIntegerError,
+        GraphSetSource, GraphWriteChainCursor, GraphWriteChainTask,
     };
     use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
     use std::sync::Arc;
@@ -177,7 +177,10 @@ fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
         let mut properties = Vec::new();
         let mut retain = |batch: fgdb_gql::insertion::GraphInsertBatch| {
             for intent in batch.into_intents() {
-                let GraphInsertIntent::Vertex { properties: fields, .. } = intent else {
+                let GraphInsertIntent::Vertex {
+                    properties: fields, ..
+                } = intent
+                else {
                     panic!("only a native vertex creation is expected");
                 };
                 assert_eq!(fields.len(), 1, "{text}");
@@ -193,11 +196,9 @@ fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
             match task {
                 GraphWriteChainTask::Read(read) => {
                     rows = Some(
-                        read.execute_governed(
-                            rows.take(), query, Lexical(arguments), || Ok(()),
-                        )
-                        .unwrap_or_else(|error| panic!("read {text}: {error:?}"))
-                        .value,
+                        read.execute_governed(rows.take(), query, Lexical(arguments), || Ok(()))
+                            .unwrap_or_else(|error| panic!("read {text}: {error:?}"))
+                            .value,
                     );
                 }
                 GraphWriteChainTask::Write {
@@ -220,7 +221,8 @@ fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
                     let (batch, output) = proposal.into_parts();
                     retain(batch);
                     rows = Some(
-                        output.finish_governed_reading(Lexical(arguments), || Ok(()))
+                        output
+                            .finish_governed_reading(Lexical(arguments), || Ok(()))
                             .unwrap_or_else(|error| panic!("output {text}: {error:?}"))
                             .value,
                     );
@@ -260,7 +262,8 @@ fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
         actual.sort();
         assert_eq!(
             actual,
-            expected_rows.into_iter()
+            expected_rows
+                .into_iter()
                 .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
                 .collect::<Vec<_>>(),
             "{text}",
@@ -268,7 +271,8 @@ fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
         properties.sort();
         assert_eq!(
             properties,
-            expected_properties.into_iter()
+            expected_properties
+                .into_iter()
                 .map(|value| CanonicalPropertyValue::from(CanonicalScalar::Int(value)))
                 .collect::<Vec<_>>(),
             "{text}",
@@ -364,6 +368,48 @@ fn malformed_write_bodies_refuse_before_catalog_resolution() {
                 symbols(kind, name)
             });
         assert!(result.is_err(), "{text}");
+        assert_eq!(lookups.get(), 0, "{text}");
+    }
+}
+
+#[test]
+fn call_union_structural_errors_keep_the_native_diagnostic_and_utf8_byte_offset() {
+    for (text, expected) in [
+        (
+            "WITH '雪' AS note CALL() { UNION CREATE (:F) }",
+            "a nonempty UNION arm",
+        ),
+        (
+            "CALL() { CREATE (:F {p:'雪'}) UNION ALL UNION ALL CREATE (:F) }",
+            "a nonempty UNION arm",
+        ),
+        (
+            "CALL() { CREATE (:F {p:'雪'}) UNION ALL CREATE (:F) UNION CREATE (:F) }",
+            "one quantifier across CALL UNION arms",
+        ),
+        (
+            "CALL() { CREATE (:F {p:'雪'}) UNION DISTINCT CREATE (:F) UNION ALL CREATE (:F) }",
+            "one quantifier across CALL UNION arms",
+        ),
+    ] {
+        let lookups = Cell::new(0);
+        let error =
+            PreparedGraphWriteChainText::prepare(text, RelationId(1), |kind, name: &str| {
+                lookups.set(lookups.get() + 1);
+                symbols(kind, name)
+            })
+            .unwrap_err();
+        let fgdb_gql::GraphWriteChainTextError::Insert(error) = error else {
+            panic!("CALL framing keeps its native query diagnostic: {text}");
+        };
+        let fgdb_gql::GraphInsertTextErrorKind::Query(
+            fgdb_gql::GraphPatternTextErrorKind::Expected(actual),
+        ) = error.kind
+        else {
+            panic!("structural UNION refusal keeps its expected-token class: {text}");
+        };
+        assert_eq!(actual, expected, "{text}");
+        assert_eq!(error.offset, text.rfind("UNION").unwrap(), "{text}");
         assert_eq!(lookups.get(), 0, "{text}");
     }
 }
@@ -571,18 +617,35 @@ fn call_union_arm_limits_precede_catalog_work_and_errors_keep_original_byte_offs
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
     let lookups = Cell::new(0);
-    assert!(
-        PreparedGraphWriteChainText::prepare(
-            &format!("CALL() {{ {body} }}"),
-            RelationId(1),
-            |kind, name: &str| {
-                lookups.set(lookups.get() + 1);
-                symbols(kind, name)
-            },
-        )
-        .is_err()
-    );
+    let text = format!("WITH '雪' AS note CALL() {{ {body} }}");
+    let fgdb_gql::GraphWriteChainTextError::Insert(error) =
+        PreparedGraphWriteChainText::prepare(&text, RelationId(1), |kind, name: &str| {
+            lookups.set(lookups.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap_err()
+    else {
+        panic!("CALL arm-count refusal keeps its native query diagnostic");
+    };
+    assert!(matches!(
+        error.kind,
+        fgdb_gql::GraphInsertTextErrorKind::Query(fgdb_gql::GraphPatternTextErrorKind::Expected(
+            "bounded CALL UNION arm count"
+        ))
+    ));
+    assert_eq!(error.offset, text.rfind("UNION").unwrap());
     assert_eq!(lookups.get(), 0);
+
+    for separator in [" UNION ", " UNION DISTINCT ", " UNION ALL "] {
+        let body = std::iter::repeat_n("CREATE (:F)", fgdb_gql::MAX_GRAPH_SET_DEPTH)
+            .collect::<Vec<_>>()
+            .join(separator);
+        let chain = prepare(&format!("CALL() {{ {body} }}"));
+        let GraphWriteChainStep::UnitCall(call) = &chain.steps()[0] else {
+            panic!("a valid boundary-sized UNION keeps its native unit CALL owner");
+        };
+        assert_eq!(call.arms().len(), fgdb_gql::MAX_GRAPH_SET_DEPTH);
+    }
 
     let text = "CALL() { RETURN '雪' AS value \
                 UNION ALL CREATE (:Missing) RETURN 'x' AS value }";
