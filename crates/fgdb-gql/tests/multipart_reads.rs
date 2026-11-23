@@ -1471,6 +1471,53 @@ fn inline_call_filter_retries_do_not_import_an_unlisted_name() {
 }
 
 #[test]
+fn inline_call_named_map_projection_retains_imported_predicate() {
+    for text in [
+        "WITH {p:1} AS call,2 AS score MATCH (n) \
+         WHERE call {WITH:score}.WITH = n.p RETURN n ORDER BY n",
+        "WITH {p:1} AS call,2 AS score CALL (call,score) { MATCH (n) \
+         WHERE call {MATCH:score}.MATCH = n.p RETURN n } RETURN n ORDER BY n",
+    ] {
+        assert_eq!(
+            execute(text),
+            vec![vertices(&[2]), vertices(&[3])],
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn inline_call_property_filters_keep_imported_arithmetic_and_optional_counts() {
+    // Endpoint filtering and the invocation's imported expression both run
+    // before aggregation. Empty or rejected witnesses still give count zero.
+    let p = |id: u128| [1, 2, 2, 3][id as usize - 1];
+    let expected: Vec<_> = (1..=4)
+        .map(|id| {
+            let count = EDGES
+                .iter()
+                .filter(|&&(source, _, target)| {
+                    source == VId(id) && p(target.0) == 2 && p(id) > 1 && target != source
+                })
+                .count() as i64;
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(count)),
+            ])
+        })
+        .collect();
+    for text in [
+        "MATCH (n) WITH n,n.p AS score CALL (n,score) { \
+         MATCH (n)-[:R]->(m {p:2}) WHERE score + 1 > 2 AND m <> n \
+         RETURN count(*) AS degree } RETURN n,degree ORDER BY n",
+        "MATCH (n) WITH n,n.p AS score CALL (n,score) { \
+         OPTIONAL MATCH (n)-[:R]->(m {p:2}) WHERE score > 1 AND m <> n \
+         RETURN count(m) AS degree } RETURN n,degree ORDER BY n",
+    ] {
+        assert_eq!(execute(text), expected, "{text}");
+    }
+}
+
+#[test]
 fn implicit_exists_bodies_keep_clause_boundaries_and_outer_occurrences() {
     let row = |id, present| {
         GraphValueRow::from_owned_values(vec![
@@ -2339,6 +2386,10 @@ fn inline_call_refuses_escaping_names_collisions_and_effects_before_catalog() {
         "WITH 1 AS x CALL (missing) { RETURN 2 AS y } RETURN y",
         "WITH 1 AS x CALL (x,x) { RETURN 2 AS y } RETURN y",
         "WITH 1 AS x CALL { RETURN x AS y } RETURN y",
+        "WITH 2 AS score CALL () { MATCH (n {p:2}) WHERE score > 1 \
+         RETURN count(*) AS degree } RETURN degree",
+        "WITH 2 AS score CALL (score) { CALL () { MATCH (n {p:2}) \
+         WHERE score > 1 RETURN count(*) AS degree } RETURN degree AS nested } RETURN nested",
         "WITH 1 AS x CALL (x) { RETURN x } RETURN x",
         "CALL { WITH 2 AS hidden RETURN 1 AS y } RETURN hidden",
         "CALL { MATCH (n) RETURN n } WITH 1 AS x RETURN n.p",

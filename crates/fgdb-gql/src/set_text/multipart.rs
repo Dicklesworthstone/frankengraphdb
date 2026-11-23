@@ -360,6 +360,15 @@ fn imported_where_at(tokens: &[TextToken<'_>], offset: usize, optional: bool) ->
                 }) {
                     continue;
                 }
+                // A binding named call may introduce a map projection inside
+                // this WHERE. It must not terminate the predicate or create a
+                // child query frame merely because its spelling is CALL.
+                if token.word("CALL")
+                    && tokens.get(index + 1).is_some_and(|next| next.punct(b'{'))
+                    && inline_call_body(tokens, index).is_none()
+                {
+                    continue;
+                }
                 let operator = token.word("WITH")
                     && previous
                         .is_some_and(|previous| previous.word("STARTS") || previous.word("ENDS"));
@@ -409,7 +418,60 @@ fn inline_call_body(tokens: &[TextToken<'_>], call: usize) -> Option<(usize, boo
         imports = at != start;
         at += 1;
     }
-    tokens.get(at)?.punct(b'{').then_some((at, imports))
+    if !tokens.get(at)?.punct(b'{')
+        || !tokens.get(at + 1).is_some_and(|body| {
+            [
+                "MATCH", "OPTIONAL", "WITH", "RETURN", "UNWIND", "CALL", "WHERE", "ORDER", "SKIP",
+                "LIMIT", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
+            ]
+            .iter()
+            .any(|clause| body.word(clause))
+        })
+        || tokens.get(at + 2).is_some_and(|next| next.punct(b':'))
+    {
+        return None;
+    }
+    Some((at, imports))
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+
+    #[test]
+    fn inline_call_row_prefixes_preserve_imported_match_filter_normalization() {
+        for prefix in ["WHERE score > 0", "ORDER BY score", "SKIP 0", "LIMIT 1"] {
+            let statement = format!(
+                "WITH 2 AS score CALL (score) {{ {prefix} \
+                 MATCH (n) WHERE n.p + score > 1 RETURN n }} RETURN n"
+            );
+            let tokens = PreparedGraphText::composition_tokens(&statement, &[]).unwrap();
+            let offset = statement.rfind("score > 1").unwrap();
+            assert_eq!(
+                continuation_where_at(&tokens, offset),
+                statement.rfind("WHERE"),
+                "{statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_named_map_projections_do_not_hide_the_enclosing_where() {
+        for statement in [
+            "WITH {p:1} AS call,2 AS score MATCH (n) \
+             WHERE call {WITH:score} = {WITH:2} RETURN n",
+            "WITH {p:1} AS call,2 AS score CALL (call,score) { MATCH (n) \
+             WHERE call {MATCH:score} = {MATCH:2} RETURN n } RETURN n",
+        ] {
+            let tokens = PreparedGraphText::composition_tokens(statement, &[]).unwrap();
+            let offset = statement.rfind(":score").unwrap() + 1;
+            assert_eq!(
+                continuation_where_at(&tokens, offset),
+                statement.find("WHERE"),
+                "{statement}"
+            );
+        }
+    }
 }
 
 /// The offset of the WHERE keyword of a top-level required MATCH whose

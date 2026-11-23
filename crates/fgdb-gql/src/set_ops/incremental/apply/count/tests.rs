@@ -1267,6 +1267,7 @@ fn native_filtered_counts_accept_imported_thresholds_and_static_property_sources
     for text in [
         "MATCH (a:L) WITH a RETURN a,COUNT { MATCH (b:L) WHERE b <> a RETURN b } AS degree",
         "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (a)-[:R]->(b:L) WHERE threshold > 1 AND b <> a RETURN count(*) AS degree } RETURN a,degree",
+        "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (a)-[:R]->(b:L {p:1}) WHERE threshold > 1 AND b <> a RETURN count(*) AS degree } RETURN a,degree",
         "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (b:L {p:1}) WHERE threshold > 1 AND b <> a RETURN count(DISTINCT b) AS degree } RETURN a,degree",
         "MATCH (a:L) WITH a,a.p AS threshold CALL (threshold) { MATCH (b:L) WHERE threshold IS NULL OR threshold > 1 RETURN count(threshold) AS degree } RETURN a,degree",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b RETURN count(*) AS degree } RETURN a,degree",
