@@ -669,9 +669,11 @@ mod tests {
     }
 
     fn compound_snapshot(patches: Vec<Vec<VertexRow>>) -> Snapshot {
+        let blocks = Vec::new();
         Snapshot {
             read_caches: Default::default(),
-            blocks: vec![],
+            relation_edges: crate::gql_exec::source::RelationEdgeIndex::build(&blocks),
+            blocks,
             adjacency: Default::default(),
             property_index: Default::default(),
             exact_counts: Default::default(),

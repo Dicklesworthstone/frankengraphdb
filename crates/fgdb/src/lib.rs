@@ -5450,10 +5450,7 @@ impl<V: Vfs + Clone> Database<V> {
         };
         // Relation runs stay eager: a lookup must seek without waiting for the
         // lazy adjacency cache. Extend them before make_mut borrows the snapshot.
-        let relation_edges = self
-            .snapshot
-            .relation_edges
-            .extend(&decoded, block_prefix);
+        let relation_edges = self.snapshot.relation_edges.extend(&decoded, block_prefix);
         let previous = Arc::make_mut(&mut self.snapshot);
         self.snapshot = Arc::new(Snapshot {
             read_caches: Arc::clone(&previous.read_caches),
@@ -9191,10 +9188,13 @@ mod shared_snapshot_payload_laws {
             old.edges.iter().map(|r| r.entry.eid).collect::<Vec<_>>(),
             [EId(6), EId(8)]
         );
-        assert_eq!(old.edges[1].props, [(p, CanonicalScalar::Int(2))]);
+        assert_eq!(old.edges[1].props, [(p, CanonicalScalar::Int(2).into())]);
         let current = db.edges_by_relation_at(wanted, last).unwrap();
         assert_eq!(current.edges.len(), 1);
-        assert_eq!(current.edges[0].props, [(p, CanonicalScalar::Int(41))]);
+        assert_eq!(
+            current.edges[0].props,
+            [(p, CanonicalScalar::Int(41).into())]
+        );
         assert!(current.candidate_edges > old.candidate_edges);
         assert_eq!(
             db.edges_by_relation_at(absent, last)
