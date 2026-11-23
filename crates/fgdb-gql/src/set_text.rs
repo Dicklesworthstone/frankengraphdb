@@ -125,6 +125,23 @@ fn pattern_kind(offset: usize, kind: GraphPatternTextErrorKind) -> GraphSetTextE
     fail(offset, GraphSetTextErrorKind::Pattern(kind))
 }
 
+fn push_expression_delimiter(
+    delimiters: &mut Vec<u8>,
+    opening: u8,
+    offset: usize,
+) -> Result<(), GraphSetTextError> {
+    if delimiters.len() == MAX_GRAPH_SET_DEPTH {
+        return Err(pattern_kind(
+            offset,
+            GraphPatternTextErrorKind::BooleanNesting {
+                limit: MAX_GRAPH_SET_DEPTH,
+            },
+        ));
+    }
+    delimiters.push(opening);
+    Ok(())
+}
+
 // Native leaf preparation owns these immutable templates. Only shared scalar
 // bytecode and catalog-bound GLA projections reach the execution boundary.
 #[derive(Clone)]
@@ -1895,10 +1912,7 @@ impl<'a> Composition<'a, '_> {
             }
             match token.kind {
                 TextKind::Punct(ch @ (b'(' | b'[' | b'{')) => {
-                    if delimiters.len() == MAX_GRAPH_SET_DEPTH {
-                        return Err(expected(token.at, "bounded graph-expression nesting"));
-                    }
-                    delimiters.push(ch);
+                    push_expression_delimiter(&mut delimiters, ch, token.at)?;
                 }
                 TextKind::Punct(ch @ (b')' | b']' | b'}')) => {
                     let opening = match ch {
@@ -2059,10 +2073,7 @@ impl<'a> Composition<'a, '_> {
             }
             match token.kind {
                 TextKind::Punct(ch @ (b'(' | b'[' | b'{')) => {
-                    if delimiters.len() == MAX_GRAPH_SET_DEPTH {
-                        return Err(expected(token.at, "bounded graph-expression nesting"));
-                    }
-                    delimiters.push(ch);
+                    push_expression_delimiter(&mut delimiters, ch, token.at)?;
                 }
                 TextKind::Punct(ch @ (b')' | b']' | b'}')) => {
                     let opening = match ch {

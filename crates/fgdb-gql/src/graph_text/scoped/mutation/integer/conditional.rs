@@ -22,7 +22,9 @@ impl<'a> Parser<'a> {
         &self,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<bool, GraphPatternTextError> {
-        if !self.is_word("CASE") {
+        // A multipart conditional can already be the value of a private row
+        // column. The ordinary operand reader consumes that complete span.
+        if !self.is_word("CASE") || self.at_hoisted_comprehension() {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();

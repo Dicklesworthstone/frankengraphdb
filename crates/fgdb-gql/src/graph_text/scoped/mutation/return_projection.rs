@@ -1746,7 +1746,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let carried = if columns.is_none() {
+        let carried = if columns.is_none() && !matches!(resolve, Some(ValueResolver::Write(_))) {
             native.or_else(|| {
                 self.boundary_property_map(schema, source.text).or_else(|| {
                     schema[..self.visible_width(schema)]
@@ -1763,6 +1763,9 @@ impl<'a> Parser<'a> {
         if columns.is_none() && carried.is_none() && resolve.is_none() {
             return Err(error(source.at, GraphPatternTextErrorKind::UnknownVariable).into());
         }
+        // A WHERE operand can carry a read-row map while its scalar leaves
+        // still use the predicate's resolver. Write selectors use staged data.
+        let resolve_source = resolve.is_some() && carried.is_none();
         self.punct(b'{', "{")?;
         let mut entries: Vec<(Box<str>, ReadValueTemplate)> = Vec::new();
         let mut all = false;
@@ -1789,7 +1792,7 @@ impl<'a> Parser<'a> {
                             source,
                             Some(key),
                         )?)
-                    } else if let Some(resolve) = resolve.as_mut() {
+                    } else if let Some(resolve) = resolve.as_mut().filter(|_| resolve_source) {
                         ReadValueTemplate::Column(resolve.map_input(
                             self,
                             source,
@@ -1860,7 +1863,7 @@ impl<'a> Parser<'a> {
                 (Some(columns), _) => {
                     ReadValueTemplate::Column(self.property_map_projection(columns, source)?)
                 }
-                (None, _) if resolve.is_some() => resolve
+                (None, _) if resolve_source => resolve
                     .as_mut()
                     .expect("resolver checked")
                     .map_properties(self, source)?,
@@ -1883,7 +1886,7 @@ impl<'a> Parser<'a> {
             (Some(columns), _) => {
                 ReadValueTemplate::Column(self.mutation_projection(columns, source, None)?)
             }
-            (None, _) if resolve.is_some() => {
+            (None, _) if resolve_source => {
                 ReadValueTemplate::Column(resolve.as_mut().expect("resolver checked").map_input(
                     self,
                     source,
@@ -1931,9 +1934,22 @@ impl<'a> Parser<'a> {
         resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
         depth: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        self.read_resolved_row_operand(&[], resolve, depth)
+    }
+
+    fn read_resolved_row_operand(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let entries = core::mem::replace(&mut self.resolved_entries, true);
-        let value =
-            self.read_recursive_value(None, &[], &mut Some(ValueResolver::Columns(resolve)), depth);
+        let value = self.read_recursive_value(
+            None,
+            schema,
+            &mut Some(ValueResolver::Columns(resolve)),
+            depth,
+        );
         self.resolved_entries = entries;
         value
     }
@@ -2374,7 +2390,12 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
-        if !entry && !self.is_punct(b'[') {
+        let hoisted_end = self.hoisted_value_end();
+        if let Some(end) = hoisted_end {
+            // The planner has already parsed the complete conditional or
+            // collection. Its next token starts the ordinary value postfix.
+            lexer.at = end;
+        } else if !entry && !self.is_punct(b'[') {
             lexer.next()?;
             // A dotted temporal call: step over `.name` to its `(`.
             if matches!(self.temporal_call()?, Some((_, true))) {
@@ -2382,7 +2403,7 @@ impl<'a> Parser<'a> {
                 lexer.next()?;
             }
         }
-        if !entry {
+        if hoisted_end.is_none() && !entry {
             skip_group(&mut lexer)?;
         }
         Ok(match after_postfix(&mut lexer)?.kind {
@@ -2410,16 +2431,21 @@ impl<'a> Parser<'a> {
         // Element metadata produces ordinary lists/maps. Compare the
         // complete value rather than coercing labels()/keys()/properties()
         // into a scalar let reference.
-        if (self.is_word("LABELS")
+        let metadata = (self.is_word("LABELS")
             || self.is_word("KEYS")
             || self.is_word("PROPERTIES")
             || self.is_word("STARTNODE")
             || self.is_word("ENDNODE"))
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
-        {
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
+        let hoisted_end = self.hoisted_value_end();
+        if metadata || hoisted_end.is_some() {
             let mut lexer = self.lexer.clone();
-            lexer.next()?;
-            skip_group(&mut lexer)?;
+            if let Some(end) = hoisted_end {
+                lexer.at = end;
+            } else {
+                lexer.next()?;
+                skip_group(&mut lexer)?;
+            }
             return Ok(match after_postfix(&mut lexer)?.kind {
                 TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
                 TokenKind::Punct(b'<' | b'>') => true,
@@ -2458,6 +2484,14 @@ impl<'a> Parser<'a> {
             TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
             kind => membership_keyword(kind, &lexer)?,
         })
+    }
+
+    fn hoisted_value_end(&self) -> Option<usize> {
+        self.comprehension_reads
+            .as_ref()?
+            .1
+            .iter()
+            .find_map(|&(start, end, _)| (start == self.current.at).then_some(end))
     }
 
     /// Whether the chain starting here joins two or more operands with `+`
@@ -3084,7 +3118,7 @@ impl<'a> Parser<'a> {
         &self,
         route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
-        if !self.is_word("CASE") {
+        if !self.is_word("CASE") || self.at_hoisted_comprehension() {
             return Ok(false);
         }
         if case_has_list(&self.lexer, route)? {

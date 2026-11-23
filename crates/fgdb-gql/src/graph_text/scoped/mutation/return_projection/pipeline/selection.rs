@@ -706,7 +706,11 @@ impl<'a> Parser<'a> {
         schema: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let visible = self.visible_width(schema);
-        self.read_resolved_value(&mut |parser| parser.selection_leaf(schema, visible), 0)
+        self.read_resolved_row_operand(
+            schema,
+            &mut |parser| parser.selection_leaf(schema, visible),
+            0,
+        )
     }
 
     /// User names see only the original visible row. Private graph and value

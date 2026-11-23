@@ -1477,6 +1477,10 @@ fn inline_call_named_map_projection_retains_imported_predicate() {
          WHERE call {WITH:score}.WITH = n.p RETURN n ORDER BY n",
         "WITH {p:1} AS call,2 AS score CALL (call,score) { MATCH (n) \
          WHERE call {MATCH:score}.MATCH = n.p RETURN n } RETURN n ORDER BY n",
+        "WITH {p:2} AS bag MATCH (n) \
+         WHERE bag {.p}.p = n.p RETURN n ORDER BY n",
+        "WITH {p:1} AS bag,2 AS score MATCH (n) \
+         WHERE bag {.*,p:score}.p = n.p RETURN n ORDER BY n",
     ] {
         assert_eq!(
             execute(text),
@@ -1484,6 +1488,17 @@ fn inline_call_named_map_projection_retains_imported_predicate() {
             "{text}"
         );
     }
+    assert!(execute("WITH NULL AS bag MATCH (n) WHERE bag {p:2}.p = n.p RETURN n").is_empty());
+    let mut reads = 0;
+    let refused = PreparedGraphSetText::prepare(
+        "WITH {p:2} AS dropped WITH 1 AS kept MATCH (n) WHERE dropped {p:2}.p = 2 RETURN n",
+        |kind, name| {
+            reads += 1;
+            symbols(kind, name)
+        },
+    );
+    assert!(refused.is_err());
+    assert_eq!(reads, 0);
 }
 
 #[test]
@@ -7969,9 +7984,27 @@ mod collect_subqueries {
         );
         // The aggregate and the scalar subquery intentionally have different
         // NULL semantics: collect(x) drops NULL; COLLECT { RETURN x } retains it.
+        let aggregate = fgdb_gql::PreparedGraphPipelineAggregateText::prepare(
+            "UNWIND [3,NULL,3,1] AS x RETURN collect(x) AS values",
+            symbols,
+        )
+        .unwrap()
+        .bind_relation_parameters(&GqlParameters::new())
+        .unwrap()
+        .execute_governed::<(), ()>(
+            wide(),
+            |_, _| panic!("a literal aggregate must not read the graph"),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(aggregate.value.len(), 1);
         assert_eq!(
-            execute("UNWIND [3,NULL,3,1] AS x RETURN collect(x) AS values"),
-            vec![row([list([int(3), int(3), int(1)])])]
+            aggregate.value[0].values(),
+            &[fgdb_gql::GraphAggregateValue::Value(list([
+                int(3),
+                int(3),
+                int(1)
+            ]))]
         );
         let expected = vec![
             row([vertex(1), list([vertex(3), vertex(2), vertex(2)])]),
@@ -8700,6 +8733,26 @@ mod collect_subqueries {
             ));
             assert_eq!(catalog_reads, 0);
         }
+        // A shallow CASE can still build a sequential plan taller than the
+        // native limit. Verification must finish before touching the catalog.
+        let sequential = format!(
+            "RETURN CASE {}ELSE COLLECT {{ MATCH (n:NeverRead) RETURN n }} END AS value",
+            "WHEN true THEN [] ".repeat(40),
+        );
+        let mut catalog_reads = 0;
+        let error = PreparedGraphSetText::prepare(&sequential, |kind, name| {
+            catalog_reads += 1;
+            symbols(kind, name)
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            GraphSetTextErrorKind::SetBuild(fgdb_gql::GraphSetBuildError::TooDeep {
+                limit: 64,
+                observed,
+            }) if observed > 64
+        ));
+        assert_eq!(catalog_reads, 0);
     }
 
     #[test]
@@ -8782,6 +8835,14 @@ mod collect_subqueries {
                 int(8),
             ),
             (
+                "RETURN 1 + CASE WHEN false THEN COLLECT { RETURN 1/0 AS bad } ELSE 7 END AS value",
+                int(8),
+            ),
+            (
+                "RETURN 8 = CASE WHEN false THEN COLLECT { RETURN 1/0 AS bad } ELSE 8 END AS value",
+                GraphValue::Scalar(CanonicalScalar::Bool(true)),
+            ),
+            (
                 "RETURN CASE WHEN CASE WHEN true THEN true ELSE false END THEN [] ELSE COLLECT { MATCH (n) RETURN 1/0 AS bad } END AS values",
                 list([]),
             ),
@@ -8836,6 +8897,18 @@ mod collect_subqueries {
 
     #[test]
     fn lazy_simple_case_evaluates_its_selector_once() {
+        for (statement, expected) in [
+            (
+                "RETURN CASE WHEN EXISTS { MATCH (n) } THEN COLLECT { RETURN 1 AS v } ELSE [] END AS v",
+                list([int(1)]),
+            ),
+            (
+                "RETURN CASE WHEN EXISTS { MATCH (n) WHERE n.p=999 } THEN COLLECT { RETURN 1/0 AS v } ELSE [7] END AS v",
+                list([int(7)]),
+            ),
+        ] {
+            assert_eq!(execute(statement), vec![row([expected])], "{statement}");
+        }
         let selector = "size(COLLECT { MATCH (n) RETURN n })";
         let once = run(
             &prepare(&format!("RETURN {selector} AS count")),
@@ -8889,11 +8962,22 @@ mod collect_subqueries {
 
     #[test]
     fn lazy_collect_arms_keep_correlation_occurrences_and_selected_nulls() {
-        let expected = vec![
-            row([int(1), list([vertex(2), vertex(2), vertex(3)])]),
-            row([int(4), null()]),
-            row([int(1), list([vertex(2), vertex(2), vertex(3)])]),
-        ];
+        let reached = row([int(1), list([vertex(2), vertex(2), vertex(3)])]);
+        let absent = row([int(4), null()]);
+        // A multipart MATCH delivers complete joined rows in canonical order.
+        // An independent inline CALL exposes that outer sequence before the
+        // collection's member ordering or conditional branches are involved.
+        assert_eq!(
+            execute(
+                "UNWIND [1,4,1] AS wanted MATCH (n) WHERE id(n)=wanted \
+                WITH wanted,n CALL (n) { RETURN id(n) AS nid } RETURN wanted,nid"
+            ),
+            vec![
+                row([int(1), int(1)]),
+                row([int(1), int(1)]),
+                row([int(4), int(4)])
+            ]
+        );
         for expression in [
             "CASE WHEN id(n)=1 THEN COLLECT { MATCH (n)-[:R]->(m) RETURN m ORDER BY m } WHEN true THEN NULL ELSE [99] END",
             "CASE id(n) WHEN 1 THEN COLLECT { MATCH (n)-[:R]->(m) RETURN m ORDER BY m } WHEN 4 THEN NULL ELSE [99] END",
@@ -8902,7 +8986,21 @@ mod collect_subqueries {
                 "UNWIND [1,4,1] AS wanted MATCH (n) WHERE id(n)=wanted \
                  RETURN wanted,{expression} AS values"
             );
-            assert_eq!(execute(&statement), expected, "{statement}");
+            assert_eq!(
+                execute(&statement),
+                vec![reached.clone(), reached.clone(), absent.clone()],
+                "{statement}"
+            );
+            let ordered = format!(
+                "UNWIND [0,1,2] AS occurrence WITH occurrence,[1,4,1][occurrence] AS wanted \
+                 MATCH (n) WHERE id(n)=wanted WITH wanted,n,occurrence ORDER BY occurrence \
+                 RETURN wanted,{expression} AS values"
+            );
+            assert_eq!(
+                execute(&ordered),
+                vec![reached.clone(), absent.clone(), reached.clone()],
+                "{ordered}"
+            );
         }
         assert_eq!(
             execute(

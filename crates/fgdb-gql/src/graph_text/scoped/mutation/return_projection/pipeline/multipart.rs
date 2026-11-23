@@ -159,49 +159,46 @@ impl<'a> UnresolvedReadInput<'a> {
     }
 
     pub(crate) fn depth(&self) -> usize {
-        // Each continuation contributes one Join plus its post-join stages.
-        // Its hidden source is a depth-one graph leaf, not a second pipeline.
         self.continuations
             .iter()
             .fold(self.first.depth(), |depth, part| {
-                let source_depth = match &part.operation {
-                    UnresolvedContinuationOperation::Match(_) => 1,
-                    UnresolvedContinuationOperation::Union { .. } => 0,
+                let left = depth
+                    + part
+                        .input
+                        .leading
+                        .iter()
+                        .map(ReadStageTemplate::depth)
+                        .sum::<usize>();
+                let joined = match &part.operation {
+                    UnresolvedContinuationOperation::Match(_) => left + 1,
+                    // The native Apply has two children. The list guard, when
+                    // present, projects the outer input before it meets the body.
+                    UnresolvedContinuationOperation::Apply { body, .. }
+                    | UnresolvedContinuationOperation::List { body, .. } => {
+                        1 + left.max(body.depth())
+                    }
+                    // UNION may align the right columns before combining.
+                    UnresolvedContinuationOperation::Union { body, .. } => {
+                        1 + left.max(body.depth() + 1)
+                    }
                     // Arguments + graph join + witness projection, then
                     // Apply + filter + ordered removal of the witness.
                     UnresolvedContinuationOperation::Pattern { result, .. } => match result {
-                        RowPatternResult::Filter { .. } => 6,
+                        RowPatternResult::Filter { .. } => left + 6,
                         RowPatternResult::Exists
                         | RowPatternResult::Count
-                        | RowPatternResult::Collect { .. } => 4,
+                        | RowPatternResult::Collect { .. } => left + 4,
                     },
                     UnresolvedContinuationOperation::SubqueryBody { body, result, .. } => {
-                        body.depth()
+                        left + body.depth()
                             + if matches!(result, RowPatternResult::Filter { .. }) {
                                 4
                             } else {
                                 2
                             }
                     }
-                    UnresolvedContinuationOperation::Apply { body, .. }
-                    | UnresolvedContinuationOperation::List { body, .. } => 1 + body.depth(),
-                };
-                let joined = match &part.operation {
-                    // A binary set's height is its taller child, plus
-                    // UNION and a possible right-column alignment. The
-                    // merged-schema projection below is another level.
-                    UnresolvedContinuationOperation::Union { body, .. } => {
-                        1 + depth.max(body.depth() + 1)
-                    }
-                    _ => depth + source_depth,
                 };
                 joined
-                    + part
-                        .input
-                        .leading
-                        .iter()
-                        .map(ReadStageTemplate::depth)
-                        .sum::<usize>()
                     + usize::from(part.input.projection.is_some())
                     + 2 * usize::from(!part.input.row_fields.is_empty())
                     + part
@@ -927,12 +924,13 @@ fn row_pattern_expressions_from<'a>(
         }
         if !key
             && locals.scopes.is_empty()
-            && !hoisted(token.at)
             && let Some((after, ahead)) = lazy_collection_expression(token, lexer)?
         {
-            // The complete conditional owns its graph sources. Gathering its
-            // children here would run an unselected arm before CASE/COALESCE.
-            expressions.push((token, lexer.clone()));
+            // A previously gathered conditional still owns its entire span.
+            // Scanning its children again would schedule unselected graph reads.
+            if !hoisted(token.at) {
+                expressions.push((token, lexer.clone()));
+            }
             *lexer = ahead;
             token = after;
             previous = Some(TokenKind::Punct(b')'));
@@ -2465,7 +2463,14 @@ impl<'a> Parser<'a> {
         result: RowPatternResult,
     ) -> Result<UnresolvedContinuationOperation<'a>, GraphSetTextError> {
         let at = self.current.at;
-        if !relational_subquery_body(self.current.kind, &self.lexer)? {
+        // With no captured row columns an explicit MATCH body starts its own
+        // graph read. The identity-join route requires a real outer anchor.
+        let mut ahead = self.lexer.clone();
+        let standalone_match = captures == 0
+            && (self.is_word("EXISTS") || self.is_word("COUNT"))
+            && matches!(ahead.next()?.kind, TokenKind::Punct(b'{'))
+            && matches!(ahead.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH"));
+        if !standalone_match && !relational_subquery_body(self.current.kind, &self.lexer)? {
             let (pattern, join) =
                 self.multipart_existence_pattern(statement, incoming, captures, at)?;
             return Ok(UnresolvedContinuationOperation::Pattern {
