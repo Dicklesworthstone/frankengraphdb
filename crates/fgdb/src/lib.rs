@@ -1637,6 +1637,16 @@ pub struct EdgeRecord {
     pub props: EdgePropertyRow,
 }
 
+/// Visible edges in ascending EId order and the work of the relation scan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelationEdgeRead {
+    /// Winning statements visible at the requested sequence, with their properties.
+    pub edges: Vec<EdgeRecord>,
+    /// Physical statements examined for this relation, including future
+    /// births, restatements and retirements. Unrelated relations are skipped.
+    pub candidate_edges: usize,
+}
+
 /// The published tier-D snapshot a reader is served from.
 ///
 /// Every decoded object is immutable and individually shared. Cloning a pinned
@@ -1645,6 +1655,7 @@ pub struct EdgeRecord {
 #[derive(Clone, Debug)]
 struct Snapshot {
     blocks: Vec<Arc<[AdjacencyEntry]>>,
+    relation_edges: gql_exec::source::RelationEdgeIndex,
     /// The derived adjacency index, read through [`Snapshot::adjacency_index`].
     /// Every writable path builds it with the generation (commits extend it
     /// incrementally); a read-only view builds it on first use, because a
@@ -1776,15 +1787,28 @@ impl Snapshot {
         Ok(self
             .adjacency_index()
             .statement_at(&self.blocks, eid, as_of)
-            .map(|(block, row)| EdgeRecord {
-                entry: self.blocks[block][row],
-                props: self
-                    .block_props
-                    .get(block)
-                    .and_then(Option::as_ref)
-                    .map(|props| props.props_of(row))
-                    .unwrap_or_default(),
-            }))
+            .map(|(block, row)| self.edge_record_at_position(block, row)))
+    }
+
+    fn edge_record_at_position(&self, block: usize, row: usize) -> EdgeRecord {
+        EdgeRecord {
+            entry: self.blocks[block][row],
+            props: self
+                .block_props
+                .get(block)
+                .and_then(Option::as_ref)
+                .map(|props| props.props_of(row))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn edges_by_relation_at(
+        &self,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<RelationEdgeRead, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(self.relation_edges.read(self, relation, as_of))
     }
 
     fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
@@ -1945,6 +1969,15 @@ impl EmbeddedReadView {
     /// Every edge at a sequence within this view.
     pub fn edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
         self.snapshot.edges_at(as_of)
+    }
+
+    /// Read one relation at a sequence within this pinned view.
+    pub fn edges_by_relation_at(
+        &self,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<RelationEdgeRead, ReadError> {
+        self.snapshot.edges_by_relation_at(relation, as_of)
     }
 
     /// Verification seam for the zero-copy acquisition law. This compares
@@ -4160,6 +4193,7 @@ impl<V: Vfs + Clone> Database<V> {
         };
         self.snapshot = Arc::new(Snapshot {
             adjacency,
+            relation_edges: self.snapshot.relation_edges.extend(&decoded, block_prefix),
             property_index: Arc::new(
                 self.snapshot
                     .property_index
@@ -4449,6 +4483,18 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
         self.ensure_readable()?;
         self.snapshot.edges_at(as_of)
+    }
+
+    /// Every visible edge of one relation, under the same frontier, history
+    /// and sidecar rules as [`Self::edges_at`]. Only statements of the
+    /// requested relation are examined.
+    pub fn edges_by_relation_at(
+        &self,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<RelationEdgeRead, ReadError> {
+        self.ensure_readable()?;
+        self.snapshot.edges_by_relation_at(relation, as_of)
     }
 
     /// The sequence the healthy derived partition has caught up to.
@@ -5516,6 +5562,7 @@ fn current_generation(
     Snapshot {
         // Built on first use by a reader; a commit extends it only once built.
         adjacency: std::sync::OnceLock::new(),
+        relation_edges: gql_exec::source::RelationEdgeIndex::build(&blocks),
         property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(&patches)),
         blocks: blocks.into_iter().map(Arc::from).collect(),
         refs: root.blocks,
@@ -6129,6 +6176,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             adjacency: std::sync::OnceLock::from(Arc::new(
                 gql_exec::source::AdjacencyIndex::build(&decoded),
             )),
+            relation_edges: gql_exec::source::RelationEdgeIndex::build(&decoded),
             property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(
                 &decoded_patches,
             )),

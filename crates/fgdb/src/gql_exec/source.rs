@@ -353,6 +353,89 @@ mod persistent_index_tests {
 type History = IndexMap<(CommitSeq, usize, usize), ()>;
 type Incidence = IndexMap<EId, ()>;
 
+/// Contiguous runs of a relation in the admitted blocks of one generation.
+/// The end row is exclusive. A relation lookup seeks directly to its first
+/// run, including on a freshly reopened generation with no adjacency cache.
+#[derive(Clone, Debug)]
+pub(crate) struct RelationEdgeIndex {
+    spans: IndexMap<(RelationId, usize, usize), usize>,
+}
+
+impl RelationEdgeIndex {
+    fn added_spans(
+        blocks: &[impl AsRef<[AdjacencyEntry]>],
+        from: usize,
+        mut visit: impl FnMut((RelationId, usize, usize), usize),
+    ) {
+        for (block, rows) in blocks.iter().enumerate().skip(from) {
+            let mut start = 0;
+            for run in rows.as_ref().chunk_by(|a, b| a.relation == b.relation) {
+                let end = start + run.len();
+                visit((run[0].relation, block, start), end);
+                start = end;
+            }
+        }
+    }
+
+    pub(crate) fn build(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
+        let mut spans = Vec::new();
+        Self::added_spans(blocks, 0, |key, end| spans.push((key, end)));
+        spans.sort_unstable_by_key(|(key, _)| *key);
+        let mut work = 0;
+        Self {
+            spans: IndexMap::from_sorted(spans, &mut work),
+        }
+    }
+
+    pub(crate) fn extend(&self, blocks: &[impl AsRef<[AdjacencyEntry]>], from: usize) -> Self {
+        let mut spans = self.spans.clone();
+        let mut work = 0;
+        Self::added_spans(blocks, from, |key, end| {
+            spans = spans.insert(key, end, &mut work);
+        });
+        Self { spans }
+    }
+
+    pub(crate) fn read(
+        &self,
+        snapshot: &Snapshot,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> crate::RelationEdgeRead {
+        let mut winners = BTreeMap::new();
+        let mut candidate_edges = 0;
+        for (&(kind, block, start), &end) in self.spans.iter_from(&(relation, 0, 0), true) {
+            if kind != relation {
+                break;
+            }
+            let rows = &snapshot.blocks[block][start..end];
+            candidate_edges += rows.len();
+            for (offset, entry) in rows.iter().enumerate() {
+                if entry.created_at <= as_of {
+                    // A validated EId cannot change relation. Among its
+                    // admitted versions the latest birth wins; a later block
+                    // may restate that birth to retire it or bind its sidecar.
+                    let position = (entry.created_at, block, start + offset);
+                    let winner = winners.entry(entry.eid).or_insert(position);
+                    *winner = (*winner).max(position);
+                }
+            }
+        }
+        let edges = winners
+            .into_values()
+            .filter_map(|(_, block, row)| {
+                snapshot.blocks[block][row]
+                    .visible_at(as_of)
+                    .then(|| snapshot.edge_record_at_position(block, row))
+            })
+            .collect();
+        crate::RelationEdgeRead {
+            edges,
+            candidate_edges,
+        }
+    }
+}
+
 /// The `(block, row)` of the latest statement in `history` created at or
 /// before `as_of`. Keys order `(created_at, block, row)`, so among one
 /// statement's restatements the later block wins, as in the merge.
