@@ -381,7 +381,11 @@ fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state(
                 },
             )
             .unwrap();
-        let mut delivered = initial.rows().clone();
+        let limb_limit = fgdb_delta_types::LimbLimit::new(4);
+        let mut delivered = initial
+            .rows()
+            .checked_clone(limb_limit, &mut |_| Ok::<_, ()>(()))
+            .unwrap();
         subscription.acknowledge(initial.receipt()).unwrap();
         assert_eq!(delivered, reachable_pairs(&visible, &[], false, false));
         let hidden_bridge_pair = vec![
@@ -436,14 +440,13 @@ fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state(
             }
             if let Some(batch) = subscription.poll(&db, &cx, policy()).unwrap() {
                 if batch.is_snapshot() {
-                    delivered = batch.rows().clone();
+                    delivered = batch
+                        .rows()
+                        .checked_clone(limb_limit, &mut |_| Ok::<_, ()>(()))
+                        .unwrap();
                 } else {
                     delivered
-                        .integrate(
-                            batch.rows(),
-                            fgdb_delta_types::LimbLimit::new(4),
-                            &mut |_| Ok::<_, ()>(()),
-                        )
+                        .integrate(batch.rows(), limb_limit, &mut |_| Ok::<_, ()>(()))
                         .unwrap();
                 }
                 subscription.acknowledge(batch.receipt()).unwrap();
