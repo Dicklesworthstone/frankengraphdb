@@ -12,6 +12,39 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Bounded post-seal overlays and borrowed property admission — qualification pending
+
+The authenticated Tier-R/Tier-D overlay now bounds distinct suffix statements
+before inserting winners, and bounds each retained or visible descriptor map
+before allocation. Restatements reuse the same winner slot. Property rows stay
+borrowed during winner selection. Each retained winner passes cumulative
+canonical-byte admission before one owned payload is shared by outgoing,
+incoming and retained views.
+
+Materialization feeds complete source descriptors into the existing incremental
+image builder in canonical order. It checks combined incidence, descriptor and
+property-byte allowances before each decoded row copy, releases completed
+descriptor buffers, and observes cancellation inside delta-only merge loops.
+The final image and anchor retain the ordinary sealer's encoding and scope.
+Shared property-row admission also uses the existing scalar and collection size
+contracts instead of allocating a serialized patch merely to measure it.
+
+Seven added regression tests cover literal and encoded byte counts across property
+formats, exact/insufficient limits, restatement coalescing, both traversal faces,
+future retained versions, shared payload ownership, independent retained-history
+and image parity, and every observed build/materialization interruption point.
+Two independent source reviews found no blocking production issue. Compiler,
+runtime, Rustfmt, Clippy, UBS and exact-tree qualification are UNRUN: the execution
+environment became unavailable before toolchain installation and a later retry
+reported no usable execution environment.
+
+These are explicit population and canonical-payload bounds. The complete
+operation still has no MemoryPool/RSS guarantee or spillable descriptor builder;
+existing encoded-image and incoming-index workspace semantics are unchanged.
+Work remains open under `fgdb-rc1111-persistent-tier-r-7hsan`,
+`fgdb-w3-buffer-g2v`, `fgdb-w3-properties-gou`, and
+`fgdb-qualify-integrated-nov22-maz0p`.
+
 ### Correlated filters and indexed authorized writes — qualification pending
 
 Source commits `004a14b`, `1ee4a2b` and `2d264e0` repair three live

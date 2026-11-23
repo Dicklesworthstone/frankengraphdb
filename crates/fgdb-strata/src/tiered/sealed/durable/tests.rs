@@ -1,6 +1,6 @@
 use super::*;
 use crate::AdjacencyEntry;
-use crate::edge_props::EdgePropertyRow;
+use crate::edge_props::{BlockProps, EdgePropertyRow};
 use fgdb_codec::identity::IdentityRepresentation;
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, PurposeContexts, VId};
@@ -230,6 +230,409 @@ fn post_seal_overlay_rejects_impossible_proof_horizons_before_materialization() 
                 Err(SealedError::ImageMismatch)
             ));
         }
+    });
+}
+
+fn overlay_fixture(
+    cx: &QueryCx,
+    rows: Rows,
+) -> (AdjRunSegment, crate::store::PostSealBlocks) {
+    let (partition, origins, _) = source(false);
+    let mut base =
+        AdjRunSegment::from_sealed(cx, &partition, &origins, SealedLimits::default()).unwrap();
+    let source_root = PartitionRootVersion(ObjectId([0xc3; 32]));
+    let publication = CommitSeq(8);
+    let after_seq = CommitSeq(4);
+    base.bind_envelope(source_root, publication, after_seq);
+    let (blocks, props) = rows
+        .into_iter()
+        .map(|(entry, row)| {
+            let props = (!row.is_empty()).then(|| BlockProps {
+                locators: vec![1],
+                rows: vec![row],
+            });
+            (vec![entry], props)
+        })
+        .unzip();
+    (
+        base,
+        crate::store::PostSealBlocks {
+            source_root,
+            publication,
+            relation: RELATION,
+            after_seq,
+            blocks,
+            props,
+        },
+    )
+}
+
+fn overlay_entry(id: u128, src: u128, dst: u128, created: u64) -> AdjacencyEntry {
+    AdjacencyEntry {
+        src: VId(src),
+        relation: RELATION,
+        dst: VId(dst),
+        eid: EId(id),
+        created_at: CommitSeq(created),
+        retired_at: None,
+    }
+}
+
+fn overlay_at_five(
+    cx: &QueryCx,
+    base: &AdjRunSegment,
+    suffix: &crate::store::PostSealBlocks,
+    limits: SealedLimits,
+) -> Result<super::super::SealedDeltaOverlay, SealedError> {
+    super::super::SealedDeltaOverlay::build(
+        cx,
+        base.clone(),
+        suffix.source_root,
+        suffix.after_seq,
+        CommitSeq(5),
+        suffix,
+        limits,
+    )
+}
+
+#[test]
+fn post_seal_overlay_bounds_distinct_statements_but_coalesces_restatements() {
+    run(0x5ea1_2030, |cx| {
+        // The base has fourteen retained incidences. Fifteen distinct suffix
+        // statements exceed the SAME explicit allowance before any row copy.
+        let rows: Rows = (0..15)
+            .map(|at| (overlay_entry(100 + at, 1, 2, 5), Vec::new()))
+            .collect();
+        let (base, suffix) = overlay_fixture(&cx, rows.clone());
+        let limits = SealedLimits {
+            max_incidences: 14,
+            ..SealedLimits::default()
+        };
+        assert!(matches!(
+            overlay_at_five(&cx, &base, &suffix, limits),
+            Err(SealedError::Limit {
+                resource: "overlay statements",
+                requested: 15,
+                limit: 14,
+            })
+        ));
+        let exact = overlay_at_five(
+            &cx,
+            &base,
+            &suffix,
+            SealedLimits {
+                max_incidences: 15,
+                ..limits
+            },
+        )
+        .unwrap();
+        assert_eq!(exact.visible_delta_count(), 15);
+
+        // Repeated physical statements have one logical winner; bounding raw
+        // block rows instead would falsely refuse this otherwise tiny suffix.
+        let (base, suffix) = overlay_fixture(&cx, vec![rows[0].clone(); 128]);
+        let repeated = overlay_at_five(&cx, &base, &suffix, limits).unwrap();
+        assert_eq!(repeated.visible_delta_count(), 1);
+        let mut cursor = repeated.outgoing_cursor(&cx, VId(1)).unwrap();
+        assert_eq!(cursor.next(&cx).unwrap().unwrap().entry, rows[0].0);
+    });
+}
+
+#[test]
+fn post_seal_overlay_bounds_both_faces_and_future_retained_descriptors() {
+    run(0x5ea1_2031, |cx| {
+        for (different_sources, created) in [(true, 5), (false, 5), (true, 7)] {
+            let rows = (0..3)
+                .map(|at| {
+                    let (src, dst) = if different_sources {
+                        (10 + at, 2)
+                    } else {
+                        (1, 10 + at)
+                    };
+                    (overlay_entry(100 + at, src, dst, created), Vec::new())
+                })
+                .collect();
+            let (base, suffix) = overlay_fixture(&cx, rows);
+            let limits = SealedLimits {
+                max_rows: 2,
+                ..SealedLimits::default()
+            };
+            assert!(matches!(
+                overlay_at_five(&cx, &base, &suffix, limits),
+                Err(SealedError::Limit {
+                    resource: "overlay descriptors",
+                    requested: 3,
+                    limit: 2,
+                })
+            ));
+            let exact = overlay_at_five(
+                &cx,
+                &base,
+                &suffix,
+                SealedLimits {
+                    max_rows: 3,
+                    ..limits
+                },
+            )
+            .unwrap();
+            assert_eq!(exact.visible_delta_count(), if created == 5 { 3 } else { 0 });
+        }
+    });
+}
+
+#[test]
+fn post_seal_overlay_admits_future_properties_and_shares_visible_payloads() {
+    run(0x5ea1_2032, |cx| {
+        let property = vec![(PropertyKeyId(1), CanonicalScalar::Int(42).into())];
+        let rows = vec![
+            (overlay_entry(100, 1, 2, 5), property.clone()),
+            (overlay_entry(101, 1, 3, 7), property.clone()),
+        ];
+        let (base, suffix) = overlay_fixture(&cx, rows);
+        // Two rows: each is u32 count + u64 key + u32 length + 9-byte Int.
+        let limits = SealedLimits {
+            max_property_bytes: 49,
+            ..SealedLimits::default()
+        };
+        assert!(matches!(
+            overlay_at_five(&cx, &base, &suffix, limits),
+            Err(SealedError::Limit {
+                resource: "overlay property bytes",
+                requested: 50,
+                limit: 49,
+            })
+        ));
+        let exact = overlay_at_five(
+            &cx,
+            &base,
+            &suffix,
+            SealedLimits {
+                max_property_bytes: 50,
+                ..limits
+            },
+        )
+        .unwrap();
+        assert_eq!(exact.visible_delta_count(), 1);
+        let mut outgoing = exact.outgoing_cursor(&cx, VId(1)).unwrap();
+        let out = outgoing.next(&cx).unwrap().unwrap();
+        let mut incoming = exact.incoming_cursor(&cx, VId(2)).unwrap();
+        let inbound = incoming.next(&cx).unwrap().unwrap();
+        assert_eq!(out.entry.eid, EId(100));
+        assert_eq!(inbound.entry, out.entry);
+        assert_eq!(out.properties, property.as_slice());
+        assert!(core::ptr::eq(out.properties, inbound.properties));
+        assert!(incoming.next(&cx).unwrap().is_none());
+
+        let (base, suffix) =
+            overlay_fixture(&cx, vec![(overlay_entry(100, 1, 2, 5), property); 128]);
+        let repeated = overlay_at_five(
+            &cx,
+            &base,
+            &suffix,
+            SealedLimits {
+                max_property_bytes: 25,
+                ..limits
+            },
+        )
+        .unwrap();
+        assert_eq!(repeated.visible_delta_count(), 1);
+    });
+}
+
+#[test]
+fn post_seal_materialization_streams_families_with_cumulative_output_admission() {
+    run(0x5ea1_2033, |cx| {
+        let limits = SealedLimits::default();
+        let (_, _, original) = source(false);
+        let property = |value| vec![(PropertyKeyId(1), CanonicalScalar::Int(value).into())];
+        let mut later_retirement = original
+            .iter()
+            .find(|row| row.0.eid == EId(11))
+            .unwrap()
+            .0;
+        later_retirement.retired_at = Some(CommitSeq(7));
+        let mut current_retirement = original
+            .iter()
+            .find(|row| row.0.eid == EId(12))
+            .unwrap()
+            .0;
+        current_retirement.retired_at = Some(CommitSeq(5));
+        let mut added = overlay_entry(100, 1, 3, 5);
+        added.retired_at = Some(CommitSeq(6));
+        let future = overlay_entry(101, 8, 9, 7);
+        let suffix_rows = vec![
+            (later_retirement, property(11)),
+            (current_retirement, property(12)),
+            (added, property(100)),
+            (future, property(101)),
+        ];
+        let (base, suffix) = overlay_fixture(&cx, suffix_rows);
+        let overlay = overlay_at_five(&cx, &base, &suffix, limits).unwrap();
+
+        // Independently assemble retained logical history at floor five,
+        // including a base retirement after the cut and a future delta birth.
+        let mut expected_rows: Rows = original
+            .into_iter()
+            .filter(|(entry, _)| entry.retired_at.is_none_or(|retired| retired > CommitSeq(5)))
+            .filter(|(entry, _)| entry.eid != EId(12))
+            .map(|(mut entry, row)| {
+                if entry.eid == EId(11) {
+                    entry.retired_at = Some(CommitSeq(7));
+                }
+                (entry, row)
+            })
+            .chain([(added, property(100)), (future, property(101))])
+            .collect();
+        expected_rows.sort_by_key(|(entry, _)| {
+            (
+                entry.src,
+                entry.relation,
+                entry.dst,
+                entry.eid,
+                entry.created_at,
+            )
+        });
+        let expected_count = expected_rows.len();
+        let expected_properties: usize = expected_rows
+            .iter()
+            .map(|(_, row)| crate::edge_props::admitted_row_bytes(row).unwrap() as usize)
+            .sum();
+        let image =
+            super::super::image::build_retained(expected_rows.clone(), limits, &mut || Ok(()))
+                .unwrap();
+        let scope = SealedScope {
+            source_root: suffix.source_root,
+            graph: base.header().scope.graph,
+            branch: base.header().scope.branch,
+            partition: base.header().scope.partition,
+            floor: CommitSeq(5),
+            publication: suffix.publication,
+        };
+        let expected =
+            SealedPartition::finish_scoped(scope, Some(RELATION), image, limits, &mut || Ok(()))
+                .unwrap();
+
+        for (tight, resource) in [
+            (
+                SealedLimits {
+                    max_incidences: expected_count - 1,
+                    ..limits
+                },
+                "incidences",
+            ),
+            (
+                SealedLimits {
+                    max_rows: 2,
+                    ..limits
+                },
+                "descriptors",
+            ),
+            (
+                SealedLimits {
+                    max_property_bytes: expected_properties - 1,
+                    ..limits
+                },
+                "property bytes",
+            ),
+        ] {
+            assert!(matches!(
+                overlay.materialize_partition(&cx, tight),
+                Err(SealedError::Limit { resource: actual, .. }) if actual == resource
+            ));
+        }
+
+        // Every failed private build leaves the same overlay reusable.
+        let exact = SealedLimits {
+            max_incidences: expected_count,
+            max_property_bytes: expected_properties,
+            max_image_bytes: expected.stats().encoded_bytes,
+            ..limits
+        };
+        let materialized = overlay.materialize_partition(&cx, exact).unwrap();
+        assert_eq!(
+            materialized.encode(&cx, limits).unwrap(),
+            expected.encode(&cx, limits).unwrap()
+        );
+        assert_eq!(materialized.anchor(), expected.anchor());
+        for sequence in 5..=8 {
+            for src in [VId(1), VId(8), VId((1_u128 << 127) + 19)] {
+                let expected: Rows = expected_rows
+                    .iter()
+                    .filter(|(entry, _)| {
+                        entry.src == src && entry.visible_at(CommitSeq(sequence))
+                    })
+                    .cloned()
+                    .collect();
+                assert_eq!(collect(&cx, &materialized, src, sequence), expected);
+            }
+        }
+        let mut incoming = overlay.incoming_cursor(&cx, VId(3)).unwrap();
+        let observed = incoming.next(&cx).unwrap().unwrap();
+        assert_eq!(observed.entry, added);
+        assert_eq!(observed.properties, property(100).as_slice());
+        assert!(incoming.next(&cx).unwrap().is_none());
+    });
+}
+
+#[test]
+fn post_seal_overlay_cancellation_is_terminal_and_private_builds_are_reusable() {
+    run(0x5ea1_2034, |cx| {
+        use fgdb_types::context::SimulationCheckpointProbe;
+
+        let limits = SealedLimits::default();
+        let (_, _, original) = source(false);
+        // Retire the complete first base descriptor, then materialize a
+        // delta-only source. Its row copies must observe cancellation even
+        // though there is no base cursor to provide their checkpoints.
+        let suffix_rows: Rows = original
+            .into_iter()
+            .filter(|(entry, _)| entry.src == VId(1) && entry.visible_at(CommitSeq(4)))
+            .map(|(mut entry, row)| {
+                entry.retired_at = Some(CommitSeq(5));
+                (entry, row)
+            })
+            .chain((0..20).map(|at| {
+                (
+                    overlay_entry(200 + at, 8, 20 + at, 5),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(at as i64).into())],
+                )
+            }))
+            .collect();
+        let (base, suffix) = overlay_fixture(&cx, suffix_rows);
+        let build_probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let observed = cx.with_checkpoint_probe(Arc::clone(&build_probe));
+        let overlay = overlay_at_five(&observed, &base, &suffix, limits).unwrap();
+        assert!(build_probe.calls() > 0);
+        for stop in 1..=build_probe.calls() {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let stopped = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(matches!(
+                overlay_at_five(&stopped, &base, &suffix, limits),
+                Err(SealedError::Interrupted(_))
+            ));
+            assert_eq!(probe.calls(), stop);
+        }
+
+        let image_probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let observed = cx.with_checkpoint_probe(Arc::clone(&image_probe));
+        let expected = overlay.materialize_partition(&observed, limits).unwrap();
+        assert!(collect(&cx, &expected, VId(1), 5).is_empty());
+        assert_eq!(collect(&cx, &expected, VId(8), 5).len(), 20);
+        assert!(image_probe.calls() > 20);
+        for stop in 1..=image_probe.calls() {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let stopped = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(matches!(
+                overlay.materialize_partition(&stopped, limits),
+                Err(SealedError::Interrupted(_))
+            ));
+            assert_eq!(probe.calls(), stop);
+        }
+        let retried = overlay.materialize_partition(&cx, limits).unwrap();
+        assert_eq!(
+            retried.encode(&cx, limits).unwrap(),
+            expected.encode(&cx, limits).unwrap()
+        );
     });
 }
 

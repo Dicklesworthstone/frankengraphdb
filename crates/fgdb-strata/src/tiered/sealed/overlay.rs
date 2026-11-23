@@ -18,17 +18,112 @@
 
 use super::{
     AdjRunSegment, IncomingIndexLimits, SealedCursor, SealedEdge, SealedError,
-    SealedIncomingCursor, SealedIncomingIndex, SealedLimits, SealedPartition, SealedScope, image,
+    SealedIncomingCursor, SealedIncomingIndex, SealedLimits, SealedPartition, SealedScope,
+    check_limit, image,
 };
 use crate::edge_props::{BlockProps, EdgePropertyRow, admitted_row_bytes};
 use crate::root::RootError;
 use crate::{AdjacencyEntry, PartitionRootVersion};
-use fgdb_delta_types::RelationId;
-use fgdb_types::{CommitSeq, EId, QueryCx, VId};
+use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_types::{CanonicalPropertyValue, CommitSeq, EId, QueryCx, VId};
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-type OverlayEntryRow = (AdjacencyEntry, EdgePropertyRow);
+type OverlayEntryRow = (AdjacencyEntry, Arc<EdgePropertyRow>);
+type BorrowedOverlayRow<'a> = (AdjacencyEntry, &'a [(PropertyKeyId, CanonicalPropertyValue)]);
+
+fn admit_delta_descriptor(
+    rows: &BTreeMap<VId, Vec<OverlayEntryRow>>,
+    vertex: VId,
+    limit: usize,
+) -> Result<(), SealedError> {
+    if !rows.contains_key(&vertex) {
+        let requested = rows.len().checked_add(1).ok_or(SealedError::SizeOverflow)?;
+        check_limit("overlay descriptors", requested, limit)?;
+    }
+    Ok(())
+}
+
+fn push_delta(
+    rows: &mut BTreeMap<VId, Vec<OverlayEntryRow>>,
+    vertex: VId,
+    entry: AdjacencyEntry,
+    properties: Arc<EdgePropertyRow>,
+) -> Result<(), SealedError> {
+    let row = rows.entry(vertex).or_default();
+    row.try_reserve(1)
+        .map_err(|_| SealedError::AllocationFailed)?;
+    row.push((entry, properties));
+    Ok(())
+}
+
+/// Cumulative output admission, before each decoded row/property copy. The
+/// image builder keeps its own identical final-image checks; this earlier
+/// boundary also bounds the temporary descriptor family being fed to it.
+struct MaterializedAdmission {
+    limits: SealedLimits,
+    incidences: usize,
+    descriptors: usize,
+    property_bytes: usize,
+    last_src: Option<VId>,
+}
+
+impl MaterializedAdmission {
+    fn new(limits: SealedLimits) -> Self {
+        Self {
+            limits,
+            incidences: 0,
+            descriptors: 0,
+            property_bytes: 0,
+            last_src: None,
+        }
+    }
+
+    fn push(
+        &mut self,
+        rows: &mut Vec<(AdjacencyEntry, EdgePropertyRow)>,
+        entry: AdjacencyEntry,
+        properties: &[(PropertyKeyId, CanonicalPropertyValue)],
+    ) -> Result<(), SealedError> {
+        let incidences = self
+            .incidences
+            .checked_add(1)
+            .ok_or(SealedError::SizeOverflow)?;
+        check_limit("incidences", incidences, self.limits.max_incidences)?;
+        u32::try_from(incidences).map_err(|_| SealedError::SizeOverflow)?;
+        let descriptors = self
+            .descriptors
+            .checked_add(usize::from(self.last_src != Some(entry.src)))
+            .ok_or(SealedError::SizeOverflow)?;
+        check_limit("descriptors", descriptors, self.limits.max_rows)?;
+        let row_bytes =
+            usize::try_from(admitted_row_bytes(properties).map_err(SealedError::Property)?)
+                .map_err(|_| SealedError::SizeOverflow)?;
+        let property_bytes = self
+            .property_bytes
+            .checked_add(row_bytes)
+            .ok_or(SealedError::SizeOverflow)?;
+        check_limit(
+            "property bytes",
+            property_bytes,
+            self.limits.max_property_bytes,
+        )?;
+        rows.try_reserve(1)
+            .map_err(|_| SealedError::AllocationFailed)?;
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(properties.len())
+            .map_err(|_| SealedError::AllocationFailed)?;
+        owned.extend(properties.iter().cloned());
+        rows.push((entry, owned));
+        self.incidences = incidences;
+        self.descriptors = descriptors;
+        self.property_bytes = property_bytes;
+        self.last_src = Some(entry.src);
+        Ok(())
+    }
+}
 
 /// Authenticated composition of a durable [`AdjRunSegment`] (`<= verified_through`)
 /// with post-seal Tier-D delta blocks (`> verified_through`) up to `envelope_publication`.
@@ -51,6 +146,15 @@ pub struct SealedDeltaOverlay {
 impl SealedDeltaOverlay {
     /// Construct an authenticated post-seal delta overlay from an admitted base
     /// run and a store-minted [`crate::store::PostSealBlocks`] receipt.
+    ///
+    /// Existing base-index admission is preserved. The limits also bound the
+    /// selected suffix separately. Distinct suffix statements (including
+    /// retirement evidence) consume the incidence allowance; repeated
+    /// restatements replace the same slot.
+    /// Each suffix descriptor map obeys the row allowance, and retained suffix
+    /// properties share one canonical-byte allowance and one owned copy across
+    /// cursor faces. These are population/payload bounds, not an allocator/RSS
+    /// guarantee. Materialization admits the combined output cumulatively.
     pub fn build(
         cx: &QueryCx,
         base: AdjRunSegment,
@@ -127,18 +231,10 @@ impl SealedDeltaOverlay {
             }));
         }
 
-        let base_incoming = base.partition().incoming_index(
-            cx,
-            IncomingIndexLimits {
-                max_rows: limits.max_rows,
-                max_incidences: limits.max_incidences,
-                max_workspace_bytes: usize::MAX / 2,
-            },
-        )?;
-
-        // Collapse post-seal statements on `relation` under Strata's canonical
-        // last-block-wins rule keyed by `(eid, created_at)`.
-        let mut winning: BTreeMap<(EId, CommitSeq), OverlayEntryRow> = BTreeMap::new();
+        // Collapse statements under the canonical last-block-wins rule.
+        // Retain borrowed property rows until winners and their allowances
+        // are known; a superseded statement never makes a recursive copy.
+        let mut winning: BTreeMap<(EId, CommitSeq), BorrowedOverlayRow<'_>> = BTreeMap::new();
         for (block, props) in post_seal_blocks.iter().zip(post_seal_props) {
             cx.checkpoint().map_err(SealedError::Interrupted)?;
             let props_ref = props.as_ref().map(Borrow::borrow);
@@ -149,16 +245,33 @@ impl SealedDeltaOverlay {
                 if entry.relation != relation {
                     continue;
                 }
-                let row = props_ref.map(|p| p.props_of(index)).unwrap_or_default();
-                winning.insert((entry.eid, entry.created_at), (*entry, row));
+                let key = (entry.eid, entry.created_at);
+                if !winning.contains_key(&key) {
+                    let requested = winning
+                        .len()
+                        .checked_add(1)
+                        .ok_or(SealedError::SizeOverflow)?;
+                    check_limit("overlay statements", requested, limits.max_incidences)?;
+                }
+                let row = props_ref.map_or(&[][..], |properties| properties.props_ref(index));
+                winning.insert(key, (*entry, row));
             }
         }
 
+        let base_incoming = base.partition().incoming_index(
+            cx,
+            IncomingIndexLimits {
+                max_rows: limits.max_rows,
+                max_incidences: limits.max_incidences,
+                max_workspace_bytes: usize::MAX / 2,
+            },
+        )?;
         let mut retired_base_at_as_of = BTreeSet::new();
         let mut base_retirements_after_as_of = BTreeMap::new();
         let mut delta_out_at_as_of: BTreeMap<VId, Vec<OverlayEntryRow>> = BTreeMap::new();
         let mut delta_in_at_as_of: BTreeMap<VId, Vec<OverlayEntryRow>> = BTreeMap::new();
         let mut delta_retained_from_as_of: BTreeMap<VId, Vec<OverlayEntryRow>> = BTreeMap::new();
+        let mut property_bytes = 0usize;
 
         for (step, ((eid, created_at), (entry, row))) in winning.into_iter().enumerate() {
             if step.is_multiple_of(128) {
@@ -174,25 +287,40 @@ impl SealedDeltaOverlay {
                         base_retirements_after_as_of.insert((eid, created_at), retired);
                     }
                 }
-            } else {
-                if entry.retired_at.is_none_or(|retired| retired > as_of) {
-                    admitted_row_bytes(&row)
-                        .map_err(|err| SealedError::History(RootError::PropertyPatch(err)))?;
-                    if entry.visible_at(as_of) {
-                        delta_out_at_as_of
-                            .entry(entry.src)
-                            .or_default()
-                            .push((entry, row.clone()));
-                        delta_in_at_as_of
-                            .entry(entry.dst)
-                            .or_default()
-                            .push((entry, row.clone()));
-                    }
-                    delta_retained_from_as_of
-                        .entry(entry.src)
-                        .or_default()
-                        .push((entry, row));
+            } else if entry.retired_at.is_none_or(|retired| retired > as_of) {
+                // Admission precedes both the recursive copy and descriptor
+                // allocation. Future retained versions count too, even though
+                // neither visible cursor will yield them at this cut.
+                admit_delta_descriptor(&delta_retained_from_as_of, entry.src, limits.max_rows)?;
+                let visible = entry.visible_at(as_of);
+                if visible {
+                    admit_delta_descriptor(&delta_out_at_as_of, entry.src, limits.max_rows)?;
+                    admit_delta_descriptor(&delta_in_at_as_of, entry.dst, limits.max_rows)?;
                 }
+                let bytes = usize::try_from(
+                    admitted_row_bytes(row)
+                        .map_err(|error| SealedError::History(RootError::PropertyPatch(error)))?,
+                )
+                .map_err(|_| SealedError::SizeOverflow)?;
+                property_bytes = property_bytes
+                    .checked_add(bytes)
+                    .ok_or(SealedError::SizeOverflow)?;
+                check_limit(
+                    "overlay property bytes",
+                    property_bytes,
+                    limits.max_property_bytes,
+                )?;
+                let mut owned = Vec::new();
+                owned
+                    .try_reserve_exact(row.len())
+                    .map_err(|_| SealedError::AllocationFailed)?;
+                owned.extend(row.iter().cloned());
+                let row = Arc::new(owned);
+                if visible {
+                    push_delta(&mut delta_out_at_as_of, entry.src, entry, Arc::clone(&row))?;
+                    push_delta(&mut delta_in_at_as_of, entry.dst, entry, Arc::clone(&row))?;
+                }
+                push_delta(&mut delta_retained_from_as_of, entry.src, entry, row)?;
             }
         }
 
@@ -348,6 +476,11 @@ impl SealedDeltaOverlay {
     /// into an `as_of`-floored [`SealedPartition`] anchored to `envelope_root`,
     /// preserving exact byte/anchor parity with a full Tier-D seal while reading
     /// historical `[floor..=verified_through]` rows from the compressed run.
+    /// Complete source descriptors feed the incremental image builder in order;
+    /// decoded rows from a completed descriptor are released before the next.
+    /// Combined incidence, descriptor and canonical-property allowances are
+    /// checked before every copied row. Final encoded-image limits remain the
+    /// ordinary sealer's, without a whole-operation memory/RSS claim.
     pub fn materialize_partition(
         &self,
         cx: &QueryCx,
@@ -357,7 +490,9 @@ impl SealedDeltaOverlay {
         let base_rows = &self.base.partition().image.rows;
         let mut base_idx = 0usize;
         let mut delta_iter = self.delta_retained_from_as_of.iter().peekable();
-        let mut merged: Vec<OverlayEntryRow> = Vec::new();
+        let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
+        let mut builder = image::ImageBuilder::new(limits)?;
+        let mut admission = MaterializedAdmission::new(limits);
 
         loop {
             cx.checkpoint().map_err(SealedError::Interrupted)?;
@@ -396,8 +531,10 @@ impl SealedDeltaOverlay {
             };
             let mut peeked_base: Option<SealedEdge<'_>> = None;
             let mut delta_pos = 0usize;
+            let mut merged = Vec::new();
 
             loop {
+                checkpoint()?;
                 if peeked_base.is_none()
                     && let Some(cursor) = base_cursor.as_mut()
                 {
@@ -420,35 +557,24 @@ impl SealedDeltaOverlay {
                         let d_key = (d_entry.dst, d_entry.eid, d_entry.created_at);
                         if b_key <= d_key {
                             let edge = peeked_base.take().expect("peeked above");
-                            merged
-                                .try_reserve(1)
-                                .map_err(|_| SealedError::AllocationFailed)?;
-                            merged.push((edge.entry, edge.properties.to_vec()));
+                            admission.push(&mut merged, edge.entry, edge.properties)?;
                         } else {
                             delta_pos += 1;
-                            merged
-                                .try_reserve(1)
-                                .map_err(|_| SealedError::AllocationFailed)?;
-                            merged.push((*d_entry, d_row.clone()));
+                            admission.push(&mut merged, *d_entry, d_row.as_slice())?;
                         }
                     }
                     (Some(_), None) => {
                         let edge = peeked_base.take().expect("peeked above");
-                        merged
-                            .try_reserve(1)
-                            .map_err(|_| SealedError::AllocationFailed)?;
-                        merged.push((edge.entry, edge.properties.to_vec()));
+                        admission.push(&mut merged, edge.entry, edge.properties)?;
                     }
                     (None, Some((d_entry, d_row))) => {
                         delta_pos += 1;
-                        merged
-                            .try_reserve(1)
-                            .map_err(|_| SealedError::AllocationFailed)?;
-                        merged.push((*d_entry, d_row.clone()));
+                        admission.push(&mut merged, *d_entry, d_row.as_slice())?;
                     }
                     (None, None) => break,
                 }
             }
+            builder.push_retained(merged, &mut checkpoint)?;
         }
 
         let base_scope = self.base.header().scope;
@@ -460,8 +586,7 @@ impl SealedDeltaOverlay {
             floor: self.as_of,
             publication: self.envelope_publication,
         };
-        let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
-        let built_image = image::build_retained(merged, limits, &mut checkpoint)?;
+        let built_image = builder.finish(&mut checkpoint)?;
         let mut partition = SealedPartition::finish_scoped(
             scope,
             Some(self.relation),
