@@ -102,9 +102,11 @@ fn stored_properties_need_their_own_effect_proof_even_in_unselected_lazy_arms() 
         },
     ] {
         let insertion = stored(value);
+        let input = insertion.relational_selection().unwrap();
+        assert!(!input.reads_graph() && !input.reads_elements());
         assert!(
-            !insertion.requires_read(),
-            "the legacy check covers only graph operands"
+            insertion.requires_read(),
+            "the creation includes the stored property expression's element read"
         );
         assert_eq!(insertion.independent_owned_create_relation(), None);
     }

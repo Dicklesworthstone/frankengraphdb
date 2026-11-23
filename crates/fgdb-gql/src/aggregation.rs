@@ -734,13 +734,25 @@ impl PreparedGraphAggregate {
     pub fn answers_identified_edges_from_topology(&self) -> bool {
         self.input.plan().requires_identified_edges() && weighted::answers_identified_exactly(self)
     }
+
+    fn needs_projected_rows(&self) -> bool {
+        // A collected list belongs to its completed match row. The binding
+        // visitor only borrows vertex identities and source properties.
+        self.computed_input.is_some()
+            || self
+                .input
+                .value_columns()
+                .iter()
+                .any(|column| matches!(column, ValueProjection::Collected { .. }))
+    }
+
     /// Whether the ordinary element-map executor reaches the existing bounded
     /// root-group owner. A physical source substitution must preserve that
     /// owner's finite-prefix retirement, including its argument DISTINCT state.
     /// Keep eligibility with the owner rather than recreating its page/key proof.
     pub(crate) fn uses_root_group_retirement(&self) -> bool {
         let plan = self.input.plan();
-        self.computed_input.is_none()
+        !self.needs_projected_rows()
             && self.relational_input.is_none()
             && (!plan.requires_identified_edges() || weighted::answers_identified_exactly(self))
             && !plan.projects_labels()
@@ -1233,7 +1245,7 @@ impl PreparedGraphAggregate {
                 || checkpoint.unit(),
             );
         }
-        if self.computed_input.is_some() {
+        if self.needs_projected_rows() {
             return self.execute_projected_governed(
                 snapshot_records,
                 vertices,

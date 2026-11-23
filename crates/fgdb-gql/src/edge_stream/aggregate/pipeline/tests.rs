@@ -703,10 +703,28 @@ fn direct_collected_operands_keep_native_lists_and_reject_unproved_collection_ou
     .unwrap();
     let source = Source::new(&[Some(1), Some(1), None, None]);
     let batch = eager_vertex_collections(&query, &source);
+    let topology = query
+        .execute_governed(
+            source.props.len() as u64 * 2,
+            (0..source.props.len()).map(|at| VId(at as u128)),
+            (0..source.props.len()).map(|at| (VId(0), R, Source::owner(at))),
+            |_, predicates| Ok::<_, ()>(predicates.is_empty()),
+            |id, key| {
+                Ok(source.props[id.0 as usize]
+                    .iter()
+                    .find(|(candidate, _)| *candidate == key)
+                    .map(|(_, value)| value))
+            },
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap()
+        .value;
     let rows = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()))
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(rows, batch);
+    assert_eq!(rows, topology);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].keys(), &[GraphValue::Scalar(CanonicalScalar::Null)]);
     assert_eq!(
@@ -1886,6 +1904,30 @@ fn intermediate_distinct_keeps_spill_and_order_sensitive_admission_boundaries() 
             }
         }
     }
-    let query = prepare("MATCH (n) WITH DISTINCT n AS v WITH v.p AS p RETURN COUNT(*) AS n");
-    assert!(VertexAggregatePlan::compile(&query).is_err());
+    // A static field of the original vertex is projected by the scan itself.
+    // The DISTINCT stage carries that field alongside the vertex identity.
+    for (argument, count) in [("*", 3), ("p", 2)] {
+        let query = prepare(&format!(
+            "MATCH (n) WITH DISTINCT n AS v WITH v.p AS p RETURN COUNT({argument}) AS n"
+        ));
+        let source = Source::new(&[Some(7), None, Some(7)]);
+        let batch = eager_vertex(&query, &source);
+        let rows = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows, batch);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values(), &[GraphAggregateValue::Count(count)]);
+    }
+    // A property of a computed identity still needs a reader after DISTINCT,
+    // even in an unselected CASE arm.
+    for expression in ["[v][0].p", "CASE WHEN TRUE THEN 1 ELSE [v][0].p END"] {
+        let query = prepare(&format!(
+            "MATCH (n) WITH DISTINCT n AS v WITH {expression} AS p RETURN COUNT(*) AS n"
+        ));
+        assert!(matches!(
+            VertexAggregatePlan::compile(&query),
+            Err(crate::stream::aggregate::VertexAggregateBuildError::RequiresPlainGlobalAggregate)
+        ));
+    }
 }
