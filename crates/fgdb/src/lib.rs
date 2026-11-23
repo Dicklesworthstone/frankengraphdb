@@ -1956,6 +1956,16 @@ pub struct EdgeRecord {
     pub props: EdgePropertyRow,
 }
 
+/// Visible edges in ascending EId order and the work of the relation scan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelationEdgeRead {
+    /// Winning statements visible at the requested sequence, with their properties.
+    pub edges: Vec<EdgeRecord>,
+    /// Physical statements examined for this relation, including future
+    /// births, restatements and retirements. Unrelated relations are skipped.
+    pub candidate_edges: usize,
+}
+
 /// The published tier-D snapshot a reader is served from.
 ///
 /// Every decoded object is immutable and individually shared. Cloning a pinned
@@ -1968,6 +1978,7 @@ struct Snapshot {
     /// with weak snapshot identities, so this does not form an ownership cycle.
     read_caches: Arc<query::ReadCaches>,
     blocks: Vec<Arc<[AdjacencyEntry]>>,
+    relation_edges: gql_exec::source::RelationEdgeIndex,
     /// The derived adjacency index, read through [`Snapshot::adjacency_index`].
     /// Built on first use, because a point read by property never touches
     /// adjacency; a commit extends it incrementally once it is built.
@@ -2327,15 +2338,28 @@ impl Snapshot {
         Ok(self
             .adjacency_index()
             .statement_at(&self.blocks, eid, as_of)
-            .map(|(block, row)| EdgeRecord {
-                entry: self.blocks[block][row],
-                props: self
-                    .block_props
-                    .get(block)
-                    .and_then(Option::as_ref)
-                    .map(|props| props.props_of(row))
-                    .unwrap_or_default(),
-            }))
+            .map(|(block, row)| self.edge_record_at_position(block, row)))
+    }
+
+    fn edge_record_at_position(&self, block: usize, row: usize) -> EdgeRecord {
+        EdgeRecord {
+            entry: self.blocks[block][row],
+            props: self
+                .block_props
+                .get(block)
+                .and_then(Option::as_ref)
+                .map(|props| props.props_of(row))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn edges_by_relation_at(
+        &self,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<RelationEdgeRead, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(self.relation_edges.read(self, relation, as_of))
     }
 
     fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
@@ -2547,6 +2571,15 @@ impl EmbeddedReadView {
     /// Every edge at a sequence within this view.
     pub fn edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
         self.snapshot.edges_at(as_of)
+    }
+
+    /// Read one relation at a sequence within this pinned view.
+    pub fn edges_by_relation_at(
+        &self,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<RelationEdgeRead, ReadError> {
+        self.snapshot.edges_by_relation_at(relation, as_of)
     }
 
     /// Verification seam for the zero-copy acquisition law. This compares
@@ -5415,12 +5448,19 @@ impl<V: Vfs + Clone> Database<V> {
             }
             None => std::sync::OnceLock::new(),
         };
+        // Relation runs stay eager: a lookup must seek without waiting for the
+        // lazy adjacency cache. Extend them before make_mut borrows the snapshot.
+        let relation_edges = self
+            .snapshot
+            .relation_edges
+            .extend(&decoded, block_prefix);
         let previous = Arc::make_mut(&mut self.snapshot);
         self.snapshot = Arc::new(Snapshot {
             read_caches: Arc::clone(&previous.read_caches),
             adjacency,
             property_index,
             exact_counts,
+            relation_edges,
             blocks: decoded,
             block_props: decoded_props,
             patches: decoded_patches,
@@ -5716,6 +5756,18 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
         self.ensure_readable()?;
         self.snapshot.edges_at(as_of)
+    }
+
+    /// Every visible edge of one relation, under the same frontier, history
+    /// and sidecar rules as [`Self::edges_at`]. Only statements of the
+    /// requested relation are examined.
+    pub fn edges_by_relation_at(
+        &self,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<RelationEdgeRead, ReadError> {
+        self.ensure_readable()?;
+        self.snapshot.edges_by_relation_at(relation, as_of)
     }
 
     /// The sequence the healthy derived partition has caught up to.
@@ -7188,6 +7240,7 @@ fn current_generation(
         // Both built on first use by a reader; a commit extends each only
         // once built.
         adjacency: std::sync::OnceLock::new(),
+        relation_edges: gql_exec::source::RelationEdgeIndex::build(&blocks),
         property_index: std::sync::OnceLock::new(),
         exact_counts: gql_exec::source::exact_counts::ExactCounts::new(
             blocks.is_empty() && patches.is_empty(),
@@ -7937,6 +7990,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             } else {
                 std::sync::OnceLock::new()
             },
+            relation_edges: gql_exec::source::RelationEdgeIndex::build(&decoded),
             blocks: decoded.into_iter().map(Arc::from).collect(),
             block_props: decoded_props
                 .into_iter()
@@ -9098,6 +9152,102 @@ mod shared_snapshot_payload_laws {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn relation_reads_match_whole_history_after_updates_retirement_compaction_and_reopen() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new([5; 32], DatabaseSecurityNamespaceId([6; 32]), [7; 32]);
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let wanted = RelationId(12);
+        let other = RelationId(3);
+        let absent = RelationId(4);
+        let p = PropertyKeyId(8);
+        let mut initial = WriteBatch::new(other);
+        for id in 1..=3 {
+            initial.create_vertex(VId(id), vec![], vec![]);
+        }
+        for id in 100..132 {
+            initial.add_edge(EId(id), VId(1), VId(3), vec![]);
+        }
+        runtime.block_on(db.write(&cx, initial)).unwrap();
+        let mut add = WriteBatch::new(wanted);
+        add.add_edge(EId(8), VId(1), VId(2), vec![(p, CanonicalScalar::Int(2))]);
+        add.add_edge(EId(6), VId(2), VId(2), vec![]);
+        let birth = runtime.block_on(db.write(&cx, add)).unwrap();
+        let pinned = db.pinned_read_view().unwrap();
+        let mut change = WriteBatch::new(wanted);
+        change.set_edge_property(EId(8), p, Some(CanonicalScalar::Int(41)));
+        change.delete_edge(EId(6));
+        let last = runtime.block_on(db.write(&cx, change)).unwrap();
+        let old = pinned.edges_by_relation_at(wanted, birth).unwrap();
+        assert_eq!(old.candidate_edges, 2);
+        assert_eq!(
+            old.edges.iter().map(|r| r.entry.eid).collect::<Vec<_>>(),
+            [EId(6), EId(8)]
+        );
+        assert_eq!(old.edges[1].props, [(p, CanonicalScalar::Int(2))]);
+        let current = db.edges_by_relation_at(wanted, last).unwrap();
+        assert_eq!(current.edges.len(), 1);
+        assert_eq!(current.edges[0].props, [(p, CanonicalScalar::Int(41))]);
+        assert!(current.candidate_edges > old.candidate_edges);
+        assert_eq!(
+            db.edges_by_relation_at(absent, last)
+                .unwrap()
+                .candidate_edges,
+            0
+        );
+        assert!(matches!(
+            pinned.edges_by_relation_at(absent, last),
+            Err(ReadError::BeyondFrontier { .. })
+        ));
+        assert!(matches!(
+            db.edges_by_relation_at(absent, CommitSeq(last.0 + 1)),
+            Err(ReadError::BeyondFrontier { .. })
+        ));
+
+        let check = |view: &EmbeddedReadView| {
+            for relation in [wanted, other, absent] {
+                let physical = view
+                    .snapshot
+                    .blocks
+                    .iter()
+                    .flat_map(|rows| rows.iter())
+                    .filter(|row| row.relation == relation)
+                    .count();
+                for seq in 0..=view.frontier().0 {
+                    let cut = CommitSeq(seq);
+                    let expected = view
+                        .edges_at(cut)
+                        .unwrap()
+                        .into_iter()
+                        .filter(|e| e.entry.relation == relation)
+                        .collect::<Vec<_>>();
+                    let got = view.edges_by_relation_at(relation, cut).unwrap();
+                    assert_eq!(got.candidate_edges, physical);
+                    assert_eq!(got.edges, expected, "relation {relation:?} at {cut:?}");
+                }
+            }
+        };
+        check(&db.pinned_read_view().unwrap());
+        runtime.block_on(db.compact(&cx)).unwrap();
+        check(&db.pinned_read_view().unwrap());
+        let vfs = db.vfs.clone();
+        let path = db.path().to_path_buf();
+        drop(db);
+        let reopened = runtime
+            .block_on(Database::open_read_view_with_vfs(&cx, vfs, &path, keys))
+            .unwrap();
+        assert!(reopened.snapshot.adjacency.get().is_none());
+        check(&reopened);
+        assert!(reopened.snapshot.adjacency.get().is_none());
+        assert_eq!(pinned.edges_by_relation_at(wanted, birth).unwrap(), old);
+        check(&pinned);
     }
 
     #[test]
