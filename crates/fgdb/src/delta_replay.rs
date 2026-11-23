@@ -407,7 +407,14 @@ impl<V: Vfs + Clone> Database<V> {
             return Ok(None);
         };
         let entry = entry_at(chain, next)?;
-        if entry.marker.prev_global != cursor.position.marker {
+        // Chronicle permits an omitted global predecessor. Every marker still
+        // commits to its predecessor via the hash of the full marker chain.
+        if entry
+            .marker
+            .prev_global
+            .is_some_and(|previous| Some(previous) != cursor.position.marker)
+            || entry.marker.chain_hash(cursor.position.chain_hash).ok() != Some(entry.chain_hash)
+        {
             return Err(DeltaReplayError::HistoryChanged { at: next });
         }
         let completed = Cut::from_entry(entry);
