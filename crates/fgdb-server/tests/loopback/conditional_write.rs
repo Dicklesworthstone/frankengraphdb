@@ -393,3 +393,152 @@ fn fgp_conditional_hybrid_writes_search_staged_values_and_roll_back_as_one_state
         task.join(cx).await.unwrap();
     });
 }
+
+#[test]
+fn fgp_demand_graph_writes_follow_staged_edges_and_rebind_prepared_values() {
+    run(async |cx| {
+        let (address, shutdown, mut task) = start(cx, "conditional-demand-graph").await;
+        let mut owner = connected(cx, address, &grant(Rights::ReadWrite)).await;
+        let seeded = owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (root:Person {name:'root',age:10}), \
+                    (middle:Person {name:'middle',age:20}), \
+                    (leaf:Person {name:'leaf',age:30}), \
+                    (hidden:Company {name:'hidden',age:'not a number'}), \
+                    (root)-[:KNOWS]->(hidden), (hidden)-[:KNOWS]->(leaf), \
+                    (root)-[:WORKS_AT]->(leaf)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            seeded.outcome,
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1
+            }
+        );
+        let mut permitted = grant(Rights::ReadWrite);
+        permitted.labels = Scope::only([LabelId(1)]);
+        permitted.relations = Scope::only([RelationId(1)]);
+        let mut client = connected(cx, address, &permitted).await;
+
+        // Neither visible edge exists at the pinned frontier. Search must
+        // traverse the canonical staged replacements and mask both the hidden
+        // bridge and the forbidden direct shortcut before computing hops.
+        let statement = "MATCH (root:Person {name:'root'}), \
+                (middle:Person {name:'middle'}), (leaf:Person {name:'leaf'}) \
+            CREATE (root)-[:KNOWS]->(middle), (middle)-[:KNOWS]->(leaf) WITH root \
+            CALL hybrid.search(seeds => [root], max_hops => 2, \
+                graph_access => 'demand', graph_candidates => 2, k => 2) \
+            YIELD node,graph_hops SET node.age=node.age+1 \
+            RETURN node.name AS name,node.age AS age,graph_hops ORDER BY name";
+        let written = client
+            .execute_write_if_current(cx, 1, statement, vec![])
+            .await
+            .unwrap();
+        assert_eq!(written.columns, ["name", "age", "graph_hops"]);
+        assert_eq!(
+            written.rows,
+            [
+                vec![text("leaf"), WireValue::Int(31), WireValue::Int(2)],
+                vec![text("middle"), WireValue::Int(21), WireValue::Int(1)],
+            ]
+        );
+        assert_eq!(
+            written.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1
+            }
+        );
+
+        let arguments = |name: &str, age| {
+            vec![
+                ("name".into(), text(name)),
+                ("age".into(), WireValue::Int(age)),
+            ]
+        };
+        let prepared = client
+            .prepare_write_returning(
+                cx,
+                "MATCH (root:Person {name:'root'}) \
+                CREATE (fresh:Person {name:$name,age:$age}), (root)-[:KNOWS]->(fresh) \
+                WITH root,fresh CALL hybrid.search(seeds => [root], max_hops => 1, \
+                    graph_access => 'demand', eligible => [fresh], graph_candidates => 1, k => 1) \
+                YIELD node,graph_hops SET node.age=node.age+1 \
+                RETURN node.name AS name,node.age AS age,graph_hops",
+                arguments("representative only", 999),
+            )
+            .await
+            .unwrap();
+        for (seq, name, age) in [(3, "first", 40), (4, "second", 50)] {
+            let result = client
+                .execute_prepared_write_returning(cx, prepared, arguments(name, age))
+                .await
+                .unwrap();
+            assert_eq!(
+                result.rows,
+                [vec![text(name), WireValue::Int(age + 1), WireValue::Int(1)]]
+            );
+            assert_eq!(
+                result.outcome,
+                Outcome::WriteCommitted { seq, statements: 1 }
+            );
+        }
+
+        // The eligible identity is private to this attempt. A late scalar
+        // failure must discard the new vertex and edge together; a stale
+        // frontier must reject the whole chain before it can stage anything.
+        let failing = "MATCH (root:Person {name:'root'}) \
+            CREATE (fresh:Person {name:'rolled back',age:0}), (root)-[:KNOWS]->(fresh) \
+            WITH root,fresh CALL hybrid.search(seeds => [root], max_hops => 1, \
+                graph_access => 'demand', eligible => [fresh], graph_candidates => 1, k => 1) \
+            YIELD node RETURN 1/node.age AS invalid";
+        assert!(matches!(
+            server_code(
+                client
+                    .execute_write_if_current(cx, 4, failing, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement | ErrorCode::Execution
+        ));
+        assert_eq!(
+            server_code(
+                client
+                    .execute_write_if_current(cx, 1, statement, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Conflict
+        );
+        let observed = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.name AS name,n.age AS age ORDER BY name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            observed.rows,
+            [
+                vec![text("first"), WireValue::Int(41)],
+                vec![text("leaf"), WireValue::Int(31)],
+                vec![text("middle"), WireValue::Int(21)],
+                vec![text("root"), WireValue::Int(10)],
+                vec![text("second"), WireValue::Int(51)],
+            ]
+        );
+        assert_eq!(observed.outcome, Outcome::Rows { seq: 4 });
+        client.release_prepared(cx, prepared).await.unwrap();
+        client.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}

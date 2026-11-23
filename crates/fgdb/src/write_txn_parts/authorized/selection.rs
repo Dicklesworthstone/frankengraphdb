@@ -31,6 +31,9 @@ use std::cell::RefCell;
 
 type Selected<Row> = Result<GqlQueryExecution<Row>, GqlQueryError<WriteTxnError, WriteTxnError>>;
 
+#[path = "selection/hybrid_demand.rs"]
+mod hybrid_demand;
+
 /// Read one field of an ALREADY admitted target in the private write workspace.
 /// The caller owns target/endpoint authorization and supplies its SAME live
 /// signed/native evaluator control. This helper grants no identity authority.
@@ -1028,9 +1031,9 @@ impl<W: WorkControl> WorkControl for HybridWork<'_, W> {
 /// be made safe by filtering its final hits, because hidden documents would
 /// already have changed BM25 statistics, HNSW routing and graph reachability.
 ///
-/// The existing staged default is materialized. Explicit indexed/demand graph
-/// requests require a different authorized source and refuse before overlay
-/// acquisition; no failed or unsupported source is retried under another one.
+/// The staged default remains materialized. Explicit graph-only demand uses
+/// the same canonical overlay with seeded membership/incidence access. Indexed
+/// and mixed demand requests refuse; no failed source is retried under another.
 #[allow(clippy::too_many_arguments)]
 fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &WriteTxn,
@@ -1050,7 +1053,7 @@ fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
     let (search, eligible) =
         crate::query::HybridSearch::bind_filtered(call, arguments, transaction.basis, policy)
             .map_err(|error| crate::query::hybrid_refusal(error).map_source(WriteTxnError::Gql))?;
-    if search.uses_indexed_graph() || search.uses_demand_graph() {
+    if search.uses_indexed_graph() {
         return Err(
             crate::query::hybrid_refusal(crate::query::HybridCallError::Combination(
                 "authorized staged graph search requires materialized graph_access",
@@ -1071,6 +1074,19 @@ fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 "authorized transaction search requires exact vector retrieval",
             ))
             .map_source(WriteTxnError::Gql),
+        );
+    }
+    if search.uses_demand_graph() {
+        return hybrid_demand::evaluate(
+            transaction,
+            database,
+            cx,
+            call,
+            &search,
+            eligible,
+            scope,
+            policy,
+            execution,
         );
     }
     let expansion = search.expansion();

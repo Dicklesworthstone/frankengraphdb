@@ -1919,8 +1919,8 @@ mod staged_hybrid {
                     "requires materialized graph_access",
                 ),
                 (
-                    "seeds => [1], max_hops => 2, graph_access => 'demand'",
-                    "requires materialized graph_access",
+                    "text => 'graph', text_property => 'body', seeds => [1], max_hops => 2, graph_access => 'demand'",
+                    "demand graph access requires a graph-only read",
                 ),
             ] {
                 let program = prepare(&format!(
@@ -1934,6 +1934,611 @@ mod staged_hybrid {
                 }
             }
         });
+    }
+
+    mod demand {
+        use super::*;
+
+        const REACH: LabelId = LabelId(3);
+        const WIDE: VId = VId((1_u128 << 96) + 7);
+        const WIDE_EDGE: EId = EId((1_u128 << 112) + 19);
+
+        fn bound(text: &str, arguments: &GqlParameters) -> PreparedGraphWriteChain {
+            let declarations: Vec<_> = arguments.parameter_types().collect();
+            PreparedGraphWriteChainText::prepare_with_parameter_types(
+                text,
+                R,
+                &declarations,
+                |kind, name: &str| match (kind, name) {
+                    (GraphSymbolKind::Label, "Reach") => Some(GraphSymbol::Label(REACH)),
+                    _ => symbols(kind, name),
+                },
+            )
+            .expect(text)
+            .bind_parameters(arguments)
+            .expect(text)
+        }
+
+        fn values(receipt: &Receipt) -> Vec<Vec<GraphValue>> {
+            receipt
+                .1
+                .value
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect()
+        }
+
+        async fn source(
+            contexts: &PurposeContexts,
+            hidden: bool,
+            unrelated: usize,
+        ) -> Database<MemVfs> {
+            let mut db = database(contexts, hidden).await;
+            let mut extra = WriteBatch::new(R);
+            extra.add_edge(EId(2), VId(2), VId(3), vec![]);
+            for offset in 0..unrelated {
+                let id = 1_000 + offset as u128;
+                extra.create_vertex(VId(id), vec![L], vec![(P, CanonicalScalar::Int(0))]);
+                extra.add_edge(EId(id), VId(id), VId(id), vec![]);
+            }
+            db.write(&contexts.commit(), extra).await.unwrap();
+            db
+        }
+
+        /// Inspect the public commit boundary independently of the retrieval
+        /// profile. A failed late expression or admission has no graph effect.
+        async fn execute_on(
+            contexts: &PurposeContexts,
+            db: &mut Database<MemVfs>,
+            program: &PreparedGraphWriteChain,
+            grant: Grant,
+            budget: GraphInsertPolicy,
+        ) -> Result<Receipt, Fault> {
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            let token = issuer.issue_at(&grant, NOW).unwrap();
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let answer = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    program,
+                    budget,
+                    || NOW,
+                )
+                .await;
+            match &answer {
+                Ok((_, _, completion)) => {
+                    let frontier = db.frontier().unwrap();
+                    assert_eq!(frontier.0, before.0.0 + 1);
+                    assert_eq!(
+                        *completion,
+                        EmbeddedTxnCompletion::WriteCommitted {
+                            commit_seq: frontier
+                        }
+                    );
+                    for original in &before.1 {
+                        if original.labels.contains(&HIDDEN) {
+                            assert_eq!(db.vertex(original.vid).unwrap().as_ref(), Some(original));
+                        } else if let Some(current) = db.vertex(original.vid).unwrap() {
+                            assert_eq!(
+                                current.props.iter().find(|(key, _)| *key == SECRET),
+                                original.props.iter().find(|(key, _)| *key == SECRET)
+                            );
+                        }
+                    }
+                    for edge in &before.2 {
+                        if (90..=92).contains(&edge.entry.eid.0) {
+                            assert_eq!(db.edge(edge.entry.eid).unwrap().as_ref(), Some(edge));
+                        }
+                    }
+                }
+                Err(_) => assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before,
+                    "a refused demand read must roll back its complete write prefix"
+                ),
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+            answer.map(|(stats, rows, _)| (stats, rows))
+        }
+
+        async fn execute_fresh(
+            contexts: &PurposeContexts,
+            program: &PreparedGraphWriteChain,
+            hidden: bool,
+            unrelated: usize,
+            grant: Grant,
+            budget: GraphInsertPolicy,
+        ) -> Result<Receipt, Fault> {
+            let mut db = source(contexts, hidden, unrelated).await;
+            execute_on(contexts, &mut db, program, grant, budget).await
+        }
+
+        #[test]
+        fn staged_demand_directions_keep_parallel_edges_loops_and_full_width_identities() {
+            lab(0xc4a1_2126, |contexts| async move {
+                let arguments = GqlParameters::new();
+                for (direction, expected) in [
+                    ("out", vec![(VId(1), 0), (VId(3), 1), (WIDE, 2)]),
+                    ("in", vec![(VId(1), 0), (VId(2), 1), (VId(4), 1)]),
+                    (
+                        "both",
+                        vec![
+                            (VId(1), 0),
+                            (VId(2), 1),
+                            (VId(3), 1),
+                            (VId(4), 1),
+                            (WIDE, 2),
+                        ],
+                    ),
+                ] {
+                    let mut expected_values = None;
+                    let mut expected_demand = None;
+                    for hidden in [false, true] {
+                        for access in ["demand", "materialized"] {
+                            let mut db = source(&contexts, hidden, 0).await;
+                            let mut extra = WriteBatch::new(R);
+                            extra.create_vertex(
+                                VId(4),
+                                vec![L],
+                                vec![(P, CanonicalScalar::Int(40))],
+                            );
+                            extra.create_vertex(WIDE, vec![L], vec![(P, CanonicalScalar::Int(70))]);
+                            extra.add_edge(EId(3), VId(4), VId(1), vec![]);
+                            extra.add_edge(EId(4), VId(2), VId(2), vec![]);
+                            extra.add_edge(EId(5), VId(1), VId(2), vec![]);
+                            extra.add_edge(WIDE_EDGE, VId(3), WIDE, vec![]);
+                            db.write(&contexts.commit(), extra).await.unwrap();
+                            let program = bound(
+                                &format!(
+                                    "MATCH (a:Visible {{p:10}})-[old:R]->(b:Visible {{p:20}}) \
+                                     DELETE old WITH DISTINCT a,b MATCH (c:Visible {{p:30}}) \
+                                     CREATE (a)-[:R]->(c),(a)-[:R]->(c),(c)-[:R]->(c),(b)-[:R]->(a) \
+                                     WITH a CALL hybrid.search(seeds => [a], max_hops => 2, \
+                                     include_seeds => true, graph_access => '{access}', \
+                                     direction => '{direction}', graph_candidates => 8, k => 8) \
+                                     YIELD node,graph_hops,graph_rank,text_rank,vector_rank,score \
+                                     RETURN node,graph_hops,graph_rank,text_rank,vector_rank,score \
+                                     ORDER BY graph_rank"
+                                ),
+                                &arguments,
+                            );
+                            let answer =
+                                execute_on(&contexts, &mut db, &program, capability(8), policy(8))
+                                    .await
+                                    .unwrap();
+                            assert_eq!(answer.0.created_edges, 4);
+                            assert!(db.edge(EId(1)).unwrap().is_none());
+                            assert!(db.edge(EId(5)).unwrap().is_none());
+                            assert!(db.edge(WIDE_EDGE).unwrap().is_some());
+                            let actual = values(&answer);
+                            assert_eq!(actual.len(), expected.len(), "{direction}/{access}");
+                            for (rank, (row, &(id, hops))) in
+                                actual.iter().zip(&expected).enumerate()
+                            {
+                                assert_eq!(
+                                    &row[..5],
+                                    &[
+                                        GraphValue::Vertex(id),
+                                        int(hops),
+                                        int(rank as i64 + 1),
+                                        GraphValue::Scalar(CanonicalScalar::Null),
+                                        GraphValue::Scalar(CanonicalScalar::Null),
+                                    ],
+                                    "{direction}/{access}"
+                                );
+                            }
+                            if let Some(reference) = &expected_values {
+                                assert_eq!(&actual, reference, "exact graph scores and row order");
+                            } else {
+                                expected_values = Some(actual);
+                            }
+                            if access == "demand" {
+                                if let Some(reference) = &expected_demand {
+                                    assert_eq!(
+                                        &answer, reference,
+                                        "hidden shortcuts, transit and properties cannot change resource use"
+                                    );
+                                } else {
+                                    expected_demand = Some(answer);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn staged_demand_creation_labels_and_deletion_use_the_effective_graph() {
+            lab(0xc4a1_2127, |contexts| async move {
+                let cases = [
+                    (
+                        "MATCH (a:Visible {p:10}),(b:Visible {p:20}) \
+                         CREATE (fresh:Visible {p:41}),(b)-[:R]->(fresh) WITH a,fresh \
+                         SET fresh.p=42 WITH a,fresh ",
+                        "seeds => [a], eligible => [fresh]",
+                        "YIELD node,graph_hops CREATE (copy:Visible {p:node.p+1}) \
+                         RETURN node.p AS original,copy.p AS copied,graph_hops",
+                        vec![vec![int(42), int(43), int(2)]],
+                    ),
+                    (
+                        "MATCH (a:Visible {p:10}),(b:Visible {p:20}),(c:Visible {p:30}) \
+                         SET a:Reach,b:Reach,c:Reach WITH a,b,c \
+                         REMOVE b:Reach WITH a,c ",
+                        "seeds => [a], label => 'Reach', eligible => [c]",
+                        "YIELD node,graph_hops RETURN node,graph_hops",
+                        vec![],
+                    ),
+                    (
+                        "MATCH (a:Visible {p:10}),(b:Visible {p:20}),(c:Visible {p:30}) \
+                         SET a:Reach,b:Reach,c:Reach WITH a,b,c \
+                         REMOVE b:Reach WITH a,b,c SET b:Reach WITH a,c ",
+                        "seeds => [a], label => 'Reach', eligible => [c]",
+                        "YIELD node,graph_hops RETURN node,graph_hops",
+                        vec![vec![GraphValue::Vertex(VId(3)), int(2)]],
+                    ),
+                    (
+                        "MATCH (a:Visible {p:10}),(c:Visible {p:30}) \
+                         CREATE (fresh:Visible {p:41}),(a)-[:R]->(fresh),(fresh)-[:R]->(c) \
+                         WITH a,c,fresh DETACH DELETE fresh WITH c,fresh ",
+                        "seeds => [fresh], max_hops => 1, eligible => [c]",
+                        "YIELD node,graph_hops RETURN node,graph_hops",
+                        vec![],
+                    ),
+                ];
+                for (prefix, lanes, tail, expected) in cases {
+                    let mut reference = None;
+                    for hidden in [false, true] {
+                        for access in ["demand", "materialized"] {
+                            let hops = if lanes.contains("max_hops") {
+                                ""
+                            } else {
+                                "max_hops => 2,"
+                            };
+                            let program = bound(
+                                &format!(
+                                    "{prefix}CALL hybrid.search({lanes}, {hops} \
+                                     graph_access => '{access}', graph_candidates => 4, k => 4) {tail}"
+                                ),
+                                &GqlParameters::new(),
+                            );
+                            let mut scope = capability(4);
+                            scope.labels = Scope::only([L, REACH]);
+                            let answer =
+                                execute_fresh(&contexts, &program, hidden, 0, scope, policy(4))
+                                    .await
+                                    .unwrap();
+                            assert_eq!(values(&answer), expected, "{prefix} / {access}");
+                            if access == "demand" {
+                                if let Some(reference) = &reference {
+                                    assert_eq!(&answer, reference);
+                                } else {
+                                    reference = Some(answer);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        const LOCAL: &str = "CREATE (marker:Visible {p:99}) WITH marker \
+            CALL hybrid.search(seeds => [1], max_hops => 2, graph_access => 'demand', \
+            eligible => [3], graph_candidates => 1, k => 1) \
+            YIELD node,graph_hops RETURN node,graph_hops";
+
+        #[test]
+        fn staged_demand_charges_visible_selector_rejections_without_disclosing_hidden_labels() {
+            lab(0xc4a1_2130, |contexts| async move {
+                let selected = bound(
+                    "CREATE (marker:Visible {p:99}) WITH marker \
+                     CALL hybrid.search(seeds => [1], max_hops => 2, label => 'Reach', \
+                     graph_access => 'demand', eligible => [3], k => 1) YIELD node RETURN node",
+                    &GqlParameters::new(),
+                );
+                let mut reference = None;
+                for hidden in [false, true] {
+                    // CREATE admits its requested and resulting images; the graph
+                    // source then admits the seed and visible rejected transit.
+                    for nodes in [4, 3] {
+                        let mut db = source(&contexts, hidden, 16).await;
+                        let mut label = WriteBatch::new(R);
+                        label.set_vertex_label(VId(1), REACH, true);
+                        db.write(&contexts.commit(), label).await.unwrap();
+                        let mut scope = capability(0);
+                        scope.labels = Scope::only([L, REACH]);
+                        scope.limits.max_nodes = nodes;
+                        let result = execute_on(&contexts, &mut db, &selected, scope, policy(1)).await;
+                        if nodes == 3 {
+                            assert_eq!(
+                                authorization(&result.unwrap_err()),
+                                Some(Error::LimitExceeded(LimitDimension::Nodes))
+                            );
+                        } else {
+                            let answer = result.unwrap();
+                            assert!(answer.1.value.is_empty());
+                            // The seed and the visible transit rejected by the
+                            // user's selector are both admitted exactly once.
+                            // The rejected incidence and its far side are not.
+                            assert_eq!(answer.0.selection.snapshot_records, 2);
+                            if let Some(reference) = &reference {
+                                assert_eq!(&answer, reference);
+                            } else {
+                                reference = Some(answer);
+                            }
+                        }
+                    }
+                }
+                let denied = bound(
+                    "CREATE (marker:Visible {p:99}) WITH marker \
+                     CALL hybrid.search(seeds => [1], max_hops => 2, label => 'Hidden', \
+                     graph_access => 'demand', k => 1) YIELD node RETURN node",
+                    &GqlParameters::new(),
+                );
+                let mut reference = None;
+                for hidden in [false, true] {
+                    for present in [false, true] {
+                        let mut db = source(&contexts, hidden, 16).await;
+                        if present {
+                            let mut label = WriteBatch::new(R);
+                            label.set_vertex_label(VId(1), HIDDEN, true);
+                            db.write(&contexts.commit(), label).await.unwrap();
+                        }
+                        let mut scope = capability(0);
+                        // Two CREATE admissions plus one visible seed admission.
+                        scope.limits.max_nodes = 3;
+                        let answer = execute_on(&contexts, &mut db, &denied, scope, policy(1))
+                            .await
+                            .unwrap();
+                        assert!(answer.1.value.is_empty());
+                        assert_eq!(answer.0.selection.snapshot_records, 1);
+                        if let Some(reference) = &reference {
+                            assert_eq!(
+                                &answer, reference,
+                                "a forbidden label on a visible seed must have no observable effect"
+                            );
+                        } else {
+                            reference = Some(answer);
+                        }
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn staged_demand_admits_only_the_reached_component_and_shares_exact_allowances() {
+            lab(0xc4a1_2128, |contexts| async move {
+                let program = bound(LOCAL, &GqlParameters::new());
+                let mut scope = capability(1);
+                // Two CREATE admissions plus three reached graph vertices.
+                scope.limits.max_nodes = 5;
+                let small = execute_fresh(&contexts, &program, false, 0, scope.clone(), policy(1))
+                    .await
+                    .unwrap();
+                let expected =
+                    execute_fresh(&contexts, &program, false, 256, scope.clone(), policy(1))
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    values(&expected),
+                    vec![vec![GraphValue::Vertex(VId(3)), int(2)]]
+                );
+                assert_eq!(expected.0.created_vertices, 1);
+                assert_eq!(
+                    expected.0.selection.snapshot_records,
+                    small.0.selection.snapshot_records
+                );
+                assert!(
+                    expected.0.selection.snapshot_records <= 6,
+                    "three vertices and two incidences"
+                );
+                let measured = expected.0;
+                let exact = GraphInsertPolicy::new(
+                    GqlQueryPolicy::new(
+                        measured.selection.snapshot_records,
+                        1,
+                        measured.evaluator.work_units,
+                        measured.evaluator.scratch_entries,
+                    ),
+                    1,
+                    0,
+                );
+                let materialized = bound(
+                    &LOCAL.replace("'demand'", "'materialized'"),
+                    &GqlParameters::new(),
+                );
+                for hidden in [false, true] {
+                    assert_eq!(
+                        execute_fresh(&contexts, &program, hidden, 256, scope.clone(), exact)
+                            .await
+                            .unwrap(),
+                        expected
+                    );
+                    execute_fresh(
+                        &contexts,
+                        &materialized,
+                        hidden,
+                        256,
+                        scope.clone(),
+                        policy(1),
+                    )
+                    .await
+                    .expect_err("the materialized corpus cannot fit the five-node allowance");
+                    let mut fewer_nodes = scope.clone();
+                    fewer_nodes.limits.max_nodes = 4;
+                    let error =
+                        execute_fresh(&contexts, &program, hidden, 256, fewer_nodes, policy(1))
+                            .await
+                            .unwrap_err();
+                    assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Nodes))
+                    );
+                    let mut fewer_rows = scope.clone();
+                    fewer_rows.limits.max_rows = 0;
+                    let error =
+                        execute_fresh(&contexts, &program, hidden, 256, fewer_rows, policy(1))
+                            .await
+                            .unwrap_err();
+                    assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Rows))
+                    );
+                    for dimension in 0..4 {
+                        let mut short = exact;
+                        match dimension {
+                            0 => {
+                                short.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                                    measured.selection.snapshot_records - 1,
+                                    1,
+                                )
+                            }
+                            1 => short.query.evaluator.max_work_units -= 1,
+                            2 => short.query.evaluator.max_scratch_entries -= 1,
+                            _ => {
+                                short.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                                    measured.selection.snapshot_records,
+                                    0,
+                                )
+                            }
+                        }
+                        execute_fresh(&contexts, &program, hidden, 256, scope.clone(), short)
+                            .await
+                            .expect_err("one-less native allowance must reject the entire chain");
+                    }
+                }
+                let (mut low, mut high) = (0, scope.limits.max_work);
+                while high - low > 1 {
+                    let mut trial = scope.clone();
+                    trial.limits.max_work = low + (high - low) / 2;
+                    match execute_fresh(&contexts, &program, false, 256, trial.clone(), policy(1))
+                        .await
+                    {
+                        Ok(actual) => {
+                            assert_eq!(actual, expected);
+                            high = trial.limits.max_work;
+                        }
+                        Err(error) => {
+                            assert_eq!(
+                                authorization(&error),
+                                Some(Error::LimitExceeded(LimitDimension::Work))
+                            );
+                            low = trial.limits.max_work;
+                        }
+                    }
+                }
+                for hidden in [false, true] {
+                    let mut exact_scope = scope.clone();
+                    exact_scope.limits.max_work = high;
+                    assert_eq!(
+                        execute_fresh(&contexts, &program, hidden, 256, exact_scope.clone(), exact)
+                            .await
+                            .unwrap(),
+                        expected
+                    );
+                    exact_scope.limits.max_work -= 1;
+                    let error = execute_fresh(&contexts, &program, hidden, 256, exact_scope, exact)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Work))
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn staged_demand_empty_pages_full_width_seeds_and_late_failures_keep_the_commit_boundary() {
+            lab(0xc4a1_2129, |contexts| async move {
+                for (seeds, options) in [
+                    (vec![GraphValue::Vertex(VId(1))], "eligible => [], k => 4"),
+                    (vec![GraphValue::Vertex(VId(1))], "k => 0"),
+                    (vec![], "k => 4"),
+                    (vec![GraphValue::Vertex(WIDE)], "k => 4"),
+                ] {
+                    let arguments = GqlParameters::new().with_list("seeds", seeds).unwrap();
+                    let program = bound(
+                        &format!(
+                            "CREATE (marker:Visible {{p:99}}) WITH marker \
+                             CALL hybrid.search(seeds => $seeds, max_hops => 2, \
+                             graph_access => 'demand', {options}) YIELD node RETURN node"
+                        ),
+                        &arguments,
+                    );
+                    let mut reference = None;
+                    for hidden in [false, true] {
+                        let answer = execute_fresh(
+                            &contexts,
+                            &program,
+                            hidden,
+                            16,
+                            capability(0),
+                            policy(4),
+                        )
+                        .await
+                        .unwrap();
+                        assert!(answer.1.value.is_empty());
+                        assert_eq!(answer.0.created_vertices, 1);
+                        if let Some(reference) = &reference {
+                            assert_eq!(&answer, reference);
+                        } else {
+                            reference = Some(answer);
+                        }
+                    }
+                }
+                let arguments = GqlParameters::new()
+                    .with_list(
+                        "seeds",
+                        vec![GraphValue::Vertex(WIDE), GraphValue::Vertex(WIDE)],
+                    )
+                    .unwrap();
+                let program = bound(
+                    "CREATE (marker:Visible {p:99}) WITH marker \
+                     CALL hybrid.search(seeds => $seeds, max_hops => 0, include_seeds => true, \
+                     graph_access => 'demand', k => 4) YIELD node,graph_hops RETURN node,graph_hops",
+                    &arguments,
+                );
+                for hidden in [false, true] {
+                    let mut db = source(&contexts, hidden, 16).await;
+                    let mut seed = WriteBatch::new(R);
+                    seed.create_vertex(WIDE, vec![L], vec![]);
+                    db.write(&contexts.commit(), seed).await.unwrap();
+                    let answer = execute_on(&contexts, &mut db, &program, capability(1), policy(4))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        values(&answer),
+                        vec![vec![GraphValue::Vertex(WIDE), int(0)]]
+                    );
+                }
+                let late = bound(
+                    &LOCAL.replace("RETURN node,graph_hops", "RETURN 1 / 0 AS invalid LIMIT 0"),
+                    &GqlParameters::new(),
+                );
+                for hidden in [false, true] {
+                    let error =
+                        execute_fresh(&contexts, &late, hidden, 16, capability(1), policy(1))
+                            .await
+                            .unwrap_err();
+                    assert!(format!("{error:?}").contains("DivisionByZero"), "{error:?}");
+                }
+            });
+        }
     }
 }
 
