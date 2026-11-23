@@ -12,6 +12,53 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Correlated filters and indexed authorized writes — qualification pending
+
+Source commits `004a14b`, `1ee4a2b` and `2d264e0` repair three live
+preparation and write-selection seams.
+
+Native write-script preparation now preserves the first work, expiry or
+cancellation refusal from representative binding. Ordinary argument errors
+still pass live controls before disclosure, and successful preparation keeps
+its complete original input and binding bill. The prepared same-value SET
+regression now follows the plan's write terminal contract: each success advances
+once with empty graph effects; refusals leave the frontier unchanged. Exact
+single/batch UTF-8 budget boundaries remain asserted as history grows.
+
+The existing refused-WHERE retry now follows inline CALL scopes, including
+explicit, legacy, empty and nested imports. Imported scalar comparisons can
+therefore reach the native row-filter and aggregate machinery. Working keyed
+graph predicates keep their existing lowering, and OPTIONAL MATCH filtering
+remains inside Apply before null extension.
+
+Unstaged authorized write overlays now reuse the existing visible, total
+equality-selection proof and the native indexed candidate owner. The overlay
+continues retaining positive, absent-key and incomplete-attempt observations.
+Candidates still pass normal masking and shared allowance admission. Staged,
+hidden-predicate and unsupported plans retain their prior source path.
+
+Regression sources cover literal bags, nullable and duplicate imports,
+parallel edges, optional COUNT/NULL behavior, scope errors before catalog
+access, independent full-scan results, overlapping/absent roots, hidden
+postings, exact quotas and conflict witnesses after refused reads. The original
+`authorized_unwind_write` frozen-update assertions are unchanged.
+
+Pinned formatting of all nine changed Rust files, whitespace checks, static
+UBS scans (zero critical findings) and independent source review completed.
+Locked dependency fetch and offline metadata resolution completed. The initial
+serialized server build was interrupted during dependency compilation; the
+later GQL test build lost its executor before a first-party or runtime verdict.
+Runtime tests, strict Clippy and complete exact-tree proof remain **UNRUN**.
+The initial workspace-format check's reported changed-file diff was corrected,
+but the whole-workspace check was not rerun. The local Beads status edits could
+not be exported through `scripts/br_sync.sh` after executor loss.
+
+Qualification remains open under `fgdb-qualify-integrated-nov22-maz0p`,
+`fgdb-prepared-write-budget-kg0hx`,
+`fgdb-filtered-count-subscription-7r618` and `fgdb-irqu2`.
+No measured speedup, general staged-index capability or workstream completion
+is claimed.
+
 ### Maintained native directed reachability — qualification pending
 
 Native registration recognizes one uncaptured, unbounded, directed TRAIL with
