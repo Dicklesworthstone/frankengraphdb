@@ -306,6 +306,320 @@ impl Write for Output {
     }
 }
 
+fn subscription_chunk(
+    frontier: u64,
+    snapshot: bool,
+    columns: bool,
+    last: bool,
+    entries: Vec<(i128, Vec<WireValue>)>,
+) -> Frame {
+    result(
+        FrameKind::SubscriptionBatch,
+        4,
+        &fgdb_protocol::body::SubscriptionBatch {
+            frontier,
+            snapshot,
+            columns: columns.then(|| vec!["value".into()]),
+            last,
+            entries,
+        },
+    )
+}
+
+fn subscription_end(frontier: u64) -> Frame {
+    result(
+        FrameKind::SnapshotResultEnd,
+        4,
+        &ResultEnd {
+            outcome: Outcome::Rows { seq: frontier },
+            rows: 0,
+        },
+    )
+}
+
+#[test]
+fn subscription_frames_flush_before_more_input_and_progress_marks_complete_batches() {
+    let ((), report) = run_async_under_lab(0x79a0_0520, |root| async move {
+        for robot in [false, true] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let io = script(
+                vec![
+                    (
+                        subscription_chunk(
+                            7,
+                            true,
+                            true,
+                            false,
+                            vec![(1, vec![WireValue::Int(10)])],
+                        ),
+                        0,
+                    ),
+                    (
+                        subscription_chunk(
+                            7,
+                            true,
+                            false,
+                            true,
+                            vec![(i128::MAX, vec![WireValue::Int(20)])],
+                        ),
+                        2,
+                    ),
+                    (
+                        subscription_chunk(
+                            8,
+                            false,
+                            false,
+                            false,
+                            vec![(-1, vec![WireValue::Int(10)])],
+                        ),
+                        3,
+                    ),
+                    (subscription_chunk(8, false, false, true, vec![]), 4),
+                    (subscription_end(8), 5),
+                ],
+                Arc::clone(&flushes),
+            );
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: Vec::new(),
+                flushes,
+                fail_on: None,
+            };
+            stream_subscription(
+                &root,
+                &mut client,
+                "SUBSCRIBE TO MATCH (n) RETURN n",
+                vec![],
+                Some(2),
+                robot,
+                &mut out,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(out.flushes.load(Ordering::SeqCst), 6);
+            let text = String::from_utf8(out.bytes).unwrap();
+            let lines: Vec<_> = text.lines().collect();
+            assert_eq!(lines.len(), 7);
+            if robot {
+                assert_eq!(lines[0], r#"{"v":1,"event":"columns","columns":["value"]}"#);
+                assert!(lines[2].contains(&format!(r#""weight":"{}""#, i128::MAX)));
+                assert_eq!(lines[3], r#"{"v":1,"event":"progress","rows":2,"seq":7}"#);
+                assert!(lines[4].contains(r#""weight":"-1""#));
+                assert_eq!(lines[5], r#"{"v":1,"event":"progress","rows":1,"seq":8}"#);
+                assert_eq!(
+                    lines[6],
+                    r#"{"v":1,"event":"result","kind":"rows","seq":8,"count":3}"#
+                );
+            } else {
+                assert_eq!(lines[0], "weight | value");
+                assert_eq!(lines[3], "-- baseline at seq 7 (2 change(s))");
+                assert_eq!(lines[4], "-1 | 10");
+                assert_eq!(lines[5], "-- delta at seq 8 (1 change(s))");
+                assert_eq!(lines[6], "3 change(s) through seq 8");
+            }
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                    .count(),
+                1
+            );
+            assert!(
+                frames
+                    .iter()
+                    .all(|frame| frame.header().kind() != FrameKind::WindowUpdate)
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn subscription_schema_and_chunk_sink_failures_cancel_immediately_and_allow_reuse() {
+    let ((), report) = run_async_under_lab(0x79a0_0521, |root| async move {
+        for fail_on in 1..=3 {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let io = script(
+                vec![
+                    (
+                        subscription_chunk(
+                            7,
+                            true,
+                            true,
+                            false,
+                            vec![(1, vec![WireValue::Int(10)])],
+                        ),
+                        0,
+                    ),
+                    (
+                        subscription_chunk(
+                            7,
+                            true,
+                            false,
+                            true,
+                            vec![(1, vec![WireValue::Int(20)])],
+                        ),
+                        fail_on.min(2),
+                    ),
+                    (
+                        subscription_chunk(
+                            8,
+                            false,
+                            false,
+                            false,
+                            vec![(1, vec![WireValue::Int(30)])],
+                        ),
+                        fail_on,
+                    ),
+                    (refusal(4, ErrorCode::Cancelled), fail_on),
+                    (
+                        chunk(
+                            6,
+                            Some(vec!["value".into()]),
+                            vec![vec![WireValue::Int(42)]],
+                        ),
+                        fail_on,
+                    ),
+                    (end(6, 1), fail_on),
+                ],
+                Arc::clone(&flushes),
+            );
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: Vec::new(),
+                flushes,
+                fail_on: Some(fail_on),
+            };
+            let error = stream_subscription(
+                &root,
+                &mut client,
+                "SUBSCRIBE TO MATCH (n) RETURN n",
+                vec![],
+                None,
+                true,
+                &mut out,
+            )
+            .await
+            .expect_err("a failed sink must cancel before more delivery");
+            assert_eq!(error.code, 5);
+            assert!(error.message.contains("injected output flush failure"));
+            assert_eq!(out.flushes.load(Ordering::SeqCst), fail_on);
+            let text = String::from_utf8(out.bytes).unwrap();
+            assert!(!text.contains(r#""event":"result""#));
+            assert!(
+                !text.contains(r#""value":"30""#),
+                "a late chunk reached the failed sink"
+            );
+            if fail_on == 1 {
+                assert!(!text.contains(r#""event":"change""#));
+            }
+            let answer = client
+                .execute(&root, ExecuteMode::Read, "RETURN 42", vec![])
+                .await
+                .unwrap();
+            assert_eq!(answer.rows, [vec![WireValue::Int(42)]]);
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                    .count(),
+                1
+            );
+            assert!(
+                frames
+                    .iter()
+                    .all(|frame| frame.header().kind() != FrameKind::WindowUpdate)
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn subscription_reset_or_error_after_a_partial_batch_emits_no_completed_progress() {
+    let ((), report) = run_async_under_lab(0x79a0_0522, |root| async move {
+        for reset in [false, true] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let terminal = if reset {
+                result(
+                    FrameKind::SubscriptionReset,
+                    4,
+                    &fgdb_protocol::body::SubscriptionReset {
+                        last_delivered_seq: Some(7),
+                    },
+                )
+            } else {
+                refusal(4, ErrorCode::Budget)
+            };
+            let io = script(
+                vec![
+                    (
+                        subscription_chunk(
+                            7,
+                            true,
+                            true,
+                            true,
+                            vec![(1, vec![WireValue::Int(10)])],
+                        ),
+                        0,
+                    ),
+                    (
+                        subscription_chunk(
+                            8,
+                            false,
+                            false,
+                            false,
+                            vec![(1, vec![WireValue::Int(20)])],
+                        ),
+                        2,
+                    ),
+                    (terminal, 3),
+                ],
+                Arc::clone(&flushes),
+            );
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: Vec::new(),
+                flushes,
+                fail_on: None,
+            };
+            stream_subscription(
+                &root,
+                &mut client,
+                "SUBSCRIBE TO MATCH (n) RETURN n",
+                vec![],
+                None,
+                true,
+                &mut out,
+            )
+            .await
+            .expect_err("an interrupted partial batch is not a completed stream");
+            let text = String::from_utf8(out.bytes).unwrap();
+            assert_eq!(
+                text.lines()
+                    .filter(|line| line.contains(r#""event":"progress""#))
+                    .count(),
+                1
+            );
+            assert!(text.contains(r#"{"v":1,"event":"progress","rows":1,"seq":7}"#));
+            assert!(!text.contains(r#""event":"result""#));
+            if reset {
+                assert!(text.contains(r#""event":"subscription_reset","resubscribe_required":true,"last_delivered_seq":7"#));
+            } else {
+                assert!(!text.contains("subscription_reset"));
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn remote_rows_flush_before_more_frames_and_keep_exact_cells_and_query_cut() {
     let ((), report) = run_async_under_lab(0x79a0_0501, |root| async move {

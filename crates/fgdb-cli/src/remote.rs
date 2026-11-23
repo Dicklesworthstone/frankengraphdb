@@ -287,9 +287,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--consistent-batch requires remote query --rows-file with --read-mode buffered",
         ));
     }
-    if prepared_batch
-        && (verb != "query" || mode != ExecuteMode::Read || rows_file.is_none())
-    {
+    if prepared_batch && (verb != "query" || mode != ExecuteMode::Read || rows_file.is_none()) {
         return Err(Failure::usage(
             "--prepared-batch requires remote query --rows-file with --read-mode buffered",
         ));
@@ -1004,7 +1002,8 @@ mod stream_tests;
 /// Stream a subscription: the columns once, then per batch one `change`
 /// record per entry (its signed multiplicity change; a baseline's weights are
 /// multiplicities) and one `progress` record carrying the batch's entry count
-/// and frontier. Each batch is flushed as it arrives. With --max-batches the
+/// and frontier. Each frame is flushed as it arrives; its changes remain
+/// provisional until the batch's progress record. With --max-batches the
 /// subscription is cancelled after that many batches and a final `result`
 /// record (kind `rows`, the last delivered frontier, the total change count)
 /// marks a complete stream; without it the stream runs until interrupted.
@@ -1019,104 +1018,193 @@ async fn subscribe(
         .select(cx, &options.database)
         .await
         .map_err(failure)?;
-    // Both callbacks write the one output stream; a cell shares it.
-    let sink = core::cell::RefCell::new((out, None::<Failure>));
-    let write_line = |line: &str, flush: bool| {
-        let (out, failed) = &mut *sink.borrow_mut();
-        let result = emit(*out, line).and_then(|()| {
-            if flush {
-                out.flush().map_err(Failure::io)
-            } else {
-                Ok(())
-            }
-        });
-        if let Err(error) = result {
-            failed.get_or_insert(error);
-        }
+    stream_subscription(
+        cx,
+        &mut client,
+        &options.statement,
+        options.parameters,
+        options.max_batches,
+        robot,
+        out,
+    )
+    .await?;
+    let _ = client.close(cx).await;
+    Ok(())
+}
+
+/// Only counters and schema width survive a callback. No baseline or delta
+/// bag accumulates in the CLI, even when it spans many credit windows.
+async fn stream_subscription(
+    cx: &asupersync::Cx,
+    client: &mut Client,
+    statement: &str,
+    parameters: Vec<(String, WireValue)>,
+    max_batches: Option<u64>,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let sink = std::sync::Mutex::new(SubscriptionOutput {
+        out,
+        robot,
+        width: None,
+        pending_rows: 0,
+        batches: 0,
+        changes: 0,
+        max_batches,
+        failed: None,
+    });
+    let lock = || {
+        sink.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     };
-    let mut batches = 0u64;
-    let mut changes = 0u64;
-    let limit = options.max_batches;
-    let end = client
-        .subscribe(
+    let result = client
+        .subscribe_streaming(
             cx,
-            &options.statement,
-            options.parameters,
-            |columns| {
-                let line = if robot {
-                    format!(
-                        r#"{{"v":1,"event":"columns","columns":[{}]}}"#,
-                        columns
-                            .iter()
-                            .map(|c| fgdb_protocol::json::quote(c))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    )
-                } else {
-                    format!("weight | {}", columns.join(" | "))
-                };
-                write_line(&line, false);
-            },
-            |change| {
-                for (weight, row) in &change.entries {
-                    let line = if robot {
-                        format!(
-                            r#"{{"v":1,"event":"change","weight":"{weight}","cells":[{}]}}"#,
-                            row.iter().map(cell).collect::<Vec<_>>().join(",")
-                        )
-                    } else {
-                        format!(
-                            "{weight:+} | {}",
-                            row.iter().map(human).collect::<Vec<_>>().join(" | ")
-                        )
-                    };
-                    write_line(&line, false);
-                }
-                changes += change.entries.len() as u64;
-                let line = if robot {
-                    format!(
-                        r#"{{"v":1,"event":"progress","rows":{},"seq":{}}}"#,
-                        change.entries.len(),
-                        change.frontier
-                    )
-                } else {
-                    let kind = if change.snapshot { "baseline" } else { "delta" };
-                    format!(
-                        "-- {kind} at seq {} ({} change(s))",
-                        change.frontier,
-                        change.entries.len()
-                    )
-                };
-                write_line(&line, true);
-                batches += 1;
-                // Stop on an output failure or at the requested batch count.
-                Ok(sink.borrow().1.is_none() && limit.is_none_or(|limit| batches < limit))
-            },
+            statement,
+            parameters,
+            |columns| lock().columns(cx, columns),
+            |chunk| lock().chunk(cx, chunk),
         )
         .await;
-    if end.is_ok() || matches!(&end, Err(ClientError::SubscriptionReset { .. })) {
-        let _ = client.close(cx).await;
+    sink.into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .finish(result)
+}
+
+struct SubscriptionOutput<'a, W> {
+    out: &'a mut W,
+    robot: bool,
+    width: Option<usize>,
+    pending_rows: u64,
+    batches: u64,
+    changes: u64,
+    max_batches: Option<u64>,
+    failed: Option<Failure>,
+}
+
+impl<W: Write> SubscriptionOutput<'_, W> {
+    fn capture<T>(&mut self, result: Result<T, Failure>) -> Result<T, ClientError> {
+        result.map_err(|error| {
+            self.failed.get_or_insert(error);
+            ClientError::Io(std::io::ErrorKind::BrokenPipe)
+        })
     }
-    let (out, failed) = sink.into_inner();
-    if let Some(error) = failed {
-        return Err(error);
+
+    fn columns(&mut self, cx: &asupersync::Cx, columns: &[String]) -> Result<(), ClientError> {
+        let result = (|| {
+            cx.checkpoint().map_err(Failure::query)?;
+            let line = if self.robot {
+                format!(
+                    r#"{{"v":1,"event":"columns","columns":[{}]}}"#,
+                    columns
+                        .iter()
+                        .map(|name| fgdb_protocol::json::quote(name))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            } else {
+                format!("weight | {}", columns.join(" | "))
+            };
+            emit(self.out, &line)?;
+            self.out.flush().map_err(Failure::io)?;
+            self.width = Some(columns.len());
+            Ok(())
+        })();
+        self.capture(result)
     }
-    let end = match end {
-        Ok(end) => end,
-        Err(error @ ClientError::SubscriptionReset { last_delivered_seq }) => {
-            emit(out, &subscription_reset_record(last_delivered_seq, robot))?;
-            out.flush().map_err(Failure::io)?;
-            return Err(failure(error));
+
+    fn chunk(
+        &mut self,
+        cx: &asupersync::Cx,
+        chunk: fgdb_protocol::client::ChangeChunk,
+    ) -> Result<bool, ClientError> {
+        let result = (|| {
+            cx.checkpoint().map_err(Failure::query)?;
+            let rows = self
+                .pending_rows
+                .checked_add(chunk.entries.len() as u64)
+                .ok_or_else(|| Failure::query("subscription change counter overflow"))?;
+            let changes = self
+                .changes
+                .checked_add(rows)
+                .ok_or_else(|| Failure::query("subscription change counter overflow"))?;
+            let batches = self
+                .batches
+                .checked_add(u64::from(chunk.last))
+                .ok_or_else(|| Failure::query("subscription batch counter overflow"))?;
+            for (weight, row) in &chunk.entries {
+                cx.checkpoint().map_err(Failure::query)?;
+                if self.width != Some(row.len()) {
+                    return Err(Failure::io(
+                        "remote change width does not match its columns",
+                    ));
+                }
+                let line = if self.robot {
+                    format!(
+                        r#"{{"v":1,"event":"change","weight":"{weight}","cells":[{}]}}"#,
+                        row.iter().map(cell).collect::<Vec<_>>().join(",")
+                    )
+                } else {
+                    format!(
+                        "{weight:+} | {}",
+                        row.iter().map(human).collect::<Vec<_>>().join(" | ")
+                    )
+                };
+                emit(self.out, &line)?;
+            }
+            if chunk.last {
+                let line = if self.robot {
+                    format!(
+                        r#"{{"v":1,"event":"progress","rows":{rows},"seq":{}}}"#,
+                        chunk.frontier
+                    )
+                } else {
+                    let kind = if chunk.snapshot { "baseline" } else { "delta" };
+                    format!("-- {kind} at seq {} ({rows} change(s))", chunk.frontier)
+                };
+                emit(self.out, &line)?;
+            }
+            // Backpressure reaches the network before another frame is read.
+            // Even an empty final chunk completes only after its flush succeeds.
+            self.out.flush().map_err(Failure::io)?;
+            if chunk.last {
+                self.changes = changes;
+                self.batches = batches;
+                self.pending_rows = 0;
+            } else {
+                self.pending_rows = rows;
+            }
+            Ok(!chunk.last || self.max_batches.is_none_or(|limit| batches < limit))
+        })();
+        self.capture(result)
+    }
+
+    fn finish(self, result: Result<u64, ClientError>) -> Result<(), Failure> {
+        if let Some(error) = self.failed {
+            return Err(error);
         }
-        Err(error) => return Err(failure(error)),
-    };
-    if robot {
-        emit(
-            out,
-            &format!(r#"{{"v":1,"event":"result","kind":"rows","seq":{end},"count":{changes}}}"#),
-        )
-    } else {
-        emit(out, &format!("{changes} change(s) through seq {end}"))
+        let seq = match result {
+            Ok(seq) => seq,
+            Err(error @ ClientError::SubscriptionReset { last_delivered_seq }) => {
+                emit(
+                    self.out,
+                    &subscription_reset_record(last_delivered_seq, self.robot),
+                )?;
+                self.out.flush().map_err(Failure::io)?;
+                return Err(failure(error));
+            }
+            Err(error) => return Err(failure(error)),
+        };
+        let line = if self.robot {
+            format!(
+                r#"{{"v":1,"event":"result","kind":"rows","seq":{seq},"count":{}}}"#,
+                self.changes
+            )
+        } else {
+            format!("{} change(s) through seq {seq}", self.changes)
+        };
+        emit(self.out, &line)?;
+        self.out.flush().map_err(Failure::io)
     }
 }
 
@@ -1318,9 +1406,7 @@ mod tests {
                 2
             );
         }
-        assert!(
-            script(&["--tls-server-name", "db.example", "--tls-ca-file", "ca.pem"]).is_ok()
-        );
+        assert!(script(&["--tls-server-name", "db.example", "--tls-ca-file", "ca.pem"]).is_ok());
         for flags in [
             vec!["RETURN 1"],
             vec!["--statements-file", "again.json"],
@@ -1433,12 +1519,18 @@ mod tests {
         for flags in [
             vec!["--prepared-batch", "--rows-file", "rows.json"],
             vec![
-                "--rows-file", "rows.csv", "--csv-types", "name=text",
+                "--rows-file",
+                "rows.csv",
+                "--csv-types",
+                "name=text",
                 "--prepared-batch",
             ],
             vec![
-                "--prepared-batch", "--rows-file", "rows.json",
-                "--read-mode", "buffered",
+                "--prepared-batch",
+                "--rows-file",
+                "rows.json",
+                "--read-mode",
+                "buffered",
             ],
         ] {
             let parsed =
@@ -1454,48 +1546,70 @@ mod tests {
         );
         for (verb, flags) in [
             ("query", vec!["--prepared-batch"]),
-            ("write", vec!["--prepared-batch", "--rows-file", "rows.json"]),
-            ("subscribe", vec!["--prepared-batch", "--rows-file", "rows.json"]),
+            (
+                "write",
+                vec!["--prepared-batch", "--rows-file", "rows.json"],
+            ),
+            (
+                "subscribe",
+                vec!["--prepared-batch", "--rows-file", "rows.json"],
+            ),
             (
                 "query",
                 vec![
-                    "--prepared-batch", "--rows-file", "rows.json",
-                    "--read-mode", "source",
+                    "--prepared-batch",
+                    "--rows-file",
+                    "rows.json",
+                    "--read-mode",
+                    "source",
                 ],
             ),
             (
                 "query",
                 vec![
-                    "--prepared-batch", "--rows-file", "rows.json",
-                    "--read-mode", "ordered",
+                    "--prepared-batch",
+                    "--rows-file",
+                    "rows.json",
+                    "--read-mode",
+                    "ordered",
                 ],
             ),
             (
                 "query",
                 vec![
-                    "--prepared-batch", "--prepared-batch",
-                    "--rows-file", "rows.json",
+                    "--prepared-batch",
+                    "--prepared-batch",
+                    "--rows-file",
+                    "rows.json",
                 ],
             ),
             (
                 "query",
                 vec![
-                    "--prepared-batch", "--consistent-batch",
-                    "--rows-file", "rows.json",
+                    "--prepared-batch",
+                    "--consistent-batch",
+                    "--rows-file",
+                    "rows.json",
                 ],
             ),
             (
                 "query",
                 vec![
-                    "--prepared-batch", "--rows-file", "rows.json",
-                    "--param", "name=text:Ada",
+                    "--prepared-batch",
+                    "--rows-file",
+                    "rows.json",
+                    "--param",
+                    "name=text:Ada",
                 ],
             ),
             (
                 "query",
                 vec![
-                    "--prepared-batch", "--rows-file", "rows.json",
-                    "--statements-file", "reads.json",
+                    "--prepared-batch",
+                    "--rows-file",
+                    "rows.json",
+                    "--statements-file",
+                    "reads.json",
                 ],
             ),
         ] {

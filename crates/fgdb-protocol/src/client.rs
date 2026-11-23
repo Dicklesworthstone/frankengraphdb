@@ -114,6 +114,22 @@ pub struct Change {
     pub entries: Vec<(i128, Vec<WireValue>)>,
 }
 
+/// One frame of a subscription baseline or delta. The entries are provisional
+/// until the final chunk of this batch is accepted. A reset, error or early
+/// cancellation can discard a partial batch; consumers must not advance their
+/// checkpoint before accepting `last = true` for the same frontier.
+///
+/// [`Client::subscribe_streaming`] hands over each chunk before reading the
+/// next frame and retains no entries between callbacks. The wire frame and
+/// value limits bound each chunk; they do not bound a caller's retained state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangeChunk {
+    pub frontier: u64,
+    pub snapshot: bool,
+    pub last: bool,
+    pub entries: Vec<(i128, Vec<WireValue>)>,
+}
+
 /// A complete statement answer, as [`Client::execute`] collects it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Answer {
@@ -906,7 +922,9 @@ impl Client {
     }
 
     /// Subscribe to `SUBSCRIBE TO <read>`: hand over the columns once, then
-    /// every complete batch (the baseline first) as it arrives. Returning
+    /// every complete batch (the baseline first) as it arrives. This collected
+    /// API retains the entire current batch; use [`Self::subscribe_streaming`]
+    /// for frame-bounded delivery and a fallible schema callback. Returning
     /// `Ok(false)` from `on_change` cancels the subscription; the server then
     /// ends the stream and this returns the last frontier it delivered.
     /// A callback error also cancels and drains the child before returning the
@@ -916,9 +934,62 @@ impl Client {
         &mut self,
         cx: &Cx,
         statement: &str,
-        mut parameters: Vec<(String, WireValue)>,
+        parameters: Vec<(String, WireValue)>,
         mut on_columns: impl FnMut(&[String]),
         mut on_change: impl FnMut(Change) -> Result<bool, ClientError>,
+    ) -> Result<u64, ClientError> {
+        let mut pending: Option<Change> = None;
+        self.subscribe_streaming(
+            cx,
+            statement,
+            parameters,
+            |columns| {
+                on_columns(columns);
+                Ok(())
+            },
+            |chunk| {
+                let change = pending.get_or_insert_with(|| Change {
+                    frontier: chunk.frontier,
+                    snapshot: chunk.snapshot,
+                    entries: Vec::new(),
+                });
+                change.entries.extend(chunk.entries);
+                if chunk.last {
+                    on_change(pending.take().expect("the current batch was extended"))
+                } else {
+                    Ok(true)
+                }
+            },
+        )
+        .await
+    }
+
+    /// Deliver a subscription one validated frame at a time, without
+    /// assembling a complete baseline or delta in client memory. Both
+    /// callbacks are fallible. Each accepted chunk releases its flow credit
+    /// only after the callback returns; the schema is delivered once, before
+    /// the first chunk, and may refuse before any entries are exposed.
+    ///
+    /// Chunk entries remain provisional until an accepted `last` chunk.
+    /// Returning `Ok(false)` accepts this chunk and cancels further delivery;
+    /// only a complete accepted batch advances the returned frontier. A
+    /// cancellation before the first complete baseline returns zero, matching
+    /// the collected API; recovery reports `None` for that same checkpoint.
+    /// The checkpoint is session-local, never a durable resume capability.
+    ///
+    /// A callback error sends one cancellation, suppresses all later callbacks
+    /// and grants, and drains the original terminal before returning that
+    /// error. Late frames are still validated, but their entries are not
+    /// retained. Malformed or foreign frames require reconnecting and cannot
+    /// be hidden by a callback error. Dropping the future also requires
+    /// reconnecting; no request is retried.
+    pub async fn subscribe_streaming(
+        &mut self,
+        cx: &Cx,
+        statement: &str,
+        mut parameters: Vec<(String, WireValue)>,
+        mut on_columns: impl FnMut(&[String]) -> Result<(), ClientError>,
+        mut on_chunk: impl FnMut(ChangeChunk) -> Result<bool, ClientError>,
     ) -> Result<u64, ClientError> {
         if self.selected.is_none() {
             return Err(ClientError::Protocol("select a database first"));
@@ -939,7 +1010,6 @@ impl Client {
         let mut progress = SubscriptionProgress::default();
         let mut cancelled = false;
         let mut callback_error = None;
-        let mut pending: Option<Change> = None;
         let mut delivered_to_callback = None;
         loop {
             let frame = self.receive(cx).await?.ok_or(ClientError::Closed)?;
@@ -974,33 +1044,35 @@ impl Client {
                     // its schema or values, including late parts after cancel.
                     progress.batch(&part).map_err(ClientError::Protocol)?;
                     available = (available.0 - cost, available.1 - count);
-                    if let Some(names) = part.columns {
-                        on_columns(&names);
-                    }
-                    let change = pending.get_or_insert_with(|| Change {
-                        frontier: part.frontier,
-                        snapshot: part.snapshot,
-                        entries: Vec::new(),
-                    });
-                    change.entries.extend(part.entries);
-                    if part.last {
-                        let change = pending.take().expect("a pending batch was just extended");
-                        if !cancelled {
-                            let frontier = change.frontier;
-                            let keep = match on_change(change) {
-                                Ok(keep) => {
-                                    delivered_to_callback = Some(frontier);
-                                    keep
+                    if !cancelled {
+                        let accepted = if let Some(names) = &part.columns {
+                            on_columns(names)
+                        } else {
+                            Ok(())
+                        };
+                        let accepted = accepted.and_then(|()| {
+                            on_chunk(ChangeChunk {
+                                frontier: part.frontier,
+                                snapshot: part.snapshot,
+                                last: part.last,
+                                entries: part.entries,
+                            })
+                        });
+                        let keep = match accepted {
+                            Ok(keep) => {
+                                if part.last {
+                                    delivered_to_callback = Some(part.frontier);
                                 }
-                                Err(error) => {
-                                    callback_error = Some(error);
-                                    false
-                                }
-                            };
-                            if !keep {
-                                cancelled = true;
-                                self.send(cx, FrameKind::QueryCancel, id, &Empty).await?;
+                                keep
                             }
+                            Err(error) => {
+                                callback_error = Some(error);
+                                false
+                            }
+                        };
+                        if !keep {
+                            cancelled = true;
+                            self.send(cx, FrameKind::QueryCancel, id, &Empty).await?;
                         }
                     }
                     let frame_limit = self.send_limits.max_frame_len() as u64;
@@ -1597,6 +1669,28 @@ mod tests {
                 last,
                 columns: first.then(|| vec!["n".into()]),
                 entries: vec![(1, vec![WireValue::Int(i64::try_from(frontier).unwrap())])],
+            },
+        )
+    }
+
+    fn subscription_part(
+        frontier: u64,
+        snapshot: bool,
+        columns: bool,
+        last: bool,
+        values: &[(i128, i64)],
+    ) -> Frame {
+        output(
+            FrameKind::SubscriptionBatch,
+            &SubscriptionBatch {
+                frontier,
+                snapshot,
+                last,
+                columns: columns.then(|| vec!["n".into()]),
+                entries: values
+                    .iter()
+                    .map(|(weight, value)| (*weight, vec![WireValue::Int(*value)]))
+                    .collect(),
             },
         )
     }
@@ -4494,6 +4588,331 @@ mod tests {
                     ClientError::Protocol(_) | ClientError::Body(_) | ClientError::Transport(_)
                 ));
             }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    /// A next-frame read is illegal until the preceding chunk callback ran.
+    /// Collecting a whole baseline before delivery fails at the second frame,
+    /// independently of any internal allocation or callback-count telemetry.
+    struct CallbackGatedIo {
+        inner: ScriptIo,
+        boundaries: Vec<(usize, usize)>,
+        callbacks: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for CallbackGatedIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            for (offset, callbacks) in &self.boundaries {
+                if self.inner.offset >= *offset {
+                    assert!(
+                        self.callbacks.load(Ordering::SeqCst) >= *callbacks,
+                        "the client read another frame before delivering its chunk"
+                    );
+                }
+            }
+            Pin::new(&mut self.inner).poll_read(task, buffer)
+        }
+    }
+
+    impl AsyncWrite for CallbackGatedIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(task, bytes)
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(task)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(task)
+        }
+    }
+
+    #[test]
+    fn subscription_streaming_delivers_each_frame_before_reading_more_across_credit_windows() {
+        let ((), report) = run_async_under_lab(0x79a0_0210, |root| async move {
+            const CHUNKS: usize = 128;
+            let frames: Vec<_> = (0..CHUNKS)
+                .map(|index| {
+                    subscription_part(
+                        7,
+                        true,
+                        index == 0,
+                        index + 1 == CHUNKS,
+                        &[(1, index as i64)],
+                    )
+                })
+                .chain([output(
+                    FrameKind::SnapshotResultEnd,
+                    &ResultEnd {
+                        outcome: Outcome::Rows { seq: 7 },
+                        rows: 0,
+                    },
+                )])
+                .collect();
+            let lengths: Vec<_> = frames
+                .iter()
+                .map(|frame| frame.encode(FrameLimits::new(4096).unwrap()).unwrap().len())
+                .collect();
+            let inner = script_with_window(frames, 4096, 1);
+            let written = inner.written.clone();
+            let mut offset = inner.input.len() - lengths.iter().sum::<usize>();
+            let mut boundaries = Vec::new();
+            for (index, length) in lengths.iter().take(CHUNKS).enumerate() {
+                offset += length;
+                boundaries.push((offset, index + 1));
+            }
+            let callbacks = std::sync::Arc::new(AtomicUsize::new(0));
+            let io = CallbackGatedIo {
+                inner,
+                boundaries,
+                callbacks: callbacks.clone(),
+            };
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            let mut schemas = 0;
+            let delivered = client
+                .subscribe_streaming(
+                    &root,
+                    "SUBSCRIBE TO MATCH (n) RETURN n",
+                    vec![],
+                    |columns| {
+                        schemas += 1;
+                        assert_eq!(columns, ["n"]);
+                        Ok(())
+                    },
+                    |chunk| {
+                        let index = callbacks.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!((chunk.frontier, chunk.snapshot), (7, true));
+                        assert_eq!(chunk.last, index + 1 == CHUNKS);
+                        assert_eq!(chunk.entries, [(1, vec![WireValue::Int(index as i64)])]);
+                        Ok(!chunk.last)
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (schemas, callbacks.load(Ordering::SeqCst), delivered),
+                (1, CHUNKS, 7)
+            );
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::WindowUpdate)
+                    .count(),
+                CHUNKS - 1
+            );
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                    .count(),
+                1
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn subscription_streaming_schema_refusal_discards_chunks_and_drains_before_reuse() {
+        let ((), report) = run_async_under_lab(0x79a0_0211, |root| async move {
+            for terminal in [
+                output(
+                    FrameKind::SnapshotResultEnd,
+                    &ResultEnd {
+                        outcome: Outcome::Rows { seq: 7 },
+                        rows: 0,
+                    },
+                ),
+                output(
+                    FrameKind::SubscriptionReset,
+                    &SubscriptionReset {
+                        last_delivered_seq: Some(7),
+                    },
+                ),
+                output(
+                    FrameKind::Error,
+                    &ErrorBody {
+                        code: ErrorCode::Cancelled,
+                        message: "cancelled".into(),
+                    },
+                ),
+            ] {
+                let io = script(vec![
+                    subscription_part(7, true, true, false, &[(1, 10)]),
+                    subscription_part(7, true, false, true, &[(1, 20)]),
+                    terminal,
+                    result_chunk(6, &[42]),
+                    result_end(6, 1),
+                ]);
+                let written = io.written.clone();
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let mut schemas = 0;
+                let result = client
+                    .subscribe_streaming(
+                        &root,
+                        "SUBSCRIBE TO MATCH (n) RETURN n",
+                        vec![],
+                        |_| {
+                            schemas += 1;
+                            Err(ClientError::Protocol("subscription schema sink failed"))
+                        },
+                        |_| panic!("a refused schema must expose no entries"),
+                    )
+                    .await;
+                assert!(matches!(
+                    result,
+                    Err(ClientError::Protocol("subscription schema sink failed"))
+                ));
+                assert_eq!(schemas, 1);
+                let answer = client
+                    .execute(&root, ExecuteMode::Read, "RETURN 42", vec![])
+                    .await
+                    .unwrap();
+                assert_eq!(answer.rows, [vec![WireValue::Int(42)]]);
+                let frames = sent_frames(&written.lock().unwrap());
+                assert_eq!(
+                    frames
+                        .iter()
+                        .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                        .count(),
+                    1
+                );
+                assert!(
+                    frames
+                        .iter()
+                        .all(|frame| frame.header().kind() != FrameKind::WindowUpdate)
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn subscription_streaming_partial_cancellation_never_advances_the_accepted_checkpoint() {
+        let ((), report) = run_async_under_lab(0x79a0_0212, |root| async move {
+            for baseline_complete in [false, true] {
+                for reset in [false, true] {
+                    let mut frames = Vec::new();
+                    if baseline_complete {
+                        frames.push(batch(7, true, true));
+                    }
+                    frames.extend([
+                        subscription_part(
+                            8,
+                            !baseline_complete,
+                            !baseline_complete,
+                            false,
+                            &[(1, 20)],
+                        ),
+                        subscription_part(8, !baseline_complete, false, true, &[(1, 30)]),
+                        if reset {
+                            output(
+                                FrameKind::SubscriptionReset,
+                                &SubscriptionReset {
+                                    last_delivered_seq: Some(8),
+                                },
+                            )
+                        } else {
+                            output(
+                                FrameKind::SnapshotResultEnd,
+                                &ResultEnd {
+                                    outcome: Outcome::Rows { seq: 8 },
+                                    rows: 0,
+                                },
+                            )
+                        },
+                    ]);
+                    let mut client = Client::connect_stream(&root, script(frames), vec![1])
+                        .await
+                        .unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    let mut accepted = Vec::new();
+                    let result = client
+                        .subscribe_streaming(
+                            &root,
+                            "SUBSCRIBE TO MATCH (n) RETURN n",
+                            vec![],
+                            |_| Ok(()),
+                            |chunk| {
+                                accepted.push((chunk.frontier, chunk.last));
+                                Ok(chunk.last)
+                            },
+                        )
+                        .await;
+                    let checkpoint = baseline_complete.then_some(7);
+                    assert_eq!(
+                        accepted,
+                        if baseline_complete {
+                            vec![(7, true), (8, false)]
+                        } else {
+                            vec![(8, false)]
+                        }
+                    );
+                    if reset {
+                        assert!(
+                            matches!(result, Err(ClientError::SubscriptionReset { last_delivered_seq }) if last_delivered_seq == checkpoint)
+                        );
+                    } else {
+                        assert_eq!(result.unwrap(), checkpoint.unwrap_or(0));
+                    }
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn subscription_streaming_schema_failure_cannot_hide_a_malformed_late_batch() {
+        let ((), report) = run_async_under_lab(0x79a0_0213, |root| async move {
+            let mut client = Client::connect_stream(
+                &root,
+                script(vec![
+                    subscription_part(7, true, true, false, &[(1, 10)]),
+                    subscription_part(8, true, false, true, &[(1, 20)]),
+                ]),
+                vec![1],
+            )
+            .await
+            .unwrap();
+            client.select(&root, "test").await.unwrap();
+            let result = client
+                .subscribe_streaming(
+                    &root,
+                    "SUBSCRIBE TO MATCH (n) RETURN n",
+                    vec![],
+                    |_| Err(ClientError::Protocol("subscription schema sink failed")),
+                    |_| panic!("a refused schema must expose no entries"),
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(ClientError::Protocol(
+                    "a batch changed frontier or kind mid-stream"
+                ))
+            ));
+            requires_reconnect(
+                client
+                    .execute(&root, ExecuteMode::Read, "RETURN 42", vec![])
+                    .await,
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
