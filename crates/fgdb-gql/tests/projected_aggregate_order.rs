@@ -1140,11 +1140,14 @@ fn conditional_aggregate_membership_keeps_exact_values_with_rebound_lists() {
         ] {
             let parameters = GqlParameters::new().with_list("members", members).unwrap();
             let query = if let Some(template) = &native {
-                template.bind_parameters(&parameters)
+                template.bind_parameters(&parameters).unwrap()
             } else {
-                piped.as_ref().unwrap().bind_parameters(&parameters)
-            }
-            .unwrap();
+                piped
+                    .as_ref()
+                    .unwrap()
+                    .bind_parameters(&parameters)
+                    .unwrap()
+            };
             let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
                 .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
                 .value;

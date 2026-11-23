@@ -329,8 +329,8 @@ fn limit_zero_evaluates_reached_inputs_and_complete_group_outputs() {
                 .unwrap_err();
             assert!(
                 matches!(error, NativeSpoolError::Aggregate(error)
-                if matches!(*error, NativeAggregateSpoolError::Execute(error)
-                    if matches!(*error, GqlQueryError::Source(fgdb_gql::GraphAggregateError::OutputExpression { error, .. })
+                if matches!(error.as_ref(), NativeAggregateSpoolError::Execute(error)
+                    if matches!(error.as_ref(), GqlQueryError::Source(fgdb_gql::GraphAggregateError::OutputExpression { error, .. })
                         if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero))),
                 "{text}"
             );
@@ -503,12 +503,14 @@ fn aggregate_expiry_interrupts_pending_writes_and_rechecks_final_row_reads() {
                 .execute_ordered_aggregate(&cx, &prepared, &params)
                 .unwrap(),
         );
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(future.as_mut().poll(&mut context).is_pending());
-        now.store(1001, Ordering::SeqCst);
-        assert!(matches!(future.as_mut().poll(&mut context),
-            Poll::Ready(Err(NativeSpoolError::Authorized(error)))
-            if matches!(*error, QueryError::Authorization(AuthorizationError::Expired))));
+        {
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(future.as_mut().poll(&mut context).is_pending());
+            now.store(1001, Ordering::SeqCst);
+            assert!(matches!(future.as_mut().poll(&mut context),
+                Poll::Ready(Err(NativeSpoolError::Authorized(error)))
+                if matches!(*error, QueryError::Authorization(AuthorizationError::Expired))));
+        }
         drop(future);
         assert!(ordered.is_closed());
         assert_eq!(Arc::strong_count(&db.snapshot), pins);

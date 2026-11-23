@@ -1703,7 +1703,7 @@ fn filtered_extrema_restore_vertex_and_text_values_without_integer_coercion() {
                 2 => change.delete_edge(EId(15)),
                 3 => change.delete_vertex(VId(4)),
                 _ => unreachable!(),
-            }
+            };
             db.write(&commit, change).await.unwrap();
             let (min, max) = match phase {
                 0 => (Some(2), Some(4)),

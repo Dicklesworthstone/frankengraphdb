@@ -828,7 +828,7 @@ fn scoped_seeded_observations_survive_empty_results_refusal_and_savepoint_rollba
                 6 => concurrent.set_vertex_label(VId(20), L, false),
                 7 => concurrent.add_edge(EId(70), VId(10), VId(50), vec![]),
                 _ => unreachable!(),
-            }
+            };
             db.write(&commit, concurrent).await.unwrap();
             let completion = transaction.commit(&mut db, &commit).await;
             if case == 0 {
