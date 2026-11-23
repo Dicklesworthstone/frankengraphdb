@@ -2017,8 +2017,9 @@ impl<V: Vfs> BlockStore<V> {
         proof: Proof,
     ) -> Result<T, StoreError>
     where
-        Proof: FnMut(Vec<u8>) -> Proven,
-        Proven: Future<Output = Result<T, StoreError>>,
+        T: Send,
+        Proof: FnMut(Vec<u8>) -> Proven + Send,
+        Proven: Future<Output = Result<T, StoreError>> + Send,
     {
         self.read_object_selected(cx, kind, id, limit, proof, |_| true)
             .await
@@ -2158,21 +2159,23 @@ impl<V: Vfs> BlockStore<V> {
     // Buffered extents use the already-admitted checksum as their selector.
     // If every candidate fails that check, return the original bytes so the
     // buffer's own completion reports its existing ChecksumMismatch class.
-    async fn read_object_selected<T, Proof, Proven>(
-        &self,
-        cx: &impl StorageReadCx,
+    fn read_object_selected<'a, T, Proof, Proven>(
+        &'a self,
+        cx: &'a impl StorageReadCx,
         kind: StoredObjectKind,
         id: ObjectId,
         limit: u64,
         proof: Proof,
-        accepts: impl Fn(&T) -> bool,
-    ) -> Result<T, StoreError>
+        accepts: impl Fn(&T) -> bool + Send + 'a,
+    ) -> impl Future<Output = Result<T, StoreError>> + Send + 'a
     where
-        Proof: FnMut(Vec<u8>) -> Proven,
-        Proven: Future<Output = Result<T, StoreError>>,
+        T: Send + 'a,
+        Proof: FnMut(Vec<u8>) -> Proven + Send + 'a,
+        Proven: Future<Output = Result<T, StoreError>> + Send + 'a,
     {
+        // Bound the Send proof for callers before it reaches physical-copy
+        // retries, extent admission and their underlying VFS reads.
         self.read_object_selected_owned(cx, kind, id, limit, proof, accepts, None)
-            .await
     }
 
     #[allow(clippy::too_many_arguments)]
