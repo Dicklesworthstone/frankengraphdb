@@ -2496,19 +2496,22 @@ fn subscriptions_push_a_baseline_then_exact_deltas_until_cancelled() {
             .await
             .unwrap();
         writer.select(cx, "social").await.unwrap();
-        writer
+        let seeded = writer
             .execute(
                 cx,
                 ExecuteMode::Write,
-                "CREATE (:Person {name: 'Ann', age: 30})",
+                "CREATE (ann:Person {name: 'Ann', age: 30})-[:KNOWS]->(:Company) RETURN ann",
                 vec![],
             )
             .await
             .unwrap();
+        assert_eq!(seeded.columns, ["ann"]);
+        assert_eq!(seeded.rows.len(), 1);
+        let ann = seeded.rows[0][0].clone();
+        assert!(matches!(ann, WireValue::Vertex(_)));
 
-        // Analytic CALL fnx.* subscriptions still require unrestricted graph
-        // scope, while native GQL subscriptions project over the capability's
-        // pre-expansion quotient Pi_C (FG-INV-20).
+        // Both subscriptions see Ann. Her neighbor is outside the label scope,
+        // and her age is outside the property scope (FG-INV-20).
         let mut scoped = Client::connect(
             cx,
             addr,
@@ -2522,17 +2525,66 @@ fn subscriptions_push_a_baseline_then_exact_deltas_until_cancelled() {
         .await
         .unwrap();
         scoped.select(cx, "social").await.unwrap();
+        // Maintaining connected components requires an explicit collapse of
+        // parallel edges, even when the visible graph has just one vertex.
         let refused = scoped
             .subscribe(
                 cx,
                 "SUBSCRIBE TO CALL fnx.connected_components({relations:['KNOWS']}) YIELD vertex, component",
                 vec![],
                 |_| {},
-                |_| Ok(true),
+                |_| Ok(false),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(refused), ErrorCode::Statement);
+        let components = "SUBSCRIBE TO CALL fnx.connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+                          YIELD vertex AS member,component AS representative RETURN member,representative";
+        let mut analytic_seen = Vec::new();
+        let frontier = scoped
+            .subscribe(
+                cx,
+                components,
+                vec![],
+                |cols| assert_eq!(cols, ["member", "representative"]),
+                |change| {
+                    analytic_seen.push(change);
+                    Ok(false)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(frontier, 1);
+        assert_eq!(
+            analytic_seen,
+            [Change {
+                frontier: 1,
+                snapshot: true,
+                entries: vec![(1, vec![ann.clone(), ann])],
+            }]
+        );
+
+        let mut write_only = Client::connect(cx, addr, token(&grant(Rights::Write)))
+            .await
+            .unwrap();
+        write_only.select(cx, "social").await.unwrap();
+        let (mut got_columns, mut got_batch) = (false, false);
+        let refused = write_only
+            .subscribe(
+                cx,
+                components,
+                vec![],
+                |_| got_columns = true,
+                |_| {
+                    got_batch = true;
+                    Ok(false)
+                },
             )
             .await
             .unwrap_err();
         assert_eq!(server_code(refused), ErrorCode::PermissionDenied);
+        assert!(!got_columns && !got_batch);
+        write_only.close(cx).await.unwrap();
         let mut masked_seen = Vec::new();
         scoped
             .subscribe(
@@ -3916,9 +3968,12 @@ fn historical_snapshot_metadata_agrees_across_eager_prepared_http_and_streamed_r
             .unwrap();
         reader.select(cx, "social").await.unwrap();
         let arguments = || vec![("route".to_owned(), text("main"))];
-        // Every preparation occurs at frontier 2, including historical cuts.
-        // Literal cuts use the current wire parameter profile; the engine
-        // session regression separately covers UInt64 temporal rebinding.
+        let at_cut = |cut, branch: &str| {
+            vec![
+                ("cut".to_owned(), WireValue::Count(cut)),
+                ("route".to_owned(), text(branch)),
+            ]
+        };
         for (projection, copies, aggregate) in [
             ("RETURN n.age AS age", 1, false),
             ("RETURN sum(n.age) AS age", 1, true),
@@ -3928,6 +3983,13 @@ fn historical_snapshot_metadata_agrees_across_eager_prepared_http_and_streamed_r
                 false,
             ),
         ] {
+            let parameterized = format!(
+                "AT BRANCH $route MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $cut {projection}"
+            );
+            let reusable = reader
+                .prepare_read(cx, &parameterized, at_cut(1, "main"))
+                .await
+                .unwrap();
             for (at, age) in [(1, 10), (2, 20), (1, 10)] {
                 let statement = format!(
                     "AT BRANCH $route MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {at} {projection}"
@@ -3955,6 +4017,11 @@ fn historical_snapshot_metadata_agrees_across_eager_prepared_http_and_streamed_r
                     .await
                     .unwrap();
                 assert_eq!(prepared, eager, "{statement}");
+                let rebound = reader
+                    .execute_prepared(cx, reusable, at_cut(at, "main"))
+                    .await
+                    .unwrap();
+                assert_eq!(rebound, eager, "{parameterized}, cut {at}");
                 if aggregate {
                     let streamed = reader
                         .execute(cx, ExecuteMode::ReadStream, &statement, arguments())
@@ -4009,17 +4076,24 @@ fn historical_snapshot_metadata_agrees_across_eager_prepared_http_and_streamed_r
                 ),
                 ErrorCode::Execution
             );
-            let handle = reader.prepare_read(cx, &future, arguments()).await.unwrap();
-            assert_eq!(
-                server_code(
-                    reader
-                        .execute_prepared(cx, handle, arguments())
-                        .await
-                        .unwrap_err()
-                ),
-                ErrorCode::Execution
-            );
-            reader.release_prepared(cx, handle).await.unwrap();
+            // Both phases authorize the branch before looking up the catalog
+            // for the requested cut, even for an already admitted handle.
+            for (branch, expected) in [
+                ("main", ErrorCode::Execution),
+                ("elsewhere", ErrorCode::PermissionDenied),
+            ] {
+                let refused = reader
+                    .prepare_read(cx, &future, vec![("route".into(), text(branch))])
+                    .await
+                    .unwrap_err();
+                assert_eq!(server_code(refused), expected, "{future}, {branch}");
+                let refused = reader
+                    .execute_prepared(cx, reusable, at_cut(3, branch))
+                    .await
+                    .unwrap_err();
+                assert_eq!(server_code(refused), expected, "{parameterized}, {branch}");
+            }
+            reader.release_prepared(cx, reusable).await.unwrap();
         }
         let empty = reader
             .execute(

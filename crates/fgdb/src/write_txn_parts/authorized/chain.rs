@@ -1352,7 +1352,7 @@ impl<V: Vfs + Clone> Database<V> {
                     let collected = query_cx.with_restriction(|| {
                             let controls = RefCell::new(&mut execution);
                             let database = RefCell::new(&mut *self);
-                            let mut graph = ChainSource {
+                            let graph = ChainSource {
                                 transaction: workspace.transaction(),
                                 database: &database,
                                 cx: query_cx,
@@ -1468,26 +1468,10 @@ impl<V: Vfs + Clone> Database<V> {
                                     // Narrow authority therefore retains the
                                     // same selective path as other chain steps.
                                     let proposal = mutation
-                                        .execute_governed_over_reading_with_seeded_source_and_field_admission(
+                                        .execute_governed_over_reading_with_graph_source_and_field_admission(
                                             rows.take(),
                                             policy,
-                                            |pattern, budget| graph.pattern(pattern, budget),
-                                            Some(
-                                                |pattern: &PreparedGraphPattern<GraphValueRow>,
-                                                 seeds: fgdb_gql::GraphSeeds<'_>,
-                                                 budget| {
-                                                    selection::select_seeded_overlay(
-                                                        transaction,
-                                                        &database.borrow(),
-                                                        query_cx,
-                                                        pattern,
-                                                        seeds,
-                                                        scope,
-                                                        budget,
-                                                        &controls,
-                                                    )
-                                                },
-                                            ),
+                                            graph,
                                             elements,
                                             |key| {
                                                 mutation::admit_computed_property(
@@ -1514,26 +1498,10 @@ impl<V: Vfs + Clone> Database<V> {
                                         allowance.max_mutation_effects,
                                     );
                                     let proposal = query
-                                        .execute_governed_over_reading_with_seeded_source_and_field_admission(
+                                        .execute_governed_over_reading_with_graph_source_and_field_admission(
                                             rows.take(),
                                             policy,
-                                            |pattern, budget| graph.pattern(pattern, budget),
-                                            Some(
-                                                |pattern: &PreparedGraphPattern<GraphValueRow>,
-                                                 seeds: fgdb_gql::GraphSeeds<'_>,
-                                                 budget| {
-                                                    selection::select_seeded_overlay(
-                                                        transaction,
-                                                        &database.borrow(),
-                                                        query_cx,
-                                                        pattern,
-                                                        seeds,
-                                                        scope,
-                                                        budget,
-                                                        &controls,
-                                                    )
-                                                },
-                                            ),
+                                            graph,
                                             elements,
                                             |key| {
                                                 mutation::admit_computed_property(

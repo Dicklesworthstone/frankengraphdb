@@ -2316,10 +2316,9 @@ impl<'a> Parser<'a> {
                 && matches!(self.lexer.clone().next()?.kind,
                     TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH")))
             || (self.is_word("CALL")
-                && matches!(
-                    self.lexer.clone().next()?.kind,
-                    TokenKind::Punct(b'{' | b'(')
-                ))
+                && crate::PreparedGraphWriteChainText::graph_call_after_keyword(
+                    self.lexer.clone(),
+                )?)
             || optional_call)
     }
 

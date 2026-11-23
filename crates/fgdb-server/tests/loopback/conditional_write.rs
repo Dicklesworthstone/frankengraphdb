@@ -385,7 +385,7 @@ fn fgp_conditional_hybrid_writes_search_staged_values_and_roll_back_as_one_state
             )
             .await
             .unwrap();
-        assert_eq!(count.rows, [vec![WireValue::Int(1)]]);
+        assert_eq!(count.rows, [vec![WireValue::Count(1)]]);
         assert_eq!(count.outcome, Outcome::Rows { seq: 2 });
         client.close(cx).await.unwrap();
         owner.close(cx).await.unwrap();

@@ -211,10 +211,7 @@ impl PreparedGraphWriteChainText {
                                 && matches!(script::next_script_token(&mut lexer.clone())?.kind,
                                     TokenKind::Word(next) if next.eq_ignore_ascii_case("MATCH")))
                             || (word.eq_ignore_ascii_case("CALL")
-                                && matches!(
-                                    script::next_script_token(&mut lexer.clone())?.kind,
-                                    TokenKind::Punct(b'{' | b'(')
-                                )))
+                                && Self::graph_call_after_keyword(lexer.clone())?))
                     {
                         // A graph read after the write consumes its private
                         // rows and complete staged overlay in this statement.
@@ -897,6 +894,21 @@ impl PreparedGraphWriteChainText {
             previous = Some(token.kind);
             previous_delimited = lexer.text.as_bytes().get(token.at) == Some(&b'`');
         }
+    }
+
+    /// Both a subquery and a qualified procedure can read the staged graph.
+    /// Leave a carried column named `call` in the ordinary row grammar.
+    pub(in crate::graph_text::scoped::mutation) fn graph_call_after_keyword(
+        mut lexer: Lexer<'_>,
+    ) -> Result<bool, GraphPatternTextError> {
+        Ok(match script::next_script_token(&mut lexer)?.kind {
+            TokenKind::Punct(b'{' | b'(') => true,
+            TokenKind::Word(_) => matches!(
+                script::next_script_token(&mut lexer)?.kind,
+                TokenKind::Punct(b'.')
+            ),
+            _ => false,
+        })
     }
 
     /// A named MERGE path has the same native pattern owner as an unnamed
@@ -1921,6 +1933,30 @@ impl PreparedGraphWriteChainText {
 #[cfg(test)]
 mod tests {
     use super::PreparedGraphWriteChainText;
+
+    #[test]
+    fn post_write_call_can_be_a_carried_vertex_or_a_graph_procedure() {
+        use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphInsertQueryText};
+        use fgdb_delta_types::{PropertyKeyId, RelationId};
+
+        let projection = "CREATE (n {p:7}) WITH n AS call RETURN call.p AS value";
+        assert!(!PreparedGraphWriteChainText::is_chain(projection).unwrap());
+        let query =
+            PreparedGraphInsertQueryText::prepare(projection, RelationId(1), |kind, name: &str| {
+                (kind == GraphSymbolKind::Property && name == "p")
+                    .then_some(GraphSymbol::Property(PropertyKeyId(1)))
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert_eq!(query.columns(), &["value"]);
+        assert!(
+            PreparedGraphWriteChainText::is_chain(
+                "CREATE (n) WITH n AS call CALL fnx.degree_centrality() YIELD vertex RETURN vertex"
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn leading_row_mutation_returns_prepare_and_bind_the_existing_query_step() {

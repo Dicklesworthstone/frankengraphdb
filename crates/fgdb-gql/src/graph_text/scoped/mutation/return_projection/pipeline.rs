@@ -140,17 +140,25 @@ pub(in crate::graph_text) const BOUNDARY_READ_NAMES: [&str; 16] = [
 pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
     word: &str,
     previous: Option<TokenKind<'_>>,
-) -> bool {
+    lexer: &Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    // In a property projection the spelling before the dot is a binding.
+    // A procedure call starts with its qualified name after the keyword.
+    if word.eq_ignore_ascii_case("CALL")
+        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+    {
+        return Ok(false);
+    }
     if word.eq_ignore_ascii_case("WITH") {
-        return !matches!(previous, Some(TokenKind::Word(previous))
-            if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS"));
+        return Ok(!matches!(previous, Some(TokenKind::Word(previous))
+            if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS")));
     }
     if word.eq_ignore_ascii_case("MATCH")
         && matches!(previous, Some(TokenKind::Word(previous)) if previous.eq_ignore_ascii_case("ON"))
     {
-        return false;
+        return Ok(false);
     }
-    [
+    Ok([
         "MATCH",
         "OPTIONAL",
         "UNWIND",
@@ -161,7 +169,7 @@ pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
         "FOREACH",
     ]
     .iter()
-    .any(|clause| word.eq_ignore_ascii_case(clause))
+    .any(|clause| word.eq_ignore_ascii_case(clause)))
 }
 
 /// The aliases a later plain WITH projects unchanged, paired with their
@@ -763,7 +771,7 @@ impl<'a> Parser<'a> {
         // and nothing after them.
         if let TokenKind::Word(word) = self.current.kind
             && !unwind
-            && ends_boundary_scope(word, None)
+            && ends_boundary_scope(word, None, &self.lexer)?
         {
             if !word.eq_ignore_ascii_case("WITH") {
                 return Ok(());
@@ -849,7 +857,8 @@ impl<'a> Parser<'a> {
                 ]
                 .iter()
                 .any(|clause| word.eq_ignore_ascii_case(clause))
-                && (!word.eq_ignore_ascii_case("WITH") || ends_boundary_scope(word, window[2]))
+                && (!word.eq_ignore_ascii_case("WITH")
+                    || ends_boundary_scope(word, window[2], &lexer)?)
                 && let Some(kept) = pending.take()
             {
                 carried = Some(kept);
@@ -963,7 +972,7 @@ impl<'a> Parser<'a> {
                         && depth == 0
                         && !after_dot
                         && word.eq_ignore_ascii_case("WITH")
-                        && ends_boundary_scope(word, window[2]) =>
+                        && ends_boundary_scope(word, window[2], &lexer)? =>
                 {
                     let incoming: Vec<(&'a str, &'a str)> = carried.clone().unwrap_or_else(|| {
                         head.outputs[..visible]
@@ -986,7 +995,9 @@ impl<'a> Parser<'a> {
                     pending = Some(later_with_keeps(lexer.clone(), &incoming)?);
                 }
                 TokenKind::Word(word)
-                    if depth == 0 && !after_dot && ends_boundary_scope(word, window[2]) =>
+                    if depth == 0
+                        && !after_dot
+                        && ends_boundary_scope(word, window[2], &lexer)? =>
                 {
                     break;
                 }
@@ -2022,7 +2033,8 @@ impl<'a> Parser<'a> {
         schema: RowSchema<'a>,
         aggregate_return: bool,
     ) -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {
-        let (mut stages, schema, mut depth) = self.row_pipeline_prefix(schema)?;
+        let (mut stages, schema, mut depth) =
+            self.row_pipeline_prefix_before_call(schema, aggregate_return && self.chain_write)?;
         // A write tail that meets the next write of a chain ends here: that
         // write reads this row, hidden boundary reads included.
         if self.chain_write && self.at_chained_write()? {
@@ -2081,7 +2093,15 @@ impl<'a> Parser<'a> {
     /// aggregation; no caller rewrites a prefix into a synthetic RETURN query.
     pub(in crate::graph_text) fn row_pipeline_prefix(
         &mut self,
+        schema: RowSchema<'a>,
+    ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, usize), GraphSetTextError> {
+        self.row_pipeline_prefix_before_call(schema, false)
+    }
+
+    fn row_pipeline_prefix_before_call(
+        &mut self,
         mut schema: RowSchema<'a>,
+        staged_call: bool,
     ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, usize), GraphSetTextError> {
         // A write WITH can append frozen property columns after recording
         // its projected spellings. They still address this same visible
@@ -2113,6 +2133,11 @@ impl<'a> Parser<'a> {
                     TokenKind::Punct(b'{' | b'(')
                 )
             {
+                // After a write, the procedure must see the staged overlay,
+                // field masking and the same transaction's work allowance.
+                if staged_call && self.at_chained_read()? {
+                    break;
+                }
                 self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
                 self.advance()?;
                 let stage = self.call_stage(&mut schema, at)?;
@@ -2961,7 +2986,7 @@ impl<'a> Parser<'a> {
                     depth = outer;
                 }
                 TokenKind::Word(word) if !matches!(previous, Some(TokenKind::Punct(b'.'))) => {
-                    if depth == 0 && ends_boundary_scope(word, previous) {
+                    if depth == 0 && ends_boundary_scope(word, previous, &lexer)? {
                         break;
                     }
                     let source = if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {

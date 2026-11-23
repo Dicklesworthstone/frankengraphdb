@@ -1392,7 +1392,7 @@ impl<'a> Parser<'a> {
                 .iter()
                 .any(|clause| word.eq_ignore_ascii_case(clause))
                 && (!word.eq_ignore_ascii_case("WITH")
-                    || return_projection::pipeline::ends_boundary_scope(word, previous))
+                    || return_projection::pipeline::ends_boundary_scope(word, previous, &lexer)?)
                 && let Some(kept) = pending.take()
             {
                 carried = Some(kept);
@@ -1411,8 +1411,8 @@ impl<'a> Parser<'a> {
                         .any(|clause| word.eq_ignore_ascii_case(clause))
                             && (!word.eq_ignore_ascii_case("WITH")
                                 || return_projection::pipeline::ends_boundary_scope(
-                                    word, previous,
-                                )) =>
+                                    word, previous, &lexer,
+                                )?) =>
                     {
                         setting = false;
                         target = false;
@@ -1450,7 +1450,9 @@ impl<'a> Parser<'a> {
                         && !after_dot
                         && !after_alias
                         && word.eq_ignore_ascii_case("WITH")
-                        && return_projection::pipeline::ends_boundary_scope(word, previous) =>
+                        && return_projection::pipeline::ends_boundary_scope(
+                            word, previous, &lexer,
+                        )? =>
                 {
                     let incoming: Vec<_> = carried.clone().unwrap_or_else(|| {
                         outputs
@@ -1468,7 +1470,9 @@ impl<'a> Parser<'a> {
                         && depth == 0
                         && !after_dot
                         && !after_alias
-                        && return_projection::pipeline::ends_boundary_scope(word, previous) =>
+                        && return_projection::pipeline::ends_boundary_scope(
+                            word, previous, &lexer,
+                        )? =>
                 {
                     break;
                 }
