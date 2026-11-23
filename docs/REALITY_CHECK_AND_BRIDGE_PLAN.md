@@ -1,5 +1,19 @@
 # Reality Check and Bridge Plan
 
+## November 23, 2026 — a 72 MiB live vertex scan under a 60 MiB limit
+
+The robot CLI loaded 6,144 distinct vertices in 12 transactions. Each vertex carried a unique rank and 12,288 bytes of deterministic text. At sequence 13 the database held 176,028,448 file bytes, including 85,880,976 bytes in 12 Strata packs. A new CLI process queried all vertex IDs, ranks and text using durable symbol names. Linux enforced 62,914,560 bytes of memory and disabled swap. The original buffered reader was OOM-killed before it returned columns. Even an uncapped `LIMIT 0` peaked at 134,168 KiB RSS.
+
+Buffered root admission now reads individual packed members through the existing authenticated Strata reader and keeps that policy during cursor traversal. With the same database, 64 MiB caller allowance and 60 MiB OS limit, `MATCH (n:Doc) RETURN n,n.rank AS ordinal,n.body AS body` streamed all 6,144 rows and completed at sequence 13. Every identity and rank was unique and all 75,497,472 text bytes matched their generated values. The cgroup reached its memory ceiling and recorded zero OOM events. Uncapped `LIMIT 0` peaked at 53,912 KiB RSS. The pinned catalog and graph shared one `commits.log` open on an accepted read, down from two. A one-byte refusal opened it zero times. The executable hash, output digest, cgroup counters and independent verifier are in `/data/ssd/build/fgdb-g1-20261123-1UYwnY8q/buffered-history-20261123/live-6144`.
+
+This exercises the explicit local buffered vertex projection on a real live data set larger than the process limit. Default embedded and server reads, reverse traversal, external joins, a live incumbent comparison and the complete G1–G4 gates still require their own qualification.
+
+## November 23, 2026 — reading both ends of a retained history in 60 MiB
+
+On Linux, the published CLI kept two vertex IDs and one edge ID fixed across 512 committed versions. Each update replaced the score and a 12 KiB text value. Ordinary and buffered queries returned the same edge, endpoints and score at cuts 1, 8, 32, 128, 256 and 512, including reads of sequence 1 after later writes. At sequence 512 the database contained 3,595 files totaling 66,885,026 bytes. The current ordinary read took 0.99 seconds and the buffered read took 3.39 seconds on this host.
+
+Two fresh buffered CLI processes read a byte-verified disk copy under a 62,914,560-byte Linux cgroup with swap disabled. The historical read returned score 1 with a peak charge of 22,777,856 bytes. The current read returned score 512 with a peak of 26,529,792 bytes. Neither cgroup recorded an OOM. This establishes bounded execution for this projection over retained history with a small live graph.
+
 ## November 23, 2026 — an online seal survives writes, compaction and restart
 
 The source-built embedded example now runs on the pinned Linux toolchain. It commits a graph at sequence 1 and returns neighbors 2 and 3 before compaction, after compaction and after reopening. The server now accepts `POST /v1/databases/<name>/seal` through the existing unrestricted Admin maintenance route. Embedded code, the offline CLI and the online admin operation all use the same relation publisher.
