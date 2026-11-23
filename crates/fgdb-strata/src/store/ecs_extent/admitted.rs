@@ -208,12 +208,12 @@ async fn read<F: VfsFile>(
                 requested: len,
             }))
         })?;
-        if out.capacity() > len {
-            if let Some(charge) = output_charge.as_deref_mut() {
-                charge
-                    .grow(cx, out.capacity() - len)
-                    .map_err(|error| Ok(ExtentError::Memory(error)))?;
-            }
+        if out.capacity() > len
+            && let Some(charge) = output_charge.as_deref_mut()
+        {
+            charge
+                .grow(cx, out.capacity() - len)
+                .map_err(|error| Ok(ExtentError::Memory(error)))?;
         }
         let mut leaves = Vec::with_capacity(leaves_count);
         for ordinal in first..=last {

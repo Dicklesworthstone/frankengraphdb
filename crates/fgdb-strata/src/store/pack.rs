@@ -61,6 +61,9 @@ const PACK_VERSION: u16 = 1;
 const HEADER_BYTES: usize = 12;
 const ENTRY_BYTES: usize = 44;
 
+/// Object identity, byte offset and byte length in canonical pack order.
+type PackEntries = Vec<(ObjectId, u64, u32)>;
+
 /// The fewest objects one batch flush packs. Below it, objects stay loose.
 pub const PACK_MIN_OBJECTS: usize = 64;
 
@@ -249,7 +252,7 @@ fn header_count(header: &[u8], file_len: u64) -> Result<u64, &'static str> {
 
 /// Decode and admit a pack table, `table` being the bytes right after the
 /// header. Refuses every shape but the canonical one [`encode`] writes.
-fn decode_table(table: &[u8], file_len: u64) -> Result<Vec<(ObjectId, u64, u32)>, &'static str> {
+fn decode_table(table: &[u8], file_len: u64) -> Result<PackEntries, &'static str> {
     let mut entries = Vec::with_capacity(table.len() / ENTRY_BYTES);
     visit_table(table, file_len, |id, offset, len| {
         entries.push((id, offset, len));
@@ -547,7 +550,7 @@ impl PackIndex {
         cx: &impl StorageReadCx,
         vfs: &V,
         path: &Path,
-    ) -> Result<Option<(u64, Vec<(ObjectId, u64, u32)>)>, StoreError> {
+    ) -> Result<Option<(u64, PackEntries)>, StoreError> {
         if let Some((cfg, ns)) = &self.ecs {
             let Some(pack_id) = pack_id_from_path(path) else {
                 return Ok(None);
@@ -628,7 +631,7 @@ impl PackIndex {
         .await
     }
 
-    fn insert(table: &mut Table, path: PathBuf, len: u64, objects: Vec<(ObjectId, u64, u32)>) {
+    fn insert(table: &mut Table, path: PathBuf, len: u64, objects: PackEntries) {
         let pack = u32::try_from(table.packs.len()).expect("fewer than u32::MAX packs");
         let words = objects.len().div_ceil(64);
         let pack_file = PackFile {
@@ -1097,7 +1100,7 @@ fn open_host_range_view(
 pub fn inspect_host_pack_table(
     cx: &impl StorageReadCx,
     path: &Path,
-) -> Result<Option<Vec<(ObjectId, u64, u32)>>, StoreError> {
+) -> Result<Option<PackEntries>, StoreError> {
     cx.with_restriction(|| {
         let file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
@@ -1172,7 +1175,7 @@ mod tests {
         ObjectId([byte; 32])
     }
 
-    fn table_of(bytes: &[u8]) -> Result<Vec<(ObjectId, u64, u32)>, &'static str> {
+    fn table_of(bytes: &[u8]) -> Result<PackEntries, &'static str> {
         let count = header_count(&bytes[..HEADER_BYTES], bytes.len() as u64)?;
         decode_table(
             &bytes[HEADER_BYTES..HEADER_BYTES + count as usize * ENTRY_BYTES],

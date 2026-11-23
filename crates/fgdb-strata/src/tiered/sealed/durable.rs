@@ -623,6 +623,8 @@ pub(crate) trait AdjRunReadAdmission {
     fn decoded(&mut self, limits: SealedLimits) -> Result<Self::Owner, Self::Error>;
 }
 
+type AdmittedRun<Owner, Error> = Result<(AdjRunSegment, Owner), Error>;
+
 /// An admission refusal is a successful outer result containing the owner's
 /// original error. Store readers must return it immediately, without trying
 /// another physical copy or dropping the selected durable-run implementation.
@@ -638,7 +640,7 @@ pub(crate) fn read_adj_run_admitted<A: AdjRunReadAdmission>(
     limits: SealedLimits,
     resolver: Option<&dyn CanonicalScalarResolver>,
     admit: &mut A,
-) -> Result<Result<(AdjRunSegment, A::Owner), A::Error>, AdjRunError> {
+) -> Result<AdmittedRun<A::Owner, A::Error>, AdjRunError> {
     checkpoint(cx)?;
     check_limit(
         "durable run bytes",
@@ -663,7 +665,7 @@ fn decode<A: AdjRunReadAdmission>(
     limits: SealedLimits,
     resolver: Option<&dyn CanonicalScalarResolver>,
     admit: &mut A,
-) -> Result<Result<(AdjRunSegment, A::Owner), A::Error>, AdjRunError> {
+) -> Result<AdmittedRun<A::Owner, A::Error>, AdjRunError> {
     let end = bytes
         .len()
         .checked_sub(CHECKSUM_BYTES)
