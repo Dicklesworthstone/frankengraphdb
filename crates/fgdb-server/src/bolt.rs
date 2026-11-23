@@ -23,7 +23,7 @@
 //!   publishes, and ROLLBACK/RESET/drop discard the complete prefix. Reads see
 //!   earlier staged writes. Native cumulative limits and stale-basis refusals
 //!   apply throughout. No database lock spans network round trips.
-//! - The database is RUN/BEGIN's `db`, or the only served database.
+//! - The database is RUN/BEGIN's `db`, or the only database the token admits.
 //! - Local database-qualified bookmarks constrain BEGIN, autocommit reads,
 //!   writes and schema procedures. An unmet floor refuses before execution;
 //!   an open read transaction never advances its pinned snapshot to satisfy
@@ -619,9 +619,10 @@ impl<'s> Connection<'s> {
         ])
     }
 
-    /// The database a RUN, BEGIN or ROUTE names, or the only one served,
-    /// if this connection's token may select it. A missing database and an
-    /// unauthorized one look the same, as on every other surface.
+    /// The database a RUN, BEGIN or ROUTE names, or the only one this
+    /// connection's token may select. Hidden databases must not change an
+    /// implicit selection. A missing database and an unauthorized one look
+    /// the same, as on every other surface.
     fn database(&self, extra: &Map) -> Result<(String, &'s Served), Failure> {
         let not_found = || {
             Failure::new(
@@ -629,17 +630,23 @@ impl<'s> Connection<'s> {
                 "database not found or not authorized",
             )
         };
+        let token = self.token.as_ref().ok_or_else(not_found)?;
         let name = match get(extra, "db") {
             Some(Value::String(name)) if !name.is_empty() => name.clone(),
             None | Some(Value::Null) | Some(Value::String(_)) => {
-                match self.server.databases.keys().collect::<Vec<_>>().as_slice() {
-                    [only] => (*only).clone(),
-                    _ => return Err(not_found()),
+                let mut visible = self
+                    .server
+                    .databases
+                    .iter()
+                    .filter(|(_, db)| db.admits(token));
+                let (only, _) = visible.next().ok_or_else(not_found)?;
+                if visible.next().is_some() {
+                    return Err(not_found());
                 }
+                only.clone()
             }
             Some(_) => return Err(Failure::invalid("db must be a string")),
         };
-        let token = self.token.as_ref().ok_or_else(not_found)?;
         let db = self
             .server
             .databases

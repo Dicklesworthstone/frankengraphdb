@@ -5,10 +5,12 @@
 use super::super::{Connection, Dechunker, Io, Request};
 use super::*;
 use crate::Server;
-use crate::recovery::tests::{WireIo, fail_after_marker, served, settled};
+use crate::recovery::tests::{WireIo, fail_after_marker, served, served_with_config, settled};
 use asupersync::lab::run_async_under_lab;
+use asupersync::security::key::AuthKey;
 use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
 use std::future::Future;
+use std::sync::Arc;
 use std::task::{Context, Waker};
 
 const UNREACHED: &str = "Neo.TransientError.General.DatabaseUnavailable";
@@ -74,6 +76,148 @@ fn assert_markers(client: &Connection<'_>, count: usize) {
     for row in rows {
         assert_eq!(row, &vec![Value::Int(7)]);
     }
+}
+
+async fn default_database_transcript(
+    cx: &Cx,
+    server: &Server,
+    token: &CapabilityToken,
+) -> (Vec<Map>, Vec<u8>) {
+    let mut transcript = Vec::new();
+    let mut wire = io();
+    wire.local = Some("127.0.0.1:7687".parse().unwrap());
+    for options in [
+        vec![],
+        vec![("db".into(), Value::Null)],
+        vec![("db".into(), Value::string(""))],
+    ] {
+        let mut client = connection(server, token.clone());
+        transcript.push(
+            client
+                .run(cx, "RETURN 7 AS marker", &vec![], &options)
+                .await
+                .unwrap(),
+        );
+        assert_markers(&client, 1);
+        assert_eq!(client.pending.as_ref().unwrap().database, "test");
+        transcript.push(client.pull(cx, &mut wire, -1, false).await.unwrap());
+
+        let mut read_options = options.clone();
+        read_options.push(("mode".into(), Value::string("r")));
+        transcript.push(client.begin(cx, &read_options).await.unwrap());
+        assert_eq!(client.transaction.as_ref().unwrap().name, "test");
+        transcript.push(
+            client
+                .run(cx, "RETURN 7 AS marker", &vec![], &options)
+                .await
+                .unwrap(),
+        );
+        assert_markers(&client, 1);
+        transcript.push(client.pull(cx, &mut wire, -1, false).await.unwrap());
+        transcript.push(client.commit_transaction(cx).await.unwrap());
+        transcript.push(client.route(&wire, &vec![], &options).unwrap());
+    }
+    (transcript, wire.out)
+}
+
+#[test]
+fn implicit_database_reads_transactions_and_routing_ignore_hidden_databases() {
+    let ((), report) = run_async_under_lab(0xca05_0007, |root| async move {
+        let (mut server, token, _) = served(&root, "bolt-visible-default").await;
+        let before = default_database_transcript(&root, &server, &token).await;
+        let (hidden, _, _) = served_with_config(&root, "bolt-hidden-default", |config| {
+            config.issuer_key = AuthKey::from_seed(792);
+        })
+        .await;
+        assert!(!hidden.databases["test"].admits(&token));
+        // Hidden selectors on both sides of the visible name must not make
+        // it ambiguous or select a different namespace by catalog order.
+        for name in ["a-hidden", "z-hidden"] {
+            assert!(
+                server
+                    .databases
+                    .insert(name.into(), Arc::clone(&hidden.databases["test"]))
+                    .is_none()
+            );
+        }
+        let after = default_database_transcript(&root, &server, &token).await;
+        assert_eq!(after, before);
+
+        let client = connection(&server, token);
+        for name in ["a-hidden", "z-hidden", "nonexistent"] {
+            let refusal = client
+                .database(&vec![("db".into(), Value::string(name))])
+                .err()
+                .expect("hidden and nonexistent selectors both refuse");
+            assert_eq!(refusal.code, "Neo.ClientError.Database.DatabaseNotFound");
+            assert_eq!(refusal.message, "database not found or not authorized");
+        }
+        server.finish_shutdown(&root).await;
+        hidden.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn implicit_database_selection_requires_exactly_one_live_authorized_selector() {
+    let ((), report) = run_async_under_lab(0xca05_0008, |root| async move {
+        let (mut server, token, _) = served(&root, "bolt-ambiguous-default").await;
+        let empty = Server::new(&root, crate::ServerLimits::default()).unwrap();
+        let visible = Arc::clone(&server.databases["test"]);
+        assert!(
+            server
+                .databases
+                .insert("visible-alias".into(), Arc::clone(&visible))
+                .is_none()
+        );
+        let client = connection(&server, token.clone());
+        for name in ["test", "visible-alias"] {
+            assert_eq!(
+                client
+                    .database(&vec![("db".into(), Value::string(name))])
+                    .unwrap()
+                    .0,
+                name,
+            );
+        }
+        for options in [
+            vec![],
+            vec![("db".into(), Value::Null)],
+            vec![("db".into(), Value::string(""))],
+        ] {
+            for client in [&client, &connection(&empty, token.clone())] {
+                let refusal = client
+                    .database(&options)
+                    .err()
+                    .expect("zero or multiple authorized selectors refuse");
+                assert_eq!(refusal.code, "Neo.ClientError.Database.DatabaseNotFound");
+                assert_eq!(refusal.message, "database not found or not authorized");
+            }
+        }
+        for value in [Value::Bool(false), Value::Int(1), Value::List(vec![])] {
+            let refusal = client
+                .database(&vec![("db".into(), value)])
+                .err()
+                .expect("malformed selectors retain their type refusal");
+            assert_eq!(refusal.code, INVALID);
+        }
+        assert!(visible.authority.retire());
+        for options in [
+            vec![],
+            vec![("db".into(), Value::Null)],
+            vec![("db".into(), Value::string(""))],
+            vec![("db".into(), Value::string("test"))],
+        ] {
+            let refusal = client
+                .database(&options)
+                .err()
+                .expect("retired authority grants no implicit or explicit selection");
+            assert_eq!(refusal.code, "Neo.ClientError.Database.DatabaseNotFound");
+            assert_eq!(refusal.message, "database not found or not authorized");
+        }
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

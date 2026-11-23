@@ -12,6 +12,30 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Capability-scoped Bolt default database — qualification pending
+
+Implicit Bolt database selection now counts only selectors admitted by the
+connection's live capability. Adding an inaccessible database therefore no
+longer makes an otherwise valid default RUN, BEGIN or ROUTE ambiguous. Explicit
+names keep the same authorization check; zero or multiple admitted selectors
+keep the uniform missing-or-unauthorized refusal.
+
+Two regression sources compare complete query, transaction and routing
+transcripts before and after adding hidden selectors on both sides of the
+visible name. They cover omitted, null and empty defaults, explicit hidden and
+missing names, multiple admitted selectors, an empty server, malformed values
+and retired authority. Two independent source reviews, the pinned 2026-08-31
+formatter and `git diff --check` passed. Rust compilation, runtime tests,
+Clippy, UBS and exact-tree proof remain UNRUN. The pinned toolchain was found
+outside PATH, but offline Cargo resolution lacks the required foundation
+revision; an online fetch is still pending. The initial full-gate attempt
+detected concurrent source movement and returned nonzero.
+
+Qualification remains open in `fgdb-bolt-visible-default-q97kg`, related to
+`fgdb-w9-enforcement-j0fg`; the integrated gate stays tracked by
+`fgdb-qualify-integrated-nov22-maz0p`. This is a database-selection repair,
+not a claim of complete server noninterference.
+
 ### Bounded post-seal overlays and borrowed property admission — qualification pending
 
 The authenticated Tier-R/Tier-D overlay now bounds distinct suffix statements
