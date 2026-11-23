@@ -1343,6 +1343,15 @@ impl<V: Vfs> BlockStore<V> {
         })
     }
 
+    /// Use direct member reads and charge coded frame and repair scratch to
+    /// this reader. Other handles can still use their ordinary pack cache.
+    #[must_use]
+    pub fn with_buffered_reads(mut self, pool: crate::tiered::memory::MemoryPool) -> Self {
+        self.direct_pack_reads = true;
+        self.extent_read_pool = Some(pool);
+        self
+    }
+
     /// Acquire independent physical reads for one integrity sweep.
     ///
     /// Pack tables are re-admitted from the filesystem, and every packed

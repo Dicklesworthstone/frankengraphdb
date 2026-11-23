@@ -269,11 +269,14 @@ pub(super) async fn discover(
             .map_err(|error| {
                 admission_refused = match &error {
                     fgdb::BufferedOpenError::Memory(_)
-                    | fgdb::BufferedOpenError::Read(fgdb::BufferedReadError::Limit { .. }) => true,
+                    | fgdb::BufferedOpenError::Read(
+                        fgdb::BufferedReadError::Memory(_) | fgdb::BufferedReadError::Limit { .. },
+                    ) => true,
                     fgdb::BufferedOpenError::Read(fgdb::BufferedReadError::Store(source)) => {
                         matches!(
                             source.as_ref(),
                             fgdb_strata::store::StoreError::ObjectTooLarge { .. }
+                                | fgdb_strata::store::StoreError::RootReferenceLimit { .. }
                         )
                     }
                     _ => false,

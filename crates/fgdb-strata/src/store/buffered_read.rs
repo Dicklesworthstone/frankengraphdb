@@ -630,7 +630,9 @@ impl<V: Vfs + Clone> BlockStore<V> {
         pool: MemoryPool,
         limits: BufferedReadLimits,
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
-        self.open_buffered_root_inner(cx, id, pool, limits, None)
+        self.clone()
+            .with_buffered_reads(pool.clone())
+            .open_buffered_root_inner(cx, id, pool, limits, None)
             .await
     }
 
@@ -651,7 +653,9 @@ impl<V: Vfs + Clone> BlockStore<V> {
         pool: MemoryPool,
         limits: BufferedReadLimits,
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
-        self.open_buffered_root_inner(cx, id, pool, limits, Some(receipts))
+        self.clone()
+            .with_buffered_reads(pool.clone())
+            .open_buffered_root_inner(cx, id, pool, limits, Some(receipts))
             .await
     }
 
@@ -978,10 +982,6 @@ impl<V: Vfs> BufferedPartition<V> {
         if let Some(limits) = limits {
             BufferedReadLimits::validate_native_run_limits(limits)?;
         }
-        // A verification reader may already require direct physical reads.
-        // Disabling this query profile must not weaken that reader policy.
-        self.store.direct_pack_reads |= limits.is_some();
-        self.store.extent_read_pool = limits.map(|_| self.pool().clone());
         self.native_run_limits = limits;
         Ok(())
     }
@@ -2292,6 +2292,17 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            // Place both authenticated payloads in a physical pack. Ordinary
+            // readers can cache it whole; even the first buffered admission
+            // must read the members individually.
+            let block_bytes = std::fs::read(store.path(block.0)).unwrap();
+            let patch_bytes = std::fs::read(store.path(patch.0)).unwrap();
+            let packed =
+                crate::store::pack::encode(&[(block.0, &block_bytes), (patch.0, &patch_bytes)]);
+            std::fs::create_dir_all(store.packs.dir()).unwrap();
+            let path = store.packs.dir().join(crate::store::pack::name(&packed));
+            std::fs::write(&path, &packed).unwrap();
+            store.packs.published(path, &packed);
             let pool = MemoryPool::new(4 * 1024 * 1024, 0).unwrap();
             let limits = BufferedReadLimits {
                 max_root_bytes: 4096,
@@ -2312,6 +2323,8 @@ mod tests {
                 .open_buffered_root(&query, id, pool.clone(), limits)
                 .await
                 .unwrap();
+            assert_eq!(store.packs.whole_reads(), 0);
+            view.set_native_run_limits(&query, None).unwrap();
             assert_eq!(
                 view._metadata.bytes(),
                 limits
@@ -2405,6 +2418,9 @@ mod tests {
             drop(found);
             drop(view);
             assert_eq!(pool.used(), 0);
+            assert_eq!(store.packs.whole_reads(), 0);
+            assert_eq!(store.get_bytes(&query, block).await.unwrap(), block_bytes);
+            assert_eq!(store.packs.whole_reads(), 1);
         });
         assert!(report.invariant_violations.is_empty(), "{report:?}");
     }

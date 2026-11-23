@@ -561,9 +561,6 @@ impl<V: Vfs + Clone> Database<V> {
         // and writes nothing (fgdb-xxxnb): the committed chain is scanned
         // without repairing a torn tail, and the store is opened only to read.
         // A lagging root refuses below, so nothing here ever needs to heal.
-        let Some(store) = open_block_store_for_read(cx, &vfs, path, &keys).await? else {
-            return Err(BufferedOpenError::RecoveryRequired);
-        };
         let probe = RootStore::with_vfs(vfs.clone(), path);
         let slot = match probe.current(cx).await {
             Ok(slot) => slot,
@@ -575,8 +572,13 @@ impl<V: Vfs + Clone> Database<V> {
         validate_plain_slot(&slot, &keys, path)?;
         let manifest = ManifestVersion(ObjectId(slot.root_manifest_oid));
         // Keep this reservation until all decoded selection metadata has
-        // dropped. The store checks frame counts before flattening V4 roots.
+        // dropped. Refuse an impossible budget before reading pack tables.
+        // The store checks frame counts before flattening V4 roots.
         let selection_charge = pool.reserve(cx, limits.metadata_bytes()?)?;
+        let Some(store) = open_block_store_for_read(cx, &vfs, path, &keys).await? else {
+            return Err(BufferedOpenError::RecoveryRequired);
+        };
+        let store = store.with_buffered_reads(pool.clone());
         let resolved = store
             .resolve_manifest_bounded(cx, manifest, &limits)
             .await?;
