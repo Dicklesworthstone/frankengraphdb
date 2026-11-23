@@ -644,12 +644,13 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             self.append(StandingQuery::Window(Box::new(state)))
         } else if let Some(pattern) = query.incremental_pattern() {
             if let Some((input, projection)) = pattern.incremental_closure_definition() {
-                // The one-hop relation owns actual edge lifetimes and masks
-                // incidence before recursion. Parallel support is private
-                // input, not delivered reachable-pair cardinality.
+                // Ordinary row sources own actual edge and optional zero-hop
+                // vertex lifetimes, masking them before recursion. Parallel
+                // and lifetime support is private input, not delivered
+                // reachable-pair cardinality.
                 let input = self.compile_group_input(
                     cx,
-                    &input.into(),
+                    &input,
                     group::input_policy(policy),
                     checkpoint,
                 )?;

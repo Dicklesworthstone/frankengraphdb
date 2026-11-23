@@ -5,7 +5,7 @@ use fgdb::{
     StandingQueryError, StandingQueryFailure, StandingQueryHandle, WriteBatch,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, ZSet, ZWeight};
-use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::algebra::{GlaDirection, GraphValue};
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
 use fgdb_types::{
     CanonicalF64, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
@@ -93,26 +93,38 @@ fn oracle(db: &Database<MemVfs>, op: usize) -> QueryResult {
 fn reachable_pairs(
     db: &Database<MemVfs>,
     selected: &[RelationId],
-    reverse: bool,
+    direction: GlaDirection,
     swap: bool,
+    reflexive: bool,
 ) -> ZSet<Vec<QueryValue>> {
     let mut adjacency: BTreeMap<VId, BTreeSet<VId>> = BTreeMap::new();
+    if reflexive {
+        for row in db.vertices_at(db.frontier().unwrap()).unwrap() {
+            adjacency.entry(row.vid).or_default();
+        }
+    }
     for row in db
         .edges()
         .unwrap()
         .iter()
         .filter(|row| selected.is_empty() || selected.contains(&row.entry.relation))
     {
-        let (a, b) = if reverse {
+        let (a, b) = if direction == GlaDirection::Reverse {
             (row.entry.dst, row.entry.src)
         } else {
             (row.entry.src, row.entry.dst)
         };
         adjacency.entry(a).or_default().insert(b);
+        if direction == GlaDirection::Undirected {
+            adjacency.entry(b).or_default().insert(a);
+        }
     }
     let mut pairs = Vec::new();
     for (&source, neighbors) in &adjacency {
         let mut seen = BTreeSet::new();
+        if reflexive {
+            seen.insert(source);
+        }
         let mut pending: Vec<_> = neighbors.iter().copied().collect();
         while let Some(vertex) = pending.pop() {
             if seen.insert(vertex)
@@ -150,7 +162,7 @@ fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut seed = WriteBatch::new(RelationId(1));
-        for id in [1, 2, 3, 4, 5, u128::MAX] {
+        for id in [1, 2, 3, 4, 5, 6, u128::MAX] {
             seed.create_vertex(VId(id), vec![], vec![]);
         }
         for (id, a, b) in [(1, 1, 2), (2, 1, 2), (3, 2, 3), (4, 3, 1), (5, 4, 5)] {
@@ -165,40 +177,79 @@ fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit
             (
                 "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b",
                 vec![RelationId(1)],
+                GlaDirection::Forward,
                 false,
                 false,
             ),
             (
                 "MATCH TRAIL (a)<-[:R*]-(b) RETURN DISTINCT b AS target,a AS origin",
                 vec![RelationId(1)],
+                GlaDirection::Reverse,
                 true,
-                true,
+                false,
             ),
             (
                 "MATCH (a)-[:R|S*1..]->(b) RETURN DISTINCT a,b",
                 vec![RelationId(1), RelationId(2)],
+                GlaDirection::Forward,
                 false,
                 false,
             ),
             (
                 "MATCH (a)-[*]->(b) RETURN DISTINCT a,b",
                 vec![],
+                GlaDirection::Forward,
                 false,
                 false,
+            ),
+            (
+                "MATCH (a)-[:R*0..]->(b) RETURN DISTINCT a,b",
+                vec![RelationId(1)],
+                GlaDirection::Forward,
+                false,
+                true,
+            ),
+            (
+                "MATCH TRAIL (a)<-[:R*0..]-(b) RETURN DISTINCT b AS target,a AS origin",
+                vec![RelationId(1)],
+                GlaDirection::Reverse,
+                true,
+                true,
+            ),
+            (
+                "MATCH (a)-[:R|S*0..]->(b) RETURN DISTINCT a,b",
+                vec![RelationId(1), RelationId(2)],
+                GlaDirection::Forward,
+                false,
+                true,
+            ),
+            (
+                "MATCH (a)-[*0..]->(b) RETURN DISTINCT a,b",
+                vec![],
+                GlaDirection::Forward,
+                false,
+                true,
+            ),
+            (
+                "MATCH (a)-[:R|S*0..]-(b) RETURN DISTINCT a,b",
+                vec![RelationId(1), RelationId(2)],
+                GlaDirection::Undirected,
+                false,
+                true,
             ),
         ];
         let params = GqlParameters::new();
         let mut handles = Vec::new();
-        for (text, _, _, _) in &cases {
+        for (text, _, _, _, reflexive) in &cases {
             let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
             let (reserved, _) = prepared.subscription_footprint(&cx, &params).unwrap();
             let handle = prepared
                 .register_standing(&mut db, &cx, &params, policy())
                 .unwrap();
-            assert_eq!(reserved, 3);
+            assert_eq!(reserved, if *reflexive { 5 } else { 3 });
             assert_eq!(
                 db.standing_query_node_stats(&cx, &handle).unwrap().count(),
-                3
+                if *reflexive { 5 } else { 3 }
             );
             handles.push(handle);
         }
@@ -208,14 +259,16 @@ fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit
         );
         let mut previous: Vec<_> = cases
             .iter()
-            .map(|(_, selected, reverse, swap)| reachable_pairs(&db, selected, *reverse, *swap))
+            .map(|(_, selected, direction, swap, reflexive)| {
+                reachable_pairs(&db, selected, *direction, *swap, *reflexive)
+            })
             .collect();
         let mut from = db.frontier().unwrap();
-        for tick in 0..=11 {
-            for (index, ((text, selected, reverse, swap), handle)) in
+        for tick in 0..=12 {
+            for (index, ((text, selected, direction, swap, reflexive), handle)) in
                 cases.iter().zip(&handles).enumerate()
             {
-                let expected = reachable_pairs(&db, selected, *reverse, *swap);
+                let expected = reachable_pairs(&db, selected, *direction, *swap, *reflexive);
                 let (at, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
                 assert_eq!(at, db.frontier().unwrap());
                 assert_eq!(
@@ -232,6 +285,9 @@ fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit
                         .standing_native_delta(&cx, handle, from, policy())
                         .unwrap();
                     assert_eq!(through, at);
+                    if *reflexive && matches!(tick, 1 | 5 | 6) {
+                        assert!(delta.is_empty(), "counted self/parallel support: {text}");
+                    }
                     previous[index]
                         .integrate(&delta, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
                             Ok::<_, ()>(())
@@ -246,7 +302,7 @@ fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit
                     db.rebuild_standing_query(&cx, handle, policy()).unwrap();
                     assert_eq!(
                         db.standing_query_node_stats(&cx, handle).unwrap().count(),
-                        3
+                        if *reflexive { 5 } else { 3 }
                     );
                     assert_eq!(
                         db.standing_native_bag(&cx, handle, policy()).unwrap().1,
@@ -254,7 +310,7 @@ fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit
                     );
                 }
             }
-            if tick == 11 {
+            if tick == 12 {
                 break;
             }
             from = db.frontier().unwrap();
@@ -297,6 +353,9 @@ fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit
                 10 => {
                     change.add_edge(EId(9), VId(1), VId(3), vec![]);
                 }
+                11 => {
+                    change.delete_vertex(VId(99));
+                }
                 _ => unreachable!(),
             }
             db.write(&commit, change).await.unwrap();
@@ -306,7 +365,111 @@ fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit
 }
 
 #[test]
+fn native_reflexive_undirected_reachability_tracks_empty_graph_and_single_edge_lifetimes() {
+    let ((), report) = run_async_under_lab(0x6e73_7c13, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        let text = "MATCH (a)-[:R*0..]-(b) RETURN DISTINCT a,b";
+        let handle = db
+            .register_standing_native(&cx, text, &params, symbols, policy())
+            .unwrap();
+        let (mut from, mut delivered) = db.standing_native_bag(&cx, &handle, policy()).unwrap();
+        assert!(delivered.is_empty());
+        assert!(
+            db.register_standing_native(
+                &cx,
+                "MATCH (a)-[:R*1..]-(b) RETURN DISTINCT a,b",
+                &params,
+                symbols,
+                policy(),
+            )
+            .is_err()
+        );
+        for tick in 0..5 {
+            let mut change = WriteBatch::new(RelationId(1));
+            match tick {
+                0 => {
+                    for id in 1..=3 {
+                        change.create_vertex(VId(id), vec![], vec![]);
+                    }
+                }
+                1 => {
+                    change.add_edge(EId(1), VId(1), VId(2), vec![]);
+                }
+                2 => {
+                    change.delete_edge(EId(1));
+                }
+                3 => {
+                    change.delete_vertex(VId(2));
+                }
+                4 => {
+                    change.delete_vertex(VId(1));
+                    change.delete_vertex(VId(3));
+                }
+                _ => unreachable!(),
+            }
+            let at = db.write(&commit, change).await.unwrap();
+            let (through, delta) = db
+                .standing_native_delta(&cx, &handle, from, policy())
+                .unwrap();
+            assert_eq!(through, at);
+            delivered
+                .integrate(&delta, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            let expected: &[(u128, u128)] = match tick {
+                0 | 2 => &[(1, 1), (2, 2), (3, 3)],
+                1 => &[(1, 1), (1, 2), (2, 1), (2, 2), (3, 3)],
+                3 => &[(1, 1), (3, 3)],
+                _ => &[],
+            };
+            let expected = ZSet::from_updates(
+                expected.iter().map(|&(a, b)| {
+                    (
+                        vec![
+                            QueryValue::Value(GraphValue::Vertex(VId(a))),
+                            QueryValue::Value(GraphValue::Vertex(VId(b))),
+                        ],
+                        ZWeight::ONE,
+                    )
+                }),
+                fgdb_delta_types::LimbLimit::new(4),
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap();
+            assert_eq!(
+                delivered, expected,
+                "literal empty/single-edge law, tick {tick}"
+            );
+            assert_eq!(
+                db.standing_native_bag(&cx, &handle, policy()).unwrap(),
+                (at, expected)
+            );
+            assert_eq!(
+                db.standing_native_query(&cx, &handle, policy()).unwrap().1,
+                db.query(&cx, text, &params, symbols, policy()).unwrap()
+            );
+            from = at;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state() {
+    native_reachability_authorized_updates(false);
+}
+
+#[test]
+fn native_reflexive_reachability_masks_hidden_vertices_and_maintains_visible_isolates() {
+    native_reachability_authorized_updates(true);
+}
+
+fn native_reachability_authorized_updates(reflexive: bool) {
     use asupersync::security::key::AuthKey;
     use fgdb::{NativeSubscriptionSetup, SubscriptionError};
     use fgdb_delta_types::SchemaEpoch;
@@ -358,9 +521,12 @@ fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state(
         let token = issuer.issue_at(&grant, 0).unwrap();
         let authority = issuer.verify_at(&token, "main", 1).unwrap();
         let params = GqlParameters::new();
-        let query =
-            PreparedNativeRead::prepare("MATCH (a)-[*]->(b) RETURN DISTINCT a,b", &params, symbols)
-                .unwrap();
+        let text = if reflexive {
+            "MATCH (a)-[*0..]->(b) RETURN DISTINCT a,b"
+        } else {
+            "MATCH (a)-[*]->(b) RETURN DISTINCT a,b"
+        };
+        let query = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
         let control = query
             .register_standing(&mut db, &cx, &params, policy())
             .unwrap();
@@ -387,7 +553,10 @@ fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state(
             .checked_clone(limb_limit, &mut |_| Ok::<_, ()>(()))
             .unwrap();
         subscription.acknowledge(initial.receipt()).unwrap();
-        assert_eq!(delivered, reachable_pairs(&visible, &[], false, false));
+        assert_eq!(
+            delivered,
+            reachable_pairs(&visible, &[], GlaDirection::Forward, false, reflexive)
+        );
         let hidden_bridge_pair = vec![
             QueryValue::Value(GraphValue::Vertex(VId(1))),
             QueryValue::Value(GraphValue::Vertex(VId(3))),
@@ -400,7 +569,7 @@ fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state(
                 .iter()
                 .any(|(row, _)| row == &hidden_bridge_pair)
         );
-        for tick in 0..6 {
+        for tick in 0..9 {
             let mut change = WriteBatch::new(RelationId(1));
             match tick {
                 0 => {
@@ -421,9 +590,18 @@ fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state(
                 5 => {
                     change.delete_edge(EId(2));
                 }
+                6 => {
+                    change.create_vertex(VId(4), vec![LabelId(1)], vec![]);
+                }
+                7 => {
+                    change.create_vertex(VId(11), vec![LabelId(2)], vec![]);
+                }
+                8 => {
+                    change.delete_vertex(VId(4));
+                }
                 _ => unreachable!(),
             }
-            if matches!(tick, 2 | 3 | 5) {
+            if matches!(tick, 2 | 3 | 5 | 6 | 8) {
                 visible.write(&commit, change.clone()).await.unwrap();
             }
             db.write(&commit, change).await.unwrap();
@@ -453,12 +631,12 @@ fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state(
             }
             assert_eq!(
                 delivered,
-                reachable_pairs(&visible, &[], false, false),
+                reachable_pairs(&visible, &[], GlaDirection::Forward, false, reflexive),
                 "visible-only independent oracle, tick {tick}"
             );
             assert_eq!(
                 db.standing_native_bag(&cx, &control, policy()).unwrap().1,
-                reachable_pairs(&db, &[], false, false),
+                reachable_pairs(&db, &[], GlaDirection::Forward, false, reflexive),
                 "unscoped live control, tick {tick}"
             );
         }
@@ -466,12 +644,12 @@ fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state(
             subscription
                 .close_and_release(&mut db, &cx, policy())
                 .unwrap(),
-            5,
-            "mask, three recursive owners, replay"
+            if reflexive { 7 } else { 5 },
+            "mask, complete recursive circuit, replay"
         );
         assert_eq!(
             db.standing_query_node_stats(&cx, &control).unwrap().count(),
-            3
+            if reflexive { 5 } else { 3 }
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

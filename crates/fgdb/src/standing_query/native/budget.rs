@@ -92,7 +92,7 @@ fn circuit(
     }
     if let Some(pattern) = query.incremental_pattern() {
         if let Some((input, _)) = pattern.incremental_closure_definition() {
-            return circuit(cx, &input.into(), scoped)?.append(2);
+            return circuit(cx, &input, scoped)?.append(2);
         }
         return Ok(Footprint {
             nodes: 1,
@@ -295,7 +295,7 @@ impl PreparedNativeRead {
                     .bind_parameters(params)
                     .map_err(|error| prepare_error(QueryError::PatternText(error)))?;
                 if let Some((input, _)) = bound.incremental_closure_definition() {
-                    circuit(cx, &input.into(), scoped)?.append(2)?
+                    circuit(cx, &input, scoped)?.append(2)?
                 } else {
                     Footprint {
                         nodes: 1,

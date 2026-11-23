@@ -24,23 +24,35 @@ struct Output<'a> {
 }
 
 impl PreparedGraphPattern<GraphValueRow> {
-    /// Compile the support of one unbounded directed TRAIL into a one-hop
+    /// Compile the support of one unbounded TRAIL into an edge/lifetime
     /// relation and a lossless endpoint projection. The host must apply its
     /// deletion-safe transitive-closure owner between these two stages.
     ///
     /// DISTINCT is load-bearing: closure has one row per reachable pair, not
-    /// one row per path. The admitted interval is exactly one-or-more hops,
-    /// with both distinct endpoint columns and no predicates, captures, order
-    /// or page. An undirected trail cannot use this recipe: traversing one
-    /// physical edge in both directions does not constitute a legal cycle.
-    /// Ordinary one-hop selection retains relation unions, wildcard types and
-    /// source authorization before the closure sees any incidence.
+    /// one row per path. The admitted interval is zero-or-more or one-or-more
+    /// hops, with both distinct endpoint columns and no predicates, captures,
+    /// order or page. Zero-hop support adds one self pair per visible vertex,
+    /// including isolates, through an ordinary UNION ALL source. Those lifetime
+    /// rows and real self-loops retain independent counted support, so deleting
+    /// one does not retract the other. An undirected one-or-more trail cannot
+    /// use this recipe: traversing one physical edge in both directions does
+    /// not constitute a legal cycle. Zero-or-more support is sound in every
+    /// direction because each distinct reachable pair has a simple path and
+    /// every visible vertex has an empty path. Ordinary selection retains
+    /// relation unions, wildcard types and source authorization before closure
+    /// sees incidence or vertex lifetimes.
     #[must_use]
     pub fn incremental_closure_definition(
         &self,
-    ) -> Option<(Self, crate::row_projection::RowProjectionSpec)> {
+    ) -> Option<(
+        crate::PreparedGraphSet,
+        crate::row_projection::RowProjectionSpec,
+    )> {
         use crate::algebra::{GlaDirection, GraphColumn, GraphPatternBuilder, GraphWalkSearch};
-        use crate::{GraphSetColumnType, GraphSetProjection, GraphSetQuantifier, GraphSetValue};
+        use crate::{
+            GraphSetColumnType, GraphSetOperation, GraphSetProjection, GraphSetQuantifier,
+            GraphSetValue, PreparedGraphSet,
+        };
 
         let output = self.incremental_rows_output()?;
         if !output.distinct
@@ -76,9 +88,9 @@ impl PreparedGraphPattern<GraphValueRow> {
             return None;
         };
         if source.ordinal() != 0
-            || bounds.minimum() != 1
+            || bounds.minimum() > 1
             || bounds.is_bounded()
-            || *direction == GlaDirection::Undirected
+            || (*direction == GlaDirection::Undirected && bounds.minimum() != 0)
             || !edge_predicates.is_empty()
         {
             return None;
@@ -98,7 +110,7 @@ impl PreparedGraphPattern<GraphValueRow> {
         pattern
             .edge("source", *relation, *direction, "destination")
             .ok()?;
-        let input = pattern
+        let mut input: PreparedGraphSet = pattern
             .prepare_values(
                 &[
                     GraphColumn::vertex("source", "source"),
@@ -108,7 +120,30 @@ impl PreparedGraphPattern<GraphValueRow> {
                 None,
             )
             .ok()?
-            .with_duplicates();
+            .with_duplicates()
+            .into();
+        if bounds.minimum() == 0 {
+            let mut vertices = GraphPatternBuilder::new();
+            vertices.vertex("vertex").ok()?;
+            let lifetimes = vertices
+                .prepare_values(
+                    &[
+                        GraphColumn::vertex("source", "vertex"),
+                        GraphColumn::vertex("destination", "vertex"),
+                    ],
+                    0,
+                    None,
+                )
+                .ok()?
+                .with_duplicates();
+            input = input
+                .combine(
+                    GraphSetOperation::Union,
+                    GraphSetQuantifier::All,
+                    lifetimes.into(),
+                )
+                .ok()?;
+        }
         // Both endpoint columns occur exactly once, so this permutation
         // preserves closure's DISTINCT support without another threshold.
         let projection = crate::row_projection::RowProjectionSpec::new(

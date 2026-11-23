@@ -237,6 +237,15 @@ fn reachability_symbols(
 
 #[test]
 fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_row_limit() {
+    reachability_registration_and_rebuild(false);
+}
+
+#[test]
+fn native_reflexive_reachability_registration_and_rebuild_preserve_private_lifetime_support() {
+    reachability_registration_and_rebuild(true);
+}
+
+fn reachability_registration_and_rebuild(reflexive: bool) {
     let ((), report) = run_async_under_lab(0x6e73_7c11, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -257,14 +266,20 @@ fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_ro
             .unwrap();
         let before = db.standing_queries.len();
         let prior_answer = db.standing_native_query(&cx, &prior, policy()).unwrap();
-        let text = "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b";
+        let text = if reflexive {
+            "MATCH (a)-[:R*0..]->(b) RETURN DISTINCT a,b"
+        } else {
+            "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b"
+        };
+        let nodes = if reflexive { 5 } else { 3 };
+        let rows = if reflexive { 6 } else { 3 };
         let query: PreparedGraphSet = PreparedGraphText::prepare(text, reachability_symbols)
             .unwrap()
             .bind_parameters(&params)
             .unwrap()
             .into();
-        let exact = GqlQueryPolicy::new(1000, 3, 10_000_000, 10_000_000);
-        let too_few = GqlQueryPolicy::new(1000, 2, 10_000_000, 10_000_000);
+        let exact = GqlQueryPolicy::new(1000, rows, 10_000_000, 10_000_000);
+        let too_few = GqlQueryPolicy::new(1000, rows - 1, 10_000_000, 10_000_000);
         assert!(matches!(
             register(&mut db, &cx, &query, too_few),
             Err(StandingQueryError::Maintenance(
@@ -281,9 +296,9 @@ fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_ro
                     Ok(())
                 })
                 .unwrap();
-            assert_eq!(staged.database.standing_queries.len(), before + 3);
+            assert_eq!(staged.database.standing_queries.len(), before + nodes);
         }
-        assert!(calls >= 3);
+        assert!(calls >= nodes);
         assert_eq!(db.standing_queries.len(), before);
         for stop in 1..=calls {
             let mut visited = 0;
@@ -314,9 +329,9 @@ fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_ro
             );
         }
         let handle = register(&mut db, &cx, &query, exact).unwrap();
-        assert_eq!(db.standing_queries.len(), before + 3);
+        assert_eq!(db.standing_queries.len(), before + nodes);
         let expected = db.standing_native_bag(&cx, &handle, exact).unwrap().1;
-        assert_eq!(expected.len(), 3);
+        assert_eq!(expected.len() as u64, rows);
         assert_eq!(
             db.standing_native_bag(&cx, &handle, exact).unwrap().1,
             expected
@@ -329,7 +344,12 @@ fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_ro
         else {
             panic!("owned reachability circuit");
         };
-        assert_eq!(private_inputs, &[true, false, false]);
+        let expected_private: &[bool] = if reflexive {
+            &[true, true, true, false, false]
+        } else {
+            &[true, false, false]
+        };
+        assert_eq!(private_inputs.as_slice(), expected_private);
         let identities = addresses(&db, *first, handle.index);
         assert!(db.rebuild_standing_query(&cx, &handle, too_few).is_err());
         assert_eq!(addresses(&db, *first, handle.index), identities);
@@ -377,7 +397,7 @@ fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_ro
             );
             assert_eq!(visited, stop);
             assert_eq!(addresses(&db, *first, handle.index), identities);
-            assert_eq!(db.standing_queries.len(), before + 3);
+            assert_eq!(db.standing_queries.len(), before + nodes);
             assert_eq!(
                 db.standing_native_bag(&cx, &handle, exact).unwrap().1,
                 expected
@@ -385,7 +405,7 @@ fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_ro
         }
         for unsupported in [
             "MATCH (a)-[:R*]->(b) RETURN a,b",
-            "MATCH (a)-[:R*0..]->(b) RETURN DISTINCT a,b",
+            "MATCH (a)-[:R*0..2]->(b) RETURN DISTINCT a,b",
             "MATCH (a)-[:R*2..]->(b) RETURN DISTINCT a,b",
             "MATCH (a)-[:R*1..2]->(b) RETURN DISTINCT a,b",
             "MATCH (a)-[:R*]-(b) RETURN DISTINCT a,b",
@@ -400,14 +420,14 @@ fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_ro
                     .is_err(),
                 "{unsupported}"
             );
-            assert_eq!(db.standing_queries.len(), before + 3, "{unsupported}");
+            assert_eq!(db.standing_queries.len(), before + nodes, "{unsupported}");
         }
         let mut change = WriteBatch::new(RelationId(1));
         change.delete_edge(EId(9));
         db.write(&commit, change).await.unwrap();
         assert_eq!(
             db.standing_native_bag(&cx, &handle, exact).unwrap().1.len(),
-            1
+            if reflexive { 4 } else { 1 }
         );
         // A durable write may outgrow this view's allowance. It must fence the
         // dependent result, preserve an unrelated view, and permit an explicit
@@ -422,7 +442,7 @@ fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_ro
             prior_answer.1
         );
         db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
-        assert_eq!(db.standing_queries.len(), before + 3);
+        assert_eq!(db.standing_queries.len(), before + nodes);
         assert_eq!(
             db.standing_native_bag(&cx, &handle, policy())
                 .unwrap()

@@ -335,6 +335,7 @@ fn closure_recipe_admits_only_distinct_directed_unbounded_endpoint_support() {
         let (source, output) = pattern
             .incremental_closure_definition()
             .unwrap_or_else(|| panic!("eligible endpoint closure: {text}"));
+        let source = source.incremental_pattern().expect("one-hop support leaf");
         assert!(source.preserves_duplicates(), "parallel support: {text}");
         assert!(source.plan().scans_edges());
         assert_eq!(
@@ -353,8 +354,53 @@ fn closure_recipe_admits_only_distinct_directed_unbounded_endpoint_support() {
         assert!(source.incremental_closure_definition().is_none());
     }
     for text in [
-        "MATCH (a)-[:R*]->(b) RETURN a,b",
         "MATCH (a)-[:R*0..]->(b) RETURN DISTINCT a,b",
+        "MATCH TRAIL (a)-[:R*0..]->(b) RETURN DISTINCT a,b",
+        "MATCH REPEATABLE ELEMENTS TRAIL (a)-[:R*0..]->(b) RETURN DISTINCT a,b",
+        "MATCH (a)<-[:R|S*0..]-(b) RETURN DISTINCT b AS target,a AS origin",
+        "MATCH (a)-[*0..]->(b) RETURN DISTINCT a AS origin,b AS target",
+        "MATCH (a)-[:R*0..]-(b) RETURN DISTINCT a,b",
+    ] {
+        let pattern = prepare(text);
+        let (source, output) = pattern
+            .incremental_closure_definition()
+            .unwrap_or_else(|| panic!("eligible reflexive closure: {text}"));
+        let (operation, quantifier, edges, lifetimes) = source.incremental_binary().unwrap();
+        assert_eq!(operation, fgdb_gql::GraphSetOperation::Union);
+        assert_eq!(quantifier, fgdb_gql::GraphSetQuantifier::All);
+        let edges = edges.incremental_pattern().unwrap();
+        let lifetimes = lifetimes.incremental_pattern().unwrap();
+        assert!(edges.preserves_duplicates());
+        assert!(lifetimes.preserves_duplicates());
+        assert!(edges.plan().scans_edges());
+        assert!(!lifetimes.plan().scans_edges());
+        assert_eq!(edges.plan().edge_relations(), pattern.plan().edge_relations());
+        assert_eq!(
+            output.columns().collect::<Vec<_>>(),
+            pattern
+                .columns()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert!(edges.incremental_row_source_definition().is_some());
+        assert!(lifetimes.incremental_row_source_definition().is_some());
+        assert!(edges.incremental_closure_definition().is_none());
+        assert!(lifetimes.incremental_closure_definition().is_none());
+        let actual: Vec<_> = run(lifetimes, &[])
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect();
+        let expected: Vec<_> = VERTICES
+            .iter()
+            .map(|&vertex| vec![GraphValue::Vertex(vertex), GraphValue::Vertex(vertex)])
+            .collect();
+        assert_eq!(actual, expected, "isolated vertex lifetimes: {text}");
+    }
+    for text in [
+        "MATCH (a)-[:R*]->(b) RETURN a,b",
+        "MATCH (a)-[:R*0..]->(b) RETURN a,b",
+        "MATCH (a)-[:R*0..3]->(b) RETURN DISTINCT a,b",
         "MATCH (a)-[:R*2..]->(b) RETURN DISTINCT a,b",
         "MATCH (a)-[:R*1..3]->(b) RETURN DISTINCT a,b",
         "MATCH (a)-[:R*]-(b) RETURN DISTINCT a,b",
@@ -372,5 +418,28 @@ fn closure_recipe_admits_only_distinct_directed_unbounded_endpoint_support() {
             prepare(text).incremental_closure_definition().is_none(),
             "path semantics cannot silently become closure: {text}"
         );
+    }
+}
+
+#[test]
+fn undirected_zero_hop_support_includes_isolates_without_admitting_nonempty_false_cycles() {
+    let edge = [(EId(11), VId(1), R, VId(2))];
+    let zero = bind("MATCH (a)-[:R*0..]-(b) RETURN DISTINCT a,b");
+    let nonempty = bind("MATCH (a)-[:R*1..]-(b) RETURN DISTINCT a,b");
+    assert!(zero.incremental_closure_definition().is_some());
+    assert!(nonempty.incremental_closure_definition().is_none());
+    for (query, expected) in [
+        (&zero, vec![(1, 1), (1, 2), (2, 1), (2, 2), (3, 3)]),
+        (&nonempty, vec![(1, 2), (2, 1)]),
+    ] {
+        let actual: Vec<_> = run(query, &edge)
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect();
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(a, b)| vec![GraphValue::Vertex(VId(a)), GraphValue::Vertex(VId(b))])
+            .collect();
+        assert_eq!(actual, expected);
     }
 }
