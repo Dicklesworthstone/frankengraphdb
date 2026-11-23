@@ -512,15 +512,26 @@ impl GqlTextOffsets for crate::GraphWriteChainTextError {
 }
 
 fn tokens(text: &str) -> Option<Vec<Token<'_>>> {
+    if text.len() > crate::MAX_GRAPH_WRITE_SCRIPT_BYTES {
+        return None;
+    }
     let mut lexer = Lexer {
         text,
         at: 0,
         tokens: 0,
     };
     let mut tokens = Vec::new();
+    let mut separators = 0;
     loop {
-        let token = lexer.next().ok()?;
+        let token = super::scoped::mutation::script::next_script_token(&mut lexer).ok()?;
         let end = matches!(token.kind, TokenKind::End);
+        if !end && separators == crate::MAX_GRAPH_MUTATION_STATEMENTS {
+            return None;
+        }
+        if matches!(token.kind, TokenKind::Punct(b';')) {
+            separators += 1;
+            lexer.tokens = 0;
+        }
         tokens.push(token);
         if end {
             return Some(tokens);
@@ -547,11 +558,34 @@ fn is_clause(word: &str) -> bool {
     word.eq_ignore_ascii_case("SET") || named(PATTERN_CLAUSES) || named(OTHER_CLAUSES)
 }
 
+/// Preserve absolute token indexes in the shared parameter recipe while
+/// keeping aliases and clause state local to their own script statement.
+fn property_map_sites(text: &str, tokens: &[Token<'_>]) -> Vec<Site> {
+    let mut base = 0;
+    let mut sites = Vec::new();
+    for statement in tokens.split_inclusive(|token| matches!(token.kind, TokenKind::Punct(b';'))) {
+        sites.extend(
+            statement_sites(text, statement)
+                .into_iter()
+                .map(|site| match site {
+                    Site::Map(at) => Site::Map(base + at),
+                    Site::Field(start, end) => Site::Field(base + start, base + end),
+                    Site::Rows { alias, list } => Site::Rows {
+                        alias: base + alias,
+                        list: base + list,
+                    },
+                }),
+        );
+        base += statement.len();
+    }
+    sites
+}
+
 /// The sites reading a map argument, in text order: parameter tokens
 /// standing where a property map does, `$p.k` inside a pattern, and a SET
 /// item assigning an UNWIND row. Only top-level clauses count: a subquery's
 /// braces hide its own.
-fn property_map_sites(text: &str, tokens: &[Token<'_>]) -> Vec<Site> {
+fn statement_sites(text: &str, tokens: &[Token<'_>]) -> Vec<Site> {
     let rows = unwound_rows(text, tokens);
     let mut sites = Vec::new();
     let mut clause = Clause::Other;
@@ -881,6 +915,10 @@ mod tests {
             ),
             ("CREATE (n:P $m)", "CREATE (n:P {`a`: $aa, `b`: $ab})"),
             (
+                "CREATE (n:P $m); /* ; */ CREATE (q:P $m);",
+                "CREATE (n:P {`a`: $aa, `b`: $ab}); /* ; */ CREATE (q:P {`a`: $ac, `b`: $ad});",
+            ),
+            (
                 "MATCH (a), (b) MERGE (a)-[r:R $m]->(b)",
                 "MATCH (a), (b) MERGE (a)-[r:R {`a`: $aa, `b`: $ab}]->(b)",
             ),
@@ -1189,6 +1227,10 @@ mod tests {
             (
                 "UNWIND $rows AS row CREATE (n:P) SET n += row",
                 "UNWIND $rows AS row CREATE (n:P) SET n += {`age`: row.age, `name`: row.name}",
+            ),
+            (
+                "UNWIND $rows AS row CREATE (n) SET n += row; CREATE (other) SET other += row",
+                "UNWIND $rows AS row CREATE (n) SET n += {`age`: row.age, `name`: row.name}; CREATE (other) SET other += row",
             ),
             (
                 "UNWIND $rows AS r MATCH (n {name: r.name}) SET n = r, n.seen = true RETURN n",
