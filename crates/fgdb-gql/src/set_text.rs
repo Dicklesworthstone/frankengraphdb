@@ -1292,8 +1292,15 @@ pub(crate) struct CompoundOrderTemplate {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BoundCorrelation {
-    Column { left: usize, right: usize },
-    Identity { left: usize, right: usize, text: bool },
+    Column {
+        left: usize,
+        right: usize,
+    },
+    Identity {
+        left: usize,
+        right: usize,
+        text: bool,
+    },
 }
 
 #[derive(Clone)]

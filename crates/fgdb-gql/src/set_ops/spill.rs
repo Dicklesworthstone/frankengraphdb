@@ -28,10 +28,10 @@ mod apply;
 mod procedure;
 mod relational_join;
 mod selected_cross;
+pub use super::execute::scalar_to_vid;
 pub use apply::{SpillSetApplyKind, SpillSetApplyPlan, SpillSetArgumentsPlan, SpillSetCollection};
 pub use procedure::SpillSetProcedurePlan;
 pub use relational_join::SpillSetJoinPlan;
-pub use super::execute::scalar_to_vid;
 
 /// The executing host's pinned, awaitable element-property reader.
 ///

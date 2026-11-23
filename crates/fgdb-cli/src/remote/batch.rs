@@ -13,8 +13,8 @@ use fgdb_gql::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParamet
 use fgdb_protocol::MAX_HEADER_LEN;
 use fgdb_protocol::body::{
     Body, Execute, ExecuteBatch, ExecuteMode, ExecutePreparedReadBatch, ExecuteReadStatements,
-    MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS, MAX_READ_BATCH_STATEMENTS,
-    Outcome, Prepare, PrepareMode, PreparedHandle, PreparedReadMode, WireValue,
+    MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS, MAX_READ_BATCH_STATEMENTS, Outcome,
+    Prepare, PrepareMode, PreparedHandle, PreparedReadMode, WireValue,
 };
 use fgdb_protocol::client::{CLIENT_MAX_FRAME, Client, ClientError};
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
@@ -1017,9 +1017,10 @@ mod tests {
             unreachable!();
         };
         value.push('x');
-        assert!(batch.body.encode().unwrap().len()
-            <= (CLIENT_MAX_FRAME as usize) - MAX_HEADER_LEN);
-        let error = batch.admit_prepared_reads().expect_err("fixed handle overhead");
+        assert!(batch.body.encode().unwrap().len() <= (CLIENT_MAX_FRAME as usize) - MAX_HEADER_LEN);
+        let error = batch
+            .admit_prepared_reads()
+            .expect_err("fixed handle overhead");
         assert_eq!(error.code, 2);
         assert!(error.message.contains("frame limit"));
     }

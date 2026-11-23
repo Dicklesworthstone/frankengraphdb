@@ -885,7 +885,6 @@ fn cancellation_and_late_authority_expiry_discard_every_call_frame() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 #[test]
 fn scoped_write_call_failure_restores_prefix_and_a_following_invocation_uses_fresh_arguments() {
     let ((), report) = run_async_under_lab(0xca11_0031, |root| async move {
@@ -905,16 +904,10 @@ fn scoped_write_call_failure_restores_prefix_and_a_following_invocation_uses_fre
              CREATE (:Visible {p:10/(2-x)}) } RETURN x",
         );
         let error = transaction
-            .execute_graph_write_chain_governed(
-                &mut db,
-                &query,
-                &failed,
-                insert_policy(2),
-                |_| {
-                    allocated += 1;
-                    Ok::<_, Infallible>(ElementId::Vertex(VId(100 + allocated)))
-                },
-            )
+            .execute_graph_write_chain_governed(&mut db, &query, &failed, insert_policy(2), |_| {
+                allocated += 1;
+                Ok::<_, Infallible>(ElementId::Vertex(VId(100 + allocated)))
+            })
             .expect_err("a later invocation must roll back the earlier invocation's writes");
         assert!(format!("{error:?}").contains("DivisionByZero"), "{error:?}");
         assert_eq!(allocated, 3, "both invocations reached their first write");
@@ -1008,7 +1001,10 @@ fn restored_write_call_imports_keep_hidden_graphs_and_all_limits_outside_the_fra
                 let (stats, rows, _) = result.unwrap();
                 assert_eq!(stats.created_vertices, 3);
                 assert_eq!(
-                    rows.value.iter().map(|row| row.values().to_vec()).collect::<Vec<_>>(),
+                    rows.value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
                     vec![vec![int(1)], vec![int(1)], vec![int(2)]]
                 );
                 assert_eq!(db.vertices().unwrap().len(), 5);
@@ -1116,7 +1112,10 @@ fn restored_write_call_imports_remain_cancelled_and_expired_with_their_owner() {
             .await
             .unwrap();
         assert_eq!(
-            rows.value.iter().map(|row| row.values().to_vec()).collect::<Vec<_>>(),
+            rows.value
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect::<Vec<_>>(),
             [1, 2, 3].map(|value| vec![int(value)])
         );
         let mut baseline_properties: Vec<_> = baseline
@@ -1174,7 +1173,13 @@ fn restored_write_call_imports_remain_cancelled_and_expired_with_their_owner() {
                 "main",
                 &call,
                 insert_policy(3),
-                move || if clock.load(Ordering::Relaxed) { 10_000 } else { NOW },
+                move || {
+                    if clock.load(Ordering::Relaxed) {
+                        10_000
+                    } else {
+                        NOW
+                    }
+                },
                 |rows, _, _| {
                     assert_eq!(rows.len(), 3, "all restored imports reached checked output");
                     expired.store(true, Ordering::Relaxed);

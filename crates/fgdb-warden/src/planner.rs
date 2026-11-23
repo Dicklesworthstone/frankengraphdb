@@ -340,7 +340,9 @@ impl PlannerPredicates {
     /// [`fgdb_policy::ReadCaveat`] counterpart, or when unrestricted properties
     /// carry explicit negative property denials (`Scope::All` with non-empty
     /// `denied_properties`). Never widens or approximates a restriction.
-    pub fn to_read_policy(&self) -> Result<Option<fgdb_policy::ReadPolicy>, fgdb_policy::PolicyError> {
+    pub fn to_read_policy(
+        &self,
+    ) -> Result<Option<fgdb_policy::ReadPolicy>, fgdb_policy::PolicyError> {
         if !self.rights.can_read() {
             return Ok(None);
         }

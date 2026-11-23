@@ -3669,7 +3669,9 @@ fn regex_parameters_validate_before_execution_and_keep_group_keys_distinct() {
     )
     .unwrap();
     for pattern in [text("a.*"), CanonicalScalar::Null] {
-        let query = lazy.bind_parameters(&arguments("pattern", pattern)).unwrap();
+        let query = lazy
+            .bind_parameters(&arguments("pattern", pattern))
+            .unwrap();
         let result = execute(&query, &CanonicalScalar::Int(1), policy()).unwrap();
         assert_eq!(
             result.value[0].values()[0].as_scalar(),

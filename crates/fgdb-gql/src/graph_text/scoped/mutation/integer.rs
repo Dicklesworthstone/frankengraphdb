@@ -1952,7 +1952,8 @@ impl<'a> Parser<'a> {
                 "a regular-expression text literal or parameter after =~",
             ));
         };
-        let CanonicalScalar::Text(pattern) = crate::graph_text::literal::text_scalar(raw, at)? else {
+        let CanonicalScalar::Text(pattern) = crate::graph_text::literal::text_scalar(raw, at)?
+        else {
             return Err(expected("a regular-expression text literal after =~"));
         };
         let regex = crate::regex::CompiledRegex::compile(pattern.as_str())

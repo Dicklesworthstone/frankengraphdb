@@ -772,7 +772,10 @@ fn prepared_read_batches_keep_connection_authority_and_template_lifetime_fences(
         let credential = token(&grant(Rights::Read));
         let mut client = Client::connect(cx, addr, credential.clone()).await.unwrap();
         client.select(cx, "social").await.unwrap();
-        let handle = client.prepare_read(cx, "RETURN 7 AS value", vec![]).await.unwrap();
+        let handle = client
+            .prepare_read(cx, "RETURN 7 AS value", vec![])
+            .await
+            .unwrap();
         let mut foreign = Client::connect(cx, addr, credential.clone()).await.unwrap();
         foreign.select(cx, "social").await.unwrap();
         assert_eq!(
@@ -781,11 +784,14 @@ fn prepared_read_batches_keep_connection_authority_and_template_lifetime_fences(
             ),
             ErrorCode::Statement
         );
-        let mut write_only = Client::connect(cx, addr, token(&grant(Rights::Write))).await.unwrap();
+        let mut write_only = Client::connect(cx, addr, token(&grant(Rights::Write)))
+            .await
+            .unwrap();
         write_only.select(cx, "social").await.unwrap();
         assert_eq!(
             server_code(
-                refuse_prepared_batch_without_prefix(cx, &mut write_only, handle, vec![vec![]]).await
+                refuse_prepared_batch_without_prefix(cx, &mut write_only, handle, vec![vec![]])
+                    .await
             ),
             ErrorCode::PermissionDenied
         );
@@ -801,7 +807,10 @@ fn prepared_read_batches_keep_connection_authority_and_template_lifetime_fences(
             ),
             ErrorCode::Statement
         );
-        let handle = client.prepare_read(cx, "RETURN 7 AS value", vec![]).await.unwrap();
+        let handle = client
+            .prepare_read(cx, "RETURN 7 AS value", vec![])
+            .await
+            .unwrap();
         client.release_prepared(cx, handle).await.unwrap();
         assert_eq!(
             server_code(

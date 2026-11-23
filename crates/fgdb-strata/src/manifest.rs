@@ -62,7 +62,8 @@ const HEADER_LEN: usize = 4 + 2 + 4;
 const RECORD_LEN: usize = 16 + 16 + 8 + 32 + 32;
 const CATALOG_RECORD_LEN: usize = RECORD_LEN + 1 + 32 + 8;
 /// Complete V4 upper bound, shared with storage admission.
-pub const MAX_ENCODED_MANIFEST_BYTES: usize = HEADER_LEN + MAX_MANIFEST_RECORDS as usize * CATALOG_RECORD_LEN;
+pub const MAX_ENCODED_MANIFEST_BYTES: usize =
+    HEADER_LEN + MAX_MANIFEST_RECORDS as usize * CATALOG_RECORD_LEN;
 
 /// One live partition: its coordinate and the identity of its published root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,8 +152,12 @@ impl core::fmt::Display for ManifestError {
                 "record {at} does not strictly follow its predecessor's coordinate"
             ),
             Self::ZeroRoot { at } => write!(f, "record {at} names the zero identity"),
-            Self::InvalidCatalog { at } => write!(f, "record {at} has an invalid catalog reference"),
-            Self::NonCanonicalFormat => f.write_str("catalog-free manifest must use the legacy layout"),
+            Self::InvalidCatalog { at } => {
+                write!(f, "record {at} has an invalid catalog reference")
+            }
+            Self::NonCanonicalFormat => {
+                f.write_str("catalog-free manifest must use the legacy layout")
+            }
             Self::ImplausibleRecordCount { declared } => {
                 write!(
                     f,
@@ -181,8 +186,16 @@ pub fn encode_manifest(records: &[ManifestRecord]) -> Result<Vec<u8>, ManifestEr
     }
     validate_records(records)?;
     let has_catalog = records.iter().any(|record| record.schema.is_some());
-    let record_len = if has_catalog { CATALOG_RECORD_LEN } else { RECORD_LEN };
-    let format = if has_catalog { MANIFEST_FORMAT_V4 } else { MANIFEST_FORMAT_V3 };
+    let record_len = if has_catalog {
+        CATALOG_RECORD_LEN
+    } else {
+        RECORD_LEN
+    };
+    let format = if has_catalog {
+        MANIFEST_FORMAT_V4
+    } else {
+        MANIFEST_FORMAT_V3
+    };
     let mut out = Vec::with_capacity(HEADER_LEN + records.len() * record_len);
     out.extend_from_slice(&MANIFEST_MAGIC);
     out.extend_from_slice(&format.to_be_bytes());
@@ -213,14 +226,21 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestRecord>, ManifestErro
         return Err(ManifestError::NotAManifest);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if !matches!(format, MANIFEST_FORMAT_V2 | MANIFEST_FORMAT_V3 | MANIFEST_FORMAT_V4) {
+    if !matches!(
+        format,
+        MANIFEST_FORMAT_V2 | MANIFEST_FORMAT_V3 | MANIFEST_FORMAT_V4
+    ) {
         return Err(ManifestError::UnsupportedFormat { format });
     }
     let count = u32::from_be_bytes(bytes[6..10].try_into().expect("fixed header"));
     if count > MAX_MANIFEST_RECORDS {
         return Err(ManifestError::ImplausibleRecordCount { declared: count });
     }
-    let record_len = if format == MANIFEST_FORMAT_V4 { CATALOG_RECORD_LEN } else { RECORD_LEN };
+    let record_len = if format == MANIFEST_FORMAT_V4 {
+        CATALOG_RECORD_LEN
+    } else {
+        RECORD_LEN
+    };
     let expected = HEADER_LEN + count as usize * record_len;
     if bytes.len() < expected {
         return Err(ManifestError::Truncated {
@@ -249,13 +269,22 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestRecord>, ManifestErro
             bytes[at + 72..at + 104].try_into().expect("bounded record");
         let schema = if format == MANIFEST_FORMAT_V4 {
             match bytes[at + RECORD_LEN] {
-                0 if bytes[at + RECORD_LEN + 1..at + record_len].iter().all(|byte| *byte == 0) => None,
+                0 if bytes[at + RECORD_LEN + 1..at + record_len]
+                    .iter()
+                    .all(|byte| *byte == 0) =>
+                {
+                    None
+                }
                 1 => Some(crate::catalog::CatalogRef {
                     root: crate::catalog::CatalogVersion(ObjectId(
-                        bytes[at + RECORD_LEN + 1..at + RECORD_LEN + 33].try_into().expect("bounded catalog reference"),
+                        bytes[at + RECORD_LEN + 1..at + RECORD_LEN + 33]
+                            .try_into()
+                            .expect("bounded catalog reference"),
                     )),
                     epoch: fgdb_delta_types::SchemaEpoch(u64::from_be_bytes(
-                        bytes[at + RECORD_LEN + 33..at + record_len].try_into().expect("bounded catalog epoch"),
+                        bytes[at + RECORD_LEN + 33..at + record_len]
+                            .try_into()
+                            .expect("bounded catalog epoch"),
                     )),
                 }),
                 _ => return Err(ManifestError::InvalidCatalog { at: records.len() }),
@@ -285,7 +314,10 @@ fn validate_records(records: &[ManifestRecord]) -> Result<(), ManifestError> {
         if record.root.0.0 == [0u8; 32] {
             return Err(ManifestError::ZeroRoot { at });
         }
-        if record.schema.is_some_and(|schema| schema.validate().is_err()) {
+        if record
+            .schema
+            .is_some_and(|schema| schema.validate().is_err())
+        {
             return Err(ManifestError::InvalidCatalog { at });
         }
         if at > 0 {

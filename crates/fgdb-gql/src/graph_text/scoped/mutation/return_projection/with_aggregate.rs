@@ -790,7 +790,9 @@ impl<'a> Parser<'a> {
             }
             if !returning {
                 match output {
-                    Output::Key(key) => self.check_call_scope_alias(name, &inputs[keys[key]].value, schema)?,
+                    Output::Key(key) => {
+                        self.check_call_scope_alias(name, &inputs[keys[key]].value, schema)?
+                    }
                     _ => self.check_call_scope_name(name)?,
                 }
             }

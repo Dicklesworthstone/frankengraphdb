@@ -792,7 +792,9 @@ fn catalog_epochs_preserve_native_creation_and_incremental_composition() {
         let cx = contexts.commit();
         let mut db = seeded(&cx).await;
         let mut catalog = SymbolCatalog::default();
-        catalog.bind("Person", CatalogSymbol::Label(LabelId(1))).unwrap();
+        catalog
+            .bind("Person", CatalogSymbol::Label(LabelId(1)))
+            .unwrap();
         let mut final_creations = None;
 
         for epoch in 1..=2 {
@@ -809,9 +811,16 @@ fn catalog_epochs_preserve_native_creation_and_incremental_composition() {
                 .expect("catalog epochs must retain ordered native prefix reuse");
             let full = db.prepare_ordered_writes(raw).unwrap();
             assert_same(&incremental, &full);
-            assert!(incremental.template.coordinate_entries().iter().all(|coordinate| {
-                coordinate.schema_epoch == expected_epoch && coordinate.schema_transition.is_none()
-            }));
+            assert!(
+                incremental
+                    .template
+                    .coordinate_entries()
+                    .iter()
+                    .all(|coordinate| {
+                        coordinate.schema_epoch == expected_epoch
+                            && coordinate.schema_transition.is_none()
+                    })
+            );
 
             let mut first = WriteBatch::new(RelationId(7));
             first.set_vertex_property(VId(1), P, Some(int(20)));
@@ -834,30 +843,49 @@ fn catalog_epochs_preserve_native_creation_and_incremental_composition() {
                 let mut batch = WriteBatch::new(RelationId(7));
                 batch.create_vertex(VId(id), vec![LabelId(1)], vec![(P, int(score))]);
                 dependencies.extend(PreparedDependencies::capture(&db.writer, &batch));
-                chunks.push(db.prepare_independent_create_chunk(
-                    batch.clone(),
-                    &earlier_vertices,
-                    &earlier_edges,
-                ).unwrap());
+                chunks.push(
+                    db.prepare_independent_create_chunk(
+                        batch.clone(),
+                        &earlier_vertices,
+                        &earlier_edges,
+                    )
+                    .unwrap(),
+                );
                 earlier_vertices.insert(VId(id));
                 combined.rows.extend(batch.rows);
             }
-            let creations = db.compose_independent_create_chunks(
-                Some(RelationId(7)),
-                &chunks,
-                dependencies,
-                Some(2),
-            ).unwrap();
+            let creations = db
+                .compose_independent_create_chunks(
+                    Some(RelationId(7)),
+                    &chunks,
+                    dependencies,
+                    Some(2),
+                )
+                .unwrap();
             let full = db.prepare_write(combined).unwrap();
             assert_same(&creations, &full);
-            assert_eq!(creations.template.coordinate_entries()[0].schema_epoch, expected_epoch);
+            assert_eq!(
+                creations.template.coordinate_entries()[0].schema_epoch,
+                expected_epoch
+            );
             final_creations = Some(creations);
         }
 
-        db.commit_prepared(&cx, final_creations.unwrap()).await.unwrap();
-        assert_eq!(db.vertex(VId(100)).unwrap().unwrap().props, vec![(P, int(100).into())]);
-        assert_eq!(db.vertex(VId(101)).unwrap().unwrap().props, vec![(P, int(101).into())]);
-        assert_eq!(db.snapshot.schema.catalog.epoch(), fgdb_delta_types::SchemaEpoch(2));
+        db.commit_prepared(&cx, final_creations.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.vertex(VId(100)).unwrap().unwrap().props,
+            vec![(P, int(100).into())]
+        );
+        assert_eq!(
+            db.vertex(VId(101)).unwrap().unwrap().props,
+            vec![(P, int(101).into())]
+        );
+        assert_eq!(
+            db.snapshot.schema.catalog.epoch(),
+            fgdb_delta_types::SchemaEpoch(2)
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

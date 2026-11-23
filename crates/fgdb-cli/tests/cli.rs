@@ -2677,8 +2677,18 @@ fn schema_name_allocation_is_durable_and_usable_without_numeric_flags() {
                 "create",
                 &[
                     "--persist-bindings",
-                    "--label", "Zulu", "--label", "Person", "--label", "Person",
-                    "--relation", "KNOWS", "--property", "name", "--property", "id=42",
+                    "--label",
+                    "Zulu",
+                    "--label",
+                    "Person",
+                    "--label",
+                    "Person",
+                    "--relation",
+                    "KNOWS",
+                    "--property",
+                    "name",
+                    "--property",
+                    "id=42",
                 ],
             ),
             "created",
@@ -2706,18 +2716,29 @@ fn schema_name_allocation_is_durable_and_usable_without_numeric_flags() {
         ),
         2
     );
-    let query = fixture.discovered("query", &[
-        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS name,b.id AS id",
-    ]);
+    let query = fixture.discovered(
+        "query",
+        &["MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS name,b.id AS id"],
+    );
     assert_eq!(succeeded(&query, "rows"), 2);
-    assert_eq!(rows(&query), [
-        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"Ada"},{"type":"int","value":"2"}]}"#,
-    ]);
+    assert_eq!(
+        rows(&query),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"Ada"},{"type":"int","value":"2"}]}"#,
+        ]
+    );
     let added = fixture.discovered("schema", &["--if-current", "2", "--property", "score"]);
     assert_eq!(succeeded(&added, "rows"), 3);
-    assert!(rows(&added).iter().any(|row| row.contains(r#""value":"score"},{"type":"int","value":"44""#)));
+    assert!(
+        rows(&added)
+            .iter()
+            .any(|row| row.contains(r#""value":"score"},{"type":"int","value":"44""#))
+    );
     assert_eq!(
-        succeeded(&fixture.discovered("schema", &["--property", "score"]), "rows"),
+        succeeded(
+            &fixture.discovered("schema", &["--property", "score"]),
+            "rows"
+        ),
         3,
         "redeclaring a name must not append a schema commit",
     );
@@ -2727,7 +2748,10 @@ fn schema_name_allocation_is_durable_and_usable_without_numeric_flags() {
     let origin = fixture.discovered("schema", &["--as-of", "0"]);
     assert_eq!(succeeded(&origin, "rows"), 0);
     assert!(rows(&origin).is_empty());
-    assert_eq!(succeeded(&fixture.discovered("compact", &[]), "compacted"), 3);
+    assert_eq!(
+        succeeded(&fixture.discovered("compact", &[]), "compacted"),
+        3
+    );
     let reopened = fixture.discovered("schema", &[]);
     assert_eq!(succeeded(&reopened, "rows"), 3);
     assert_eq!(rows(&reopened), rows(&added));
@@ -2737,43 +2761,109 @@ fn schema_name_allocation_is_durable_and_usable_without_numeric_flags() {
 fn schema_registration_skips_unnamed_ordinals_from_deleted_data() {
     let fixture = Fixture::new("schema-retired-ordinals");
     assert_eq!(succeeded(&fixture.discovered("create", &[]), "created"), 0);
-    assert_eq!(succeeded(&fixture.discovered("write", &[
-        "--label", "Old=77", "--relation", "LINK=88", "--property", "old=99",
-        "CREATE (a:Old {old:1}),(b:Old {old:2}),(a)-[:LINK]->(b)",
-    ]), "written"), 1);
-    assert_eq!(succeeded(&fixture.discovered("write", &[
-        "--label", "Old=77", "MATCH (n:Old) DETACH DELETE n",
-    ]), "written"), 2);
-    assert_eq!(succeeded(&fixture.discovered("compact", &[]), "compacted"), 2);
-    let allocated = fixture.discovered("schema", &[
-        "--label", "New", "--relation", "NEW_LINK", "--property", "new",
-    ]);
+    assert_eq!(
+        succeeded(
+            &fixture.discovered(
+                "write",
+                &[
+                    "--label",
+                    "Old=77",
+                    "--relation",
+                    "LINK=88",
+                    "--property",
+                    "old=99",
+                    "CREATE (a:Old {old:1}),(b:Old {old:2}),(a)-[:LINK]->(b)",
+                ]
+            ),
+            "written"
+        ),
+        1
+    );
+    assert_eq!(
+        succeeded(
+            &fixture.discovered(
+                "write",
+                &["--label", "Old=77", "MATCH (n:Old) DETACH DELETE n",]
+            ),
+            "written"
+        ),
+        2
+    );
+    assert_eq!(
+        succeeded(&fixture.discovered("compact", &[]), "compacted"),
+        2
+    );
+    let allocated = fixture.discovered(
+        "schema",
+        &[
+            "--label",
+            "New",
+            "--relation",
+            "NEW_LINK",
+            "--property",
+            "new",
+        ],
+    );
     assert_eq!(succeeded(&allocated, "rows"), 3);
-    assert_eq!(rows(&allocated), [
-        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"label"},{"type":"text","value":"New"},{"type":"int","value":"78"}]}"#,
-        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"relation"},{"type":"text","value":"NEW_LINK"},{"type":"int","value":"89"}]}"#,
-        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"property"},{"type":"text","value":"new"},{"type":"int","value":"100"}]}"#,
-    ]);
+    assert_eq!(
+        rows(&allocated),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"label"},{"type":"text","value":"New"},{"type":"int","value":"78"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"relation"},{"type":"text","value":"NEW_LINK"},{"type":"int","value":"89"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"property"},{"type":"text","value":"new"},{"type":"int","value":"100"}]}"#,
+        ]
+    );
     // An intervening numeric-only write must also advance the next census.
-    assert_eq!(succeeded(&fixture.discovered("write", &[
-        "--label", "Unregistered=500", "CREATE (:Unregistered)",
-    ]), "written"), 4);
+    assert_eq!(
+        succeeded(
+            &fixture.discovered(
+                "write",
+                &["--label", "Unregistered=500", "CREATE (:Unregistered)",]
+            ),
+            "written"
+        ),
+        4
+    );
     let later = fixture.discovered("schema", &["--label", "Later"]);
     assert_eq!(succeeded(&later, "rows"), 5);
-    assert!(rows(&later).iter().any(|row| row.contains(r#""value":"Later"},{"type":"int","value":"501""#)));
+    assert!(
+        rows(&later)
+            .iter()
+            .any(|row| row.contains(r#""value":"Later"},{"type":"int","value":"501""#))
+    );
 }
 
 #[test]
 fn schema_registration_conflicts_exhaustion_and_stale_guards_publish_nothing() {
     let fixture = Fixture::new("schema-atomic-refusals");
-    assert_eq!(succeeded(&fixture.discovered("create", &[
-        "--persist-bindings", "--label", "Person", "--property", "id",
-    ]), "created"), 1);
+    assert_eq!(
+        succeeded(
+            &fixture.discovered(
+                "create",
+                &[
+                    "--persist-bindings",
+                    "--label",
+                    "Person",
+                    "--property",
+                    "id",
+                ]
+            ),
+            "created"
+        ),
+        1
+    );
     let before = fixture.discovered("schema", &[]);
     assert_eq!(succeeded(&before, "rows"), 1);
     for flags in [
         vec!["--label", "Other=1", "--property", "never"],
-        vec!["--label", "Last=18446744073709551615", "--label", "New", "--property", "never"],
+        vec![
+            "--label",
+            "Last=18446744073709551615",
+            "--label",
+            "New",
+            "--property",
+            "never",
+        ],
         vec!["--if-current", "0", "--label", "New"],
     ] {
         refused(&fixture.discovered("schema", &flags), 3, "query");
@@ -2802,19 +2892,32 @@ fn schema_cli_rejects_ambiguous_modes_and_preserves_exact_names_and_u64_ids() {
         ("query", vec!["--label", "Person", "RETURN 1"]),
     ] {
         refused(&fixture.discovered(command, &flags), 2, "usage");
-        assert!(!fixture.db().exists(), "invalid input must refuse before database creation");
+        assert!(
+            !fixture.db().exists(),
+            "invalid input must refuse before database creation"
+        );
     }
     assert_eq!(succeeded(&fixture.discovered("create", &[]), "created"), 0);
-    let registered = fixture.discovered("schema", &[
-        "--label", "étiquette", "--property", "a=b=18446744073709551615",
-        "--relation", "line\nbreak",
-    ]);
+    let registered = fixture.discovered(
+        "schema",
+        &[
+            "--label",
+            "étiquette",
+            "--property",
+            "a=b=18446744073709551615",
+            "--relation",
+            "line\nbreak",
+        ],
+    );
     assert_eq!(succeeded(&registered, "rows"), 1);
-    assert_eq!(rows(&registered), [
-        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"label"},{"type":"text","value":"étiquette"},{"type":"int","value":"1"}]}"#,
-        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"relation"},{"type":"text","value":"line\nbreak"},{"type":"int","value":"1"}]}"#,
-        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"property"},{"type":"text","value":"a=b"},{"type":"wideint","value":"18446744073709551615"}]}"#,
-    ]);
+    assert_eq!(
+        rows(&registered),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"label"},{"type":"text","value":"étiquette"},{"type":"int","value":"1"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"relation"},{"type":"text","value":"line\nbreak"},{"type":"int","value":"1"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"property"},{"type":"text","value":"a=b"},{"type":"wideint","value":"18446744073709551615"}]}"#,
+        ]
+    );
 }
 
 #[test]
@@ -2827,7 +2930,10 @@ fn persisted_bindings_reopen_without_flags_across_write_and_read_profiles() {
     .unwrap();
     assert_eq!(
         succeeded(
-            &fixture.robot("create", &["--persist-bindings", "--bindings-file", "names"]),
+            &fixture.robot(
+                "create",
+                &["--persist-bindings", "--bindings-file", "names"]
+            ),
             "created",
         ),
         1
@@ -2849,7 +2955,9 @@ fn persisted_bindings_reopen_without_flags_across_write_and_read_profiles() {
     assert_eq!(succeeded(&relation, "rows"), 2);
     assert_eq!(
         rows(&relation),
-        [r#"{"v":1,"event":"row","cells":[{"type":"text","value":"Ada"},{"type":"int","value":"2"}]}"#]
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"Ada"},{"type":"int","value":"2"}]}"#
+        ]
     );
 
     let statement = "MATCH (n:Person) RETURN n,n.id AS id,n.name AS name";
@@ -2889,10 +2997,7 @@ fn persisted_bindings_refuse_conflicts_and_keep_read_declarations_ephemeral() {
         ("--property", "id=9"),
         ("--property", "different=1"),
     ] {
-        let output = fixture.discovered(
-            "write",
-            &[flag, binding, "CREATE (:Person {id:88})"],
-        );
+        let output = fixture.discovered("write", &[flag, binding, "CREATE (:Person {id:88})"]);
         refused(&output, 2, "usage");
         assert_eq!(directory_bytes(&fixture.db()), before);
     }
@@ -2900,7 +3005,11 @@ fn persisted_bindings_refuse_conflicts_and_keep_read_declarations_ephemeral() {
     // flags/file themselves keep their original duplicate-input checks.
     let same = fixture.robot("query", &["CALL db.labels()"]);
     assert_eq!(succeeded(&same, "rows"), 1);
-    std::fs::write(fixture.dir.join("same-names"), "label Person=1\nproperty id=1\n").unwrap();
+    std::fs::write(
+        fixture.dir.join("same-names"),
+        "label Person=1\nproperty id=1\n",
+    )
+    .unwrap();
     let from_file = fixture.discovered(
         "query",
         &["--bindings-file", "same-names", "CALL db.labels()"],
@@ -2908,10 +3017,7 @@ fn persisted_bindings_refuse_conflicts_and_keep_read_declarations_ephemeral() {
     assert_eq!(succeeded(&from_file, "rows"), 1);
     assert_eq!(rows(&from_file), rows(&same));
 
-    let temporary = fixture.discovered(
-        "query",
-        &["--label", "Temporary=99", "CALL db.labels()"],
-    );
+    let temporary = fixture.discovered("query", &["--label", "Temporary=99", "CALL db.labels()"]);
     assert_eq!(succeeded(&temporary, "rows"), 1);
     assert_eq!(rows(&temporary).len(), 2);
     let unchanged = fixture.discovered("query", &["CALL db.labels()"]);
@@ -2948,7 +3054,9 @@ fn persisted_bindings_follow_history_and_refuse_cross_catalog_composition() {
     runtime.block_on(async {
         let mut db = Database::open(&cx, fixture.db(), keys()).await.unwrap();
         let mut addition = SymbolCatalog::default();
-        addition.bind("Later", CatalogSymbol::Label(LabelId(2))).unwrap();
+        addition
+            .bind("Later", CatalogSymbol::Label(LabelId(2)))
+            .unwrap();
         assert_eq!(db.register_symbols(&cx, &addition).await.unwrap().0, 3);
     });
 
@@ -2980,7 +3088,13 @@ fn persisted_bindings_follow_history_and_refuse_cross_catalog_composition() {
 
     let diff = fixture.discovered(
         "diff",
-        &["--before", "2", "--after", "3", "MATCH (n:Person) RETURN n.id"],
+        &[
+            "--before",
+            "2",
+            "--after",
+            "3",
+            "MATCH (n:Person) RETURN n.id",
+        ],
     );
     refused(&diff, 3, "query");
     assert!(terminal(&diff).contains("\"code\":\"unsupported\""));
@@ -3022,7 +3136,10 @@ fn persist_bindings_flag_is_creation_only_and_legacy_creation_keeps_sequence_zer
     );
     let empty = Fixture::new("empty-persisted-symbols");
     assert_eq!(
-        succeeded(&empty.discovered("create", &["--persist-bindings"]), "created"),
+        succeeded(
+            &empty.discovered("create", &["--persist-bindings"]),
+            "created"
+        ),
         0
     );
     let duplicate = Fixture::new("duplicate-persist-option");
@@ -3047,13 +3164,22 @@ fn catalog_generation_change_refuses_a_prebound_import_before_effects_or_result(
         1
     );
     let fifo = fixture.dir.join("rows.fifo");
-    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
     let mut child = Command::new(env!("CARGO_BIN_EXE_fgdb"))
         .current_dir(&fixture.dir)
         .args(["--robot", "import-csv", "--db"])
         .arg(fixture.db())
         .args([
-            "--key-file", "keys", "--input", "rows.fifo",
+            "--key-file",
+            "keys",
+            "--input",
+            "rows.fifo",
             "CREATE (:Person {id:$id})",
         ])
         .stdout(Stdio::piped())
@@ -3130,7 +3256,9 @@ fn bounded_catalog_discovery_refuses_lagging_publication_without_resident_recove
     runtime.block_on(async {
         let mut db = Database::open(&cx, fixture.db(), keys()).await.unwrap();
         let mut addition = SymbolCatalog::default();
-        addition.bind("Later", CatalogSymbol::Label(LabelId(2))).unwrap();
+        addition
+            .bind("Later", CatalogSymbol::Label(LabelId(2)))
+            .unwrap();
         let error = db
             .register_symbols_with_faults(
                 &cx,
@@ -3151,7 +3279,11 @@ fn bounded_catalog_discovery_refuses_lagging_publication_without_resident_recove
     for arguments in [
         vec!["--buffered", "MATCH (n:Person) RETURN n,n.id AS id"],
         vec![
-            "--sealed", "--graph-relation", "KNOWS", "--relation", "KNOWS=7",
+            "--sealed",
+            "--graph-relation",
+            "KNOWS",
+            "--relation",
+            "KNOWS=7",
             "CALL fnx.weakly_connected_components() YIELD vertex,component",
         ],
     ] {

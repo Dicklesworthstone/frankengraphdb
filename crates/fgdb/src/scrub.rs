@@ -446,8 +446,8 @@ impl<V: Vfs + Clone> Database<V> {
                 )
                 .await
                 .and_then(|(bytes, repaired)| {
-                    let transition = SchemaTransition::decode(&bytes)
-                        .map_err(StoreError::MalformedCatalog)?;
+                    let transition =
+                        SchemaTransition::decode(&bytes).map_err(StoreError::MalformedCatalog)?;
                     metadata.insert(transition.after.root.0, MetadataKind::Catalog);
                     if let Some(before) = transition.before {
                         metadata.insert(before.root.0, MetadataKind::Catalog);

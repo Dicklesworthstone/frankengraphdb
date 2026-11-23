@@ -967,8 +967,14 @@ fn regex_parameters_select_mutations_and_rebind_without_retaining_prior_patterns
         ),
     ]);
     for (pattern, selected) in [
-        (CanonicalScalar::ucs_basic_text("A.*").unwrap(), Some(VId(1))),
-        (CanonicalScalar::ucs_basic_text("B.*").unwrap(), Some(VId(2))),
+        (
+            CanonicalScalar::ucs_basic_text("A.*").unwrap(),
+            Some(VId(1)),
+        ),
+        (
+            CanonicalScalar::ucs_basic_text("B.*").unwrap(),
+            Some(VId(2)),
+        ),
         (CanonicalScalar::Null, None),
     ] {
         let mut parameters = GqlParameters::new();
@@ -998,29 +1004,17 @@ fn regex_parameters_select_mutations_and_rebind_without_retaining_prior_patterns
         .insert(
             "pattern",
             fgdb_gql::GqlParameterValue::Scalar(
-                fgdb_gql::GqlScalarParameter::new(
-                    CanonicalScalar::ucs_basic_text("A.*").unwrap(),
-                )
-                .unwrap(),
+                fgdb_gql::GqlScalarParameter::new(CanonicalScalar::ucs_basic_text("A.*").unwrap())
+                    .unwrap(),
             ),
         )
         .unwrap();
-    let assignment = PreparedGraphMutationText::prepare(
-        "MATCH (n) SET n.p=n.text =~ $pattern",
-        R,
-        symbols,
-    )
-    .unwrap()
-    .bind_parameters(&parameters)
-    .unwrap();
-    let result = run(
-        &assignment,
-        &[VId(1), VId(2)],
-        &[],
-        &properties,
-        policy(),
-    )
-    .unwrap();
+    let assignment =
+        PreparedGraphMutationText::prepare("MATCH (n) SET n.p=n.text =~ $pattern", R, symbols)
+            .unwrap()
+            .bind_parameters(&parameters)
+            .unwrap();
+    let result = run(&assignment, &[VId(1), VId(2)], &[], &properties, policy()).unwrap();
     assert_eq!(
         result.intents(),
         &[

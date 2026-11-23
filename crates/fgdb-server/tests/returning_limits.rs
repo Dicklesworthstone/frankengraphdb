@@ -941,23 +941,14 @@ async fn frame_refusal(
         FramedWrite::Prepared(handle) => {
             client
                 .execute_prepared_write_returning_streaming(
-                    cx,
-                    handle,
-                    parameters,
-                    on_columns,
-                    on_row,
+                    cx, handle, parameters, on_columns, on_row,
                 )
                 .await
         }
         FramedWrite::Conditional(sequence) => {
             client
                 .execute_write_if_current_streaming(
-                    cx,
-                    sequence,
-                    statement,
-                    parameters,
-                    on_columns,
-                    on_row,
+                    cx, sequence, statement, parameters, on_columns, on_row,
                 )
                 .await
         }

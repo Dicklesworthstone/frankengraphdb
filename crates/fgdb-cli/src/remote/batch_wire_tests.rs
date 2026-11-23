@@ -4,8 +4,7 @@ use super::super::batch::{CsvSchema, PreparedBatch, ReadStatements};
 use super::*;
 use fgdb_protocol::body::{
     ExecuteBatch, ExecutePrepared, ExecutePreparedReadBatch, ExecuteReadStatements, Prepare,
-    Prepared, PreparedHandle,
-    PreparedReadMode, ReadBatchResultChunk, ReadBatchResultEnd,
+    Prepared, PreparedHandle, PreparedReadMode, ReadBatchResultChunk, ReadBatchResultEnd,
 };
 
 const BATCH_QUERY: &str = "CREATE (:Person {name:$name})";
@@ -509,7 +508,10 @@ fn prepared_consistent_reads_send_one_template_and_one_batch_with_fresh_values()
                         result(
                             FrameKind::ReadBatchResultEnd,
                             5,
-                            &ReadBatchResultEnd { results: 2, rows: 2 },
+                            &ReadBatchResultEnd {
+                                results: 2,
+                                rows: 2,
+                            },
                         ),
                         4,
                     ),
@@ -623,11 +625,17 @@ fn prepared_consistent_refusals_and_sink_failures_never_retry_or_complete_a_pref
             assert!(out.bytes.is_empty());
             let frames = sent_frames(&written.lock().unwrap());
             assert_eq!(
-                frames.iter().filter(|frame| frame.header().kind() == FrameKind::Prepare).count(),
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::Prepare)
+                    .count(),
                 1
             );
             assert_eq!(
-                frames.iter().filter(|frame| frame.header().kind() == FrameKind::ExecutePreparedReadBatch).count(),
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::ExecutePreparedReadBatch)
+                    .count(),
                 usize::from(request == 5)
             );
             assert!(!frames.iter().any(|frame| matches!(
@@ -673,14 +681,24 @@ fn prepared_consistent_refusals_and_sink_failures_never_retry_or_complete_a_pref
                 .await
                 .expect_err("failed output must cancel and drain");
             assert_eq!(error.code, 5);
-            assert!(!String::from_utf8(out.bytes).unwrap().contains(r#""event":"result""#));
+            assert!(
+                !String::from_utf8(out.bytes)
+                    .unwrap()
+                    .contains(r#""event":"result""#)
+            );
             let frames = sent_frames(&written.lock().unwrap());
             assert_eq!(
-                frames.iter().filter(|frame| frame.header().kind() == FrameKind::QueryCancel).count(),
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                    .count(),
                 1
             );
             assert_eq!(
-                frames.iter().filter(|frame| frame.header().kind() == FrameKind::ExecutePreparedReadBatch).count(),
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::ExecutePreparedReadBatch)
+                    .count(),
                 1
             );
         }

@@ -17,8 +17,8 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;
 use fgdb_strata::manifest::{
-    MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3, MANIFEST_FORMAT_V4, ManifestError, ManifestRecord, ManifestVersion,
-    decode_manifest, encode_manifest, manifest_id, read_manifest,
+    MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3, MANIFEST_FORMAT_V4, ManifestError, ManifestRecord,
+    ManifestVersion, decode_manifest, encode_manifest, manifest_id, read_manifest,
 };
 use fgdb_strata::root::{BlockRef, PartitionRoot};
 use fgdb_strata::store::{BlockStore, StoreError};
@@ -448,22 +448,40 @@ fn catalog_manifests_preserve_legacy_bytes_and_admit_exact_optional_references()
     assert_eq!(bytes.len(), 10 + records.len() * 145);
     assert_eq!(decode_manifest(&bytes).unwrap(), records);
     for cut in 0..bytes.len() {
-        assert!(decode_manifest(&bytes[..cut]).is_err(), "catalog prefix {cut}");
+        assert!(
+            decode_manifest(&bytes[..cut]).is_err(),
+            "catalog prefix {cut}"
+        );
     }
     let mut malformed = bytes.clone();
     malformed[10 + 2 * 145 + 104 + 1] = 1;
-    assert_eq!(decode_manifest(&malformed), Err(ManifestError::InvalidCatalog { at: 2 }));
+    assert_eq!(
+        decode_manifest(&malformed),
+        Err(ManifestError::InvalidCatalog { at: 2 })
+    );
     malformed = bytes.clone();
     malformed[10 + 145 + 104] = 2;
-    assert_eq!(decode_manifest(&malformed), Err(ManifestError::InvalidCatalog { at: 1 }));
+    assert_eq!(
+        decode_manifest(&malformed),
+        Err(ManifestError::InvalidCatalog { at: 1 })
+    );
     malformed = bytes;
     malformed[10 + 104..10 + 145].fill(0);
     malformed[10 + 145 + 104..10 + 2 * 145].fill(0);
-    assert_eq!(decode_manifest(&malformed), Err(ManifestError::NonCanonicalFormat));
+    assert_eq!(
+        decode_manifest(&malformed),
+        Err(ManifestError::NonCanonicalFormat)
+    );
     records[1].schema.as_mut().unwrap().epoch = SchemaEpoch(8);
-    assert_eq!(encode_manifest(&records), Err(ManifestError::InvalidCatalog { at: 1 }));
+    assert_eq!(
+        encode_manifest(&records),
+        Err(ManifestError::InvalidCatalog { at: 1 })
+    );
     records[1].schema.as_mut().unwrap().epoch = SchemaEpoch(0);
-    assert_eq!(encode_manifest(&records), Err(ManifestError::InvalidCatalog { at: 1 }));
+    assert_eq!(
+        encode_manifest(&records),
+        Err(ManifestError::InvalidCatalog { at: 1 })
+    );
     assert_eq!(encode_manifest(&legacy).unwrap(), legacy_bytes);
 }
 
@@ -480,23 +498,51 @@ fn catalog_objects_reopen_through_manifest_and_corruption_cannot_supply_names() 
         move |cx| async move {
             let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE).await.unwrap();
             let mut symbols = SymbolCatalog::default();
-            symbols.bind("Person", CatalogSymbol::Label(LabelId(73))).unwrap();
+            symbols
+                .bind("Person", CatalogSymbol::Label(LabelId(73)))
+                .unwrap();
             let catalog = SchemaCatalog::empty(GraphId(1), BranchId(1))
-                .successor(CommitSeq(1), &symbols).unwrap().unwrap();
+                .successor(CommitSeq(1), &symbols)
+                .unwrap()
+                .unwrap();
             let catalog_id = store.put_catalog(&cx, &catalog).await.unwrap();
-            let schema = CatalogRef { root: catalog_id, epoch: SchemaEpoch(1) };
+            let schema = CatalogRef {
+                root: catalog_id,
+                epoch: SchemaEpoch(1),
+            };
             let transition = SchemaTransition {
-                graph: GraphId(1), branch: BranchId(1),
-                apply_basis: Some(MarkerRef { marker_oid: ObjectId([0x90; 32]), commit_seq: CommitSeq(1) }),
-                before: None, after: schema,
+                graph: GraphId(1),
+                branch: BranchId(1),
+                apply_basis: Some(MarkerRef {
+                    marker_oid: ObjectId([0x90; 32]),
+                    commit_seq: CommitSeq(1),
+                }),
+                before: None,
+                after: schema,
             };
             let transition_id = store.put_schema_transition(&cx, &transition).await.unwrap();
-            assert_eq!(store.get_schema_transition(&cx, transition_id).await.unwrap(), transition);
+            assert_eq!(
+                store
+                    .get_schema_transition(&cx, transition_id)
+                    .await
+                    .unwrap(),
+                transition
+            );
             let root = publish_partition(&cx, &store, 0, 1).await;
-            let manifest = store.put_manifest(&cx, &[ManifestRecord {
-                graph: GraphId(1), branch: BranchId(1), partition: 0, root,
-                published_chain_hash: fgdb_crypto::Digest([0xd1; 32]), schema: Some(schema),
-            }]).await.unwrap();
+            let manifest = store
+                .put_manifest(
+                    &cx,
+                    &[ManifestRecord {
+                        graph: GraphId(1),
+                        branch: BranchId(1),
+                        partition: 0,
+                        root,
+                        published_chain_hash: fgdb_crypto::Digest([0xd1; 32]),
+                        schema: Some(schema),
+                    }],
+                )
+                .await
+                .unwrap();
             (manifest, transition_id)
         }
     });
@@ -506,17 +552,33 @@ fn catalog_objects_reopen_through_manifest_and_corruption_cannot_supply_names() 
         let schema = resolved[0].0.schema.unwrap();
         let catalog = store.get_catalog(&cx, schema.root).await.unwrap();
         assert_eq!(catalog.epoch(), schema.epoch);
-        assert_eq!(catalog.symbols_at(CommitSeq(1)).unwrap().resolve(CatalogSymbolKind::Label, "Person"), None);
-        assert_eq!(catalog.symbols_at(CommitSeq(2)).unwrap().resolve(CatalogSymbolKind::Label, "Person"),
-            Some(CatalogSymbol::Label(LabelId(73))));
-        let transition = store.get_schema_transition(&cx, transition_id).await.unwrap();
+        assert_eq!(
+            catalog
+                .symbols_at(CommitSeq(1))
+                .unwrap()
+                .resolve(CatalogSymbolKind::Label, "Person"),
+            None
+        );
+        assert_eq!(
+            catalog
+                .symbols_at(CommitSeq(2))
+                .unwrap()
+                .resolve(CatalogSymbolKind::Label, "Person"),
+            Some(CatalogSymbol::Label(LabelId(73)))
+        );
+        let transition = store
+            .get_schema_transition(&cx, transition_id)
+            .await
+            .unwrap();
         assert_eq!(transition.after, schema);
         let path = store.path(schema.root.0);
         let mut bytes = std::fs::read(&path).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
         std::fs::write(&path, bytes).unwrap();
-        assert!(matches!(store.get_catalog(&cx, schema.root).await,
-            Err(StoreError::IdentityMismatch { .. })));
+        assert!(matches!(
+            store.get_catalog(&cx, schema.root).await,
+            Err(StoreError::IdentityMismatch { .. })
+        ));
     });
 }

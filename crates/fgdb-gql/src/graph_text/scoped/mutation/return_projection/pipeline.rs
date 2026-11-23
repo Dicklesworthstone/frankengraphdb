@@ -2499,10 +2499,15 @@ impl<'a> Parser<'a> {
         &self,
         alias: Name<'a>,
     ) -> Result<(), GraphSetTextError> {
-        if self.call_scope.as_ref().is_some_and(|scope| {
-            scope.imports.iter().any(|name| name.text == alias.text)
-        }) {
-            return Err(expected(alias.at, "an imported CALL variable without redeclaration"));
+        if self
+            .call_scope
+            .as_ref()
+            .is_some_and(|scope| scope.imports.iter().any(|name| name.text == alias.text))
+        {
+            return Err(expected(
+                alias.at,
+                "an imported CALL variable without redeclaration",
+            ));
         }
         Ok(())
     }
@@ -2525,7 +2530,10 @@ impl<'a> Parser<'a> {
             if schema.iter().any(|(present, _)| present.text == name.text) {
                 continue;
             }
-            let column = scope.arguments.iter().position(|(argument, _)| argument.text == name.text)
+            let column = scope
+                .arguments
+                .iter()
+                .position(|(argument, _)| argument.text == name.text)
                 .ok_or_else(|| expected(at, "the current CALL argument frame"))?;
             imports.push(column);
         }
@@ -2540,10 +2548,17 @@ impl<'a> Parser<'a> {
         let width = schema.len();
         let insert_at = self.visible_width(schema);
         let inserted = imports.len();
-        let missing: Vec<_> = imports.iter().map(|&column| scope.arguments[column]).collect();
+        let missing: Vec<_> = imports
+            .iter()
+            .map(|&column| scope.arguments[column])
+            .collect();
         let stage = ReadStageTemplate::RestoreArguments {
             at,
-            columns: scope.arguments.iter().map(|(name, _)| name.text.to_owned()).collect(),
+            columns: scope
+                .arguments
+                .iter()
+                .map(|(name, _)| name.text.to_owned())
+                .collect(),
             types: scope.arguments.iter().map(|(_, kind)| *kind).collect(),
             imports,
             insert_at,
@@ -2558,10 +2573,22 @@ impl<'a> Parser<'a> {
         if let Some(boundary) = &mut self.boundary_reads
             && boundary.width == width
         {
-            boundary.reads.iter_mut().for_each(|read| shift(&mut read.2));
-            boundary.functions.iter_mut().for_each(|read| shift(&mut read.2));
-            boundary.grouped.iter_mut().for_each(|read| shift(&mut read.3));
-            boundary.scoped.iter_mut().for_each(|read| shift(&mut read.2));
+            boundary
+                .reads
+                .iter_mut()
+                .for_each(|read| shift(&mut read.2));
+            boundary
+                .functions
+                .iter_mut()
+                .for_each(|read| shift(&mut read.2));
+            boundary
+                .grouped
+                .iter_mut()
+                .for_each(|read| shift(&mut read.3));
+            boundary
+                .scoped
+                .iter_mut()
+                .for_each(|read| shift(&mut read.2));
             boundary.visible += inserted;
             boundary.width += inserted;
         }

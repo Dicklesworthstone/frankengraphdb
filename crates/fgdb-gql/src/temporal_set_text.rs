@@ -580,10 +580,7 @@ impl PreparedTemporalGraphSetText {
                 GraphTemporalSetTextErrorKind::UnexpectedArguments,
             ));
         }
-        Ok(BoundTemporalGraphSetQuery {
-            query,
-            as_of,
-        })
+        Ok(BoundTemporalGraphSetQuery { query, as_of })
     }
 }
 
@@ -635,14 +632,21 @@ mod tests {
     #[test]
     fn symbol_free_snapshot_selection_uses_the_temporal_parser() {
         let mut arguments = GqlParameters::new();
-        arguments.insert("cut", GqlParameterValue::UInt64(19)).unwrap();
-        arguments.insert("unused", GqlParameterValue::Int64(7)).unwrap();
+        arguments
+            .insert("cut", GqlParameterValue::UInt64(19))
+            .unwrap();
+        arguments
+            .insert("unused", GqlParameterValue::Int64(7))
+            .unwrap();
         for text in [
             "MATCH (n:Future) FOR SYSTEM_TIME AS OF SEQ 19 RETURN n",
             "MATCH (n:Future) /* FOR SYSTEM_TIME AS OF SEQ 999 */ FOR SYSTEM_TIME AS OF SEQ $cut UNWIND [1] AS x RETURN x",
             "MATCH (n:Future) FOR SYSTEM_TIME AS OF SEQ $cut CALL { WITH n RETURN n } RETURN n",
         ] {
-            assert_eq!(bind_graph_snapshot_selector(text, &arguments), Ok(Some(CommitSeq(19))));
+            assert_eq!(
+                bind_graph_snapshot_selector(text, &arguments),
+                Ok(Some(CommitSeq(19)))
+            );
         }
         for text in [
             "MATCH (n:Future) RETURN n",
@@ -661,10 +665,15 @@ mod tests {
         let offset = text.find("$cut").unwrap();
         assert_eq!(
             bind_graph_snapshot_selector(text, &GqlParameters::new()),
-            Err(fail(offset, GraphTemporalSetTextErrorKind::MissingParameter))
+            Err(fail(
+                offset,
+                GraphTemporalSetTextErrorKind::MissingParameter
+            ))
         );
         let mut arguments = GqlParameters::new();
-        arguments.insert("cut", GqlParameterValue::Int64(19)).unwrap();
+        arguments
+            .insert("cut", GqlParameterValue::Int64(19))
+            .unwrap();
         assert_eq!(
             bind_graph_snapshot_selector(text, &arguments),
             Err(fail(
@@ -679,7 +688,9 @@ mod tests {
             "MATCH (n) FOR SYSTEM_TIME AS OF RETURN n",
         ] {
             assert_eq!(
-                bind_graph_snapshot_selector(text, &arguments).unwrap_err().kind,
+                bind_graph_snapshot_selector(text, &arguments)
+                    .unwrap_err()
+                    .kind,
                 GraphTemporalSetTextErrorKind::MissingSystemTimeClause
             );
         }
@@ -688,7 +699,9 @@ mod tests {
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 18446744073709551616 RETURN n",
         ] {
             assert_eq!(
-                bind_graph_snapshot_selector(text, &arguments).unwrap_err().kind,
+                bind_graph_snapshot_selector(text, &arguments)
+                    .unwrap_err()
+                    .kind,
                 GraphTemporalSetTextErrorKind::InvalidSequenceSelector
             );
         }
@@ -696,12 +709,16 @@ mod tests {
             bind_graph_snapshot_selector(
                 "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 FOR SYSTEM_TIME AS OF SEQ 2 RETURN n",
                 &arguments,
-            ).unwrap_err().kind,
+            )
+            .unwrap_err()
+            .kind,
             GraphTemporalSetTextErrorKind::DuplicateSystemTimeClause
         );
         let oversized = " ".repeat(MAX_GRAPH_TEXT_BYTES + 1);
         assert_eq!(
-            bind_graph_snapshot_selector(&oversized, &arguments).unwrap_err().kind,
+            bind_graph_snapshot_selector(&oversized, &arguments)
+                .unwrap_err()
+                .kind,
             GraphTemporalSetTextErrorKind::Set(GraphSetTextErrorKind::Pattern(
                 GraphPatternTextErrorKind::DefinitionTooLarge,
             ))

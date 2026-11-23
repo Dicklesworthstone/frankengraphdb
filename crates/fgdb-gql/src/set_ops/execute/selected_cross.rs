@@ -55,11 +55,7 @@ pub fn scalar_to_vid(value: &GraphValue, text: bool) -> Option<fgdb_types::VId> 
     scalar_to_identity(value, text).map(fgdb_types::VId)
 }
 
-fn id_equality(
-    op: &GraphSetPredicateOp,
-    width: usize,
-    columns: Option<&[usize]>,
-) -> Option<IdKey> {
+fn id_equality(op: &GraphSetPredicateOp, width: usize, columns: Option<&[usize]>) -> Option<IdKey> {
     let (scalar, element, text) = match op {
         GraphSetPredicateOp::Compare {
             left: GraphSetOperand::Column(scalar),
@@ -293,8 +289,8 @@ fn compare_id_keys<E>(
             scalar_to_identity(&left.values()[a], text)
         }
         .expect("id_eligible checked left key");
-        let rhs =
-            right_element_identity(&right.values()[b], text).expect("id_eligible checked right key");
+        let rhs = right_element_identity(&right.values()[b], text)
+            .expect("id_eligible checked right key");
         let order = lhs.cmp(&rhs);
         if order != Ordering::Equal {
             return Ok(order);
@@ -640,8 +636,7 @@ impl Index {
                     *hint,
                     control,
                 )?;
-                let upper =
-                    boundary(row, right, &self.ordinals, &self.keys, true, lower, control)?;
+                let upper = boundary(row, right, &self.ordinals, &self.keys, true, lower, control)?;
                 *hint = lower;
                 Ok(lower..upper)
             } else {

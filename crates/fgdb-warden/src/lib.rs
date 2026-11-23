@@ -295,9 +295,9 @@ mod read_policy_tests {
         let token = authority
             .issue_at(&grant, 10_000)
             .expect("mint read token")
-            .attenuate(Restriction::DenyProperties(BTreeSet::from([PropertyKeyId(
-                2,
-            )])))
+            .attenuate(Restriction::DenyProperties(BTreeSet::from([
+                PropertyKeyId(2),
+            ])))
             .expect("attenuate denied property");
         let verified = authority
             .verify_at(&token, "main", 20_000)

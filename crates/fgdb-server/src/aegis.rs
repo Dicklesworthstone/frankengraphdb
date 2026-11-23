@@ -7,8 +7,8 @@
 //! barriers run through the real Aegis kernels.
 
 use fgdb_order::{
-    Committed, Configuration, Domain, Error as OrderError, Event, Limits, MemberId, PersistentState,
-    Role,
+    Committed, Configuration, Domain, Error as OrderError, Event, Limits, MemberId,
+    PersistentState, Role,
 };
 use fgdb_repl::driver::RaftPublisher;
 use fgdb_repl::replica::{ReadIndexId, ReadResolution, Replica, ReplicaError, ReplicaOutput};
@@ -71,8 +71,12 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
         limits: Limits,
         maximum_reads: usize,
     ) -> Result<Self, OrderError> {
-        let configuration =
-            Configuration::stable(domain, configuration_identity, [member], core::iter::empty())?;
+        let configuration = Configuration::stable(
+            domain,
+            configuration_identity,
+            [member],
+            core::iter::empty(),
+        )?;
         Ok(Self {
             replica: Replica::new(member, configuration, limits, maximum_reads)?,
         })
@@ -185,7 +189,10 @@ mod tests {
                 .read_index(&mut publisher)
                 .await
                 .expect("read_index");
-            assert_eq!(AegisReplicaCoordinator::ready_read_indices(&read_out), vec![2]);
+            assert_eq!(
+                AegisReplicaCoordinator::ready_read_indices(&read_out),
+                vec![2]
+            );
             assert!(publisher.publications() >= 2);
             assert_eq!(
                 coordinator
@@ -203,10 +210,7 @@ mod tests {
         let ok = limits
             .admit_frame_resources(u64::from(limits.max_frame_len), limits.max_window_bytes)
             .expect("exact frame and window bounds fit");
-        assert_eq!(
-            ok.vector().network_bytes,
-            u64::from(limits.max_frame_len)
-        );
+        assert_eq!(ok.vector().network_bytes, u64::from(limits.max_frame_len));
         assert_eq!(
             limits.admit_frame_resources(u64::from(limits.max_frame_len) + 1, 0),
             Err(crate::ResourceError::CeilingExceeded {

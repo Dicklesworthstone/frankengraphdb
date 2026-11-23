@@ -883,7 +883,8 @@ impl<'a> Parser<'a> {
     #[allow(clippy::type_complexity)]
     fn identity_row_correlation(
         &mut self,
-    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError> {
+    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError>
+    {
         if self.read_row_bindings.is_empty() {
             return Ok(None);
         }
@@ -927,35 +928,36 @@ impl<'a> Parser<'a> {
                     .iter()
                     .any(|binding| binding.text == word)
         };
-        let identity_call = |first: Token<'a>,
-                             lexer: &mut Lexer<'a>|
-         -> Result<Option<(Name<'a>, bool, Token<'a>)>, GraphPatternTextError> {
-            let TokenKind::Word(func) = first.kind else {
-                return Ok(None);
+        let identity_call =
+            |first: Token<'a>,
+             lexer: &mut Lexer<'a>|
+             -> Result<Option<(Name<'a>, bool, Token<'a>)>, GraphPatternTextError> {
+                let TokenKind::Word(func) = first.kind else {
+                    return Ok(None);
+                };
+                let text = if func.eq_ignore_ascii_case("id") {
+                    false
+                } else if func.eq_ignore_ascii_case("elementId") {
+                    true
+                } else {
+                    return Ok(None);
+                };
+                if lexer.next()?.kind != TokenKind::Punct(b'(') {
+                    return Ok(None);
+                }
+                let arg = lexer.next()?;
+                let TokenKind::Word(word) = arg.kind else {
+                    return Ok(None);
+                };
+                let Some(variable) = graph_element(word) else {
+                    return Ok(None);
+                };
+                if lexer.next()?.kind != TokenKind::Punct(b')') {
+                    return Ok(None);
+                }
+                let after = lexer.next()?;
+                Ok(Some((variable, text, after)))
             };
-            let text = if func.eq_ignore_ascii_case("id") {
-                false
-            } else if func.eq_ignore_ascii_case("elementId") {
-                true
-            } else {
-                return Ok(None);
-            };
-            if lexer.next()?.kind != TokenKind::Punct(b'(') {
-                return Ok(None);
-            }
-            let arg = lexer.next()?;
-            let TokenKind::Word(word) = arg.kind else {
-                return Ok(None);
-            };
-            let Some(variable) = graph_element(word) else {
-                return Ok(None);
-            };
-            if lexer.next()?.kind != TokenKind::Punct(b')') {
-                return Ok(None);
-            }
-            let after = lexer.next()?;
-            Ok(Some((variable, text, after)))
-        };
         let atom_boundary = |token: Token<'a>, previous: Option<TokenKind<'a>>| -> bool {
             match token.kind {
                 TokenKind::End | TokenKind::Punct(b')' | b'}' | b']' | b'|') => true,
@@ -968,68 +970,72 @@ impl<'a> Parser<'a> {
                 _ => false,
             }
         };
-        let scan_imported = |start: Token<'a>,
-                             mut lexer: Lexer<'a>,
-                             until_eq: bool|
-         -> Result<Option<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
-            let mut token = start;
-            let mut depth = 0_usize;
-            let mut reads_row = false;
-            let mut after_dot = false;
-            let mut previous = None;
-            loop {
-                if depth == 0 {
-                    if until_eq {
-                        if token.kind == TokenKind::Punct(b'=') {
-                            let next = lexer.next()?;
-                            if matches!(next.kind, TokenKind::Punct(b'~' | b'=')) || !reads_row {
+        let scan_imported =
+            |start: Token<'a>,
+             mut lexer: Lexer<'a>,
+             until_eq: bool|
+             -> Result<Option<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
+                let mut token = start;
+                let mut depth = 0_usize;
+                let mut reads_row = false;
+                let mut after_dot = false;
+                let mut previous = None;
+                loop {
+                    if depth == 0 {
+                        if until_eq {
+                            if token.kind == TokenKind::Punct(b'=') {
+                                let next = lexer.next()?;
+                                if matches!(next.kind, TokenKind::Punct(b'~' | b'=')) || !reads_row
+                                {
+                                    return Ok(None);
+                                }
+                                return Ok(Some((next, lexer)));
+                            }
+                            if matches!(token.kind, TokenKind::Punct(b'!' | b'<' | b'>'))
+                                || atom_boundary(token, previous)
+                            {
                                 return Ok(None);
                             }
-                            return Ok(Some((next, lexer)));
-                        }
-                        if matches!(token.kind, TokenKind::Punct(b'!' | b'<' | b'>'))
-                            || atom_boundary(token, previous)
+                        } else if atom_boundary(token, previous) {
+                            return Ok(reads_row.then_some((token, lexer)));
+                        } else if matches!(token.kind, TokenKind::Punct(b'=' | b'!' | b'<' | b'>'))
                         {
                             return Ok(None);
                         }
-                    } else if atom_boundary(token, previous) {
-                        return Ok(reads_row.then_some((token, lexer)));
-                    } else if matches!(token.kind, TokenKind::Punct(b'=' | b'!' | b'<' | b'>')) {
-                        return Ok(None);
-                    }
-                    if let TokenKind::Word(word) = token.kind
-                        && !after_dot
-                        && ["IN", "IS", "STARTS", "ENDS", "CONTAINS", "BETWEEN", "NOT"]
-                            .iter()
-                            .any(|op| word.eq_ignore_ascii_case(op))
-                    {
-                        return Ok(None);
-                    }
-                }
-                match token.kind {
-                    TokenKind::End => return Ok(None),
-                    TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
-                    TokenKind::Punct(b')' | b']' | b'}') => {
-                        let Some(next) = depth.checked_sub(1) else {
+                        if let TokenKind::Word(word) = token.kind
+                            && !after_dot
+                            && ["IN", "IS", "STARTS", "ENDS", "CONTAINS", "BETWEEN", "NOT"]
+                                .iter()
+                                .any(|op| word.eq_ignore_ascii_case(op))
+                        {
                             return Ok(None);
-                        };
-                        depth = next;
-                    }
-                    TokenKind::Word(word) if !after_dot => {
-                        if !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(' | b':')) {
-                            if graph_any(word) {
-                                return Ok(None);
-                            }
-                            reads_row |= imported_word(word);
                         }
                     }
-                    _ => {}
+                    match token.kind {
+                        TokenKind::End => return Ok(None),
+                        TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                        TokenKind::Punct(b')' | b']' | b'}') => {
+                            let Some(next) = depth.checked_sub(1) else {
+                                return Ok(None);
+                            };
+                            depth = next;
+                        }
+                        TokenKind::Word(word) if !after_dot => {
+                            if !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(' | b':'))
+                            {
+                                if graph_any(word) {
+                                    return Ok(None);
+                                }
+                                reads_row |= imported_word(word);
+                            }
+                        }
+                        _ => {}
+                    }
+                    after_dot = token.kind == TokenKind::Punct(b'.');
+                    previous = Some(token.kind);
+                    token = lexer.next()?;
                 }
-                after_dot = token.kind == TokenKind::Punct(b'.');
-                previous = Some(token.kind);
-                token = lexer.next()?;
-            }
-        };
+            };
 
         let mut call_lex = self.lexer.clone();
         if let Some((variable, text, after)) = identity_call(self.current, &mut call_lex)?
@@ -1102,7 +1108,8 @@ impl<'a> Parser<'a> {
     #[allow(clippy::type_complexity)]
     fn computed_row_correlation(
         &mut self,
-    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError> {
+    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError>
+    {
         let at = self.current.at;
         let mut lexer = self.lexer.clone();
         let (
@@ -1152,7 +1159,8 @@ impl<'a> Parser<'a> {
     #[allow(clippy::type_complexity)]
     fn row_correlation(
         &mut self,
-    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError> {
+    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError>
+    {
         if let Some(correlation) = self.row_field_correlation()? {
             return Ok(Some(correlation));
         }
@@ -1235,7 +1243,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Word(_),
                 TokenKind::Punct(b'.'),
                 TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
-                ] => (row(name), false),
+            ] => (row(name), false),
             _ => (None, false),
         };
         let Some(row) = row else {

@@ -180,7 +180,8 @@ impl<'a> Parser<'a> {
     #[allow(clippy::type_complexity)]
     pub(super) fn row_field_correlation(
         &mut self,
-    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError> {
+    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError>
+    {
         if self.read_row_bindings.is_empty() {
             return Ok(None);
         }

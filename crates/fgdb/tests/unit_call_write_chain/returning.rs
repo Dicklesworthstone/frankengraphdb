@@ -1058,7 +1058,6 @@ fn returned_identity_metadata_masks_hidden_fields_and_keeps_authority_before_eff
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 #[test]
 fn scoped_write_call_imports_survive_projection_grouping_and_nested_bodies() {
     let ((), report) = run_async_under_lab(0xca11_1031, |root| async move {
@@ -1087,7 +1086,11 @@ fn scoped_write_call_imports_survive_projection_grouping_and_nested_bodies() {
                  CREATE (:Visible {p:coalesce(x,0)+one}) WITH 2 AS other \
                  RETURN x AS value } RETURN x,value",
                 vec!["x", "value"],
-                vec![vec![int(2), int(2)], vec![int(2), int(2)], vec![null.clone(), null]],
+                vec![
+                    vec![int(2), int(2)],
+                    vec![int(2), int(2)],
+                    vec![null.clone(), null],
+                ],
                 vec![1, 3, 3],
             ),
             (
@@ -1226,7 +1229,9 @@ fn restored_write_call_identities_read_staged_properties_and_export_writable_typ
         assert_eq!(db.delta_since(basis).unwrap().count(), 1);
         assert!(pinned.vertices().unwrap().is_empty());
         drop(db);
-        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(reopened.vertices().unwrap(), expected);
         assert_eq!(txn.outstanding_obligations(), 0);
     });

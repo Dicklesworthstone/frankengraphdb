@@ -570,14 +570,8 @@ fn explicit_read_host_limit_and_structured_selectors_abandon_all_result_owners()
             let mut client = connection(&server, read);
             let mut wire = io();
             client.begin(&root, &read_extra()).await.unwrap();
-            let prefix = stage_explicit(
-                &root,
-                &mut client,
-                &mut wire,
-                "RETURN 7 AS marker",
-                vec![],
-            )
-            .await;
+            let prefix =
+                stage_explicit(&root, &mut client, &mut wire, "RETURN 7 AS marker", vec![]).await;
             assert_eq!(prefix, 0);
             let query = match case {
                 0 => "RETURN 8 AS marker",
@@ -612,7 +606,10 @@ fn explicit_read_host_limit_and_structured_selectors_abandon_all_result_owners()
                 Request::Pull { n: -1, qid: prefix },
             )
             .await;
-            assert!(matches!(ignored.as_slice(), [Value::Struct { tag: 0x7e, .. }]));
+            assert!(matches!(
+                ignored.as_slice(),
+                [Value::Struct { tag: 0x7e, .. }]
+            ));
             assert_committed_vertices(&root, db, 1, 1).await;
             server.join_database_workers(&root).await;
         }

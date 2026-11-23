@@ -1588,12 +1588,12 @@ fn scalar_identity_correlations_seed_resident_matches_and_preserve_capability_re
                     fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(-1)),
                     fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Null),
                     fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(999)),
-                    fgdb_gql::algebra::GraphValue::Scalar(
-                        CanonicalScalar::Float(fgdb_types::CanonicalF64::new(2.0)),
-                    ),
-                    fgdb_gql::algebra::GraphValue::Scalar(
-                        CanonicalScalar::Float(fgdb_types::CanonicalF64::new(2.5)),
-                    ),
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Float(
+                        fgdb_types::CanonicalF64::new(2.0),
+                    )),
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Float(
+                        fgdb_types::CanonicalF64::new(2.5),
+                    )),
                 ],
             )
             .unwrap();
@@ -1709,11 +1709,19 @@ fn scalar_identity_correlations_seed_resident_matches_and_preserve_capability_re
             )
             .unwrap();
         for forbidden in [
-            ("UNWIND $ids AS id MATCH (n) WHERE id(n) = id RETURN n.x AS x", &ids_param),
-            ("UNWIND $eids AS eid MATCH (n) WHERE elementId(n) = eid RETURN n.x AS x", &eids_param),
+            (
+                "UNWIND $ids AS id MATCH (n) WHERE id(n) = id RETURN n.x AS x",
+                &ids_param,
+            ),
+            (
+                "UNWIND $eids AS eid MATCH (n) WHERE elementId(n) = eid RETURN n.x AS x",
+                &eids_param,
+            ),
         ] {
             assert!(
-                session.prepare(&c.query(), forbidden.0, forbidden.1).is_err(),
+                session
+                    .prepare(&c.query(), forbidden.0, forbidden.1)
+                    .is_err(),
                 "capability-scoped session must refuse identity correlation: {}",
                 forbidden.0
             );

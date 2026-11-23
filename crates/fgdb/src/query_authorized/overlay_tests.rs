@@ -560,7 +560,6 @@ fn indexed_overlay_membership_and_refused_attempts_survive_later_success() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 #[allow(clippy::too_many_arguments)]
 fn seeded_sparse(
     database: &Database<MemVfs>,
@@ -642,29 +641,49 @@ fn scoped_seeded_overlay_matches_full_rows_and_masks_hidden_transit_before_charg
                         let ids = [VId(root_id), VId(99), VId(999)];
                         let values = [CanonicalScalar::Int(property)];
                         let seeds = if property_seed {
-                            fgdb_gql::GraphSeeds::Property { key: P, values: &values }
+                            fgdb_gql::GraphSeeds::Property {
+                                key: P,
+                                values: &values,
+                            }
                         } else {
                             fgdb_gql::GraphSeeds::Identities(&ids)
                         };
                         let trace = Trace::default();
                         let result = seeded_sparse(
-                            &db, &transaction, &query, &pattern, seeds,
-                            verified.predicates(), policy(), &trace,
+                            &db,
+                            &transaction,
+                            &query,
+                            &pattern,
+                            seeds,
+                            verified.predicates(),
+                            policy(),
+                            &trace,
                         )
                         .unwrap();
                         let full = incumbent(
-                            &db, &transaction, &query, &pattern,
-                            verified.predicates(), policy(), &Trace::default(),
+                            &db,
+                            &transaction,
+                            &query,
+                            &pattern,
+                            verified.predicates(),
+                            policy(),
+                            &Trace::default(),
                         )
                         .unwrap();
-                        assert_eq!(result.value, full.value, "{text}, disposition {disposition}");
+                        assert_eq!(
+                            result.value, full.value,
+                            "{text}, disposition {disposition}"
+                        );
                         assert!(
                             result.rows.snapshot_records < full.rows.snapshot_records,
                             "unrelated visible vertices cannot join a seeded source",
                         );
                         let charged = trace.events.into_inner();
                         let signature = (
-                            result.value.clone(), result.rows, result.evaluator, charged.clone(),
+                            result.value.clone(),
+                            result.rows,
+                            result.evaluator,
+                            charged.clone(),
                         );
                         if hidden {
                             assert_eq!(Some(signature.clone()), clean, "{text}");
@@ -686,7 +705,11 @@ fn scoped_seeded_overlay_matches_full_rows_and_masks_hidden_transit_before_charg
                                 budget[at] -= 1;
                             }
                             let outcome = seeded_sparse(
-                                &db, &transaction, &query, &pattern, seeds,
+                                &db,
+                                &transaction,
+                                &query,
+                                &pattern,
+                                seeds,
                                 verified.predicates(),
                                 GqlQueryPolicy::new(budget[0], budget[1], budget[2], budget[3]),
                                 &Trace::default(),
@@ -697,10 +720,19 @@ fn scoped_seeded_overlay_matches_full_rows_and_masks_hidden_transit_before_charg
                         // body; neither an accepted prefix nor a new full-scan
                         // allowance may escape after the first refusal.
                         for stop in 1..=charged.len() {
-                            let trace = Trace { stop: Some(stop), ..Trace::default() };
+                            let trace = Trace {
+                                stop: Some(stop),
+                                ..Trace::default()
+                            };
                             let outcome = seeded_sparse(
-                                &db, &transaction, &query, &pattern, seeds,
-                                verified.predicates(), policy(), &trace,
+                                &db,
+                                &transaction,
+                                &query,
+                                &pattern,
+                                seeds,
+                                verified.predicates(),
+                                policy(),
+                                &trace,
                             );
                             assert!(matches!(outcome, Err(GqlQueryError::Interrupted(_))));
                             assert_eq!(*trace.events.borrow(), charged[..stop]);
@@ -745,28 +777,52 @@ fn scoped_seeded_observations_survive_empty_results_refusal_and_savepoint_rollba
             let seeds = if case >= 5 {
                 fgdb_gql::GraphSeeds::Identities(&ids)
             } else {
-                fgdb_gql::GraphSeeds::Property { key: P, values: &values }
+                fgdb_gql::GraphSeeds::Property {
+                    key: P,
+                    values: &values,
+                }
             };
             if case == 4 {
-                assert!(seeded_sparse(
-                    &db, &transaction, &query, &pattern, seeds, verified.predicates(),
-                    GqlQueryPolicy::new(0, 100, 100_000, 100_000), &Trace::default(),
-                ).is_err());
+                assert!(
+                    seeded_sparse(
+                        &db,
+                        &transaction,
+                        &query,
+                        &pattern,
+                        seeds,
+                        verified.predicates(),
+                        GqlQueryPolicy::new(0, 100, 100_000, 100_000),
+                        &Trace::default(),
+                    )
+                    .is_err()
+                );
             }
             let result = seeded_sparse(
-                &db, &transaction, &query, &pattern, seeds,
-                verified.predicates(), policy(), &Trace::default(),
+                &db,
+                &transaction,
+                &query,
+                &pattern,
+                seeds,
+                verified.predicates(),
+                policy(),
+                &Trace::default(),
             )
             .unwrap();
             if case == 5 {
                 assert!(result.value.is_empty());
             }
-            transaction.rollback_to_savepoint(&db, "before_seeded_read").unwrap();
+            transaction
+                .rollback_to_savepoint(&db, "before_seeded_read")
+                .unwrap();
             let mut concurrent = WriteBatch::new(R);
             match case {
-                0 | 4 => concurrent.set_vertex_property(VId(20), SECRET, Some(CanonicalScalar::Int(7))),
+                0 | 4 => {
+                    concurrent.set_vertex_property(VId(20), SECRET, Some(CanonicalScalar::Int(7)))
+                }
                 1 => concurrent.set_vertex_property(VId(20), P, Some(CanonicalScalar::Int(10))),
-                2 => concurrent.create_vertex(VId(30), vec![L], vec![(P, CanonicalScalar::Int(10))]),
+                2 => {
+                    concurrent.create_vertex(VId(30), vec![L], vec![(P, CanonicalScalar::Int(10))])
+                }
                 3 => concurrent.set_vertex_label(VId(99), L, true),
                 5 => concurrent.create_vertex(VId(777), vec![L], vec![]),
                 6 => concurrent.set_vertex_label(VId(20), L, false),
@@ -776,11 +832,15 @@ fn scoped_seeded_observations_survive_empty_results_refusal_and_savepoint_rollba
             db.write(&commit, concurrent).await.unwrap();
             let completion = transaction.commit(&mut db, &commit).await;
             if case == 0 {
-                assert!(completion.is_ok(), "unrelated field outside completed source: {completion:?}");
+                assert!(
+                    completion.is_ok(),
+                    "unrelated field outside completed source: {completion:?}"
+                );
             } else {
                 assert!(
-                    completion.as_ref().is_err_and(|error|
-                        format!("{error:?}").contains("FG-LAW-FCW-READ-01")),
+                    completion
+                        .as_ref()
+                        .is_err_and(|error| format!("{error:?}").contains("FG-LAW-FCW-READ-01")),
                     "case {case}: a point, membership, relation or refused-read witness was lost: {completion:?}",
                 );
             }

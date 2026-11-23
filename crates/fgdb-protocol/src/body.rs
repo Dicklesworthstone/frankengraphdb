@@ -380,7 +380,9 @@ impl WireValue {
             Self::Vertices(v) | Self::Edges(v) => admit_value_nodes(nodes, v.len()),
             Self::List(items) => {
                 check_len(items.len(), MAX_VALUE_NODES)?;
-                items.iter().try_for_each(|item| item.check(depth + 1, nodes))
+                items
+                    .iter()
+                    .try_for_each(|item| item.check(depth + 1, nodes))
             }
             Self::Map(entries) => {
                 check_len(entries.len(), MAX_VALUE_NODES)?;
@@ -2329,7 +2331,10 @@ mod tests {
     #[test]
     fn every_parameter_body_admits_exactly_one_shared_node_allowance() {
         let parameters = vec![
-            ("a".into(), WireValue::Vertices(vec![1; MAX_VALUE_NODES - 2])),
+            (
+                "a".into(),
+                WireValue::Vertices(vec![1; MAX_VALUE_NODES - 2]),
+            ),
             ("b".into(), WireValue::Null),
         ];
         let handle = PreparedHandle([7; 16]);
@@ -2548,8 +2553,14 @@ mod tests {
         let wide = vec![WireValue::Null; MAX_COLUMNS + 1];
         assert_eq!(ResultChunk::row_cost(&wide), Err(BodyError::TooLarge));
         assert_eq!(ResultChunk::row_len(&wide), Err(BodyError::TooLarge));
-        assert_eq!(SubscriptionBatch::entry_cost(&wide), Err(BodyError::TooLarge));
-        assert_eq!(SubscriptionBatch::entry_len(&wide), Err(BodyError::TooLarge));
+        assert_eq!(
+            SubscriptionBatch::entry_cost(&wide),
+            Err(BodyError::TooLarge)
+        );
+        assert_eq!(
+            SubscriptionBatch::entry_len(&wide),
+            Err(BodyError::TooLarge)
+        );
     }
 
     #[test]
@@ -3097,10 +3108,7 @@ mod tests {
             .encode(),
             Err(BodyError::Noncanonical)
         );
-        for (count, error) in [
-            (0, BodyError::Noncanonical),
-            (33, BodyError::TooLarge),
-        ] {
+        for (count, error) in [(0, BodyError::Noncanonical), (33, BodyError::TooLarge)] {
             let request = ExecutePreparedReadBatch {
                 handle,
                 argument_sets: vec![vec![]; count],

@@ -1,6 +1,7 @@
 //! Mask canonical native transaction rows before they enter the common GLA.
 //! This module does not apply mutations, interpret intentions or build history.
 
+use super::relational::seeded;
 use super::{
     AdmissionUsage, Database, Fault, GlaOutput, Governed, GqlQueryError, GqlQueryPolicy,
     GraphPatternFactorExecution, PlannerPredicates, PreparedGraphPattern,
@@ -8,7 +9,6 @@ use super::{
     execute_factor_tables, execute_tables,
 };
 use crate::write_txn::overlay_scan::{BoundOverlayCandidates, OverlayRows};
-use super::relational::seeded;
 
 impl<V: Vfs + Clone> seeded::Source for OverlayRows<'_, V> {
     fn vertex<C>(
@@ -46,9 +46,13 @@ impl<V: Vfs + Clone> seeded::Source for OverlayRows<'_, V> {
     where
         C: FnMut(super::SourceEvent) -> Result<(), Fault>,
     {
-        self.visit_seeded_incidence(near, relation, direction, scan, |identity, properties, scan| {
-            visit((identity, properties), scan)
-        })
+        self.visit_seeded_incidence(
+            near,
+            relation,
+            direction,
+            scan,
+            |identity, properties, scan| visit((identity, properties), scan),
+        )
         .ok_or(GqlQueryError::IdentifiedEdgesRequired)?
     }
 }
@@ -121,7 +125,8 @@ impl<V: Vfs + Clone> Database<V> {
                     tables.metadata(pattern.plan(), scope, &mut control)?;
                     (tables, observation)
                 };
-                let result = execute_tables(tables, pattern, scope, policy, usage, &mut checkpoint)?;
+                let result =
+                    execute_tables(tables, pattern, scope, policy, usage, &mut checkpoint)?;
                 overlay.accept_seeded_observation(observation);
                 return Ok(result);
             }

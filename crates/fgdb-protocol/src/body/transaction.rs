@@ -225,8 +225,20 @@ mod tests {
             &end,
         );
         for (tag, outcome) in [
-            (1, Outcome::WriteCommitted { seq: 10, statements: 2 }),
-            (2, Outcome::ReadClosed { seq: 10, statements: 2 }),
+            (
+                1,
+                Outcome::WriteCommitted {
+                    seq: 10,
+                    statements: 2,
+                },
+            ),
+            (
+                2,
+                Outcome::ReadClosed {
+                    seq: 10,
+                    statements: 2,
+                },
+            ),
         ] {
             let mut bytes = vec![7; 16];
             bytes.push(tag);
@@ -240,7 +252,10 @@ mod tests {
     fn transaction_selectors_modes_ordinals_and_completion_classes_fail_closed() {
         let handle = TransactionHandle([1; 16]);
         assert_eq!(
-            TransactionSelector { handle: TransactionHandle([0; 16]) }.encode(),
+            TransactionSelector {
+                handle: TransactionHandle([0; 16])
+            }
+            .encode(),
             Err(BodyError::Noncanonical)
         );
         assert_eq!(
@@ -256,28 +271,51 @@ mod tests {
             },
         };
         let mut bytes = statement.encode().unwrap();
-        for mode in [ExecuteMode::Subscribe, ExecuteMode::ReadStream, ExecuteMode::ReadOrdered] {
+        for mode in [
+            ExecuteMode::Subscribe,
+            ExecuteMode::ReadStream,
+            ExecuteMode::ReadOrdered,
+        ] {
             statement.statement.mode = mode;
             assert_eq!(statement.encode(), Err(BodyError::Noncanonical));
         }
         for tag in [2, 3, 4, 255] {
             bytes[16] = tag;
-            assert_eq!(ExecuteTransaction::decode(&bytes), Err(BodyError::Noncanonical));
+            assert_eq!(
+                ExecuteTransaction::decode(&bytes),
+                Err(BodyError::Noncanonical)
+            );
         }
         statement.statement.mode = ExecuteMode::Write;
-        statement.statement.parameters.push(("x".into(), WireValue::Int(2)));
+        statement
+            .statement
+            .parameters
+            .push(("x".into(), WireValue::Int(2)));
         assert_eq!(statement.encode(), Err(BodyError::Noncanonical));
-        let mut end = TransactionResultEnd { handle, statement: 1, rows: 0 };
+        let mut end = TransactionResultEnd {
+            handle,
+            statement: 1,
+            rows: 0,
+        };
         let mut bytes = end.encode().unwrap();
         bytes[16..24].fill(0);
-        assert_eq!(TransactionResultEnd::decode(&bytes), Err(BodyError::Noncanonical));
+        assert_eq!(
+            TransactionResultEnd::decode(&bytes),
+            Err(BodyError::Noncanonical)
+        );
         end.statement = 0;
         assert_eq!(end.encode(), Err(BodyError::Noncanonical));
-        let completion = TransactionCompletion { handle, outcome: Outcome::Rows { seq: 0 } };
+        let completion = TransactionCompletion {
+            handle,
+            outcome: Outcome::Rows { seq: 0 },
+        };
         assert_eq!(completion.encode(), Err(BodyError::Noncanonical));
         let mut bytes = vec![1; 16];
         bytes.extend_from_slice(&[0; 17]);
-        assert_eq!(TransactionCompletion::decode(&bytes), Err(BodyError::UnknownTag));
+        assert_eq!(
+            TransactionCompletion::decode(&bytes),
+            Err(BodyError::UnknownTag)
+        );
     }
 
     #[test]
@@ -288,7 +326,10 @@ mod tests {
                 mode: ExecuteMode::Write,
                 statement: "RETURN $a, $b".into(),
                 parameters: vec![
-                    ("a".into(), WireValue::Vertices(vec![1; MAX_VALUE_NODES - 2])),
+                    (
+                        "a".into(),
+                        WireValue::Vertices(vec![1; MAX_VALUE_NODES - 2]),
+                    ),
                     ("b".into(), WireValue::Null),
                 ],
             },

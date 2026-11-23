@@ -14,11 +14,7 @@ use std::collections::BTreeSet;
 /// own conflict observations before a callback can fail; no row copy or second
 /// mutation evaluator is introduced by this interface.
 pub(in crate::query::authorized) trait Source {
-    fn vertex<C>(
-        &self,
-        vid: VId,
-        scan: &mut C,
-    ) -> Result<Option<&VertexRow>, Fault>
+    fn vertex<C>(&self, vid: VId, scan: &mut C) -> Result<Option<&VertexRow>, Fault>
     where
         C: FnMut(SourceEvent) -> Result<(), Fault>;
 
@@ -50,11 +46,7 @@ struct SnapshotSource<'a> {
 }
 
 impl Source for SnapshotSource<'_> {
-    fn vertex<C>(
-        &self,
-        vid: VId,
-        scan: &mut C,
-    ) -> Result<Option<&VertexRow>, Fault>
+    fn vertex<C>(&self, vid: VId, scan: &mut C) -> Result<Option<&VertexRow>, Fault>
     where
         C: FnMut(SourceEvent) -> Result<(), Fault>,
     {
@@ -268,9 +260,7 @@ pub(in crate::query::authorized) fn admit_tables<'a>(
         }
         fgdb_gql::GraphSeeds::Property { key, values } => {
             source.property_candidates(key, values, scan, |seed, value, scan| {
-                if selected.property_vertex(
-                    source, seed, scope, key, value, node, scan, control,
-                )? {
+                if selected.property_vertex(source, seed, scope, key, value, node, scan, control)? {
                     retain(&mut roots, seed, control)?;
                 }
                 Ok(())
@@ -305,43 +295,35 @@ pub(in crate::query::authorized) fn admit_tables<'a>(
                 }
                 retain(&mut expanded, near, control)?;
                 control(SourceEvent::Work)?;
-                source.incidence(
-                    near,
-                    step.relation,
-                    step.direction,
-                    scan,
-                    |edge, scan| {
-                        let ((eid, src, relation, dst), _) = edge;
-                        if !step.relation.matches(relation)
-                            || !scope.allows_relation(relation)
-                        {
-                            return Ok(());
-                        }
-                        let far = match step.direction {
-                            GlaDirection::Forward => dst,
-                            GlaDirection::Reverse => src,
-                            GlaDirection::Undirected if src == near => dst,
-                            GlaDirection::Undirected => src,
-                        };
-                        if !selected.vertex(source, far, scope, node, scan, control)? {
-                            return Ok(());
-                        }
-                        // No hidden endpoint may connect two visible vertices,
-                        // consume a charged slot, or expose an edge payload.
-                        control(SourceEvent::Work)?;
-                        retain(&mut reached, far, control)?;
-                        if depth + 1 < maximum && !expanded.contains(&far) {
-                            retain(&mut next, far, control)?;
-                        }
-                        if let std::collections::btree_map::Entry::Vacant(slot) =
-                            selected.edges.entry(eid)
-                        {
-                            control(SourceEvent::ScratchEntry)?;
-                            slot.insert(edge);
-                        }
-                        Ok(())
-                    },
-                )?;
+                source.incidence(near, step.relation, step.direction, scan, |edge, scan| {
+                    let ((eid, src, relation, dst), _) = edge;
+                    if !step.relation.matches(relation) || !scope.allows_relation(relation) {
+                        return Ok(());
+                    }
+                    let far = match step.direction {
+                        GlaDirection::Forward => dst,
+                        GlaDirection::Reverse => src,
+                        GlaDirection::Undirected if src == near => dst,
+                        GlaDirection::Undirected => src,
+                    };
+                    if !selected.vertex(source, far, scope, node, scan, control)? {
+                        return Ok(());
+                    }
+                    // No hidden endpoint may connect two visible vertices,
+                    // consume a charged slot, or expose an edge payload.
+                    control(SourceEvent::Work)?;
+                    retain(&mut reached, far, control)?;
+                    if depth + 1 < maximum && !expanded.contains(&far) {
+                        retain(&mut next, far, control)?;
+                    }
+                    if let std::collections::btree_map::Entry::Vacant(slot) =
+                        selected.edges.entry(eid)
+                    {
+                        control(SourceEvent::ScratchEntry)?;
+                        slot.insert(edge);
+                    }
+                    Ok(())
+                })?;
             }
             frontier = next;
         }

@@ -5202,26 +5202,33 @@ pub(super) fn bind_stages(
                         offset: *at,
                         kind: GraphSetTextErrorKind::ProjectionBuild(kind),
                     })?;
-                let joined = input.cross_join(arguments).map_err(|kind| GraphSetTextError {
-                    offset: *at,
-                    kind: GraphSetTextErrorKind::SetBuild(kind),
-                })?;
+                let joined = input
+                    .cross_join(arguments)
+                    .map_err(|kind| GraphSetTextError {
+                        offset: *at,
+                        kind: GraphSetTextErrorKind::SetBuild(kind),
+                    })?;
                 // Keep private boundary columns behind the visible imports.
                 // Ordered projection preserves the body's explicit row order.
                 let projection = (0..*insert_at)
                     .map(|column| (names[column].clone(), column))
-                    .chain(imports.iter().enumerate().map(|(index, &column)| {
-                        (columns[column].clone(), width + index)
-                    }))
+                    .chain(
+                        imports
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &column)| (columns[column].clone(), width + index)),
+                    )
                     .chain((*insert_at..width).map(|column| (names[column].clone(), column)))
                     .map(|(name, column)| {
                         GraphSetProjection::new(name, GraphSetValue::Column(column))
                     })
                     .collect();
-                joined.project_ordered_output(projection).map_err(|kind| GraphSetTextError {
-                    offset: *at,
-                    kind: GraphSetTextErrorKind::ProjectionBuild(kind),
-                })?
+                joined
+                    .project_ordered_output(projection)
+                    .map_err(|kind| GraphSetTextError {
+                        offset: *at,
+                        kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                    })?
             }
             ReadStageTemplate::Aggregate { at, stage } => stage.bind(input, values, *at)?,
             // Only the CSV chain binder constructs this validated first

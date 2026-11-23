@@ -45,7 +45,10 @@ pub(super) fn has_declarations(options: &Options) -> bool {
 }
 
 fn check_expected(options: &Options, actual: CommitSeq) -> Result<(), Failure> {
-    if options.if_current.is_some_and(|expected| expected != actual.0) {
+    if options
+        .if_current
+        .is_some_and(|expected| expected != actual.0)
+    {
         return Err(Failure::coded(
             refusal::Code::Conflict,
             "the expected frontier is no longer current; no schema registration was executed",
@@ -125,10 +128,17 @@ pub(super) fn render_catalog(
             vec![
                 format!(r#"{{"type":"text","value":{}}}"#, super::quoted(kind)),
                 format!(r#"{{"type":"text","value":{}}}"#, super::quoted(name)),
-                format!(r#"{{"type":"{ordinal_type}","value":"{}"}}"#, symbol.ordinal()),
+                format!(
+                    r#"{{"type":"{ordinal_type}","value":"{}"}}"#,
+                    symbol.ordinal()
+                ),
             ]
         } else {
-            vec![kind.to_owned(), name.to_owned(), symbol.ordinal().to_string()]
+            vec![
+                kind.to_owned(),
+                name.to_owned(),
+                symbol.ordinal().to_string(),
+            ]
         });
     }
     super::render_rows(
@@ -165,10 +175,11 @@ pub(super) fn text_cut(
     parameters: &GqlParameters,
 ) -> Result<Option<CommitSeq>, Failure> {
     let lowered = GqlMapArgumentText::lower_fields(statement, parameters);
-    let (statement, parameters) = lowered.as_ref().map_or(
-        (statement, parameters),
-        |(text, parameters)| (text.text(), parameters),
-    );
+    let (statement, parameters) = lowered
+        .as_ref()
+        .map_or((statement, parameters), |(text, parameters)| {
+            (text.text(), parameters)
+        });
     bind_graph_snapshot_selector(statement, parameters).map_err(Failure::statement)
 }
 
@@ -267,7 +278,10 @@ pub(super) async fn discover(
 /// generation. Explicitly pinned sealed readers use their existing at-seq
 /// argument; other hosts check this before executing or emitting any rows.
 pub(super) fn check_frontier(options: &Options, actual: CommitSeq) -> Result<(), Failure> {
-    if options.catalog_frontier.is_some_and(|expected| expected != actual) {
+    if options
+        .catalog_frontier
+        .is_some_and(|expected| expected != actual)
+    {
         return Err(Failure::coded(
             refusal::Code::Conflict,
             "the database changed while binding its symbol catalog; retry the invocation",

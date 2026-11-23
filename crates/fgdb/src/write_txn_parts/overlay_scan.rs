@@ -430,9 +430,9 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
                 GlaDirection::Undirected => &[false, true],
             };
             for &incoming in directions {
-                for &(_, _, eid) in index.range(
-                    (near, incoming, EId(0))..=(near, incoming, EId(u128::MAX)),
-                ) {
+                for &(_, _, eid) in
+                    index.range((near, incoming, EId(0))..=(near, incoming, EId(u128::MAX)))
+                {
                     scan(SourceEvent::Work)?;
                     let row = replacements[&eid]
                         .as_ref()
