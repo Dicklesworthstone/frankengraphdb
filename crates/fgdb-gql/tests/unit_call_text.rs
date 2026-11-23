@@ -222,7 +222,7 @@ fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
                     retain(batch);
                     rows = Some(
                         output
-                            .finish_governed_reading(Lexical(arguments), || Ok(()))
+                            .finish_governed_reading(Lexical(arguments), || Ok::<(), ()>(()))
                             .unwrap_or_else(|error| panic!("output {text}: {error:?}"))
                             .value,
                     );

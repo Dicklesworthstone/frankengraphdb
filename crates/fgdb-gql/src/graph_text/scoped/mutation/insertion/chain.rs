@@ -765,12 +765,13 @@ impl PreparedGraphWriteChainText {
     /// Property keys, labels, aliases, map entries and STARTS/ENDS WITH are
     /// never clause boundaries.
     fn matched_write(mut lexer: Lexer<'_>) -> Result<Option<MatchedWrite>, GraphPatternTextError> {
-        const TERMINAL: [&str; 2] = ["RETURN", "UNION"];
         let mut depth = 0_usize;
         let mut row_stages = false;
         let mut multipart = false;
         let mut matched = false;
         let mut previous: Option<TokenKind<'_>> = None;
+        let mut before_previous = None;
+        let mut previous_delimited = false;
         loop {
             let token = script::next_script_token(&mut lexer)?;
             match token.kind {
@@ -864,7 +865,16 @@ impl PreparedGraphWriteChainText {
                             MatchedWrite::Mutation
                         }));
                     }
-                    if TERMINAL.iter().any(|read| word.eq_ignore_ascii_case(read)) {
+                    if word.eq_ignore_ascii_case("RETURN")
+                        || (word.eq_ignore_ascii_case("UNION")
+                            && Self::call_union_separator(
+                                token,
+                                previous,
+                                before_previous,
+                                previous_delimited,
+                                &lexer,
+                            )?)
+                    {
                         return Ok(None);
                     }
                     if word.eq_ignore_ascii_case("MATCH") {
@@ -883,7 +893,9 @@ impl PreparedGraphWriteChainText {
                 }
                 _ => {}
             }
+            before_previous = previous;
             previous = Some(token.kind);
+            previous_delimited = lexer.text.as_bytes().get(token.at) == Some(&b'`');
         }
     }
 

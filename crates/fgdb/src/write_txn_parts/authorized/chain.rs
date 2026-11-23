@@ -379,7 +379,7 @@ fn preflight_steps<Clock: FnMut() -> u64>(
         }
         if let Some(relation) = insertion.relational_selection() {
             relation
-                .admit_patterns(|pattern| {
+                .admit_patterns(&mut |pattern| {
                     execution.checkpoint()?;
                     admit_pattern(pattern, scope)
                 })

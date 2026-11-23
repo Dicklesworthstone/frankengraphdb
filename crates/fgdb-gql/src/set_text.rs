@@ -1696,7 +1696,10 @@ fn opens_pipeline(tokens: &[TextToken<'_>], at: usize) -> bool {
             || token.word("CALL")
             || token.word("RETURN")
             || token.word("WITH")
-            || (token.word("OPTIONAL") && tokens.get(at + 1).is_some_and(|next| next.word("MATCH")))
+            || (token.word("OPTIONAL")
+                && tokens
+                    .get(at + 1)
+                    .is_some_and(|next| next.word("MATCH") || next.word("CALL")))
     })
 }
 

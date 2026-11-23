@@ -3378,12 +3378,14 @@ impl<'a> Parser<'a> {
         let chain_write = self.chain_write;
         let at = self.current.at;
         let boundary = self.boundary_reads.clone();
+        let call_scope = self.call_scope.clone();
         let parameter_types = self.parameter_types.clone();
         let parameter_aliases = self.parameter_aliases.clone();
         let parameter_inference = self.parameter_inference.clone();
         let parse = |deferred: &[usize], implicit: &[usize]| -> Result<_, GraphSetTextError> {
-            let mut parser =
-                Self::new_with_parameter_types(statement, declarations)?.with_zones(zones.clone());
+            let mut parser = Self::new_with_parameter_types(statement, declarations)?
+                .with_zones(zones.clone())
+                .with_call_scope(call_scope.clone());
             parser.parameter_aliases.clone_from(&parameter_aliases);
             parser.parameter_inference.clone_from(&parameter_inference);
             if incoming.is_some() {

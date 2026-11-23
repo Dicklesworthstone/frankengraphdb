@@ -358,10 +358,13 @@ impl<'a> CallPreparation<'a> {
         resolve: &mut impl GraphSymbolResolver,
     ) -> Result<(), GraphWriteChainTextError> {
         let range = &self.ranges[self.arm];
+        // Each arm infers its own uses against the common prefix. finish_arm
+        // merges those constraints only after the arm has been prepared.
+        let prefix_parameters = &self.parser.syntax.parameters;
         let mut parser =
             Parser::new_with_parameter_types(&self.statement[..range.end], declarations)?
                 .with_zones(resolve.time_zones())
-                .resume_after(None, &self.parameters, range.start)?;
+                .resume_after(None, prefix_parameters, range.start)?;
         self.imports = if let Some(imports) = &self.scoped_imports {
             imports.clone()
         } else if parser.unit_call_legacy_imports(&self.outer)? {
@@ -390,7 +393,7 @@ impl<'a> CallPreparation<'a> {
             at: parser.current.at,
             row,
             boundary: None,
-            parameters: self.parameters.clone(),
+            parameters: prefix_parameters.clone(),
             call_scope,
         });
         Ok(())
@@ -898,7 +901,7 @@ impl PreparedGraphWriteChainText {
     /// Empty trailing/middle arms still count as separators so the structural
     /// scan refuses them before any catalog resolution. The native compiler
     /// subsequently validates each complete expression and clause sequence.
-    fn call_union_separator(
+    pub(super) fn call_union_separator(
         token: Token<'_>,
         previous: Option<TokenKind<'_>>,
         before_previous: Option<TokenKind<'_>>,
