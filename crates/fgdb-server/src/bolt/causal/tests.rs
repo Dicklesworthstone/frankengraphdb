@@ -329,17 +329,26 @@ fn a_later_commit_cannot_satisfy_a_bookmark_for_an_already_pinned_transaction() 
         let (server, token, _) = served(&root, "bolt-causal-fixed-transaction").await;
         let mut writer = connection(&server, token.clone());
         write_vertex(&root, &mut writer).await;
-        let mut reader = connection(&server, token);
-        reader.begin(&root, &read_extra(1)).await.unwrap();
-        assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(1));
+        let mut reader = connection(&server, token.clone());
+        let mut schema_reader = connection(&server, token.clone());
+        let mut wire_reader = connection(&server, token);
+        for client in [&mut reader, &mut schema_reader, &mut wire_reader] {
+            client.begin(&root, &read_extra(1)).await.unwrap();
+            assert_eq!(client.transaction.as_ref().unwrap().seq, CommitSeq(1));
+        }
         write_vertex(&root, &mut writer).await;
         reader
             .run(&root, "MATCH (n) RETURN 7 AS marker", &vec![], &vec![])
             .await
             .unwrap();
         assert_markers(&reader, 1);
-        reader.pull(&root, &mut io(), -1, true).await.unwrap();
-        let last_qid = reader.transaction.as_ref().unwrap().cursors.last_qid();
+        let qid = reader
+            .transaction
+            .as_ref()
+            .unwrap()
+            .cursors
+            .last_qid()
+            .unwrap();
         assert_eq!(
             reader
                 .run(&root, "MATCH (n) RETURN 7 AS marker", &vec![], &extra(2))
@@ -348,22 +357,28 @@ fn a_later_commit_cannot_satisfy_a_bookmark_for_an_already_pinned_transaction() 
                 .code,
             INVALID,
         );
-        assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(1));
-        assert_eq!(
-            reader.transaction.as_ref().unwrap().cursors.last_qid(),
-            last_qid
-        );
+        assert!(reader.transaction.is_none());
         assert!(reader.pending.is_none());
         assert_eq!(
             reader
+                .pull_selected(&root, &mut io(), -1, qid, false)
+                .await
+                .unwrap_err()
+                .code,
+            INVALID,
+        );
+        assert_eq!(
+            schema_reader
                 .run(&root, "CALL db.labels()", &vec![], &extra(2))
                 .await
                 .unwrap_err()
                 .code,
             INVALID,
         );
+        assert!(schema_reader.transaction.is_none());
+        assert!(schema_reader.pending.is_none());
         let mut wire = io();
-        reader
+        wire_reader
             .handle(
                 &root,
                 &mut wire,
@@ -374,16 +389,17 @@ fn a_later_commit_cannot_satisfy_a_bookmark_for_an_already_pinned_transaction() 
                 },
             )
             .await;
-        assert!(reader.failed);
-        assert!(reader.transaction.is_none());
-        assert!(reader.pending.is_none());
-        reader.handle(&root, &mut wire, Request::Reset).await;
-        reader.begin(&root, &read_extra(2)).await.unwrap();
-        reader
+        assert!(wire_reader.failed);
+        assert!(wire_reader.transaction.is_none());
+        assert!(wire_reader.pending.is_none());
+        wire_reader.handle(&root, &mut wire, Request::Reset).await;
+        assert!(!wire_reader.failed);
+        wire_reader.begin(&root, &read_extra(2)).await.unwrap();
+        wire_reader
             .run(&root, "MATCH (n) RETURN 7 AS marker", &vec![], &vec![])
             .await
             .unwrap();
-        assert_markers(&reader, 2);
+        assert_markers(&wire_reader, 2);
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");

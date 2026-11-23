@@ -136,13 +136,16 @@ the statement prefix.
 
 ## Current boundaries
 
-Explicit writer reads use the supported native graph/set and exact aggregate
-subset. Procedure hosts such as `CALL fnx.*`, hybrid retrieval, historical or
-branch selectors unsupported by that owner, and other unsupported syntax
-refuse and discard the entire staged prefix. They do not fall back to a
-committed-state reader or autocommit path. Explicit `mode: "r"` transactions
-retain the existing broader read-session behavior, including procedure reads
-over committed snapshots.
+Explicit writer reads use the native graph/set and exact aggregate subset.
+Supported `fnx.*` procedures, including PageRank, and `hybrid.search` read
+the authorized staged graph. A PULL can return a node created earlier in the
+transaction, with its staged labels and properties. ROLLBACK discards the
+creation even after the client has consumed that result.
+
+Unknown procedures, unsupported hybrid access profiles and unsupported
+historical or branch selectors refuse and discard the entire staged prefix.
+Explicit `mode: "r"` transactions execute procedure reads over their pinned
+committed snapshot.
 
 Durable ownership leases, reconnect/reattach, durable result delivery,
 impersonation and non-null `tx_timeout` are outside this extension. The

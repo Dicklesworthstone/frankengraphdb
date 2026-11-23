@@ -902,7 +902,7 @@ fn explicit_write_terminal_paths_discard_the_entire_unpublished_prefix() {
     let ((), report) = run_async_under_lab(0xb017_e002, |root| async move {
         let (server, token) = explicit_fixture(&root, "bolt-explicit-abandonment").await;
         let db = &server.databases["test"];
-        for terminal in 0..6 {
+        for terminal in 0..7 {
             let mut client = connection(&server, token.clone());
             let mut io = io();
             client.begin(&root, &extra()).await.unwrap();
@@ -932,6 +932,39 @@ fn explicit_write_terminal_paths_discard_the_entire_unpublished_prefix() {
                     assert_committed_vertices(&root, db, 0, 0).await;
                     continue;
                 }
+                5 => {
+                    let qid = stage_explicit(
+                        &root,
+                        &mut client,
+                        &mut io,
+                        "CALL fnx.pagerank() YIELD node RETURN node",
+                        vec![],
+                    )
+                    .await;
+                    let page =
+                        send(&root, &mut client, &mut io, Request::Pull { n: -1, qid }).await;
+                    let rows = records(&page);
+                    let [row] = rows.as_slice() else {
+                        panic!("expected the single staged vertex: {rows:?}");
+                    };
+                    let [Value::Struct { tag: 0x4e, fields }] = row.as_slice() else {
+                        panic!("expected a Bolt node: {row:?}");
+                    };
+                    assert_eq!(fields[1], Value::List(vec![Value::string("Visible")]));
+                    let Value::Map(properties) = &fields[2] else {
+                        panic!("expected staged node properties");
+                    };
+                    assert_eq!(get(properties, "p"), Some(&Value::Int(1)));
+                    let metadata = summary(&page, 0x70);
+                    assert_eq!(
+                        get(metadata, "fgdb_transaction_local"),
+                        Some(&Value::Bool(true))
+                    );
+                    assert!(get(metadata, "bookmark").is_none());
+                    assert_committed_vertices(&root, db, 0, 0).await;
+                    let rolled_back = send(&root, &mut client, &mut io, Request::Rollback).await;
+                    summary(&rolled_back, 0x70);
+                }
                 _ => {
                     let response = send(
                         &root,
@@ -940,9 +973,7 @@ fn explicit_write_terminal_paths_discard_the_entire_unpublished_prefix() {
                         Request::Run {
                             query: match terminal {
                                 4 => "MATCH (n) RETURN id(n)",
-                                // Algorithm procedures still have no staged
-                                // graph host and must never run as autocommit.
-                                _ => "CALL fnx.pagerank() YIELD node RETURN node",
+                                _ => "CALL fnx.nope() YIELD vertex RETURN vertex",
                             }
                             .into(),
                             parameters: vec![],
