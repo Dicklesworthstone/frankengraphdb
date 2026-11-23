@@ -78,6 +78,19 @@ impl<'a> Cursor<'a> {
         Ok(out)
     }
 
+    // A configured ceiling is not evidence that a count can be present in this
+    // frame. Check the minimum wire footprint before any count-sized reserve.
+    fn require_items(
+        &self,
+        count: usize,
+        minimum_bytes: usize,
+    ) -> Result<(), BeaconCheckpointError> {
+        if count > (self.bytes.len() - self.pos) / minimum_bytes {
+            return Err(BeaconCheckpointError::Malformed("truncated payload"));
+        }
+        Ok(())
+    }
+
     fn u8(&mut self) -> Result<u8, BeaconCheckpointError> {
         Ok(self.take(1)?[0])
     }
@@ -127,15 +140,25 @@ impl<'a> Cursor<'a> {
         Ok(f64::from_bits(self.u64()?))
     }
 
-    fn str_bounded(&mut self, max_bytes: usize) -> Result<String, BeaconCheckpointError> {
+    fn str_bounded(
+        &mut self,
+        max_bytes: usize,
+        work: &mut dyn WorkControl,
+    ) -> Result<String, BeaconCheckpointError> {
         let len = self.usize_checked()?;
         if len > max_bytes {
             return Err(BeaconCheckpointError::Malformed("string exceeds limit"));
         }
         let raw = self.take(len)?;
+        work.charge(len.max(1))?;
         let text = core::str::from_utf8(raw)
             .map_err(|_| BeaconCheckpointError::Malformed("invalid UTF-8 string"))?;
-        Ok(text.to_owned())
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(len)
+            .map_err(|_| BeaconError::AllocationFailed { requested: len })?;
+        owned.push_str(text);
+        Ok(owned)
     }
 
     fn finish(self) -> Result<(), BeaconCheckpointError> {
@@ -144,6 +167,26 @@ impl<'a> Cursor<'a> {
         }
         Ok(())
     }
+}
+
+fn decoded_vec<T>(count: usize) -> Result<Vec<T>, BeaconCheckpointError> {
+    let requested = count
+        .checked_mul(size_of::<T>())
+        .ok_or(BeaconCheckpointError::Malformed(
+            "decoded capacity overflow",
+        ))?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(count)
+        .map_err(|_| BeaconError::AllocationFailed { requested })?;
+    Ok(out)
+}
+
+// SimpleUnicodeV1 applies full Unicode lowercase. A source scalar occupies at
+// least one byte and its mapping has at most three scalars of up to four bytes
+// each. In particular, U+0130 grows from two input bytes to three analyzed bytes.
+// The frame and work allowance still bound the actual allocation independently.
+fn analyzed_term_bytes(source_bytes: usize) -> usize {
+    source_bytes.saturating_mul(12)
 }
 
 /// All output growth passes this boundary, including nested vectors, postings
@@ -367,8 +410,9 @@ fn decode_vector_arc(
         }
         .into());
     }
+    cur.require_items(len, size_of::<f32>())?;
     work.charge(len)?;
-    let mut vals = Vec::with_capacity(len);
+    let mut vals = decoded_vec(len)?;
     for _ in 0..len {
         vals.push(cur.f32()?);
     }
@@ -411,6 +455,11 @@ fn decode_analyzed_text(
         }
         .into());
     }
+    if length > source_bytes as u64 {
+        return Err(BeaconCheckpointError::Malformed(
+            "analyzed token length exceeds source bytes",
+        ));
+    }
     let term_count = cur.usize_checked()?;
     if term_count > cfg.max_document_terms {
         return Err(BeaconError::ResourceLimit {
@@ -419,18 +468,19 @@ fn decode_analyzed_text(
         }
         .into());
     }
-    let mut frequencies = BTreeMap::new();
-    let mut prev_term: Option<String> = None;
+    cur.require_items(term_count, 25)?;
+    let mut frequencies: BTreeMap<String, Arc<Vec<u64>>> = BTreeMap::new();
+    let mut seen_positions = BTreeSet::new();
     let mut total_positions = 0u64;
     for _ in 0..term_count {
         work.charge(1)?;
-        let term = cur.str_bounded(source_bytes)?;
+        let term = cur.str_bounded(analyzed_term_bytes(source_bytes), work)?;
         if term.is_empty() {
             return Err(BeaconCheckpointError::Malformed("empty analyzed term"));
         }
-        if prev_term
-            .as_deref()
-            .is_some_and(|prev| term.as_str() <= prev)
+        if frequencies
+            .last_key_value()
+            .is_some_and(|(prev, _)| term.as_str() <= prev.as_str())
         {
             return Err(BeaconCheckpointError::Malformed("unsorted analyzed terms"));
         }
@@ -440,12 +490,16 @@ fn decode_analyzed_text(
                 "invalid term position count",
             ));
         }
+        cur.require_items(pos_count, size_of::<u64>())?;
         work.charge(term.len().saturating_add(pos_count))?;
-        let mut positions = Vec::with_capacity(pos_count);
+        let mut positions = decoded_vec(pos_count)?;
         let mut prev_pos: Option<u64> = None;
         for _ in 0..pos_count {
             let pos = cur.u64()?;
-            if pos >= length || prev_pos.is_some_and(|prev| pos <= prev) {
+            if pos >= length
+                || prev_pos.is_some_and(|prev| pos <= prev)
+                || !seen_positions.insert(pos)
+            {
                 return Err(BeaconCheckpointError::Malformed("invalid token position"));
             }
             prev_pos = Some(pos);
@@ -454,7 +508,6 @@ fn decode_analyzed_text(
         total_positions = total_positions
             .checked_add(pos_count as u64)
             .ok_or(BeaconCheckpointError::Malformed("position sum overflow"))?;
-        prev_term = Some(term.clone());
         frequencies.insert(term, Arc::new(positions));
     }
     if total_positions != length {
@@ -663,6 +716,7 @@ impl BeaconIndex {
             }
             .into());
         }
+        cur.require_items(live_count, 26)?;
         let mut prev_vid: Option<VId> = None;
         for _ in 0..live_count {
             work.charge(1)?;
@@ -722,15 +776,21 @@ impl BeaconIndex {
             }
             .into());
         }
+        cur.require_items(segment_count, 25)?;
+        next.segments = decoded_vec(segment_count)?;
         let mut live_found_in_segment = BTreeSet::new();
+        let mut previous_segment_generation = None;
         for _ in 0..segment_count {
             work.charge(1)?;
             let seg_gen = cur.u64()?;
-            if seg_gen > sequence {
+            if seg_gen > sequence
+                || previous_segment_generation.is_some_and(|previous| seg_gen <= previous)
+            {
                 return Err(BeaconCheckpointError::Malformed(
-                    "segment generation exceeds index sequence",
+                    "segment generations are not strictly increasing within index sequence",
                 ));
             }
+            previous_segment_generation = Some(seg_gen);
             let has_vector = cur.bool()?;
             if has_vector != next.config.vector.is_some() {
                 return Err(BeaconCheckpointError::Malformed(
@@ -756,7 +816,8 @@ impl BeaconIndex {
                     }
                     .into());
                 }
-                let mut nodes = Vec::with_capacity(node_count);
+                cur.require_items(node_count, 32)?;
+                let mut nodes = decoded_vec::<Node>(node_count)?;
                 let mut prev_node_id: Option<VId> = None;
                 for slot in 0..node_count {
                     work.charge(1)?;
@@ -766,13 +827,27 @@ impl BeaconIndex {
                     }
                     prev_node_id = Some(id);
                     let (mut vec_arc, norm) = decode_vector_arc(&mut cur, vcfg, work)?;
-                    if let Some(live_doc) = next.live.get(&id)
-                        && live_doc.generation == seg_gen
-                        && let Some(live_vec) = &live_doc.document.vector
-                        && same_f32_bits(live_vec, &vec_arc)
-                    {
-                        vec_arc = Arc::clone(live_vec);
-                        live_found_in_segment.insert((id, true));
+                    if let Some(live_doc) = next.live.get(&id) {
+                        if live_doc.generation < seg_gen {
+                            return Err(BeaconCheckpointError::Malformed(
+                                "HNSW node is newer than its live document",
+                            ));
+                        }
+                        if live_doc.generation == seg_gen {
+                            work.charge(vec_arc.len().max(1))?;
+                            let Some(live_vec) = &live_doc.document.vector else {
+                                return Err(BeaconCheckpointError::Malformed(
+                                    "live HNSW node has no vector document",
+                                ));
+                            };
+                            if !same_f32_bits(live_vec, &vec_arc) {
+                                return Err(BeaconCheckpointError::Malformed(
+                                    "live HNSW node disagrees with vector document",
+                                ));
+                            }
+                            vec_arc = Arc::clone(live_vec);
+                            live_found_in_segment.insert((id, true));
+                        }
                     }
                     let layer_count = cur.usize_checked()?;
                     if !vcfg.links {
@@ -786,7 +861,8 @@ impl BeaconIndex {
                             "invalid HNSW node layer count",
                         ));
                     }
-                    let mut links = Vec::with_capacity(layer_count);
+                    cur.require_items(layer_count, size_of::<u64>())?;
+                    let mut links = decoded_vec(layer_count)?;
                     for layer in 0..layer_count {
                         let deg = cur.usize_checked()?;
                         let max_deg = if layer == 0 { 2 * vcfg.m } else { vcfg.m };
@@ -795,8 +871,9 @@ impl BeaconIndex {
                                 "HNSW layer degree exceeds configured bound",
                             ));
                         }
+                        cur.require_items(deg, size_of::<u64>())?;
                         work.charge(deg.max(1))?;
-                        let mut layer_links = Vec::with_capacity(deg);
+                        let mut layer_links = decoded_vec(deg)?;
                         let mut seen = BTreeSet::new();
                         for _ in 0..deg {
                             let nb = cur.usize_checked()?;
@@ -834,7 +911,9 @@ impl BeaconIndex {
                         ));
                     }
                     for node in &nodes {
+                        work.charge(1)?;
                         for (layer, layer_links) in node.links.iter().enumerate() {
+                            work.charge(layer_links.len().max(1))?;
                             for &nb in layer_links {
                                 if nodes[nb].links.len() <= layer {
                                     return Err(BeaconCheckpointError::Malformed(
@@ -870,6 +949,7 @@ impl BeaconIndex {
                 }
                 .into());
             }
+            cur.require_items(len_count, 24)?;
             let mut lengths = BTreeMap::new();
             let mut prev_len_vid: Option<VId> = None;
             for _ in 0..len_count {
@@ -882,12 +962,23 @@ impl BeaconIndex {
                 }
                 prev_len_vid = Some(vid);
                 let doc_len = cur.u64()?;
-                if let Some(live_doc) = next.live.get(&vid)
-                    && live_doc.generation == seg_gen
-                    && let Some(live_text) = &live_doc.document.text
-                    && live_text.length == doc_len
-                {
-                    live_found_in_segment.insert((vid, false));
+                if let Some(live_doc) = next.live.get(&vid) {
+                    if live_doc.generation < seg_gen {
+                        return Err(BeaconCheckpointError::Malformed(
+                            "text segment is newer than its live document",
+                        ));
+                    }
+                    if live_doc.generation == seg_gen
+                        && live_doc
+                            .document
+                            .text
+                            .as_ref()
+                            .is_none_or(|text| text.length != doc_len)
+                    {
+                        return Err(BeaconCheckpointError::Malformed(
+                            "live segment length disagrees with text document",
+                        ));
+                    }
                 }
                 lengths.insert(vid, doc_len);
             }
@@ -902,16 +993,16 @@ impl BeaconIndex {
                 .config
                 .text
                 .as_ref()
-                .map_or(0, |tcfg| tcfg.max_document_bytes);
+                .map_or(0, |tcfg| analyzed_term_bytes(tcfg.max_document_bytes));
+            cur.require_items(term_count, 49)?;
             let mut postings: BTreeMap<String, BTreeMap<VId, Arc<Vec<u64>>>> = BTreeMap::new();
-            let mut prev_term: Option<String> = None;
             for _ in 0..term_count {
                 work.charge(1)?;
-                let term = cur.str_bounded(max_term_bytes)?;
+                let term = cur.str_bounded(max_term_bytes, work)?;
                 if term.is_empty()
-                    || prev_term
-                        .as_deref()
-                        .is_some_and(|prev| term.as_str() <= prev)
+                    || postings
+                        .last_key_value()
+                        .is_some_and(|(prev, _)| term.as_str() <= prev.as_str())
                 {
                     return Err(BeaconCheckpointError::Malformed("invalid posting term"));
                 }
@@ -921,9 +1012,11 @@ impl BeaconIndex {
                         "invalid posting document count",
                     ));
                 }
+                cur.require_items(doc_count, 32)?;
                 let mut doc_map = BTreeMap::new();
                 let mut prev_doc_vid: Option<VId> = None;
                 for _ in 0..doc_count {
+                    work.charge(1)?;
                     let vid = VId(cur.u128()?);
                     if prev_doc_vid.is_some_and(|prev| vid <= prev) {
                         return Err(BeaconCheckpointError::Malformed(
@@ -942,8 +1035,9 @@ impl BeaconIndex {
                             "invalid segment posting position count",
                         ));
                     }
+                    cur.require_items(pos_count, size_of::<u64>())?;
                     work.charge(pos_count)?;
-                    let mut positions = Vec::with_capacity(pos_count);
+                    let mut positions = decoded_vec(pos_count)?;
                     let mut prev_pos: Option<u64> = None;
                     for _ in 0..pos_count {
                         let pos = cur.u64()?;
@@ -957,18 +1051,52 @@ impl BeaconIndex {
                     }
                     let pos_arc = if let Some(live_doc) = next.live.get(&vid)
                         && live_doc.generation == seg_gen
-                        && let Some(live_text) = &live_doc.document.text
-                        && let Some(live_pos) = live_text.frequencies.get(&term)
-                        && live_pos.as_slice() == positions.as_slice()
                     {
+                        work.charge(term.len().saturating_add(pos_count).max(1))?;
+                        let live_pos = live_doc
+                            .document
+                            .text
+                            .as_ref()
+                            .and_then(|text| text.frequencies.get(&term))
+                            .filter(|expected| expected.as_slice() == positions.as_slice())
+                            .ok_or(BeaconCheckpointError::Malformed(
+                                "live posting disagrees with analyzed document",
+                            ))?;
                         Arc::clone(live_pos)
                     } else {
                         Arc::new(positions)
                     };
                     doc_map.insert(vid, pos_arc);
                 }
-                prev_term = Some(term.clone());
                 postings.insert(term, doc_map);
+            }
+            // Length equality proves neither term coverage nor phrase/rank
+            // equivalence. Every live term must have its exact positional list
+            // in this same generation; the per-posting check above rejects
+            // additional live terms. Older segments may legitimately retain
+            // superseded documents and are not compared to the new live value.
+            for &vid in lengths.keys() {
+                work.charge(1)?;
+                let Some(live_doc) = next.live.get(&vid) else {
+                    continue;
+                };
+                if live_doc.generation != seg_gen {
+                    continue;
+                }
+                let live_text = live_doc.document.text.as_ref().expect("length admitted");
+                for (term, expected) in &live_text.frequencies {
+                    work.charge(term.len().saturating_add(expected.len()).max(1))?;
+                    if postings
+                        .get(term)
+                        .and_then(|documents| documents.get(&vid))
+                        .is_none_or(|positions| positions.as_slice() != expected.as_slice())
+                    {
+                        return Err(BeaconCheckpointError::Malformed(
+                            "live text term missing from its segment generation",
+                        ));
+                    }
+                }
+                live_found_in_segment.insert((vid, false));
             }
             next.segments.push(Arc::new(Segment {
                 generation: seg_gen,
@@ -979,6 +1107,7 @@ impl BeaconIndex {
 
         // Every live document lane must be represented in its named segment generation.
         for (&vid, live) in &next.live {
+            work.charge(1)?;
             if live.document.vector.is_some() && !live_found_in_segment.contains(&(vid, true)) {
                 return Err(BeaconCheckpointError::Malformed(
                     "live vector document missing from its segment generation",
@@ -1090,6 +1219,317 @@ mod tests {
             BeaconIndex::decode_checkpoint(&bytes[..bytes.len() - 3], &cfg, &mut work).unwrap_err(),
             BeaconCheckpointError::Malformed(_),
         ));
+    }
+
+    fn rejects_changed_generation(name: &str, edit: impl FnOnce(&mut Generation)) {
+        let (cfg, mut index) = checkpoint_fixture();
+        edit(Arc::get_mut(&mut index.current).unwrap());
+        // Use the real encoder so framing, ordering and counts remain valid.
+        // Only the relationship between live documents and segments is wrong.
+        let bytes = index
+            .encode_checkpoint(&mut WorkBudget::new(10_000_000))
+            .unwrap();
+        assert!(
+            matches!(
+                BeaconIndex::decode_checkpoint(&bytes, &cfg, &mut WorkBudget::new(10_000_000)),
+                Err(BeaconCheckpointError::Malformed(_))
+            ),
+            "accepted inconsistent checkpoint: {name}",
+        );
+    }
+
+    #[test]
+    fn live_text_postings_must_exactly_represent_the_analyzed_document() {
+        rejects_changed_generation("missing term", |generation| {
+            Arc::get_mut(&mut generation.segments[1])
+                .unwrap()
+                .text
+                .postings
+                .remove("hybrid");
+        });
+        rejects_changed_generation("missing every term of one live document", |generation| {
+            let postings = &mut Arc::get_mut(&mut generation.segments[1])
+                .unwrap()
+                .text
+                .postings;
+            for documents in postings.values_mut() {
+                documents.remove(&VId(3));
+            }
+            postings.retain(|_, documents| !documents.is_empty());
+        });
+        rejects_changed_generation("additional live term", |generation| {
+            Arc::get_mut(&mut generation.segments[1])
+                .unwrap()
+                .text
+                .postings
+                .insert(
+                    "unexpected".to_owned(),
+                    BTreeMap::from([(VId(3), Arc::new(vec![0]))]),
+                );
+        });
+        rejects_changed_generation("wrong term frequency", |generation| {
+            Arc::get_mut(&mut generation.segments[1])
+                .unwrap()
+                .text
+                .postings
+                .get_mut("alpha")
+                .unwrap()
+                .insert(VId(3), Arc::new(vec![0, 1]));
+        });
+        rejects_changed_generation("wrong phrase position", |generation| {
+            Arc::get_mut(&mut generation.segments[1])
+                .unwrap()
+                .text
+                .postings
+                .get_mut("alpha")
+                .unwrap()
+                .insert(VId(3), Arc::new(vec![1]));
+        });
+        rejects_changed_generation("two analyzed terms own one token position", |generation| {
+            let document = &mut generation.live.get_mut(&VId(3)).unwrap().document;
+            Arc::get_mut(document)
+                .unwrap()
+                .text
+                .as_mut()
+                .unwrap()
+                .frequencies
+                .insert("hybrid".to_owned(), Arc::new(vec![0]));
+        });
+    }
+
+    #[test]
+    fn segment_generations_and_live_lane_ownership_cannot_be_forged() {
+        rejects_changed_generation("duplicate generation", |generation| {
+            generation
+                .segments
+                .push(Arc::clone(&generation.segments[1]));
+        });
+        rejects_changed_generation("reversed generations", |generation| {
+            generation.segments.swap(0, 1);
+        });
+        rejects_changed_generation("extra current text lane", |generation| {
+            let document = &mut generation.live.get_mut(&VId(3)).unwrap().document;
+            Arc::get_mut(document).unwrap().text = None;
+        });
+        rejects_changed_generation("extra current vector lane", |generation| {
+            let document = &mut generation.live.get_mut(&VId(3)).unwrap().document;
+            Arc::get_mut(document).unwrap().vector = None;
+        });
+        rejects_changed_generation("segment newer than live document", |generation| {
+            generation.live.get_mut(&VId(1)).unwrap().generation = 1;
+        });
+    }
+
+    #[test]
+    fn stale_segments_restore_without_changing_text_scores_phrases_or_later_updates() {
+        let (cfg, mut index) = checkpoint_fixture();
+        let mut work = WorkBudget::new(10_000_000);
+        let bytes = index.encode_checkpoint(&mut work).unwrap();
+        let mut restored = BeaconIndex::decode_checkpoint(&bytes, &cfg, &mut work).unwrap();
+        // Vertex 1 has different text/vector values in the older segment.
+        // Those authentic stale values must remain legal and invisible.
+        for (query, mode, expected_ids) in [
+            ("beta", TextMatch::Any, vec![VId(2)]),
+            ("updated", TextMatch::Any, vec![VId(1)]),
+            ("alpha updated graph", TextMatch::Phrase, vec![VId(1)]),
+            ("alpha hybrid search", TextMatch::Phrase, vec![VId(3)]),
+            ("alpha beta graph", TextMatch::Phrase, Vec::new()),
+        ] {
+            let expected = index
+                .snapshot()
+                .text_search(query, 10, mode, |_| true, &mut work)
+                .unwrap();
+            assert_eq!(
+                expected.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+                expected_ids
+            );
+            assert_eq!(
+                restored
+                    .snapshot()
+                    .text_search(query, 10, mode, |_| true, &mut work)
+                    .unwrap(),
+                expected,
+            );
+        }
+        assert_eq!(restored.encode_checkpoint(&mut work).unwrap(), bytes);
+
+        let mutations = [
+            IndexMutation::Delete(VId(1)),
+            IndexMutation::Upsert(IndexDocument {
+                id: VId(3),
+                vector: None,
+                text: Some(String::new()),
+            }),
+            IndexMutation::Upsert(IndexDocument {
+                id: VId(4),
+                vector: Some(vec![0.0, 0.0, 1.0]),
+                text: Some("beta new graph".to_owned()),
+            }),
+        ];
+        index.apply_batch(mutations.clone(), &mut work).unwrap();
+        restored.apply_batch(mutations, &mut work).unwrap();
+        index.compact(&mut work).unwrap();
+        restored.compact(&mut work).unwrap();
+        assert_eq!(restored.snapshot().stats(), index.snapshot().stats());
+        assert_eq!(
+            restored.encode_checkpoint(&mut work).unwrap(),
+            index.encode_checkpoint(&mut work).unwrap(),
+        );
+        let final_bytes = restored.encode_checkpoint(&mut work).unwrap();
+        let final_index = BeaconIndex::decode_checkpoint(&final_bytes, &cfg, &mut work).unwrap();
+        assert_eq!(
+            final_index
+                .snapshot()
+                .text_search("beta new graph", 10, TextMatch::Phrase, |_| true, &mut work)
+                .unwrap(),
+            index
+                .snapshot()
+                .text_search("beta new graph", 10, TextMatch::Phrase, |_| true, &mut work)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn unicode_lowercase_expansion_roundtrips_at_the_exact_source_byte_limit() {
+        let cfg = IndexConfig {
+            text: Some(Bm25Config {
+                max_document_bytes: "İ".len(),
+                ..Bm25Config::default()
+            }),
+            ..IndexConfig::default()
+        };
+        let mut work = WorkBudget::new(10_000_000);
+        let index = BeaconIndex::build(
+            cfg.clone(),
+            [IndexDocument {
+                id: VId(7),
+                vector: None,
+                text: Some("İ".to_owned()),
+            }],
+            &mut work,
+        )
+        .unwrap();
+        let bytes = index.encode_checkpoint(&mut work).unwrap();
+        let restored = BeaconIndex::decode_checkpoint(&bytes, &cfg, &mut work).unwrap();
+        assert_eq!(restored.encode_checkpoint(&mut work).unwrap(), bytes);
+        let expected = index
+            .snapshot()
+            .text_search("İ", 1, TextMatch::Any, |_| true, &mut work)
+            .unwrap();
+        assert_eq!(expected.len(), 1);
+        assert_eq!(expected[0].id, VId(7));
+        assert_eq!(
+            restored
+                .snapshot()
+                .text_search("İ", 1, TextMatch::Any, |_| true, &mut work)
+                .unwrap(),
+            expected,
+        );
+    }
+
+    #[test]
+    fn forged_counts_are_rejected_before_count_sized_allocation() {
+        let mut vector_bytes = 65_536_u64.to_le_bytes().to_vec();
+        vector_bytes.extend_from_slice(&1_f32.to_le_bytes());
+        let error = decode_vector_arc(
+            &mut Cursor::new(&vector_bytes),
+            &HnswConfig::new(65_536, DistanceMetric::SquaredEuclidean),
+            &mut WorkBudget::new(0),
+        )
+        .unwrap_err();
+        assert_eq!(error, BeaconCheckpointError::Malformed("truncated payload"));
+
+        let mut vector_cfg = HnswConfig::new(1, DistanceMetric::SquaredEuclidean).exact_only();
+        vector_cfg.max_vectors = usize::MAX;
+        let cfg = IndexConfig {
+            vector: Some(vector_cfg),
+            text: None,
+            ..IndexConfig::default()
+        };
+        let mut work = WorkBudget::new(10_000_000);
+        let index = BeaconIndex::build(
+            cfg.clone(),
+            [IndexDocument {
+                id: VId(1),
+                vector: None,
+                text: None,
+            }],
+            &mut work,
+        )
+        .unwrap();
+        let mut bytes = index.encode_checkpoint(&mut work).unwrap();
+        let mut cursor = Cursor::new(&bytes);
+        cursor.take(6).unwrap();
+        decode_index_config(&mut cursor).unwrap();
+        assert_eq!(cursor.u64().unwrap(), 1); // index sequence
+        assert_eq!(cursor.u64().unwrap(), 1); // live document count
+        cursor.take(24).unwrap(); // live identity and generation
+        assert!(!cursor.bool().unwrap());
+        assert!(!cursor.bool().unwrap());
+        assert_eq!(cursor.u64().unwrap(), 1); // segment count
+        assert_eq!(cursor.u64().unwrap(), 1); // segment generation
+        assert!(cursor.bool().unwrap()); // HNSW lane
+        assert!(!cursor.bool().unwrap()); // no entry in the empty HNSW
+        assert_eq!(cursor.u64().unwrap(), 0); // top level
+        let node_count_at = cursor.pos;
+        assert_eq!(cursor.u64().unwrap(), 0);
+        bytes[node_count_at..node_count_at + 8].copy_from_slice(&(usize::MAX as u64).to_le_bytes());
+        assert_eq!(
+            BeaconIndex::decode_checkpoint(&bytes, &cfg, &mut work).unwrap_err(),
+            BeaconCheckpointError::Malformed("truncated payload"),
+        );
+    }
+
+    #[test]
+    fn every_decode_cancellation_and_truncated_prefix_refuses_without_a_generation() {
+        struct Stop {
+            calls: usize,
+            at: usize,
+        }
+        impl WorkControl for Stop {
+            fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
+                self.calls += 1;
+                if self.calls == self.at {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let (cfg, index) = checkpoint_fixture();
+        let mut work = WorkBudget::new(100_000_000);
+        let bytes = index.encode_checkpoint(&mut work).unwrap();
+        let mut complete = Stop {
+            calls: 0,
+            at: usize::MAX,
+        };
+        BeaconIndex::decode_checkpoint(&bytes, &cfg, &mut complete).unwrap();
+        assert!(complete.calls > 100);
+        for at in 1..=complete.calls {
+            let mut stop = Stop { calls: 0, at };
+            assert_eq!(
+                BeaconIndex::decode_checkpoint(&bytes, &cfg, &mut stop).unwrap_err(),
+                BeaconCheckpointError::Beacon(BeaconError::Cancelled),
+            );
+            assert_eq!(stop.calls, at);
+        }
+        for end in 0..bytes.len() {
+            assert!(
+                matches!(
+                    BeaconIndex::decode_checkpoint(&bytes[..end], &cfg, &mut work),
+                    Err(BeaconCheckpointError::Malformed(_))
+                ),
+                "accepted truncated checkpoint at {end}",
+            );
+        }
+        assert_eq!(index.encode_checkpoint(&mut work).unwrap(), bytes);
+        assert_eq!(
+            BeaconIndex::decode_checkpoint(&bytes, &cfg, &mut work)
+                .unwrap()
+                .encode_checkpoint(&mut work)
+                .unwrap(),
+            bytes,
+        );
     }
 
     #[test]
