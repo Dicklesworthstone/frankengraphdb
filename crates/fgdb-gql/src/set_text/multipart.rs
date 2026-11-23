@@ -434,46 +434,6 @@ fn inline_call_body(tokens: &[TextToken<'_>], call: usize) -> Option<(usize, boo
     Some((at, imports))
 }
 
-#[cfg(test)]
-mod normalization_tests {
-    use super::*;
-
-    #[test]
-    fn inline_call_row_prefixes_preserve_imported_match_filter_normalization() {
-        for prefix in ["WHERE score > 0", "ORDER BY score", "SKIP 0", "LIMIT 1"] {
-            let statement = format!(
-                "WITH 2 AS score CALL (score) {{ {prefix} \
-                 MATCH (n) WHERE n.p + score > 1 RETURN n }} RETURN n"
-            );
-            let tokens = PreparedGraphText::composition_tokens(&statement, &[]).unwrap();
-            let offset = statement.rfind("score > 1").unwrap();
-            assert_eq!(
-                continuation_where_at(&tokens, offset),
-                statement.rfind("WHERE"),
-                "{statement}"
-            );
-        }
-    }
-
-    #[test]
-    fn call_named_map_projections_do_not_hide_the_enclosing_where() {
-        for statement in [
-            "WITH {p:1} AS call,2 AS score MATCH (n) \
-             WHERE call {WITH:score} = {WITH:2} RETURN n",
-            "WITH {p:1} AS call,2 AS score CALL (call,score) { MATCH (n) \
-             WHERE call {MATCH:score} = {MATCH:2} RETURN n } RETURN n",
-        ] {
-            let tokens = PreparedGraphText::composition_tokens(statement, &[]).unwrap();
-            let offset = statement.rfind(":score").unwrap() + 1;
-            assert_eq!(
-                continuation_where_at(&tokens, offset),
-                statement.find("WHERE"),
-                "{statement}"
-            );
-        }
-    }
-}
-
 /// The offset of the WHERE keyword of a top-level required MATCH whose
 /// predicate contains byte `offset` and an existence predicate: `EXISTS`
 /// before `{` or `(`, or a node pattern's `)` before an edge introducer.
@@ -839,6 +799,46 @@ impl BoundReadInput {
                 }
             }
             part.input.append_template_transcript(bytes);
+        }
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+
+    #[test]
+    fn inline_call_row_prefixes_preserve_imported_match_filter_normalization() {
+        for prefix in ["WHERE score > 0", "ORDER BY score", "SKIP 0", "LIMIT 1"] {
+            let statement = format!(
+                "WITH 2 AS score CALL (score) {{ {prefix} \
+                 MATCH (n) WHERE n.p + score > 1 RETURN n }} RETURN n"
+            );
+            let tokens = PreparedGraphText::composition_tokens(&statement, &[]).unwrap();
+            let offset = statement.rfind("score > 1").unwrap();
+            assert_eq!(
+                continuation_where_at(&tokens, offset),
+                statement.rfind("WHERE"),
+                "{statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_named_map_projections_do_not_hide_the_enclosing_where() {
+        for statement in [
+            "WITH {p:1} AS call,2 AS score MATCH (n) \
+             WHERE call {WITH:score} = {WITH:2} RETURN n",
+            "WITH {p:1} AS call,2 AS score CALL (call,score) { MATCH (n) \
+             WHERE call {MATCH:score} = {MATCH:2} RETURN n } RETURN n",
+        ] {
+            let tokens = PreparedGraphText::composition_tokens(statement, &[]).unwrap();
+            let offset = statement.rfind(":score").unwrap() + 1;
+            assert_eq!(
+                continuation_where_at(&tokens, offset),
+                statement.find("WHERE"),
+                "{statement}"
+            );
         }
     }
 }

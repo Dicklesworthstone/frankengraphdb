@@ -1332,6 +1332,7 @@ fn prepared_definition_keeps_the_first_budget_and_expiry_refusal() {
                         clock,
                     )
                 }
+                .map_err(Box::new)
             };
 
             // Exercise every preparation boundary, including representative

@@ -129,8 +129,7 @@ fn mixed_read_refusals_and_output_errors_never_retry_or_complete_a_prefix() {
             let error = mixed_reads()
                 .execute(&root, &mut client, true, &mut out)
                 .await
-                .err()
-                .expect("batch refused");
+                .expect_err("batch refused");
             assert!(matches!(error.code, 3 | 5));
             assert!(out.bytes.is_empty());
             let frames = sent_frames(&written.lock().unwrap());
@@ -175,8 +174,7 @@ fn mixed_read_refusals_and_output_errors_never_retry_or_complete_a_prefix() {
             let error = mixed_reads()
                 .execute(&root, &mut client, true, &mut out)
                 .await
-                .err()
-                .expect("output failed");
+                .expect_err("output failed");
             assert_eq!(error.code, 5);
             assert!(
                 !String::from_utf8(out.bytes)
