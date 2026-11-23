@@ -239,21 +239,20 @@ impl WriteTxn {
     // The private checkpoint seam is shared verbatim by production and the
     // interruption/unwind tests. Authorized callers also use this STRICT seam:
     // their original-basis authorization never implicitly grants replay authority.
-    async fn complete_controlled<V: Vfs + Clone>(
+    fn complete_controlled<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
         cx: &CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
         require_write: bool,
         checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
-    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
-        self.complete_with_basis_controlled(database, cx, crash_at, require_write, None, checkpoint)
-            .await
+    ) -> impl Future<Output = Result<EmbeddedTxnCompletion, WriteTxnError>> {
+        self.complete_rebased_controlled(database, cx, crash_at, require_write, None, checkpoint)
     }
 
     // Explicit re-evaluation stays INSIDE the same terminal guard and BEFORE
     // ordinary validation/publication. Every existing caller retains its basis.
-    async fn complete_with_basis_controlled<V: Vfs + Clone>(
+    fn complete_with_basis_controlled<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
         cx: &CommitCx,
@@ -261,7 +260,7 @@ impl WriteTxn {
         require_write: bool,
         append_rebase: Option<u64>,
         checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
-    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
+    ) -> impl Future<Output = Result<EmbeddedTxnCompletion, WriteTxnError>> {
         self.complete_rebased_controlled(
             database,
             cx,
@@ -270,7 +269,6 @@ impl WriteTxn {
             append_rebase.map(RebasePreparation::Append),
             checkpoint,
         )
-        .await
     }
 
     // Every finalization policy shares this one owner guard, acceptance point

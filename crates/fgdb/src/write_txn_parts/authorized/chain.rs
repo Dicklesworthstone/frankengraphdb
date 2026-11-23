@@ -718,7 +718,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// Native unknown/recovery outcomes and the existing authorized insertion's
     /// durable-identity and security boundaries apply unchanged.
     #[allow(clippy::too_many_arguments)]
-    pub async fn execute_graph_write_chain_authorized(
+    pub fn execute_graph_write_chain_authorized(
         &mut self,
         txn_cx: &TxnCx,
         query_cx: &QueryCx,
@@ -729,7 +729,7 @@ impl<V: Vfs + Clone> Database<V> {
         chain: &PreparedGraphWriteChain,
         policy: GraphInsertPolicy,
         clock: impl FnMut() -> u64,
-    ) -> Result<Receipt, Fault> {
+    ) -> impl Future<Output = Result<Receipt, Fault>> {
         self.execute_graph_write_chain_authorized_checked(
             txn_cx,
             query_cx,
@@ -742,7 +742,6 @@ impl<V: Vfs + Clone> Database<V> {
             clock,
             |_, _, _| Ok(()),
         )
-        .await
     }
 
     /// Admit a host's final representation before the chain's sole commit.
@@ -751,7 +750,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// must buffer privately; any refusal aborts all staged effects. No
     /// fallible output conversion or authorization follows publication.
     #[allow(clippy::too_many_arguments)]
-    pub async fn execute_graph_write_chain_authorized_checked(
+    pub fn execute_graph_write_chain_authorized_checked(
         &mut self,
         txn_cx: &TxnCx,
         query_cx: &QueryCx,
@@ -767,12 +766,11 @@ impl<V: Vfs + Clone> Database<V> {
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
             &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
-    ) -> Result<Receipt, Fault> {
+    ) -> impl Future<Output = Result<Receipt, Fault>> {
         self.execute_graph_write_chain_authorized_with_read(
             txn_cx, query_cx, commit_cx, authority, token, branch, chain, None, policy, clock,
             admit,
         )
-        .await
     }
 
     /// Execute a returning write chain and a correlated read under one live

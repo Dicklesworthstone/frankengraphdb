@@ -361,7 +361,7 @@ impl<V: Vfs + Clone> Database<V> {
     // this exact preflight, dispatch and completion body. No second validation
     // allowance, workspace, graph writer or publication path is introduced.
     #[allow(clippy::too_many_arguments)]
-    async fn complete_authorized_program<Receipt, Clock: FnMut() -> u64>(
+    fn complete_authorized_program<Receipt, Clock: FnMut() -> u64>(
         &mut self,
         txn_cx: &TxnCx,
         query_cx: &QueryCx,
@@ -372,7 +372,7 @@ impl<V: Vfs + Clone> Database<V> {
         execution: &mut Execution<'_, '_, Clock>,
         returning: bool,
         receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> Receipt,
-    ) -> Result<(Receipt, EmbeddedTxnCompletion), Fault> {
+    ) -> impl Future<Output = Result<(Receipt, EmbeddedTxnCompletion), Fault>> {
         self.complete_authorized_program_with_output(
             txn_cx,
             query_cx,
@@ -385,7 +385,6 @@ impl<V: Vfs + Clone> Database<V> {
             |_, _, _, stats, steps| Ok(receipt(stats, steps)),
             core::convert::identity,
         )
-        .await
     }
 
     // Result construction may execute a governed query, but is always inside
