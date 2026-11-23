@@ -254,6 +254,38 @@ fn search_filtered(
 }
 
 impl ResidentIndex {
+    /// Bind only an already caught-up private candidate to its own admitted
+    /// current generation. No graph rows or graph topology come from checkpoint
+    /// bytes. Installation follows this constant-size pin and has its own final
+    /// cancellation checkpoint; a refused restore exposes neither the candidate
+    /// nor its graph source.
+    pub(crate) fn bind_restored_graph_source<V: Vfs + Clone>(
+        &mut self,
+        cx: &QueryCx,
+        database: &Database<V>,
+    ) -> Result<(), MaintainedBeaconError> {
+        cx.with_restriction(|| {
+            cx.checkpoint().map_err(Error::Interrupted)?;
+            if !self.belongs_to(database) {
+                return Err(Error::ForeignDatabase.into());
+            }
+            let current = database.frontier().map_err(Error::Source)?;
+            if self.source_sequence != current {
+                return Err(MaintainedBeaconError::Stale {
+                    source: self.source_sequence,
+                    current,
+                });
+            }
+            self.graph_source = Some(EmbeddedReadView {
+                snapshot: Arc::clone(&database.snapshot),
+                namespace: database.keys.namespace,
+                beacon_indexes: QueryIndexes::default(),
+                statement_clock: database.statement_clock.clone(),
+            });
+            Ok(())
+        })
+    }
+
     #[must_use]
     pub fn source_sequence(&self) -> CommitSeq {
         self.source_sequence

@@ -17,8 +17,12 @@ use fgdb::{
     MaintainedBeaconError, MemVfs, ResidentIndexError, StandingQueryError, StandingQueryFailure,
     WriteBatch,
 };
+use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
 use fgdb_beacon::read::{ReadOptions, ReadPolicy, Search};
-use fgdb_beacon::{BeaconError, DistanceMetric, HnswConfig, TextMatch, VectorSearch};
+use fgdb_beacon::{
+    BeaconError, DistanceMetric, ExactHybridQuery, ExactRrfProfile, GraphHybridQuery, HnswConfig,
+    TextMatch, VectorSearch,
+};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphSet,
@@ -59,6 +63,35 @@ fn beacon_options() -> BeaconOptions {
     options.projection.vector = vec![X];
     options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
     options
+}
+
+fn graph_request() -> GraphHybridQuery<'static> {
+    GraphHybridQuery {
+        retrieval: ExactHybridQuery {
+            vector: &[2.0],
+            text: "graph quantum",
+            boolean_text: None,
+            k: 16,
+            vector_candidates: 12,
+            text_candidates: 12,
+            vector_mode: VectorSearch::Exact,
+            text_mode: TextMatch::Any,
+            profile: ExactRrfProfile::new(60, 1, 1).unwrap(),
+        },
+        graph_candidates: 12,
+        graph_weight: 100,
+    }
+}
+
+fn graph_expansion() -> ExpansionSpec<'static, RelationId> {
+    ExpansionSpec {
+        seeds: &[VId(1)],
+        relation: Some(LINKS),
+        direction: ExpansionDirection::Outgoing,
+        max_hops: 4,
+        include_seeds: false,
+        limits: ExpansionLimits::default(),
+    }
 }
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -435,7 +468,7 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
         );
 
         let beacon_h = db
-            .register_beacon_index(&query, &beacon_options(), ReadPolicy::default())
+            .register_beacon_graph_index(&query, &beacon_options(), ReadPolicy::default())
             .unwrap();
         let reach_h = db
             .register_standing_reachability(&query, LINKS, rebuild_policy())
@@ -493,7 +526,7 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
             k: 6,
             mode: VectorSearch::Exact,
         };
-        let (expected_gql, expected_text_rows, expected_vec_rows, expected_pairs) = {
+        let (expected_gql, expected_text_rows, expected_vec_rows, expected_graph, expected_pairs) = {
             let mut fresh_ref =
                 Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
                     .await
@@ -510,6 +543,14 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
             let expected_vec_rows = fresh_ref
                 .beacon_search(&query, &beacon_options(), vec_req)
                 .unwrap();
+            let expected_graph = fresh_ref
+                .beacon_search_graph_indexed(
+                    &query,
+                    &beacon_options(),
+                    graph_request(),
+                    graph_expansion(),
+                )
+                .unwrap();
             let expected_pairs: Vec<_> = fresh_ref
                 .standing_reachability(&query, &fresh_reach)
                 .unwrap()
@@ -521,6 +562,7 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
                 expected_gql,
                 expected_text_rows,
                 expected_vec_rows,
+                expected_graph,
                 expected_pairs,
             )
         };
@@ -554,12 +596,15 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
             max_staging_rows: 4,
             max_result_rows: 64,
         };
+        let mut restore_options = beacon_options();
+        restore_options.policy.max_staging_rows = 0;
+        restore_options.policy.max_source_scratch = 0;
         let (restored_beacon, beacon_outcome) = reopened
-            .load_or_rebuild_beacon_checkpoint(
+            .load_or_rebuild_beacon_graph_checkpoint(
                 &commit,
                 &query,
                 "doc_hybrid",
-                &beacon_options(),
+                &restore_options,
                 delta_only_maintenance,
             )
             .await
@@ -575,6 +620,46 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
             },
         );
         assert_eq!(reopened.delta_index().unwrap(), &loaded_window);
+        let restored_pin = reopened
+            .beacon_index_snapshot(&query, &restored_beacon)
+            .unwrap();
+        assert!(restored_pin.has_graph_source());
+        let graph_search_policy = ReadPolicy {
+            max_staging_rows: 0,
+            ..ReadPolicy::default()
+        };
+        let graph_hits = restored_pin
+            .search_graph(
+                &query,
+                graph_request(),
+                graph_expansion(),
+                graph_search_policy,
+            )
+            .unwrap();
+        assert_eq!(graph_hits, expected_graph);
+        assert_eq!(
+            graph_hits
+                .iter()
+                .find(|hit| hit.id == VId(65))
+                .unwrap()
+                .graph_hops,
+            Some(2),
+        );
+        assert_eq!(
+            graph_hits
+                .iter()
+                .find(|hit| hit.id == VId(5))
+                .unwrap()
+                .graph_hops,
+            Some(3),
+        );
+        assert!(graph_hits.iter().all(|hit| hit.id != VId(10)));
+        assert!(
+            graph_hits
+                .iter()
+                .all(|hit| hit.id != VId(4) || hit.graph_hops.is_none()),
+            "the deleted edge must not survive in the restored graph lane",
+        );
 
         // Catch up Ripple reachability with max_snapshot_records = 0 (proves 0 Strata block scans!).
         let (restored_reach, reach_outcome) = reopened
@@ -650,6 +735,40 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
         let mut delta3 = WriteBatch::new(LINKS);
         delta3.add_edge(EId(108), VId(5), VId(4), vec![]);
         reopened.write(&commit, delta3).await.unwrap();
+        let current_pin = reopened
+            .beacon_index_snapshot(&query, &restored_beacon)
+            .unwrap();
+        assert_eq!(current_pin.source_sequence(), CommitSeq(4));
+        let current_graph = current_pin
+            .search_graph(
+                &query,
+                graph_request(),
+                graph_expansion(),
+                graph_search_policy,
+            )
+            .unwrap();
+        assert_eq!(
+            current_graph
+                .iter()
+                .find(|hit| hit.id == VId(4))
+                .unwrap()
+                .graph_hops,
+            Some(4),
+            "edge-only commits must advance the restored graph source",
+        );
+        assert_eq!(restored_pin.source_sequence(), s2);
+        assert_eq!(
+            restored_pin
+                .search_graph(
+                    &query,
+                    graph_request(),
+                    graph_expansion(),
+                    graph_search_policy
+                )
+                .unwrap(),
+            expected_graph,
+            "a caller's old pin must keep the pre-write graph and retrieval lanes",
+        );
         let post_write_pairs: Vec<_> = reopened
             .standing_reachability(&query, &restored_reach)
             .unwrap()
@@ -658,6 +777,248 @@ fn durable_watermarks_catch_up_in_o_delta_with_zero_full_scans_and_heal_raptorq_
             .map(|(&pair, _)| pair)
             .collect();
         assert!(post_write_pairs.contains(&(VId(1), VId(4))));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn graph_checkpoint_restore_at_head_reuses_two_lane_bytes_and_refuses_before_installation() {
+    let ((), report) = run_async_under_lab(0xc198_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let watermark = seed_base_graph(&commit, &mut db).await;
+        // The graph opt-in belongs to the host restore request. The saved
+        // search lanes need no graph-capability bit or new durable format.
+        let ordinary = db
+            .register_beacon_index(&query, &beacon_options(), ReadPolicy::default())
+            .unwrap();
+        db.save_beacon_checkpoint(&commit, &query, &ordinary, "graph_restore")
+            .await
+            .unwrap();
+        let checkpoint_path = vfs
+            .database_dir()
+            .join(db.beacon_checkpoint_relative_path("graph_restore"));
+        drop(db);
+
+        let mut reopened =
+            Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+                .await
+                .unwrap();
+        let mut no_build = beacon_options();
+        no_build.policy.max_staging_rows = 0;
+        no_build.policy.max_source_scratch = 0;
+        let search_policy = ReadPolicy {
+            max_staging_rows: 0,
+            ..ReadPolicy::default()
+        };
+        let (restored, outcome) = assert_send(reopened.load_or_rebuild_beacon_graph_checkpoint(
+            &commit,
+            &query,
+            "graph_restore",
+            &no_build,
+            ReadPolicy::default(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            DerivedCheckpointOutcome::CatchUp {
+                watermark_seq: watermark,
+                head_seq: watermark,
+                commits_replayed: 0,
+                touched_vertices: 0,
+                healed_by_raptorq: false,
+            },
+        );
+        let pinned = reopened.beacon_index_snapshot(&query, &restored).unwrap();
+        assert!(pinned.has_graph_source());
+        let initial = pinned
+            .search_graph(&query, graph_request(), graph_expansion(), search_policy)
+            .unwrap();
+        assert_eq!(
+            initial
+                .iter()
+                .find(|hit| hit.id == VId(5))
+                .unwrap()
+                .graph_hops,
+            Some(4),
+        );
+
+        let (ordinary, _) = reopened
+            .load_or_rebuild_beacon_checkpoint(
+                &commit,
+                &query,
+                "graph_restore",
+                &no_build,
+                ReadPolicy::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !reopened
+                .beacon_index_snapshot(&query, &ordinary)
+                .unwrap()
+                .has_graph_source()
+        );
+        let before_refusal = reopened.delta_index().unwrap().clone();
+        let mut denied_decode = no_build.clone();
+        denied_decode.policy.max_work_units = 0;
+        assert!(matches!(
+            reopened
+                .load_or_rebuild_beacon_graph_checkpoint(
+                    &commit,
+                    &query,
+                    "graph_restore",
+                    &denied_decode,
+                    ReadPolicy::default(),
+                )
+                .await,
+            Err(DerivedCheckpointError::Beacon(
+                MaintainedBeaconError::Resident(ResidentIndexError::Index(
+                    BeaconError::WorkBudgetExceeded
+                ))
+            ))
+        ));
+        assert_eq!(reopened.delta_index().unwrap(), &before_refusal);
+        assert_eq!(
+            reopened
+                .beacon_index_status(&query, &restored)
+                .unwrap()
+                .source_sequence,
+            watermark,
+        );
+
+        let mut delete = WriteBatch::new(LINKS);
+        delete.delete_edge(EId(104));
+        let head = reopened.write(&commit, delete).await.unwrap();
+        assert_eq!(head, CommitSeq(2));
+        let before_refusal = reopened.delta_index().unwrap().clone();
+        assert!(matches!(
+            reopened
+                .load_or_rebuild_beacon_graph_checkpoint(
+                    &commit,
+                    &query,
+                    "graph_restore",
+                    &no_build,
+                    ReadPolicy {
+                        max_work_units: 0,
+                        ..ReadPolicy::default()
+                    },
+                )
+                .await,
+            Err(DerivedCheckpointError::Beacon(
+                MaintainedBeaconError::Resident(ResidentIndexError::Index(
+                    BeaconError::WorkBudgetExceeded
+                ))
+            ))
+        ));
+        assert_eq!(reopened.delta_index().unwrap(), &before_refusal);
+        let (retried, outcome) = reopened
+            .load_or_rebuild_beacon_graph_checkpoint(
+                &commit,
+                &query,
+                "graph_restore",
+                &no_build,
+                ReadPolicy::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            DerivedCheckpointOutcome::CatchUp {
+                watermark_seq: watermark,
+                head_seq: head,
+                commits_replayed: 1,
+                touched_vertices: 0,
+                healed_by_raptorq: false,
+            },
+        );
+        let current = reopened
+            .beacon_index_snapshot(&query, &retried)
+            .unwrap()
+            .search_graph(&query, graph_request(), graph_expansion(), search_policy)
+            .unwrap();
+        let expected = reopened
+            .beacon_search_graph_indexed(
+                &query,
+                &beacon_options(),
+                graph_request(),
+                graph_expansion(),
+            )
+            .unwrap();
+        assert_eq!(current, expected);
+        assert_ne!(current, initial);
+        assert_eq!(
+            pinned
+                .search_graph(&query, graph_request(), graph_expansion(), search_policy)
+                .unwrap(),
+            initial,
+        );
+
+        // A damaged optional checkpoint cannot supply graph truth, and the
+        // rebuild must still pay the ordinary corpus admission budget.
+        vfs.write(&checkpoint_path, b"FGDCtruncated-corrupt")
+            .await
+            .unwrap();
+        assert!(
+            reopened
+                .load_or_rebuild_beacon_graph_checkpoint(
+                    &commit,
+                    &query,
+                    "graph_restore",
+                    &no_build,
+                    ReadPolicy::default(),
+                )
+                .await
+                .is_err(),
+        );
+        for (name, reason) in [
+            ("graph_restore", DerivedRebuildReason::CorruptOrIncompatible),
+            ("missing_graph", DerivedRebuildReason::Missing),
+        ] {
+            let (rebuilt, outcome) = reopened
+                .load_or_rebuild_beacon_graph_checkpoint(
+                    &commit,
+                    &query,
+                    name,
+                    &beacon_options(),
+                    ReadPolicy::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                DerivedCheckpointOutcome::RebuiltFromChronicle { reason }
+            );
+            let rebuilt = reopened.beacon_index_snapshot(&query, &rebuilt).unwrap();
+            assert!(rebuilt.has_graph_source());
+            assert_eq!(
+                rebuilt
+                    .search_graph(&query, graph_request(), graph_expansion(), search_policy)
+                    .unwrap(),
+                expected,
+            );
+        }
+        assert_eq!(reopened.delta_index().unwrap(), &before_refusal);
+        assert!(
+            reopened
+                .beacon_index_status(&query, &restored)
+                .unwrap()
+                .failure
+                .is_none()
+        );
+        assert!(
+            reopened
+                .beacon_index_status(&query, &retried)
+                .unwrap()
+                .failure
+                .is_none()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -511,6 +511,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// with other checkpoints and graph writes on this database handle.
     /// Plaintext encoding is admitted under the checkpoint byte ceiling before
     /// growing its output; an oversized index leaves any saved cache intact.
+    /// Graph-enabled registrations save the same retrieval-lane payload. Use
+    /// [`Self::load_or_rebuild_beacon_graph_checkpoint`] to bind a native graph
+    /// source again after restoring those lanes.
     pub async fn save_beacon_checkpoint(
         &mut self,
         cx: &CommitCx,
@@ -570,6 +573,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// or discard stale/corrupt derived bytes (`FG-INV-18`) and rebuild from
     /// Chronicle. Catch-up preserves the database's loaded history window.
     /// A damaged authoritative capsule is a terminal error, not a cache miss.
+    /// This restores text/vector retrieval only; graph retrieval is an explicit
+    /// opt-in through [`Self::load_or_rebuild_beacon_graph_checkpoint`].
     pub async fn load_or_rebuild_beacon_checkpoint(
         &mut self,
         cx: &CommitCx,
@@ -577,6 +582,60 @@ impl<V: Vfs + Clone> Database<V> {
         name: &str,
         options: &BeaconOptions,
         maintenance: ReadPolicy,
+    ) -> Result<(MaintainedBeaconIndex, DerivedCheckpointOutcome), DerivedCheckpointError> {
+        self.load_or_rebuild_beacon_checkpoint_internal(
+            cx,
+            query_cx,
+            name,
+            options,
+            maintenance,
+            false,
+        )
+        .await
+    }
+
+    /// Restore the same durable text/vector lanes together with a coherent
+    /// native graph source for graph/text/vector retrieval. The checkpoint
+    /// contains no graph authority: after complete authenticated catch-up, the
+    /// current admitted database generation supplies the graph pin at the
+    /// exact restored frontier. Edge-only ticks need no search-lane rebuild.
+    ///
+    /// Checkpoints saved from either registration kind can be used. Corrupt,
+    /// incompatible, or unavailable derived state rebuilds all requested lanes
+    /// through the ordinary graph-enabled registration path and its admission
+    /// policy. Caller cancellation, exhausted work, or authoritative-history
+    /// corruption installs no registration and never becomes a rebuild retry.
+    ///
+    /// This is the privileged host API, like `register_beacon_graph_index`;
+    /// retaining the graph pin grants no capability-scoped query authority.
+    /// It retains an admitted native snapshot, not a bounded graph projection.
+    pub async fn load_or_rebuild_beacon_graph_checkpoint(
+        &mut self,
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        name: &str,
+        options: &BeaconOptions,
+        maintenance: ReadPolicy,
+    ) -> Result<(MaintainedBeaconIndex, DerivedCheckpointOutcome), DerivedCheckpointError> {
+        self.load_or_rebuild_beacon_checkpoint_internal(
+            cx,
+            query_cx,
+            name,
+            options,
+            maintenance,
+            true,
+        )
+        .await
+    }
+
+    async fn load_or_rebuild_beacon_checkpoint_internal(
+        &mut self,
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        name: &str,
+        options: &BeaconOptions,
+        maintenance: ReadPolicy,
+        graph_enabled: bool,
     ) -> Result<(MaintainedBeaconIndex, DerivedCheckpointOutcome), DerivedCheckpointError> {
         if name.is_empty() {
             return Err(DerivedCheckpointError::EmptyName);
@@ -668,9 +727,20 @@ impl<V: Vfs + Clone> Database<V> {
                                                 )
                                             ) =>
                                     {
-                                        let rebuilt = self
-                                            .register_beacon_index(query_cx, options, maintenance)
-                                            .map_err(DerivedCheckpointError::Beacon)?;
+                                        let rebuilt = if graph_enabled {
+                                            self.register_beacon_graph_index(
+                                                query_cx,
+                                                options,
+                                                maintenance,
+                                            )
+                                        } else {
+                                            self.register_beacon_index(
+                                                query_cx,
+                                                options,
+                                                maintenance,
+                                            )
+                                        }
+                                        .map_err(DerivedCheckpointError::Beacon)?;
                                         return Ok((
                                             rebuilt,
                                             DerivedCheckpointOutcome::RebuiltFromChronicle {
@@ -684,6 +754,11 @@ impl<V: Vfs + Clone> Database<V> {
                                     Err(error) => return Err(error),
                                 }
                             };
+                            if graph_enabled {
+                                resident
+                                    .bind_restored_graph_source(query_cx, self)
+                                    .map_err(DerivedCheckpointError::Beacon)?;
+                            }
                             let handle = self
                                 .install_restored_beacon_index(
                                     query_cx,
@@ -708,9 +783,12 @@ impl<V: Vfs + Clone> Database<V> {
             },
         };
 
-        let rebuilt = self
-            .register_beacon_index(query_cx, options, maintenance)
-            .map_err(DerivedCheckpointError::Beacon)?;
+        let rebuilt = if graph_enabled {
+            self.register_beacon_graph_index(query_cx, options, maintenance)
+        } else {
+            self.register_beacon_index(query_cx, options, maintenance)
+        }
+        .map_err(DerivedCheckpointError::Beacon)?;
         Ok((
             rebuilt,
             DerivedCheckpointOutcome::RebuiltFromChronicle {
