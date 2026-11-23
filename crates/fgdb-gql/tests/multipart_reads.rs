@@ -1363,6 +1363,114 @@ fn inline_call_bodies_aggregate_once_per_outer_row() {
 }
 
 #[test]
+fn inline_call_match_filters_read_imported_scalars_before_aggregation() {
+    // The predicate begins with an imported scalar, not a graph binding.
+    // NULL thresholds reject every witness; duplicate outer rows and parallel
+    // edges retain their independent multiplicities.
+    let expected: Vec<_> = (1..=4)
+        .flat_map(|id| {
+            [None, Some(0), Some(1), Some(1)].map(move |floor| {
+                let degree = match (id, floor) {
+                    (1, Some(0)) => 3,
+                    (2, Some(_)) => 1,
+                    _ => 0,
+                };
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    GraphValue::Scalar(floor.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
+                    GraphValue::Scalar(CanonicalScalar::Int(degree)),
+                ])
+            })
+        })
+        .collect();
+    for body in [
+        "CALL (n,score,floor) { MATCH (n)-[:R]->(m {p:2}) \
+         WHERE score > floor AND m <> n RETURN count(*) AS degree }",
+        "CALL { WITH n,score,floor MATCH (n)-[:R]->(m {p:2}) \
+         WHERE floor < score AND m <> n RETURN count(*) AS degree }",
+        "CALL (n,score,floor) { CALL (floor,n,score) { \
+         MATCH (n)-[:R]->(m {p:2}) WHERE score > floor AND m <> n \
+         RETURN count(*) AS matched } RETURN matched AS degree }",
+    ] {
+        let text = format!(
+            "MATCH (n) UNWIND [NULL,0,1,1] AS floor WITH n,n.p AS score,floor \
+             {body} RETURN n,floor,degree ORDER BY n,floor NULLS FIRST"
+        );
+        // Vertex 3's neighbor has p=3, so the literal map filter removes that
+        // witness independently of the invocation's scalar predicate.
+        assert_eq!(execute(&text), expected, "{text}");
+    }
+    assert_eq!(
+        execute(
+            "CALL () { UNWIND [NULL,0,2,2] AS floor MATCH (n {p:2}) \
+             WHERE floor > 1 RETURN count(*) AS degree } RETURN degree"
+        ),
+        vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+            CanonicalScalar::Int(4),
+        )])]
+    );
+}
+
+#[test]
+fn inline_call_optional_match_filters_before_null_extension() {
+    let text = "MATCH (n) WITH n,n.p AS score CALL (n,score) { \
+                OPTIONAL MATCH (n)-[:R]->(m) WHERE score > 1 AND m <> n \
+                RETURN count(*) AS copies,count(m) AS degree } \
+                RETURN n,copies,degree ORDER BY n";
+    let expected: Vec<_> = [(1, 0), (2, 1), (3, 1), (4, 0)]
+        .into_iter()
+        .map(|(id, degree)| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(degree)),
+            ])
+        })
+        .collect();
+    assert_eq!(execute(text), expected);
+    // Returning the witness itself also pins the position of null extension:
+    // a false imported predicate must preserve each incoming owner.
+    assert_eq!(
+        execute(
+            "MATCH (n) WITH n,n.p AS score CALL (n,score) { \
+             OPTIONAL MATCH (n)-[:R]->(m) WHERE score > 9 RETURN m } \
+             RETURN n,m ORDER BY n"
+        ),
+        (1..=4)
+            .map(|id| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ]))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn inline_call_filter_retries_do_not_import_an_unlisted_name() {
+    for text in [
+        "MATCH (n) WITH n,n.p AS score CALL (n) { MATCH (n)-[:R]->(m) \
+         WHERE score > 1 RETURN count(*) AS degree } RETURN degree",
+        "MATCH (n) WITH n,n.p AS score CALL (n,score) { CALL (n) { \
+         MATCH (n)-[:R]->(m) WHERE score > 1 RETURN count(*) AS degree } \
+         RETURN degree } RETURN degree",
+        "MATCH (n) WITH n,n.p AS score CALL (n,score) { \
+         MATCH (n)-[:R]->(m) WHERE misspelled > 1 RETURN count(*) AS degree } \
+         RETURN degree",
+    ] {
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "scope refusal precedes catalog: {text}");
+    }
+}
+
+#[test]
 fn implicit_exists_bodies_keep_clause_boundaries_and_outer_occurrences() {
     let row = |id, present| {
         GraphValueRow::from_owned_values(vec![

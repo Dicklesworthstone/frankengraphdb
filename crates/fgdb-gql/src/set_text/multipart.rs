@@ -287,15 +287,16 @@ pub(crate) fn row_existence_offsets(tokens: &[TextToken<'_>]) -> Vec<usize> {
 }
 
 /// The offset of the WHERE keyword of a required MATCH over imported rows (a
-/// top-level MATCH after a top-level WITH, CALL or leading UNWIND, not OPTIONAL)
-/// whose predicate contains byte `offset`, if any. unresolved_read_input
+/// MATCH after a WITH, CALL or leading UNWIND, not OPTIONAL) whose predicate
+/// contains byte `offset`, if any. Scoped CALL bodies have their own imported
+/// row, so the same retry applies inside them. unresolved_read_input
 /// re-reads such a WHERE after an implicit `WITH *` when the graph predicate
 /// refused it.
 pub(crate) fn continuation_where_at(tokens: &[TextToken<'_>], offset: usize) -> Option<usize> {
     imported_where_at(tokens, offset, false)
 }
 
-/// A top-level OPTIONAL MATCH's refused WHERE, including a leading optional
+/// An OPTIONAL MATCH's refused WHERE, including a leading optional
 /// clause and one directly following another MATCH. An explicit WITH is not
 /// required: the composition retry already preserves those clause boundaries.
 /// Re-read the predicate inside an optional Apply, before null extension;
@@ -308,41 +309,107 @@ fn imported_where_at(tokens: &[TextToken<'_>], offset: usize, optional: bool) ->
     const CLAUSES: [&str; 9] = [
         "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP",
     ];
+    struct Scope {
+        depth: usize,
+        with: bool,
+        eligible: bool,
+        predicate: Option<usize>,
+    }
     let mut depth = 0_usize;
-    let mut with = tokens.first().is_some_and(|token| token.word("UNWIND"));
-    let mut eligible = false;
-    let mut predicate: Option<usize> = None;
+    let mut scope = Scope {
+        depth: 0,
+        with: tokens.first().is_some_and(|token| token.word("UNWIND")),
+        eligible: false,
+        predicate: None,
+    };
+    let mut outer = Vec::new();
+    let mut call_body = None;
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
+            TextKind::Punct(b'{') if call_body.is_some_and(|(body, _)| body == index) => {
+                let (_, imports) = call_body.take()?;
+                depth += 1;
+                outer.push(core::mem::replace(
+                    &mut scope,
+                    Scope {
+                        depth,
+                        with: imports
+                            || tokens
+                                .get(index + 1)
+                                .is_some_and(|next| next.word("UNWIND")),
+                        eligible: false,
+                        predicate: None,
+                    },
+                ));
+            }
+            TextKind::Punct(b'}') if depth == scope.depth && !outer.is_empty() => {
+                if let Some(at) = scope.predicate
+                    && (at..token.at).contains(&offset)
+                {
+                    return Some(at);
+                }
+                scope = outer.pop()?;
+                depth = depth.saturating_sub(1);
+            }
             TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
             TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
-            _ if depth == 0 => {
+            _ if depth == scope.depth => {
                 let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
-                if previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS")) {
+                if previous.is_some_and(|previous| {
+                    previous.punct(b'.') || previous.punct(b':') || previous.word("AS")
+                }) {
                     continue;
                 }
                 let operator = token.word("WITH")
                     && previous
                         .is_some_and(|previous| previous.word("STARTS") || previous.word("ENDS"));
                 if !operator && CLAUSES.iter().any(|clause| token.word(clause)) {
-                    if let Some(at) = predicate.take()
+                    if let Some(at) = scope.predicate.take()
                         && (at..token.at).contains(&offset)
                     {
                         return Some(at);
                     }
-                    eligible = (with || optional)
+                    scope.eligible = (scope.with || optional)
                         && token.word("MATCH")
                         && previous.is_some_and(|previous| previous.word("OPTIONAL")) == optional;
-                    with |= token.word("WITH") || token.word("CALL");
-                } else if eligible && token.word("WHERE") {
-                    predicate = Some(token.at);
-                    eligible = false;
+                    scope.with |= token.word("WITH") || token.word("CALL");
+                    if token.word("CALL") {
+                        call_body = inline_call_body(tokens, index);
+                    }
+                } else if scope.eligible && token.word("WHERE") {
+                    scope.predicate = Some(token.at);
+                    scope.eligible = false;
                 }
             }
             _ => {}
         }
     }
-    predicate.filter(|&at| at <= offset)
+    scope.predicate.filter(|&at| at <= offset)
+}
+
+/// Recognize only the delimiter of an inline CALL and whether its explicit
+/// scope imports a row. The native parser still validates names, scope and
+/// expressions. Named procedures and literal/map payloads do not introduce
+/// query frames in this fallback token walk.
+fn inline_call_body(tokens: &[TextToken<'_>], call: usize) -> Option<(usize, bool)> {
+    let mut at = call + 1;
+    let mut imports = false;
+    if tokens.get(at)?.punct(b'(') {
+        at += 1;
+        let start = at;
+        while matches!(
+            tokens.get(at)?.kind,
+            TextKind::Word(_) | TextKind::Punct(b',' | b'*')
+        ) {
+            at += 1;
+        }
+        if !tokens.get(at)?.punct(b')') {
+            return None;
+        }
+        imports = at != start;
+        at += 1;
+    }
+    tokens.get(at)?.punct(b'{').then_some((at, imports))
 }
 
 /// The offset of the WHERE keyword of a top-level required MATCH whose
