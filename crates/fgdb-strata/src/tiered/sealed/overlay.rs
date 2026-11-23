@@ -31,7 +31,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 type OverlayEntryRow = (AdjacencyEntry, Arc<EdgePropertyRow>);
-type BorrowedOverlayRow<'a> = (AdjacencyEntry, &'a [(PropertyKeyId, CanonicalPropertyValue)]);
+type BorrowedOverlayRow<'a> = (
+    AdjacencyEntry,
+    &'a [(PropertyKeyId, CanonicalPropertyValue)],
+);
 
 fn admit_delta_descriptor(
     rows: &BTreeMap<VId, Vec<OverlayEntryRow>>,

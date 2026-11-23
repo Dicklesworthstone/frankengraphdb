@@ -400,21 +400,13 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 )
                 .map_err(&map_native)?;
                 let admitted = transaction::admit_graph_output(
-                    view,
-                    at,
-                    scope,
-                    policy,
-                    execution,
-                    result,
-                    rows,
-                    output,
-                    &map_native,
+                    view, at, scope, policy, execution, result, rows, output, map_native,
                 )?;
                 // The shared output boundary already reserved the user rows.
                 // run_scoped performs final delivery and cache publication.
                 Ok(((admitted, at), 0))
             },
-            &map_native,
+            map_native,
             |_| terminal.get(),
         )
     }

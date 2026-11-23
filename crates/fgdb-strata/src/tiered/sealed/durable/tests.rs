@@ -233,10 +233,7 @@ fn post_seal_overlay_rejects_impossible_proof_horizons_before_materialization() 
     });
 }
 
-fn overlay_fixture(
-    cx: &QueryCx,
-    rows: Rows,
-) -> (AdjRunSegment, crate::store::PostSealBlocks) {
+fn overlay_fixture(cx: &QueryCx, rows: Rows) -> (AdjRunSegment, crate::store::PostSealBlocks) {
     let (partition, origins, _) = source(false);
     let mut base =
         AdjRunSegment::from_sealed(cx, &partition, &origins, SealedLimits::default()).unwrap();
@@ -375,7 +372,10 @@ fn post_seal_overlay_bounds_both_faces_and_future_retained_descriptors() {
                 },
             )
             .unwrap();
-            assert_eq!(exact.visible_delta_count(), if created == 5 { 3 } else { 0 });
+            assert_eq!(
+                exact.visible_delta_count(),
+                if created == 5 { 3 } else { 0 }
+            );
         }
     });
 }
@@ -445,17 +445,9 @@ fn post_seal_materialization_streams_families_with_cumulative_output_admission()
         let limits = SealedLimits::default();
         let (_, _, original) = source(false);
         let property = |value| vec![(PropertyKeyId(1), CanonicalScalar::Int(value).into())];
-        let mut later_retirement = original
-            .iter()
-            .find(|row| row.0.eid == EId(11))
-            .unwrap()
-            .0;
+        let mut later_retirement = original.iter().find(|row| row.0.eid == EId(11)).unwrap().0;
         later_retirement.retired_at = Some(CommitSeq(7));
-        let mut current_retirement = original
-            .iter()
-            .find(|row| row.0.eid == EId(12))
-            .unwrap()
-            .0;
+        let mut current_retirement = original.iter().find(|row| row.0.eid == EId(12)).unwrap().0;
         current_retirement.retired_at = Some(CommitSeq(5));
         let mut added = overlay_entry(100, 1, 3, 5);
         added.retired_at = Some(CommitSeq(6));
@@ -473,7 +465,11 @@ fn post_seal_materialization_streams_families_with_cumulative_output_admission()
         // including a base retirement after the cut and a future delta birth.
         let mut expected_rows: Rows = original
             .into_iter()
-            .filter(|(entry, _)| entry.retired_at.is_none_or(|retired| retired > CommitSeq(5)))
+            .filter(|(entry, _)| {
+                entry
+                    .retired_at
+                    .is_none_or(|retired| retired > CommitSeq(5))
+            })
             .filter(|(entry, _)| entry.eid != EId(12))
             .map(|(mut entry, row)| {
                 if entry.eid == EId(11) {
@@ -558,9 +554,7 @@ fn post_seal_materialization_streams_families_with_cumulative_output_admission()
             for src in [VId(1), VId(8), VId((1_u128 << 127) + 19)] {
                 let expected: Rows = expected_rows
                     .iter()
-                    .filter(|(entry, _)| {
-                        entry.src == src && entry.visible_at(CommitSeq(sequence))
-                    })
+                    .filter(|(entry, _)| entry.src == src && entry.visible_at(CommitSeq(sequence)))
                     .cloned()
                     .collect();
                 assert_eq!(collect(&cx, &materialized, src, sequence), expected);
