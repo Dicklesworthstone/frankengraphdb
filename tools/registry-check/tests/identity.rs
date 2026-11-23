@@ -10088,6 +10088,59 @@ fn undo_k3sa_rekey(identity: &mut IdentityRegistries) {
     }
 }
 
+fn schema_catalog_field(schema: &str, name: &str) -> bool {
+    match schema {
+        "PartitionManifest" => matches!(name, "schema_root" | "schema_epoch"),
+        "SchemaCatalog" => matches!(
+            name,
+            "graph" | "branch" | "epoch" | "changed_after" | "ordinal_floors" | "bindings"
+        ),
+        "SchemaTransition" => matches!(
+            name,
+            "graph"
+                | "branch"
+                | "apply_basis"
+                | "before_root"
+                | "before_epoch"
+                | "after_root"
+                | "after_epoch"
+        ),
+        _ => false,
+    }
+}
+
+#[test]
+fn catalog_additions_preserve_predecessor_kind_and_field_assignments() {
+    let mut prior = real_identity();
+    let kinds = prior.logical.len();
+    let fields = prior.fields.len();
+    prior.logical.retain(|kind| {
+        !matches!(
+            (kind.object_kind, kind.name.as_str()),
+            (0x042d, "SchemaTransition") | (0x058e, "SchemaCatalog")
+        )
+    });
+    prior
+        .fields
+        .retain(|field| !schema_catalog_field(&field.containing_schema, &field.stable_name));
+    assert_eq!(kinds - prior.logical.len(), 2);
+    assert_eq!(fields - prior.fields.len(), 15);
+    let pins = identity::assignment_pins(&prior);
+    for (name, predecessor) in [
+        ("logical_object_kinds", "fnv1a64:5f2865014be36732"),
+        ("durable_fields", "fnv1a64:267cabf2f21301e0"),
+    ] {
+        assert_eq!(
+            pins.iter()
+                .find(|pin| pin.registry == name)
+                .unwrap()
+                .actual_pin,
+            predecessor,
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn idr_assignment_history_and_epoch_are_frozen() {
     let r = real_identity();
@@ -12733,6 +12786,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a09_field(&field.containing_schema)
             && !post_erratum_ge6a_reachability_field(&field.containing_schema)
             && !post_erratum_adj_run_field(&field.containing_schema, &field.stable_name)
+            && !schema_catalog_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a16_inline_authority_headers(
                 &field.containing_schema,
                 &field.stable_name,
@@ -13119,7 +13173,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // already belong to post_erratum_ge6a_reachability_field. All1197
         // older rows are unchanged; epoch105->106 adds exactly these23rows.
         // The independent frozen width225 and historical hash stay unchanged.
-        pre_erratum.fields.len() + 995,
+        // Epoch 107 adds the fifteen named catalog and manifest fields.
+        pre_erratum.fields.len() + 1010,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
