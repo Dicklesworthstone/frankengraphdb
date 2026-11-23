@@ -437,6 +437,7 @@ run_core_gate() {
 # weaker mutation lands somewhere unchecked and reports a false pass). Do not add
 # a row here without doing the same. An unverified coverage claim is precisely the
 # defect this step exists to prevent, one level up.
+RETAINED_BEAD_IMPORT=".beads/fgdb-nbrog-import-source.jsonl"
 coverage_of() {
   case "$1" in
     *.rs)                                echo "cargo fmt/check/clippy/test" ;;
@@ -480,6 +481,7 @@ coverage_of() {
                                          echo "registry-check all (durable-state-slot schema, command-ref/writer bijection, active-sentinel refusal, exact plane-local field projections)" ;;
     registries/*.toml)                   echo "registry-check all" ;;
     .beads/issues.jsonl)                 echo "architecture-check (parses every record; malformed line fails file:line)" ;;
+    "$RETAINED_BEAD_IMPORT")             echo "file-coverage (retained import identity, provenance and original bytes)" ;;
     docs/ARCHITECTURE_DECISION_RECORD.md) echo "architecture-check (generated document)" ;;
     docs/THREAT_AND_TRUST_MODEL.md)      echo "threat-check (generated document)" ;;
     docs/WORKSPACE_TOPOLOGY.md)          echo "topology-check (generated document)" ;;
@@ -602,6 +604,27 @@ coverage_exempt_reason() {
       echo "" ;;
   esac
 }
+# b74792d3e retained the single record from fgdb_wt_b5b, including its
+# historical source_repo_path. The live issues.jsonl can change independently.
+check_retained_bead_import() {
+  local path="$RETAINED_BEAD_IMPORT" digest
+  if ! git ls-files --error-unmatch -- "$path" >/dev/null || [ ! -f "$path" ] || [ -L "$path" ]; then
+    printf 'ERROR: missing tracked regular import file %s\n' "$path" >&2
+    return 1
+  fi
+  if ! jq -es 'length == 1 and (.[0] | .id == "fgdb-nbrog"
+      and .source_repo == "fgdb_wt_b5b" and .source_repo_path == "/data/projects/frankengraphdb")' \
+      "$path" >/dev/null; then
+    printf 'ERROR: %s must contain the single original fgdb-nbrog record from fgdb_wt_b5b\n' "$path" >&2
+    return 1
+  fi
+  digest="$(sha256sum < "$path")" || return 1
+  if [ "${digest%% *}" != "d82a69a6010e6565f6653c2b89890568c0879b6841a2f9655ed8d9ecd7c152e1" ]; then
+    printf 'ERROR: %s bytes differ from the import preserved at b74792d3e\n' "$path" >&2
+    return 1
+  fi
+}
+
 run_file_coverage() {
   local covfile
   local covreason
@@ -638,6 +661,7 @@ run_file_coverage() {
     echo "  Refusing to report green over a file this gate never opened." >&2
     return 1
   fi
+  check_retained_bead_import || return 1
   echo "    coverage: $COV_TRACKED tracked = $COV_INSPECTED inspected + $COV_EXEMPT declared-not-inspected"
 }
 
@@ -3688,6 +3712,47 @@ tree_scope_control() {
   return 0
 }
 
+retained_import_coverage_fixture() (
+  local work="$1" path="$RETAINED_BEAD_IMPORT" original="$ROOT/$RETAINED_BEAD_IMPORT"
+  local blob mutation expected rc
+  mkdir -p "$work/.beads" || return 1
+  cd "$work" || return 1
+  unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+  git init -q || return 1
+  # Stage the real blob while its worktree path is still absent.
+  blob="$(git hash-object -w -- "$original")" || return 1
+  git update-index --add --cacheinfo "100644,$blob,$path" || return 1
+  for mutation in missing malformed wrong-id wrong-source duplicate altered-content valid unknown-file; do
+    expected='single original fgdb-nbrog record'
+    case "$mutation" in
+      missing)       expected='missing tracked regular import file' ;;
+      malformed)     printf '{\n' >"$path" || return 1 ;;
+      wrong-id)      jq -c '.id = "fgdb-other"' "$original" >"$path" || return 1 ;;
+      wrong-source)  jq -c '.source_repo = "other"' "$original" >"$path" || return 1 ;;
+      duplicate)     cat "$original" "$original" >"$path" || return 1 ;;
+      altered-content)
+        jq -c '.title = "substituted report"' "$original" >"$path" || return 1
+        expected='bytes differ from the import'
+        ;;
+      valid)         cp "$original" "$path" || return 1 ;;
+      unknown-file)
+        cp "$original" .beads/unknown-import.jsonl || return 1
+        git add -f -- .beads/unknown-import.jsonl || return 1
+        expected='    .beads/unknown-import.jsonl'
+        ;;
+    esac
+    rc=0
+    run_file_coverage >"$mutation.log" 2>&1 || rc=$?
+    if [ "$mutation" = valid ]; then
+      [ "$rc" -eq 0 ] || return 1
+    elif [ "$rc" -ne 1 ] || ! grep -Fq -- "$expected" "$mutation.log"; then
+      printf 'SELF-TEST RED: retained import %s returned %s, see %s/%s.log\n' \
+        "$mutation" "$rc" "$work" "$mutation" >&2
+      return 1
+    fi
+  done
+)
+
 run_mutation_self_test() {
   local work
   local fixture_root
@@ -3735,6 +3800,10 @@ run_mutation_self_test() {
   fi
   if ! studio_node_orchestration_fixture "$work/studio-node"; then
     echo "SELF-TEST RED: Studio Node orchestration lost pass/red/unrun or retried a deterministic prerequisite" >&2
+    return 1
+  fi
+  if ! retained_import_coverage_fixture "$work/retained-import"; then
+    echo "SELF-TEST RED: retained import file-coverage controls failed in $work/retained-import" >&2
     return 1
   fi
 
