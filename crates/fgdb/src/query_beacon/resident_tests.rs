@@ -95,6 +95,7 @@ fn reusable_generation_owns_its_definition_and_survives_writer_changes_and_drop(
         let hybrid = Search::Hybrid(ExactHybridQuery {
             vector: &[0.0, 0.0],
             text: "graph storage",
+            boolean_text: None,
             k: 10,
             vector_candidates: 10,
             text_candidates: 10,
@@ -829,6 +830,7 @@ fn maintained_automatic_reads_match_fresh_exact_corpus_after_commits_and_compact
             Search::Hybrid(ExactHybridQuery {
                 vector: &[0.0, 0.0],
                 text: "graph storage",
+                boolean_text: None,
                 k: 2,
                 vector_candidates: 2,
                 text_candidates: 2,
@@ -977,6 +979,7 @@ fn maintained_automatic_reads_fall_back_for_mismatch_history_ann_and_failed_tick
         let hybrid = Search::Hybrid(ExactHybridQuery {
             vector: &[0.0, 0.0],
             text: "graph storage",
+            boolean_text: None,
             k: 1,
             vector_candidates: 1,
             text_candidates: 1,

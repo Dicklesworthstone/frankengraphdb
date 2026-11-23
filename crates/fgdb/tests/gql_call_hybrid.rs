@@ -13,8 +13,8 @@ use fgdb::{
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, VectorEncoding};
 use fgdb_beacon::{
-    DistanceMetric, ExactHybridQuery, ExactRrfProfile, GraphHybridHit, GraphHybridQuery,
-    HnswConfig, IndexConfig, TextMatch, VectorSearch,
+    BooleanTextQuery, DistanceMetric, ExactHybridQuery, ExactRrfProfile, GraphHybridHit,
+    GraphHybridQuery, HnswConfig, IndexConfig, TextMatch, VectorSearch,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
@@ -266,6 +266,7 @@ fn query<'a>(
         retrieval: ExactHybridQuery {
             vector,
             text,
+            boolean_text: None,
             k,
             vector_candidates: if vector.is_empty() { 0 } else { candidates },
             text_candidates: if text.is_empty() { 0 } else { candidates },
@@ -1528,5 +1529,394 @@ fn registered_privileged_search_indexes_do_not_change_authorized_retrieval() {
             expected,
             "a maintained tick over hidden data cannot alter scoped scores or ranks"
         );
+    });
+}
+
+const BOOLEAN_CALL: &str = "CALL hybrid.search(text_required => $required, \
+    text_optional => $optional, text_excluded => $excluded, \
+    text_minimum_optional => $minimum, text_property => 'body', \
+    candidates => 10, k => 10) YIELD node, score, text_rank, text_score \
+    MATCH (node:Doc) RETURN node, node.title ORDER BY node";
+
+fn boolean_parameters(
+    required: &str,
+    optional: &str,
+    excluded: &str,
+    minimum: i64,
+) -> GqlParameters {
+    GqlParameters::new()
+        .with_text("required", required)
+        .unwrap()
+        .with_text("optional", optional)
+        .unwrap()
+        .with_text("excluded", excluded)
+        .unwrap()
+        .with_int64("minimum", minimum)
+        .unwrap()
+}
+
+#[test]
+fn boolean_retrieval_composes_with_native_parameters_and_property_reads() {
+    run(async |commit, cx| {
+        let db = open(commit, false).await;
+        for (required, optional, excluded, minimum, expected_ids) in [
+            (
+                "engine",
+                "analytical compilers",
+                "difference",
+                1,
+                vec![1, 4, 5],
+            ),
+            ("", "analytical compilers", "difference", 0, vec![1, 4, 5]),
+            ("engine", "analytical compilers", "difference", 2, vec![]),
+            ("engine", "", "engine", 0, vec![]),
+            ("", "", "difference", 0, vec![]),
+            (
+                "ENGINE engine",
+                "ANALYTICAL analytical",
+                "difference",
+                1,
+                vec![1, 4],
+            ),
+        ] {
+            let parameters = boolean_parameters(required, optional, excluded, minimum);
+            let (columns, result) = rows(
+                db.query(cx, BOOLEAN_CALL, &parameters, symbols, policy())
+                    .unwrap(),
+            );
+            assert_eq!(columns.len(), 2);
+            assert_eq!(
+                result.iter().map(|row| row[0].clone()).collect::<Vec<_>>(),
+                expected_ids
+                    .iter()
+                    .map(|id| GraphValue::Vertex(VId(*id)))
+                    .collect::<Vec<_>>(),
+            );
+            for (row, id) in result.iter().zip(expected_ids) {
+                let title = match id {
+                    1 => "Ada",
+                    4 => "Lovelace",
+                    5 => "Hopper",
+                    _ => unreachable!("literal expected membership"),
+                };
+                assert_eq!(row[1], GraphValue::Scalar(text(title)));
+            }
+        }
+    });
+}
+
+#[test]
+fn boolean_call_arguments_refuse_before_limit_and_keep_clause_values_private() {
+    run(async |commit, cx| {
+        let db = open(commit, false).await;
+        let private = "non_public_search_value_b5c9";
+        let parameters = GqlParameters::new().with_text("private", private).unwrap();
+        for (arguments, expected_argument) in [
+            (
+                "text_required => 7, text_optional => $private, text_property => 'body'",
+                Some("text_required"),
+            ),
+            (
+                "text_required => $private, text_optional => true, text_property => 'body'",
+                Some("text_optional"),
+            ),
+            (
+                "text_required => $private, text_excluded => [$private], text_property => 'body'",
+                Some("text_excluded"),
+            ),
+            (
+                "text_required => $private, text_minimum_optional => -1, text_property => 'body'",
+                Some("text_minimum_optional"),
+            ),
+            (
+                "text_required => $private, text_minimum_optional => 1.5, text_property => 'body'",
+                Some("text_minimum_optional"),
+            ),
+            (
+                "text_required => $private, text_minimum_optional => $private, text_property => 'body'",
+                Some("text_minimum_optional"),
+            ),
+            ("text_required => $private", None),
+            (
+                "text => $private, text_minimum_optional => 1, text_property => 'body'",
+                None,
+            ),
+            (
+                "text_required => $private, text => $private, text_property => 'body'",
+                None,
+            ),
+            (
+                "text_required => $private, text_match => 'any', text_property => 'body'",
+                None,
+            ),
+            (
+                "text_required => $private, max_expansions => 1, text_property => 'body'",
+                None,
+            ),
+        ] {
+            for tail in ["", " LIMIT 0"] {
+                let statement =
+                    format!("CALL hybrid.search({arguments}) YIELD node RETURN node{tail}");
+                let error = db
+                    .query(cx, &statement, &parameters, symbols, policy())
+                    .unwrap_err();
+                assert!(
+                    !format!("{error:?} {error}").contains(private),
+                    "refusal diagnostics must not echo parameter values",
+                );
+                let refusal = search_error(error).unwrap();
+                match (expected_argument, refusal) {
+                    (Some(expected), HybridCallError::Argument { name, .. }) => {
+                        assert_eq!(name, expected);
+                    }
+                    (None, HybridCallError::Combination(_)) => {}
+                    (expected, actual) => {
+                        panic!("unexpected Boolean binding refusal for {expected:?}: {actual:?}");
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn null_boolean_arguments_preserve_the_existing_absent_argument_contract() {
+    run(async |commit, cx| {
+        let db = open(commit, false).await;
+        let absent = GqlParameters::new().with_null("absent").unwrap();
+        let outputs = "YIELD node, score, text_rank, text_score \
+                       RETURN node, score, text_rank, text_score";
+        for (ordinary, with_absent) in [
+            (
+                "text_required => 'engine', text_property => 'body'",
+                "text_required => 'engine', text_property => 'body', \
+                 text_optional => $absent, text_excluded => $absent, \
+                 text_minimum_optional => $absent, text => $absent, \
+                 text_match => $absent, max_expansions => $absent",
+            ),
+            (
+                "text => 'engine', text_property => 'body'",
+                "text => 'engine', text_property => 'body', \
+                 text_required => $absent, text_optional => $absent, \
+                 text_excluded => $absent, text_minimum_optional => $absent",
+            ),
+            (
+                "vector => [1.0, 0.0], vector_properties => ['e0', 'e1']",
+                "vector => [1.0, 0.0], vector_properties => ['e0', 'e1'], \
+                 text_required => $absent, text_optional => $absent, \
+                 text_excluded => $absent, text_minimum_optional => $absent",
+            ),
+        ] {
+            let expected = db
+                .query(
+                    cx,
+                    &format!("CALL hybrid.search({ordinary}) {outputs}"),
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
+                .unwrap();
+            assert_eq!(
+                db.query(
+                    cx,
+                    &format!("CALL hybrid.search({with_absent}) {outputs}"),
+                    &absent,
+                    symbols,
+                    policy(),
+                )
+                .unwrap(),
+                expected,
+            );
+        }
+    });
+}
+
+#[test]
+fn boolean_text_fuses_with_vector_and_graph_without_filtering_their_support() {
+    run(async |commit, cx| {
+        let db = open(commit, false).await;
+        let embedding = [1.0, 0.0];
+        let mut request = query("", &embedding, 6, 6, 6);
+        request.retrieval.boolean_text = Some(BooleanTextQuery {
+            required: "engine",
+            optional: "analytical compilers",
+            excluded: "difference",
+            minimum_optional: 1,
+        });
+        request.retrieval.text_candidates = 6;
+        request.retrieval.profile = ExactRrfProfile::new(60, 1, 1).unwrap();
+        let oracle = db
+            .beacon_search_graph(
+                cx,
+                &options(true, true),
+                request,
+                ExpansionSpec {
+                    seeds: &[VId(1)],
+                    relation: Some(CITES),
+                    direction: ExpansionDirection::Outgoing,
+                    max_hops: 2,
+                    include_seeds: false,
+                    limits: ExpansionLimits::default(),
+                },
+            )
+            .unwrap();
+        let expected = ordered((Vec::new(), expected(oracle))).1;
+        assert_eq!(expected.len(), 6);
+        for (row, id) in expected.iter().zip(1..=6_u128) {
+            assert_eq!(row[0], GraphValue::Vertex(VId(id)));
+            let is_null =
+                |cell: &GraphValue| matches!(cell, GraphValue::Scalar(CanonicalScalar::Null));
+            assert!(!is_null(&row[2]), "every vertex has vector support");
+            assert_eq!(!is_null(&row[3]), matches!(id, 1 | 4 | 5));
+            assert_eq!(!is_null(&row[4]), matches!(id, 2 | 3));
+        }
+        let parameters = boolean_parameters("engine", "analytical compilers", "difference", 1);
+        for access in ["indexed", "materialized"] {
+            let statement = format!(
+                "CALL hybrid.search(text_required => $required, text_optional => $optional, \
+                 text_excluded => $excluded, text_minimum_optional => $minimum, \
+                 text_property => 'body', vector => [1.0, 0.0], \
+                 vector_properties => ['e0', 'e1'], vector_encoding => 'coordinates', \
+                 metric => 'cosine', seeds => [1], relation => 'CITES', max_hops => 2, \
+                 graph_access => '{access}', candidates => 6, graph_candidates => 6, k => 6) \
+                 {OUTPUTS}"
+            );
+            assert_eq!(
+                ordered(rows(
+                    db.query(cx, &statement, &parameters, symbols, policy())
+                        .unwrap()
+                ))
+                .1,
+                expected,
+                "Boolean text must use the ordinary three-lane rank owner under {access}",
+            );
+        }
+    });
+}
+
+#[test]
+fn boolean_calls_use_the_transaction_overlay_through_savepoint_and_commit() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit, false).await;
+        let parameters = boolean_parameters("engine", "analytical compilers", "difference", 1);
+        let original = db
+            .query(cx, BOOLEAN_CALL, &parameters, symbols, policy())
+            .unwrap();
+        let frontier = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        txn.savepoint(&db, "before_boolean_changes").unwrap();
+        let mut update = WriteBatch::new(CITES);
+        update.set_vertex_property(VId(1), BODY, Some(text("engine analytical difference")));
+        update.set_vertex_property(VId(3), BODY, Some(text("engine analytical")));
+        txn.write(&mut db, update.clone()).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let staged = txn
+            .query(&db, cx, BOOLEAN_CALL, &parameters, symbols, policy())
+            .unwrap();
+        assert_eq!(
+            rows(staged.clone()).1,
+            [(3, "Turing"), (4, "Lovelace"), (5, "Hopper")].map(|(id, title)| vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(text(title))
+            ]),
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(
+            db.query(cx, BOOLEAN_CALL, &parameters, symbols, policy())
+                .unwrap(),
+            original
+        );
+        txn.rollback_to_savepoint(&db, "before_boolean_changes")
+            .unwrap();
+        assert_eq!(
+            txn.query(&db, cx, BOOLEAN_CALL, &parameters, symbols, policy())
+                .unwrap(),
+            original,
+        );
+        txn.write(&mut db, update).unwrap();
+        assert!(matches!(
+            txn.finish(&mut db, commit).await.unwrap(),
+            fgdb_types::EmbeddedTxnCompletion::WriteCommitted { .. },
+        ));
+        assert_eq!(
+            db.query(cx, BOOLEAN_CALL, &parameters, symbols, policy())
+                .unwrap(),
+            staged
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn boolean_calls_cannot_reuse_hidden_text_statistics_from_a_maintained_index() {
+    run(async |commit, cx| {
+        let mut full = open(commit, true).await;
+        let clean = open(commit, false).await;
+        full.register_beacon_index(cx, &options(true, false), ReadPolicy::default())
+            .unwrap();
+        let authority =
+            Authority::new(AuthKey::from_seed(4403), NS, "main", SchemaEpoch(0), 1).unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 1000,
+                max_work: 100_000_000,
+                max_rows: 100,
+            },
+        );
+        grant.labels = Scope::only([DOC]);
+        grant.properties = Scope::only([BODY]);
+        let token = authority.issue_at(&grant, 100).unwrap();
+        let statement = "CALL hybrid.search(text_required => 'engine', \
+            text_optional => 'analytical compilers', text_excluded => 'difference', \
+            text_minimum_optional => 1, text_property => 'body', candidates => 6, k => 6) \
+            YIELD node, score, text_rank, text_score RETURN node, score, text_rank, text_score";
+        let parameters = GqlParameters::new();
+        let expected = clean
+            .query(cx, statement, &parameters, symbols, policy())
+            .unwrap();
+        assert_eq!(
+            ordered(rows(expected.clone()))
+                .1
+                .iter()
+                .map(|row| row[0].clone())
+                .collect::<Vec<_>>(),
+            [1, 4, 5].map(|id| GraphValue::Vertex(VId(id)))
+        );
+        assert_ne!(
+            full.query(cx, statement, &parameters, symbols, policy())
+                .unwrap(),
+            expected,
+            "the secret document must actually affect unrestricted membership and scoring"
+        );
+        for mutate_hidden in [false, true] {
+            if mutate_hidden {
+                let mut update = WriteBatch::new(CITES);
+                update.set_vertex_property(
+                    VId(90),
+                    BODY,
+                    Some(text("engine analytical ".repeat(20).as_str())),
+                );
+                full.write(commit, update).await.unwrap();
+            }
+            assert_eq!(
+                full.query_authorized(
+                    cx,
+                    &authority,
+                    &token,
+                    "main",
+                    statement,
+                    &parameters,
+                    symbols,
+                    policy(),
+                    || 100
+                )
+                .unwrap(),
+                expected,
+                "hidden changes cannot influence Boolean candidates, BM25 scores or RRF ranks",
+            );
+        }
     });
 }

@@ -66,7 +66,7 @@ async fn fixture(cx: &CommitCx, disconnected: usize, hidden: bool) -> Database<M
 
 /// Construct the bound execution value directly for source-work controls;
 /// public text/parameter binding and Warden delivery are exercised below.
-fn search(vector: bool, text: bool) -> HybridSearch {
+fn search(vector: bool, text: bool) -> HybridSearch<'static> {
     let mut options = Options::text(TEXT);
     options.vertex_label = Some(LabelId(1));
     options.projection.vector = vec![X];
@@ -83,6 +83,7 @@ fn search(vector: bool, text: bool) -> HybridSearch {
         options,
         text: "graph".into(),
         text_mode: TextMatch::Any,
+        boolean_text: None,
         vector: vec![0.0],
         vector_mode: VectorSearch::Exact,
         k: 1,
@@ -101,7 +102,7 @@ fn search(vector: bool, text: bool) -> HybridSearch {
 }
 
 fn execute(
-    search: &HybridSearch,
+    search: &HybridSearch<'_>,
     db: &Database<MemVfs>,
     eligible: Option<&[GraphValue]>,
     work: &RefCell<impl WorkControl>,

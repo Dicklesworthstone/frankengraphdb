@@ -495,6 +495,7 @@ mod filtered_tests {
             Search::Hybrid(ExactHybridQuery {
                 vector: &[0.0],
                 text: "red",
+                boolean_text: None,
                 k: 1,
                 vector_candidates: 1,
                 text_candidates: 1,

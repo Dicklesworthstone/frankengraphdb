@@ -113,6 +113,7 @@ fn graph_query() -> GraphHybridQuery<'static> {
         retrieval: ExactHybridQuery {
             vector: &[0.0],
             text: "graph",
+            boolean_text: None,
             k: 10,
             vector_candidates: 10,
             text_candidates: 10,

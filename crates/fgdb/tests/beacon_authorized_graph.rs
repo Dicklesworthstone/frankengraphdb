@@ -74,6 +74,7 @@ fn query(mode: VectorSearch) -> GraphHybridQuery<'static> {
         retrieval: ExactHybridQuery {
             vector: &[0.0],
             text: "graph",
+            boolean_text: None,
             k: 3,
             vector_candidates: 3,
             text_candidates: 3,

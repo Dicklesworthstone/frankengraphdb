@@ -792,6 +792,21 @@ Embedded hosts must supply a complete `GraphSymbolResolver::reverse_catalog()`; 
 
 The same native argument works inside `transaction --query`, where staged properties and topology are visible and search observations remain conflict dependencies across savepoint rollback. Immutable and `--as-of` searches retain their pinned sequence. Standalone graph search uses indexed expansion from the supplied seeds, so adding an endpoint restriction does not require scanning disconnected edges. These are candidate-limited exact-RRF results; filtering does not turn ANN or candidate fusion into exhaustive search.
 
+**Boolean hybrid retrieval (qualification pending).** Native `CALL hybrid.search` accepts `text_required`, `text_optional`, `text_excluded` and `text_minimum_optional` with `text_property`. Every distinct required term must match, the optional minimum must be met, and excluded terms remove text-lane support. Without required terms, at least one optional term must match; empty and purely negative clauses produce no text candidates. Clauses use the existing bounded exact-token analyzer and share its byte, term and work limits. They are alternatives to `text`, `text_match` and fuzzy expansion.
+
+```cypher
+CALL hybrid.search(
+  text_required => 'graph', text_optional => 'storage database',
+  text_excluded => 'deprecated', text_minimum_optional => 1,
+  text_property => 'body', candidates => 20, k => 10
+) YIELD node, score, text_rank
+MATCH (node:Doc)
+RETURN node, node.title, score, text_rank
+ORDER BY score DESC, node
+```
+
+Boolean text can participate in the same vector and graph fusion as ordinary text, using the existing `vector`, `seeds` and expansion arguments. Exclusion applies to the text lane: a vertex may still receive vector or graph support. `eligible` restricts every result lane before candidate truncation. The standalone `search` command accepts the equivalent `--text-required`, `--text-optional`, `--text-excluded` and `--text-minimum-optional` flags alongside vector or graph flags. Single-lane CLI text keeps its BM25 score; native calls and fused CLI searches keep exact-RRF Decimal scores and separate per-lane evidence. Native parameters, staged transaction reads and capability masking use the ordinary shared procedure path.
+
 **Commit-maintained embedded search.** `Database::register_beacon_index` freezes a current text/vector definition; `register_beacon_graph_index` also retains its native graph source. Both take an initial build policy through `ReadOptions` and a separate `ReadPolicy` for each committed maintenance tick. Successful ordinary writes and transaction completion advance the registration from the canonical committed delta without an application refresh call. Changed identities are projected at the new sequence; edge-only and no-effect commits advance the graph/source pin without rebuilding unchanged search segments. `search_beacon_index` and `search_beacon_graph_index` require a healthy current registration. `beacon_index_snapshot` returns an explicit immutable historical pin, which remains unchanged by later commits, compaction, rebuild, removal or database drop.
 
 A maintenance projection error, resource refusal or interrupted context fences that registration and preserves its first failure in `beacon_index_status`; the durable graph commit still succeeds and other registrations maintain independently. `rebuild_beacon_index` explicitly replaces the frozen definition's generation at the current sequence and can change its build/maintenance budgets. `unregister_beacon_index` releases its resident state and invalidates every copy of the handle. An opened database holds at most 64 live registrations, reusing removed slots without aliasing old handles; each index keeps its own document, text, vector and segment limits. This privileged embedded API provides no disk spill or durable registration catalog. Reopening starts with no registrations, and handles cannot transfer between opened databases.

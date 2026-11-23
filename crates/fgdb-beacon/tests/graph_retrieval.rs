@@ -1,8 +1,8 @@
 use fgdb_beacon::expansion::{ExpansionDirection as D, ExpansionGraph, ExpansionLimits, GraphHit};
 use fgdb_beacon::{
-    BeaconError, BeaconIndex, DistanceMetric, ExactHybridQuery, ExactRrfProfile, ExactRrfScore,
-    GraphHybridQuery, HnswConfig, IndexConfig, IndexDocument, TextMatch, VectorSearch, WorkBudget,
-    WorkControl,
+    BeaconError, BeaconIndex, BooleanTextQuery, DistanceMetric, ExactHybridQuery, ExactRrfProfile,
+    ExactRrfScore, GraphHybridQuery, HnswConfig, IndexConfig, IndexDocument, TextMatch,
+    VectorSearch, WorkBudget, WorkControl,
 };
 use fgdb_types::VId;
 use std::num::NonZeroU32;
@@ -362,6 +362,7 @@ fn query() -> GraphHybridQuery<'static> {
         retrieval: ExactHybridQuery {
             vector: &[0.0],
             text: "red",
+            boolean_text: None,
             k: 1,
             vector_candidates: 3,
             text_candidates: 0,
@@ -505,4 +506,61 @@ fn fusion_budget_is_shared_across_sources_and_final_output() {
             .unwrap(),
         expected
     );
+}
+
+#[test]
+fn boolean_text_survives_three_lane_source_preparation_without_filtering_other_lanes() {
+    let snapshot = index().snapshot();
+    let query = GraphHybridQuery {
+        retrieval: ExactHybridQuery {
+            text: "",
+            boolean_text: Some(BooleanTextQuery {
+                required: "blue",
+                excluded: "red",
+                ..BooleanTextQuery::default()
+            }),
+            k: 3,
+            vector_candidates: 1,
+            text_candidates: 1,
+            profile: ExactRrfProfile::default(),
+            ..query().retrieval
+        },
+        graph_candidates: 1,
+        graph_weight: 1,
+    };
+    let graph = [GraphHit {
+        id: VId(4),
+        hops: 2,
+    }];
+    for (eligible, vector_id) in [(true, VId(1)), (false, VId(2))] {
+        let hits = snapshot
+            .hybrid_search_graph_filtered(
+                query,
+                &graph,
+                |id| eligible || id != VId(1),
+                &mut budget(),
+            )
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [vector_id, VId(3), VId(4)]
+        );
+        assert_eq!(
+            (hits[0].vector_rank, hits[0].text_rank, hits[0].graph_rank),
+            (rank(1), None, None)
+        );
+        assert_eq!(
+            (hits[1].vector_rank, hits[1].text_rank, hits[1].graph_rank),
+            (None, rank(1), None)
+        );
+        assert_eq!(
+            (hits[2].vector_rank, hits[2].text_rank, hits[2].graph_rank),
+            (None, None, rank(1))
+        );
+        assert_eq!(hits[2].graph_hops, Some(2));
+        assert!(
+            hits.iter()
+                .all(|hit| (hit.score.numerator(), hit.score.denominator()) == (1, 61))
+        );
+    }
 }

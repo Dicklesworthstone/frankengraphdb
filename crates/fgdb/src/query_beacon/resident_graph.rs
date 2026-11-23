@@ -440,6 +440,7 @@ mod filtered_tests {
             retrieval: ExactHybridQuery {
                 vector: &[0.0],
                 text: "graph",
+                boolean_text: None,
                 k: 1,
                 vector_candidates: 1,
                 text_candidates: 1,

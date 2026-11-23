@@ -230,6 +230,7 @@ impl Search<'_> {
             Self::Vector { query, mode, .. } => vector(query, mode, work),
             Self::Text { .. } | Self::BooleanText { .. } => Ok(()),
             Self::Hybrid(query) => {
+                query.validate_text_selection()?;
                 let (v, t) = self.lanes();
                 let count = u64::from(query.vector_candidates) * u64::from(v)
                     + u64::from(query.text_candidates) * u64::from(t);
@@ -240,6 +241,19 @@ impl Search<'_> {
                 }
                 if v && query.vector_candidates != 0 {
                     vector(query.vector, query.vector_mode, work)?;
+                }
+                if let Some(clauses) = query.boolean_text
+                    && t
+                {
+                    // Validate the complete Boolean profile before corpus
+                    // admission, even with zero candidates or result rows.
+                    // All clauses share the ordinary analyzer's limits and
+                    // this caller's work/scratch control.
+                    crate::bm25::boolean::AnalyzedBooleanQuery::prepare(
+                        clauses,
+                        config.text.as_ref().ok_or(BeaconError::Disabled("text"))?,
+                        work,
+                    )?;
                 }
                 Ok(())
             }
@@ -561,6 +575,7 @@ mod filtered_search_tests {
             Search::Hybrid(ExactHybridQuery {
                 vector: &[0.0],
                 text: "red",
+                boolean_text: None,
                 k: 1,
                 vector_candidates: 1,
                 text_candidates: 1,

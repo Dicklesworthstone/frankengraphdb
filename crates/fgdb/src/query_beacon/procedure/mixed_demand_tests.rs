@@ -41,6 +41,7 @@ fn query(vector: bool, text: bool, k: usize) -> GraphHybridQuery<'static> {
         retrieval: ExactHybridQuery {
             vector: &[0.0],
             text: "graph",
+            boolean_text: None,
             k,
             vector_candidates: u32::from(vector),
             text_candidates: u32::from(text),

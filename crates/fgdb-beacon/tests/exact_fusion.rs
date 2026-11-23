@@ -2,9 +2,9 @@ use std::collections::HashSet;
 use std::num::NonZeroU32;
 
 use fgdb_beacon::{
-    BeaconError, BeaconIndex, Bm25Config, DistanceMetric, ExactHybridQuery, ExactRrfProfile,
-    ExactRrfScore, HnswConfig, IndexConfig, IndexDocument, IndexMutation, TextMatch, VectorSearch,
-    WorkBudget, WorkControl,
+    BeaconError, BeaconIndex, Bm25Config, BooleanTextQuery, DistanceMetric, ExactHybridQuery,
+    ExactRrfProfile, ExactRrfScore, GraphHybridQuery, HnswConfig, IndexConfig, IndexDocument,
+    IndexMutation, TextMatch, VectorSearch, WorkBudget, WorkControl,
 };
 use fgdb_types::VId;
 
@@ -53,6 +53,7 @@ fn query() -> ExactHybridQuery<'static> {
     ExactHybridQuery {
         vector: &[0.0],
         text: "red",
+        boolean_text: None,
         k: 3,
         vector_candidates: 1,
         text_candidates: 2,
@@ -365,5 +366,358 @@ fn every_checkpoint_including_final_publication_can_refuse_without_partial_succe
             &mut WorkBudget::new(count.units - 1)
         ),
         Err(BeaconError::WorkBudgetExceeded)
+    );
+}
+
+fn boolean_index(config: IndexConfig) -> BeaconIndex {
+    BeaconIndex::build(
+        config,
+        [
+            (1, 0.0, "red banned"),
+            (2, 3.0, "red blue"),
+            (3, 2.0, "red green"),
+            (4, 1.0, "blue"),
+        ]
+        .into_iter()
+        .map(|(id, coordinate, text)| IndexDocument {
+            id: VId(id),
+            vector: Some(vec![coordinate]),
+            text: Some(text.into()),
+        }),
+        &mut budget(),
+    )
+    .unwrap()
+}
+
+fn boolean_query() -> ExactHybridQuery<'static> {
+    ExactHybridQuery {
+        text: "",
+        boolean_text: Some(BooleanTextQuery {
+            required: "red red",
+            optional: "blue green",
+            excluded: "banned",
+            minimum_optional: 1,
+        }),
+        k: 4,
+        vector_candidates: 2,
+        text_candidates: 2,
+        ..query()
+    }
+}
+
+#[test]
+fn boolean_candidates_fuse_before_limits_and_constrain_only_the_text_lane() {
+    let snapshot = boolean_index(config()).snapshot();
+    let q = boolean_query();
+    let hits = snapshot
+        .hybrid_search_exact_fusion(q, |_| true, &mut budget())
+        .unwrap();
+    // The vector lane selects 1,4. Both permitted text documents have the
+    // same length and red frequency; green's lower corpus frequency puts 3
+    // before 2. The exact one-lane scores tie by identity across modalities.
+    assert_eq!(
+        hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        [VId(1), VId(3), VId(2), VId(4)]
+    );
+    for (hit, vector_rank, text_rank, denominator) in [
+        (&hits[0], rank(1), None, 61),
+        (&hits[1], None, rank(1), 61),
+        (&hits[2], None, rank(2), 62),
+        (&hits[3], rank(2), None, 62),
+    ] {
+        assert_eq!(hit.vector_rank, vector_rank);
+        assert_eq!(hit.text_rank, text_rank);
+        assert_eq!(
+            (hit.score.numerator(), hit.score.denominator()),
+            (1, denominator)
+        );
+        assert_eq!(hit.text_score.is_some(), text_rank.is_some());
+    }
+    let filtered = snapshot
+        .hybrid_search_exact_fusion(q, |id| id != VId(1), &mut budget())
+        .unwrap();
+    assert_eq!(
+        filtered.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        [VId(3), VId(4), VId(2)]
+    );
+    assert_eq!(filtered[0].vector_rank, rank(2));
+    assert_eq!(filtered[0].text_rank, rank(1));
+    assert_eq!(
+        (
+            filtered[0].score.numerator(),
+            filtered[0].score.denominator()
+        ),
+        (123, 3782)
+    );
+    for clauses in [
+        BooleanTextQuery {
+            minimum_optional: 2,
+            ..q.boolean_text.unwrap()
+        },
+        BooleanTextQuery {
+            required: "red",
+            excluded: "red",
+            ..BooleanTextQuery::default()
+        },
+        BooleanTextQuery {
+            excluded: "banned",
+            ..BooleanTextQuery::default()
+        },
+    ] {
+        let hits = snapshot
+            .hybrid_search_exact_fusion(
+                ExactHybridQuery {
+                    boolean_text: Some(clauses),
+                    ..q
+                },
+                |_| true,
+                &mut budget(),
+            )
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [VId(1), VId(4)]
+        );
+        assert!(
+            hits.iter()
+                .all(|hit| hit.text_rank.is_none() && hit.text_score.is_none())
+        );
+    }
+}
+
+#[test]
+fn boolean_text_profiles_refuse_ambiguity_before_empty_or_zero_output() {
+    use fgdb_beacon::read::Search;
+
+    let snapshot = boolean_index(config()).snapshot();
+    for k in [0, 1] {
+        for (text, text_mode) in [("red", TextMatch::Any), ("", TextMatch::Phrase)] {
+            let invalid = ExactHybridQuery {
+                text,
+                text_mode,
+                k,
+                ..boolean_query()
+            };
+            assert!(matches!(
+                Search::Hybrid(invalid).validate(&config(), &mut budget()),
+                Err(BeaconError::InvalidQuery(_))
+            ));
+            assert!(matches!(
+                snapshot.hybrid_search_exact_fusion(invalid, |_| false, &mut budget()),
+                Err(BeaconError::InvalidQuery(_))
+            ));
+            assert!(matches!(
+                snapshot.hybrid_search_graph_filtered(
+                    GraphHybridQuery {
+                        retrieval: invalid,
+                        graph_candidates: 1,
+                        graph_weight: 1
+                    },
+                    &[],
+                    |_| false,
+                    &mut budget(),
+                ),
+                Err(BeaconError::InvalidQuery(_))
+            ));
+        }
+    }
+}
+
+#[test]
+fn disabled_boolean_text_preserves_vector_only_and_graph_only_admission() {
+    use fgdb_beacon::expansion::GraphHit;
+    use fgdb_beacon::read::Search;
+
+    let config = IndexConfig {
+        text: None,
+        ..config()
+    };
+    let snapshot = BeaconIndex::build(
+        config.clone(),
+        [IndexDocument {
+            id: VId(1),
+            vector: Some(vec![0.0]),
+            text: None,
+        }],
+        &mut budget(),
+    )
+    .unwrap()
+    .snapshot();
+    // Both the conflicting profile and oversized clauses are irrelevant to a
+    // disabled text lane. No text config, analyzer or corpus may be opened.
+    let oversized = "x".repeat(Bm25Config::default().max_query_bytes + 1);
+    let inactive = ExactHybridQuery {
+        boolean_text: Some(BooleanTextQuery {
+            required: &oversized,
+            ..BooleanTextQuery::default()
+        }),
+        text: "competing ordinary text",
+        text_mode: TextMatch::Phrase,
+        profile: ExactRrfProfile::new(60, 1, 0).unwrap(),
+        k: 1,
+        ..boolean_query()
+    };
+    Search::Hybrid(inactive)
+        .validate(&config, &mut budget())
+        .unwrap();
+    let hits = snapshot
+        .hybrid_search_exact_fusion(inactive, |_| true, &mut budget())
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, VId(1));
+    assert_eq!(hits[0].text_rank, None);
+
+    let mut graph = GraphHybridQuery::graph_only(1, 1, 1, 60).unwrap();
+    graph.retrieval.text = inactive.text;
+    graph.retrieval.text_mode = inactive.text_mode;
+    graph.retrieval.boolean_text = inactive.boolean_text;
+    let hits = graph
+        .fuse_graph_only(
+            &[GraphHit {
+                id: VId(9),
+                hops: 1,
+            }],
+            |_| true,
+            &mut budget(),
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, VId(9));
+    assert_eq!(hits[0].text_rank, None);
+    assert_eq!(hits[0].graph_rank, rank(1));
+}
+
+#[test]
+fn boolean_clause_limits_cannot_hide_behind_an_empty_hybrid_answer() {
+    use fgdb_beacon::read::Search;
+
+    let config = IndexConfig {
+        text: Some(Bm25Config {
+            max_query_bytes: 5,
+            max_query_terms: 2,
+            ..Bm25Config::default()
+        }),
+        ..config()
+    };
+    let snapshot = boolean_index(config.clone()).snapshot();
+    for (clauses, expected) in [
+        (
+            BooleanTextQuery {
+                required: "red",
+                optional: "blue",
+                ..BooleanTextQuery::default()
+            },
+            BeaconError::ResourceLimit {
+                resource: "text bytes",
+                limit: 5,
+            },
+        ),
+        (
+            BooleanTextQuery {
+                required: "x",
+                optional: "y",
+                excluded: "z",
+                minimum_optional: 1,
+            },
+            BeaconError::ResourceLimit {
+                resource: "distinct analyzed terms",
+                limit: 2,
+            },
+        ),
+    ] {
+        for k in [0, 1] {
+            let q = ExactHybridQuery {
+                boolean_text: Some(clauses),
+                k,
+                ..boolean_query()
+            };
+            assert_eq!(
+                Search::Hybrid(q).validate(&config, &mut budget()),
+                Err(expected.clone())
+            );
+            assert_eq!(
+                snapshot.hybrid_search_exact_fusion(q, |_| false, &mut budget()),
+                Err(expected.clone())
+            );
+            assert_eq!(
+                snapshot.hybrid_search_graph_filtered(
+                    GraphHybridQuery {
+                        retrieval: q,
+                        graph_candidates: 1,
+                        graph_weight: 1
+                    },
+                    &[],
+                    |_| false,
+                    &mut budget(),
+                ),
+                Err(expected.clone())
+            );
+        }
+        let no_text_candidates = ExactHybridQuery {
+            boolean_text: Some(clauses),
+            text_candidates: 0,
+            k: 1,
+            ..boolean_query()
+        };
+        assert_eq!(
+            snapshot.hybrid_search_exact_fusion(no_text_candidates, |_| true, &mut budget()),
+            Err(expected)
+        );
+    }
+}
+
+#[test]
+fn boolean_fusion_retains_pins_and_every_budget_or_cancellation_boundary() {
+    let mut index = boolean_index(config());
+    let pinned = index.snapshot();
+    let q = boolean_query();
+    let mut count = Count::default();
+    let expected = pinned
+        .hybrid_search_exact_fusion(q, |_| true, &mut count)
+        .unwrap();
+    for at in 0..count.calls {
+        assert_eq!(
+            pinned.hybrid_search_exact_fusion(q, |_| true, &mut RefuseAt { call: 0, at }),
+            Err(BeaconError::Cancelled)
+        );
+    }
+    assert_eq!(
+        pinned
+            .hybrid_search_exact_fusion(q, |_| true, &mut WorkBudget::new(count.units))
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        pinned.hybrid_search_exact_fusion(q, |_| true, &mut WorkBudget::new(count.units - 1)),
+        Err(BeaconError::WorkBudgetExceeded)
+    );
+    index
+        .apply_batch(
+            [IndexMutation::Upsert(IndexDocument {
+                id: VId(3),
+                vector: Some(vec![2.0]),
+                text: Some("red green banned".into()),
+            })],
+            &mut budget(),
+        )
+        .unwrap();
+    index.compact(&mut budget()).unwrap();
+    assert_eq!(
+        pinned
+            .hybrid_search_exact_fusion(q, |_| true, &mut budget())
+            .unwrap(),
+        expected
+    );
+    let current = index
+        .snapshot()
+        .hybrid_search_exact_fusion(q, |_| true, &mut budget())
+        .unwrap();
+    assert_eq!(
+        current
+            .iter()
+            .filter(|hit| hit.text_rank.is_some())
+            .map(|hit| hit.id)
+            .collect::<Vec<_>>(),
+        [VId(2)]
     );
 }

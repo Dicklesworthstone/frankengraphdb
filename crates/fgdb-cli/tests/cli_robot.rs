@@ -4534,6 +4534,150 @@ fn boolean_search_clauses_preserve_scores_eligibility_and_committed_history() {
 }
 
 #[test]
+fn boolean_search_fuses_vector_and_graph_lanes_and_reuses_durable_indexes() {
+    let db = TestDb::new("search-boolean-hybrid");
+    db.create();
+    let first = db.write(&[
+        "CREATE (a:Person {name:'A', team:'graph banned', born:0}), \
+         (b:Person {name:'B', team:'graph blue', born:3}), \
+         (c:Person {name:'C', team:'graph green', born:2}), \
+         (d:Person {name:'D', team:'blue', born:1}), \
+         (e:Person {name:'E'}), (a)-[:KNOWS]->(e)",
+    ]);
+    let ids = vertex_ids(&db);
+    let boolean = [
+        "--text-property",
+        "team",
+        "--text-required",
+        "graph",
+        "--text-optional",
+        "blue green",
+        "--text-excluded",
+        "banned",
+        "--text-minimum-optional",
+        "1",
+        "--vertex-label",
+        "Person",
+    ];
+    let (_, plain_columns, plain_rows) = searched(&db, &boolean);
+    assert_eq!(plain_columns, ["vertex", "score"]);
+    assert_eq!(plain_rows.len(), 2);
+    let keyed = |rows: &SearchRows| {
+        rows.iter()
+            .cloned()
+            .map(|row| (row[0].1.clone(), row))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let plain = keyed(&plain_rows);
+    let rank = |n: u32| ("int".to_owned(), n.to_string());
+    let absent = ("null".to_owned(), String::new());
+
+    let mut args = boolean.to_vec();
+    args.extend([
+        "--vector",
+        "0",
+        "--vector-property",
+        "born",
+        "--candidates",
+        "2",
+        "--k",
+        "4",
+    ]);
+    let (seq, columns, before) = searched(&db, &args);
+    assert_eq!(seq, first);
+    assert_eq!(
+        columns,
+        [
+            "vertex",
+            "score",
+            "vector_rank",
+            "text_rank",
+            "vector_distance",
+            "text_score"
+        ]
+    );
+    let actual = keyed(&before);
+    assert_eq!(actual.len(), 4);
+    for name in ["A", "B", "C", "D"] {
+        assert_eq!(actual[&ids[name]][1].0, "decimal");
+    }
+    assert_eq!(actual[&ids["A"]][2], rank(1));
+    assert_eq!(actual[&ids["A"]][3], absent);
+    assert_eq!(actual[&ids["D"]][2], rank(2));
+    assert_eq!(actual[&ids["D"]][3], absent);
+    for (name, expected_rank) in [("C", 1), ("B", 2)] {
+        assert_eq!(actual[&ids[name]][2], absent);
+        assert_eq!(actual[&ids[name]][3], rank(expected_rank));
+        assert_eq!(actual[&ids[name]][5], plain[&ids[name]][1]);
+    }
+
+    // A text-excluded nearest vector and a graph-only endpoint both remain
+    // eligible in their own lanes. Boolean scoring still uses the same corpus.
+    let mut graph_args = args[..args.len() - 2].to_vec();
+    graph_args.extend([
+        "--expand-from",
+        &ids["A"],
+        "--max-hops",
+        "1",
+        "--graph-candidates",
+        "1",
+        "--graph-weight",
+        "1",
+        "--k",
+        "5",
+    ]);
+    let (_, graph_columns, graph_rows) = searched(&db, &graph_args);
+    assert_eq!(
+        graph_columns,
+        [
+            "vertex",
+            "score",
+            "vector_rank",
+            "text_rank",
+            "graph_rank",
+            "vector_distance",
+            "text_score",
+            "graph_hops"
+        ]
+    );
+    let actual = keyed(&graph_rows);
+    assert_eq!(actual.len(), 5);
+    assert_eq!(actual[&ids["A"]][2], rank(1));
+    assert_eq!(actual[&ids["A"]][3], absent);
+    assert_eq!(actual[&ids["E"]][2], absent);
+    assert_eq!(actual[&ids["E"]][3], absent);
+    assert_eq!(actual[&ids["E"]][4], rank(1));
+    assert_eq!(actual[&ids["E"]][7], rank(1));
+    for name in ["B", "C"] {
+        assert_eq!(actual[&ids[name]][6], plain[&ids[name]][1]);
+    }
+    let mut only_endpoint = graph_args[..graph_args.len() - 2].to_vec();
+    only_endpoint.extend(["--k", "1", "--eligible", &ids["E"]]);
+    let (_, _, eligible_rows) = searched(&db, &only_endpoint);
+    assert_eq!(eligible_rows.len(), 1);
+    assert_eq!(eligible_rows[0][0].1, ids["E"]);
+
+    let mut cached = args.clone();
+    cached.extend(["--index-checkpoint", "boolean-hybrid"]);
+    for _ in 0..2 {
+        assert_eq!(
+            searched(&db, &cached),
+            (first, columns.clone(), before.clone())
+        );
+    }
+    let second = db.write(&["MATCH (n:Person) WHERE n.name='C' SET n.team='graph green banned'"]);
+    let (seq, _, current) = searched(&db, &cached);
+    assert_eq!(seq, second);
+    let current = keyed(&current);
+    assert_eq!(current.len(), 3);
+    assert_eq!(current[&ids["B"]][3], rank(1));
+    assert!(!current.contains_key(&ids["C"]));
+    let old = first.to_string();
+    args.extend(["--as-of", &old]);
+    assert_eq!(searched(&db, &args), (first, columns, before));
+}
+
+#[test]
 fn boolean_search_refuses_conflicting_modes_and_bad_flags_before_opening_storage() {
     // The directory has keys but no database. A malformed search must be a
     // usage refusal, not an attempted open of that nonexistent database.
@@ -4543,9 +4687,9 @@ fn boolean_search_refuses_conflicting_modes_and_bad_flags_before_opening_storage
         vec!["--text-match", "all"],
         vec!["--text-match", "phrase"],
         vec!["--max-expansions", "1"],
-        vec!["--vector", "1", "--vector-property", "born"],
+        vec!["--vector", "1,2", "--vector-property", "born"],
         vec!["--vector-property", "born"],
-        vec!["--expand-from", "1", "--max-hops", "1"],
+        vec!["--expand-from", "1"],
         vec!["--max-hops", "1"],
         vec!["--candidates", "1"],
         vec!["--text-required", "again"],
@@ -4573,12 +4717,20 @@ fn boolean_search_refuses_conflicting_modes_and_bad_flags_before_opening_storage
     }
     let schema = run(false, &["robot", "schema"]);
     schema.success();
+    let schema = json(&schema.stdout);
+    let search = schema.get("search");
+    assert!(search.get("lanes").string().contains("--text-required"));
     assert!(
-        json(&schema.stdout)
-            .get("search")
+        search
             .get("lanes")
             .string()
-            .contains("--text-required")
+            .contains("excluded terms constrain the text lane only")
+    );
+    assert!(
+        search
+            .get("refusals")
+            .string()
+            .contains("Boolean clauses combined with --text, --text-match or --max-expansions;")
     );
 }
 
@@ -5014,6 +5166,7 @@ fn search_lanes_equal_the_library_and_pin_history() {
             Search::Hybrid(ExactHybridQuery {
                 vector: &[4.0],
                 text: "red",
+                boolean_text: None,
                 k: 3,
                 vector_candidates: 4,
                 text_candidates: 4,
@@ -5146,6 +5299,7 @@ fn search_lanes_equal_the_library_and_pin_history() {
             retrieval: ExactHybridQuery {
                 vector: &[],
                 text: "red",
+                boolean_text: None,
                 k: 10,
                 vector_candidates: 0,
                 text_candidates: 10,
@@ -5211,6 +5365,7 @@ fn search_lanes_equal_the_library_and_pin_history() {
                 retrieval: ExactHybridQuery {
                     vector: &[4.0],
                     text: "red",
+                    boolean_text: None,
                     k: 3,
                     vector_candidates: 3,
                     text_candidates: 3,

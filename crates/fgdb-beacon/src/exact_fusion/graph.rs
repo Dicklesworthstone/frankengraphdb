@@ -42,6 +42,7 @@ impl<'a> GraphHybridQuery<'a> {
             retrieval: ExactHybridQuery {
                 vector: &[],
                 text: "",
+                boolean_text: None,
                 k,
                 vector_candidates: 0,
                 text_candidates: 0,
@@ -233,6 +234,11 @@ fn fuse(
     }
     let (vector_depth, text_depth, graph_depth) = query.candidate_depths()?;
     if query.retrieval.k == 0 {
+        if let (Some(index), Some(clauses)) = (index, query.retrieval.boolean_text)
+            && query.retrieval.profile.text_weight() != 0
+        {
+            index.text_search_boolean(clauses, 0, |_| true, work)?;
+        }
         return Ok(Vec::new());
     }
     let mut graph_ranks = BTreeMap::new();
@@ -387,6 +393,7 @@ mod filtered_tests {
             retrieval: ExactHybridQuery {
                 vector: &[0.0],
                 text: "red",
+                boolean_text: None,
                 k: 2,
                 vector_candidates: 1,
                 text_candidates: 1,

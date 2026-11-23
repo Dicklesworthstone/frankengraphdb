@@ -782,6 +782,7 @@ mod tests {
                 Search::Hybrid(ExactHybridQuery {
                     vector: &[1.0, 0.0],
                     text: "rust",
+                    boolean_text: None,
                     k: 10,
                     vector_candidates: 10,
                     text_candidates: 10,

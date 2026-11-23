@@ -12,7 +12,7 @@ use std::num::NonZeroU32;
 
 use fgdb_types::{CanonicalDecimal, VId};
 
-use crate::{BeaconError, IndexSnapshot, TextMatch, VectorSearch, WorkControl};
+use crate::{BeaconError, BooleanTextQuery, IndexSnapshot, TextMatch, VectorSearch, WorkControl};
 
 /// Exact, nonnegative integer weights for two ranked sources. Scores are
 /// `vector_weight / (k0 + vector_rank) + text_weight / (k0 + text_rank)`;
@@ -214,6 +214,12 @@ impl PartialOrd for ExactRrfScore {
 pub struct ExactHybridQuery<'a> {
     pub vector: &'a [f32],
     pub text: &'a str,
+    /// Exact-token Boolean clauses for the text lane. When that lane is
+    /// enabled, `text` must be empty and `text_mode` must be `Any`: two text
+    /// definitions never silently override one another. Clauses constrain
+    /// only text candidates; vector and graph candidates retain their
+    /// independent eligibility. A zero text weight disables these clauses too.
+    pub boolean_text: Option<BooleanTextQuery<'a>>,
     pub k: usize,
     pub vector_candidates: u32,
     pub text_candidates: u32,
@@ -223,7 +229,20 @@ pub struct ExactHybridQuery<'a> {
 }
 
 impl ExactHybridQuery<'_> {
+    pub(crate) fn validate_text_selection(self) -> Result<(), BeaconError> {
+        if self.profile.text_weight() != 0
+            && self.boolean_text.is_some()
+            && (!self.text.is_empty() || self.text_mode != TextMatch::Any)
+        {
+            return Err(BeaconError::InvalidQuery(
+                "Boolean text clauses cannot be combined with ordinary text or text_match",
+            ));
+        }
+        Ok(())
+    }
+
     fn depths(self) -> Result<(usize, usize), BeaconError> {
+        self.validate_text_selection()?;
         let depth = |weight: u16, count: u32| {
             if weight == 0 {
                 Ok(0)
@@ -316,6 +335,11 @@ impl IndexSnapshot {
         work.charge(1)?;
         let (vector_depth, text_depth) = query.depths()?;
         if query.k == 0 {
+            if let Some(clauses) = query.boolean_text
+                && query.profile.text_weight() != 0
+            {
+                self.text_search_boolean(clauses, 0, |_| true, work)?;
+            }
             return Ok(Vec::new());
         }
         let mut fused = self.fusion_candidates(query, vector_depth, text_depth, eligible, work)?;
@@ -395,9 +419,13 @@ impl IndexSnapshot {
                 row.vector_distance = Some(hit.distance);
             }
         }
-        if text_depth != 0 {
-            let hits =
-                self.text_search(query.text, text_depth, query.text_mode, &eligible, work)?;
+        if text_depth != 0 || (query.boolean_text.is_some() && query.profile.text_weight() != 0) {
+            let hits = match query.boolean_text {
+                Some(clauses) => self.text_search_boolean(clauses, text_depth, &eligible, work)?,
+                None => {
+                    self.text_search(query.text, text_depth, query.text_mode, &eligible, work)?
+                }
+            };
             for (offset, hit) in hits.into_iter().enumerate() {
                 work.charge(1)?;
                 let row = fused.entry(hit.id).or_default();

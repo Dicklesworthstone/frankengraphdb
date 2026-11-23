@@ -1218,6 +1218,7 @@ mod source_tests {
                     retrieval: ExactHybridQuery {
                         vector: &[],
                         text: "red",
+                        boolean_text: None,
                         k: 1,
                         vector_candidates: 0,
                         text_candidates: 1,

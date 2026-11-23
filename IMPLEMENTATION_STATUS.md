@@ -12,6 +12,33 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Boolean clauses in composable hybrid retrieval — qualification pending
+
+The canonical exact-RRF request now accepts the existing bounded Boolean BM25
+query as its text lane. Native `CALL hybrid.search` binds required, optional and
+excluded clauses plus an optional-term minimum, borrowing admitted argument
+storage. It composes these candidates with vector and graph lanes through the
+same ranking owner, source admission, endpoint eligibility, capability masks,
+maintained-index selection and staged transaction overlays as ordinary text.
+Exclusion removes text support; it is not an authorization or all-lane filter.
+Ordinary text/fuzzy modes and Boolean clauses are mutually exclusive on an
+active text lane. Disabled lanes retain their prior no-evaluation contract.
+
+The standalone CLI uses the same request for Boolean/vector/graph combinations.
+Boolean-only CLI output keeps ordinary BM25 scores; native calls and fused CLI
+output retain exact-RRF Decimal scores and separate ranks/scores for each lane.
+Purely negative, empty, contradictory and impossible-minimum Boolean queries
+do not become corpus scans. Active clauses share query byte/term limits even
+when zero output or empty eligibility suppresses all result rows.
+
+Regression sources cover independently specified membership and lane support,
+exact score/rank parity, eligibility before candidate limits, pinned updates,
+every kernel cancellation checkpoint, native parameters/property composition,
+transaction savepoint rollback and commit, and hidden-corpus noninterference
+with a maintained privileged index. Compiler/runtime and integrated-tree
+qualification are being tracked under `fgdb-w7-hybrid-99if`; the broader W7
+workstream and compositional answer-contract obligations remain open.
+
 ### Optional correlated aggregate calls — qualification pending
 
 The maintained correlated-summary circuit now admits `OPTIONAL CALL` for its

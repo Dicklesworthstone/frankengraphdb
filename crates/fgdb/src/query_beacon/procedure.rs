@@ -6,6 +6,11 @@
 //! The corpus is the EXPLICIT projection the arguments name, exactly as the
 //! CLI's `search` flags do: `text` over `text_property` (BM25, `text_match`
 //! any/all/phrase/fuzzy1/fuzzy2/fuzzy1-all/fuzzy2-all, `max_expansions`),
+//! or exact-token Boolean `text_required`/`text_optional`/`text_excluded`
+//! clauses with `text_minimum_optional`. Boolean clauses share the ordinary
+//! analyzer and query limits and replace `text`/`text_match`/`max_expansions`.
+//! They constrain the text lane only; vector and graph candidates still fuse
+//! independently, and `eligible` remains the all-lane endpoint restriction.
 //! `vector` over one `vector_properties` entry per coordinate, or over one
 //! `vector_property` holding the whole embedding as packed little-endian f32
 //! bytes (`metric`
@@ -88,8 +93,9 @@ use crate::{GqlError, ReadError, Snapshot, VertexRow};
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
 use fgdb_beacon::read::{Projection, ReadError as BeaconReadError, ReadPolicy, VectorEncoding};
 use fgdb_beacon::{
-    BeaconError, DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, GraphHybridHit,
-    GraphHybridQuery, HnswConfig, IndexConfig, TextMatch, VectorSearch, WorkControl,
+    BeaconError, BooleanTextQuery, DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile,
+    GraphHybridHit, GraphHybridQuery, HnswConfig, IndexConfig, TextMatch, VectorSearch,
+    WorkControl,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
@@ -194,10 +200,13 @@ enum GraphAccess {
 }
 
 /// A bound `hybrid.search`: the frozen corpus definition and query inputs.
-pub(crate) struct HybridSearch {
+pub(crate) struct HybridSearch<'a> {
     options: Options,
     text: String,
     text_mode: TextMatch,
+    // Borrow the already-admitted argument row. Analysis owns its ordinary
+    // byte/term/work limits; binding creates no second retained clause copy.
+    boolean_text: Option<BooleanTextQuery<'a>>,
     vector: Vec<f32>,
     vector_mode: VectorSearch,
     k: usize,
@@ -256,10 +265,10 @@ fn list<'v>(
     }
 }
 
-impl HybridSearch {
+impl<'a> HybridSearch<'a> {
     /// Bind a host backed by the canonical staged overlay. Preserve its
     /// materialized default while honoring indexed and demand source choices.
-    pub(crate) fn bind_filtered<'a>(
+    pub(crate) fn bind_filtered(
         call: &PreparedProcedureCall,
         arguments: &'a [GraphValue],
         at: CommitSeq,
@@ -271,7 +280,7 @@ impl HybridSearch {
     /// Immutable graph-only hosts default to demand-driven membership; mixed
     /// retrieval retains its indexed default. Explicit profiles use the same
     /// binder as transaction execution, not a second procedure grammar.
-    pub(crate) fn bind_snapshot_filtered<'a>(
+    pub(crate) fn bind_snapshot_filtered(
         call: &PreparedProcedureCall,
         arguments: &'a [GraphValue],
         at: CommitSeq,
@@ -285,7 +294,7 @@ impl HybridSearch {
     /// The call's named arguments and YIELD list bind once. `at` pins the read's
     /// snapshot; `remaining` caps Beacon's own work and staging allowances
     /// by what the read has left, so retrieval cannot outspend the statement.
-    fn bind_arguments<'a>(
+    fn bind_arguments(
         call: &PreparedProcedureCall,
         arguments: &'a [GraphValue],
         at: CommitSeq,
@@ -300,6 +309,10 @@ impl HybridSearch {
         }
         let mut eligible = None;
         let mut text = None;
+        let mut text_required = None;
+        let mut text_optional = None;
+        let mut text_excluded = None;
+        let mut text_minimum_optional = None;
         let mut text_property = None;
         let mut text_match = None;
         let mut max_expansions = None;
@@ -345,6 +358,16 @@ impl HybridSearch {
                     });
                 }
                 "text" => text = Some(text_value("text", value)?.to_owned()),
+                "text_required" => text_required = Some(text_value("text_required", value)?),
+                "text_optional" => text_optional = Some(text_value("text_optional", value)?),
+                "text_excluded" => text_excluded = Some(text_value("text_excluded", value)?),
+                "text_minimum_optional" => {
+                    text_minimum_optional = Some(
+                        usize::try_from(int_value("text_minimum_optional", value)?).map_err(
+                            |_| domain("text_minimum_optional", "a nonnegative integer in range"),
+                        )?,
+                    );
+                }
                 "text_property" => {
                     text_property = Some(PropertyKeyId(identity("text_property", value)?));
                 }
@@ -477,12 +500,35 @@ impl HybridSearch {
             }
         }
         let _ = fusion;
+        let boolean = text_required.is_some() || text_optional.is_some() || text_excluded.is_some();
+        if !boolean && text_minimum_optional.is_some() {
+            return Err(HybridCallError::Combination(
+                "text_minimum_optional requires a Boolean text clause",
+            ));
+        }
+        if boolean && (text.is_some() || text_match.is_some() || max_expansions.is_some()) {
+            return Err(HybridCallError::Combination(
+                "Boolean text clauses cannot be combined with text, text_match or max_expansions",
+            ));
+        }
+        let boolean_text = boolean.then_some(BooleanTextQuery {
+            required: text_required.unwrap_or_default(),
+            optional: text_optional.unwrap_or_default(),
+            excluded: text_excluded.unwrap_or_default(),
+            minimum_optional: text_minimum_optional.unwrap_or(0),
+        });
+        // A present text lane still follows the one source/config/profile
+        // path below. The Boolean candidate owner replaces the empty ordinary
+        // query; no positive clause is concatenated or analyzed a second way.
+        if boolean {
+            text = Some(String::new());
+        }
         let (text, text_property) = match (text, text_property) {
             (Some(text), Some(key)) => (Some(text), Some(key)),
             (None, None) => (None, None),
             _ => {
                 return Err(HybridCallError::Combination(
-                    "text and text_property are given together",
+                    "text or Boolean text clauses and text_property are given together",
                 ));
             }
         };
@@ -710,6 +756,7 @@ impl HybridSearch {
                 options,
                 text: text.unwrap_or_default(),
                 text_mode,
+                boolean_text,
                 vector: vector
                     .map(|(coordinates, _, _)| coordinates)
                     .unwrap_or_default(),
@@ -759,6 +806,7 @@ impl HybridSearch {
             retrieval: ExactHybridQuery {
                 vector: &self.vector,
                 text: &self.text,
+                boolean_text: self.boolean_text,
                 k: self.k,
                 vector_candidates: if self.profile.vector_weight() == 0 {
                     0

@@ -165,6 +165,7 @@ fn unused_lanes_are_not_validated_or_resolved() {
     let hybrid = Search::Hybrid(ExactHybridQuery {
         vector: &[f32::NAN],
         text: "x",
+        boolean_text: None,
         k: 1,
         vector_candidates: 50,
         text_candidates: 1,

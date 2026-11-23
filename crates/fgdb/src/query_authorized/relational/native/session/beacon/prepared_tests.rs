@@ -78,6 +78,7 @@ fn queries() -> [Search<'static>; 5] {
         Search::Hybrid(ExactHybridQuery {
             vector: &[0.0],
             text: "red",
+            boolean_text: None,
             k: 3,
             vector_candidates: 3,
             text_candidates: 3,

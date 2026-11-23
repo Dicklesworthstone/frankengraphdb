@@ -161,6 +161,7 @@ fn hybrid() -> ExactHybridQuery<'static> {
     ExactHybridQuery {
         vector: &[],
         text: "cat dog",
+        boolean_text: None,
         k: 10,
         vector_candidates: 0,
         text_candidates: 10,
