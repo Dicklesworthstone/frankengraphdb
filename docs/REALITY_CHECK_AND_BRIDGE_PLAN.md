@@ -23,6 +23,8 @@ On the integrated source, ordinary Cargo passed all 152 multipart reads, 23 scop
 
 Commit `b66ad6e2f` corrected the fixture while preserving all ten concurrent read-conflict cases. The pinned `cargo check --all-targets --locked` then exited 0. Runtime qualification of the original conflict and replay suites is tracked in `fgdb-qualify-integrated-nov22-maz0p` and the run's `TODO.md`.
 
+The CLI's Boolean hybrid search returned the expected ranks and retained them through checkpoint reuse and historical reads. The initial robot suite passed 59 of 60 tests. Its independent schema fixture still advertised two restrictions that the real search no longer imposes. Commit `00aef4894` corrected only the lane and refusal descriptions. With the same CLI executable, the pinned standalone robot suite passed 60 of 60, and the contract campaign passed both tests across 2,322 process invocations and three seeds. The original Cargo command stopped under disk pressure before it could run the suite. The standalone build reused its compiler arguments and libraries on the separate build volume. See `keyed-cli-pool-hashes.txt`, `corrected-cli-contract-all.log` and `corrected-cli-fuzz-all.log`.
+
 ## November 22, 2026 — the source build, the usable database, and the path to G1
 
 A developer following the first command in the README cannot build the embedded example on the audited Linux checkout. The pinned compiler reaches the product and rejects three error returns in the GQL library. The CLI and server also depend on that library. Earlier binaries demonstrate that real data survives a write, a process boundary and certified replay. Both facts matter to someone deciding whether to adopt the project today.
