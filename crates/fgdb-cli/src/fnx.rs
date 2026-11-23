@@ -1599,18 +1599,25 @@ mod tests {
     }
 
     #[test]
-    fn sealed_core_and_load_preflight_enforce_their_direction_laws() {
+    fn sealed_preflight_enforces_core_load_and_articulation_direction_laws() {
+        use super::Directedness;
+
         for (call, admits_directed) in [
             (
                 "CALL fnx.core_number() YIELD core AS level, node AS id",
-                false,
+                true,
             ),
             (
                 "CALL fnx.load_centrality() YIELD score AS rank, node AS id",
                 true,
             ),
+            ("CALL fnx.articulation_points() YIELD node", false),
         ] {
-            for direction in ["directed", "reversed", "undirected"] {
+            for (direction, expected) in [
+                ("directed", Directedness::Directed),
+                ("reversed", Directedness::Reversed),
+                ("undirected", Directedness::Undirected),
+            ] {
                 let args: Vec<String> = [
                     "--db",
                     "never-opened-database",
@@ -1632,14 +1639,24 @@ mod tests {
                 assert!(options.fnx_call);
                 match super::prepare(&options) {
                     Ok(prepared) => {
-                        assert!(admits_directed || direction == "undirected");
+                        assert!(
+                            admits_directed || expected == Directedness::Undirected,
+                            "{call} {direction}"
+                        );
+                        assert_eq!(prepared.read.projection.directedness, expected);
                         assert!(prepared.is_sealed());
                         assert!(prepared.call.supports_sealed_execution());
                     }
                     Err(failure) => {
-                        assert!(!admits_directed && direction != "undirected");
+                        assert!(
+                            !admits_directed && expected != Directedness::Undirected,
+                            "{call} {direction}: {}",
+                            failure.message
+                        );
                         assert_eq!(failure.code, 3);
                         assert_eq!(failure.class, "query");
+                        assert_eq!(failure.refusal, super::super::refusal::Code::Execution);
+                        assert!(failure.message.contains("Undirected projection"));
                     }
                 }
             }

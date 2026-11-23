@@ -331,11 +331,32 @@ fn pipeline_aggregates_stream_while_unsupported_shapes_and_future_history_refuse
         let mut db = Database::open_memory(&contexts.commit(), keys())
             .await
             .unwrap();
-        db.write(&contexts.commit(), batch(1, 7)).await.unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for (id, value) in [(1, 7), (2, 7), (3, 9)] {
+            seed.create_vertex(
+                VId(id),
+                vec![],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            );
+        }
+        db.write(&contexts.commit(), seed).await.unwrap();
 
-        for text in [
-            "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total",
-            "MATCH (n) WITH n.p AS p RETURN SUM(p) AS total",
+        for (text, cell_type, value) in [
+            (
+                "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total",
+                "count",
+                3,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p RETURN SUM(p) AS total",
+                "wideint",
+                23,
+            ),
+            (
+                "MATCH (n) WITH DISTINCT n.p AS p RETURN COUNT(*) AS total",
+                "count",
+                2,
+            ),
         ] {
             let opts = options(text);
             let prepared = PreparedNativeRead::prepare(text, &opts.params, &opts).unwrap();
@@ -349,6 +370,10 @@ fn pipeline_aggregates_stream_while_unsupported_shapes_and_future_history_refuse
             let mut bytes = Vec::new();
             okay(run(&db, &cx, &opts, true, &mut bytes));
             let streamed = String::from_utf8(bytes).unwrap();
+            let expected_row = format!(
+                r#"{{"v":1,"event":"row","cells":[{{"type":"{cell_type}","value":"{value}"}}]}}"#
+            );
+            assert_eq!(row_lines(&streamed), [expected_row.as_str()], "{text}");
             assert_eq!(
                 row_lines(&streamed),
                 row_lines(&String::from_utf8(expected).unwrap()),
@@ -357,10 +382,15 @@ fn pipeline_aggregates_stream_while_unsupported_shapes_and_future_history_refuse
             assert!(streamed.ends_with("\"seq\":1,\"count\":1}\n"), "{text}");
         }
 
-        for text in [
-            "MATCH (n) WITH DISTINCT n.p AS p RETURN COUNT(*) AS total",
-            "MATCH (a), (b) RETURN COUNT(*) AS total",
-            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN AVG(n.p) AS average",
+        for (text, refusal) in [
+            (
+                "MATCH (a), (b) RETURN COUNT(*) AS total",
+                crate::refusal::Code::Unsupported,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN AVG(n.p) AS average",
+                crate::refusal::Code::Execution,
+            ),
         ] {
             let opts = options(text);
             let prepared = PreparedNativeRead::prepare(text, &opts.params, &opts).unwrap();
@@ -377,6 +407,7 @@ fn pipeline_aggregates_stream_while_unsupported_shapes_and_future_history_refuse
             let error =
                 run(&db, &cx, &opts, true, &mut bytes).expect_err("physical/source refusal");
             assert_eq!(error.code, 3, "{}", error.message);
+            assert_eq!(error.refusal, refusal, "{text}: {}", error.message);
             assert!(bytes.is_empty(), "no header before full admission: {text}");
         }
     });
