@@ -911,6 +911,29 @@ fn computed_having_aliases_keep_hidden_summaries_and_full_width_counts() {
             }
         }
     }
+    for (condition, keep) in [("a = b", true), ("a <> b", false)] {
+        let text = format!("MATCH (n) RETURN COUNT(*) AS a, COUNT(*) AS b HAVING {condition}");
+        let prepared = query(&text);
+        for count in [0, 1, u64::MAX] {
+            let result = run_metadata::<false>(&prepared, count, policy, None)
+                .0
+                .unwrap();
+            assert_eq!(
+                result.value.len(),
+                usize::from(keep),
+                "{text}, count {count}"
+            );
+            if keep {
+                assert_eq!(
+                    result.value[0].values(),
+                    &[
+                        GraphAggregateValue::Count(count),
+                        GraphAggregateValue::Count(count)
+                    ]
+                );
+            }
+        }
+    }
     let prepared = query("MATCH (n) RETURN COUNT(*) + 1 AS n HAVING n > 2");
     for (count, expected) in [(0, None), (1, None), (2, Some(3))] {
         let result = run_metadata::<false>(&prepared, count, policy, None)

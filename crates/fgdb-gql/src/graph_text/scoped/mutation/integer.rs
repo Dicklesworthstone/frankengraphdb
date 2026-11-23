@@ -2300,8 +2300,10 @@ impl<'a> Parser<'a> {
         }
         // A list or map literal compared with `=`, `<>`, `!=` or IN is one
         // three-valued comparison in the value language (fgdb-9cawv), read
-        // only from the operand that starts its comparison level.
+        // only from the operand that starts its comparison level. HAVING
+        // consumes its own outer comparison, including between two aliases.
         if self.lets.is_some()
+            && !(self.having_operand && self.let_base + depth == 0)
             && (self.comparison_start == at || self.predicate_start == at)
             && self.composite_comparison_follows(columns, self.comparison_start == at)?
         {
