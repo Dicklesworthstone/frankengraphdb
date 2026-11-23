@@ -355,6 +355,80 @@ fn buffered_limits_refuse_whole_opens_or_reads_and_refund_every_reservation() {
 }
 
 #[test]
+fn buffered_catalog_charges_root_selection_and_keeps_historical_names() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+
+    let ((), report) = run_async_under_lab(0x6275_ca70, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut names = SymbolCatalog::default();
+        names
+            .bind_all([("score", CatalogSymbol::Property(PROPERTY))])
+            .unwrap();
+        db.register_symbols(&commit, &names).await.unwrap();
+        let frontier = db.write(&commit, vertex_batch(1, 7)).await.unwrap();
+        let pool = pool();
+        let reservation = pool.reserve(&commit, pool.available() - 1).unwrap();
+        assert!(matches!(
+            Database::open_buffered_symbol_catalog_with_vfs(
+                &commit,
+                vfs.clone(),
+                &path,
+                keys(),
+                &pool,
+                limits(),
+            )
+            .await,
+            Err(BufferedOpenError::Memory(_))
+        ));
+        drop(reservation);
+        let mut narrow = limits();
+        narrow.max_root_bytes = 1;
+        assert!(matches!(
+            Database::open_buffered_symbol_catalog_with_vfs(
+                &commit,
+                vfs.clone(),
+                &path,
+                keys(),
+                &pool,
+                narrow,
+            )
+            .await,
+            Err(BufferedOpenError::Read(_))
+        ));
+        assert_eq!(pool.used(), 0);
+        let metadata_only = BufferedReadLimits {
+            max_source_bytes: 0,
+            max_work: 0,
+            ..limits()
+        };
+        let catalog = Database::open_buffered_symbol_catalog_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            &pool,
+            metadata_only,
+        )
+        .await
+        .unwrap();
+        assert_eq!(catalog.frontier(), frontier);
+        assert_eq!(catalog.symbol_catalog_at(frontier).unwrap(), names);
+        assert_eq!(
+            catalog.symbol_catalog_at(CommitSeq::ORIGIN).unwrap(),
+            SymbolCatalog::default()
+        );
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn a_lagging_checkpoint_requires_explicit_recovery_before_buffered_open() {
     let ((), report) = run_async_under_lab(0x6275_6603, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -377,6 +451,18 @@ fn a_lagging_checkpoint_requires_explicit_recovery_before_buffered_open() {
         ));
         drop(db);
         let pool = pool();
+        assert!(matches!(
+            Database::open_buffered_symbol_catalog_with_vfs(
+                &commit,
+                vfs.clone(),
+                &path,
+                keys(),
+                &pool,
+                limits(),
+            )
+            .await,
+            Err(BufferedOpenError::RecoveryRequired)
+        ));
         assert!(matches!(
             Database::open_buffered_read_view_with_vfs(
                 &commit,

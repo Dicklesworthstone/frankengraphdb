@@ -364,7 +364,7 @@ impl core::fmt::Debug for SymbolCatalogReadView {
 }
 
 impl SymbolCatalogReadView {
-    async fn from_published<V: Vfs>(
+    pub(super) async fn from_published<V: Vfs>(
         cx: &CommitCx,
         published: PublishedRead<V>,
     ) -> Result<Self, OpenError> {

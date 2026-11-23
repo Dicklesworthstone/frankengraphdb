@@ -481,13 +481,61 @@ impl<V: Vfs + Clone> Database<V> {
         pool: MemoryPool,
         limits: BufferedReadLimits,
     ) -> Result<BufferedReadView<V>, BufferedOpenError> {
-        let path = path.as_ref();
+        let published =
+            Self::select_buffered_publication(cx, vfs, path.as_ref(), &keys, &pool, limits).await?;
+        // Keep the cold admission's Send proof at its owner, as for ordinary
+        // open; callers need not recursively prove every recovery future.
+        let admission: crate::SendFuture<'_, _> = Box::pin(published.store.open_buffered_root(
+            cx,
+            published.root_id,
+            pool,
+            limits,
+        ));
+        let partition = admission.await?;
+        Ok(BufferedReadView {
+            partition,
+            manifest: published.manifest,
+            projection_cache: crate::query::BufferedProjectionCache::new(MemoryPool::new(
+                crate::query::PROJECTION_CACHE_BYTES,
+                0,
+            )?),
+            sealed_cache: crate::query::BufferedSealedCache::new(MemoryPool::new(
+                crate::query::SEALED_CACHE_BYTES,
+                0,
+            )?),
+        })
+    }
+
+    /// Read symbol bindings at a current publication under the buffered reader's
+    /// root-byte, reference-count, and metadata-memory limits. Graph payloads
+    /// remain unopened. The returned catalog owns its schema independently.
+    pub async fn open_buffered_symbol_catalog_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        pool: &MemoryPool,
+        limits: BufferedReadLimits,
+    ) -> Result<SymbolCatalogReadView, BufferedOpenError> {
+        let published =
+            Self::select_buffered_publication(cx, vfs, path.as_ref(), &keys, pool, limits).await?;
+        Ok(SymbolCatalogReadView::from_published(cx, published).await?)
+    }
+
+    async fn select_buffered_publication(
+        cx: &CommitCx,
+        vfs: V,
+        path: &Path,
+        keys: &DatabaseKeys,
+        pool: &MemoryPool,
+        limits: BufferedReadLimits,
+    ) -> Result<PublishedRead<V>, BufferedOpenError> {
         require_database_dir(cx, &vfs, path).await?;
         // Like the resident read view's fast path, this takes no writer lease
         // and writes nothing (fgdb-xxxnb): the committed chain is scanned
         // without repairing a torn tail, and the store is opened only to read.
         // A lagging root refuses below, so nothing here ever needs to heal.
-        let Some(store) = open_block_store_for_read(cx, &vfs, path, &keys).await? else {
+        let Some(store) = open_block_store_for_read(cx, &vfs, path, keys).await? else {
             return Err(BufferedOpenError::RecoveryRequired);
         };
         let probe = RootStore::with_vfs(vfs.clone(), path);
@@ -498,7 +546,7 @@ impl<V: Vfs + Clone> Database<V> {
             }
             Err(error) => return Err(OpenError::Slot(error).into()),
         };
-        validate_plain_slot(&slot, &keys, path)?;
+        validate_plain_slot(&slot, keys, path)?;
         let manifest = ManifestVersion(ObjectId(slot.root_manifest_oid));
         // Keep this reservation until all decoded selection metadata has
         // dropped. The store checks frame counts before flattening V4 roots.
@@ -526,23 +574,12 @@ impl<V: Vfs + Clone> Database<V> {
         }
         drop(resolved);
         drop(selection_charge);
-        // Keep the cold admission's Send proof at its owner, as for ordinary
-        // open; callers need not recursively prove every recovery future.
-        let admission: crate::SendFuture<'_, _> =
-            Box::pin(store.open_buffered_root(cx, checkpoint.root_id, pool, limits));
-        let partition = admission.await?;
-        // The owned reader contains the authenticated immutable root and store.
-        Ok(BufferedReadView {
-            partition,
+        Ok(PublishedRead {
+            store,
+            root_id: checkpoint.root_id,
             manifest,
-            projection_cache: crate::query::BufferedProjectionCache::new(MemoryPool::new(
-                crate::query::PROJECTION_CACHE_BYTES,
-                0,
-            )?),
-            sealed_cache: crate::query::BufferedSealedCache::new(MemoryPool::new(
-                crate::query::SEALED_CACHE_BYTES,
-                0,
-            )?),
+            published_at: checkpoint.published_at,
+            schema: checkpoint.schema,
         })
     }
 }

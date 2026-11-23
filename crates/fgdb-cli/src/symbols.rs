@@ -230,7 +230,21 @@ pub(super) async fn discover(
     // Bounded graph hosts must never recover through a resident graph while
     // discovering names. They retain the same current-checkpoint requirement
     // as their eventual buffered/sealed source open.
-    let opened = if options.buffered.enabled() || options.fnx.is_sealed() {
+    let opened = if options.buffered.enabled() {
+        match options.buffered.admission(options.budget.policy()) {
+            Ok((pool, limits)) => Database::open_buffered_symbol_catalog_with_vfs(
+                open_cx,
+                asupersync::fs::UnixVfs::new(),
+                &options.db,
+                keys,
+                &pool,
+                limits,
+            )
+            .await
+            .map_err(super::buffered::open_failure),
+            Err(error) => Err(error),
+        }
+    } else if options.fnx.is_sealed() {
         Database::open_current_symbol_catalog(open_cx, &options.db, keys)
             .await
             .map_err(|error| match error {
