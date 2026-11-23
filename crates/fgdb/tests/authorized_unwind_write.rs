@@ -206,6 +206,7 @@ mod procedure_mutations {
             for hidden in [false, true] {
                 for returning in [false, true] {
                     let mut db = database(&contexts, hidden).await;
+                    let pinned = db.pinned_read_view().unwrap();
                     let before = (
                         db.frontier().unwrap(),
                         db.vertices().unwrap(),
@@ -288,19 +289,26 @@ mod procedure_mutations {
                             expected_stats = Some(stats);
                         }
                     }
-                    for original in &before.1 {
+                    let frontier = db.frontier().unwrap();
+                    assert_eq!(frontier.0, before.0.0 + 1);
+                    let mut historical = before.1.clone();
+                    for (original, retained) in before.1.iter().zip(&mut historical) {
                         let mut expected = original.clone();
                         if (1..=3).contains(&original.vid.0) {
                             let distance = original.vid.0 as i64 - 1;
                             expected.props[0].1 =
                                 CanonicalScalar::Int(10 * original.vid.0 as i64 + distance).into();
                             expected.props[1].1 = CanonicalScalar::Int(distance).into();
+                            if expected.props != original.props {
+                                expected.created_at = frontier;
+                                retained.retired_at = Some(frontier);
+                            }
                         }
                         assert_eq!(db.vertex(original.vid).unwrap(), Some(expected));
                     }
+                    assert_eq!(db.vertices_at(before.0).unwrap(), historical);
+                    assert_eq!(pinned.vertices().unwrap(), before.1);
                     assert_eq!(db.edges().unwrap(), before.2);
-                    let frontier = db.frontier().unwrap();
-                    assert_eq!(frontier.0, before.0.0 + 1);
                     assert_eq!(
                         completion,
                         EmbeddedTxnCompletion::WriteCommitted {
@@ -948,43 +956,50 @@ fn binding_exhaustion_does_not_refresh_the_execution_permit() {
         );
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
-        // Without the ingress authorization checkpoint, this appeared to be
-        // the exact binding boundary. It is still one binding unit short.
-        scope.limits.max_work = text.len() as u64 + 2 + binding_work;
-        let token = issuer.issue_at(&scope, NOW).unwrap();
-        let error = db
-            .query_write_authorized(
-                &txcx,
-                &query,
-                &commit,
-                &issuer,
-                &token,
-                "main",
-                text,
-                &args,
-                symbols,
-                R,
-                policy(),
-                || NOW,
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                Fault::Program(GraphWriteProgramError::Program(
-                    GraphMutationProgramError::Preflight(WriteTxnError::Authorization(
-                        Error::LimitExceeded(fgdb_warden::LimitDimension::Work)
+        let original_boundary = text.len() as u64 + 3 + binding_work;
+        let binding_boundary = original_boundary + args.canonical_byte_len() as u64;
+        // Retain the two historical thresholds and the last unit before the
+        // complete argument transcript and controlled binding are paid.
+        for limit in [
+            original_boundary - 1,
+            original_boundary,
+            binding_boundary - 1,
+        ] {
+            scope.limits.max_work = limit;
+            let token = issuer.issue_at(&scope, NOW).unwrap();
+            let error = db
+                .query_write_authorized(
+                    &txcx,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    text,
+                    &args,
+                    symbols,
+                    R,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    Fault::Program(GraphWriteProgramError::Program(
+                        GraphMutationProgramError::Preflight(WriteTxnError::Authorization(
+                            Error::LimitExceeded(fgdb_warden::LimitDimension::Work)
+                        ))
                     ))
-                ))
-            ),
-            "the original short permit must still stop inside binding: {error:?}"
-        );
-        assert_eq!(db.frontier().unwrap(), before);
-        assert!(db.vertices().unwrap().is_empty());
-        // Original text, the authorization checkpoint, both dispatch checks,
-        // and exactly the controlled binding bill leave no unit for execution.
-        scope.limits.max_work = text.len() as u64 + 3 + binding_work;
+                ),
+                "the original short permit must still stop inside binding: {error:?}"
+            );
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+        }
+        // This permit pays for admission and binding, leaving none for execution.
+        scope.limits.max_work = binding_boundary;
         let token = issuer.issue_at(&scope, NOW).unwrap();
         let error = db
             .query_write_authorized(
