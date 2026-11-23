@@ -1585,6 +1585,7 @@ fn prepared_write_original_bytes_share_single_and_batch_execution_allowances() {
             .unwrap()
             .canonical_byte_len() as u64;
         let delta = large_bytes - small_bytes;
+        let mut committed = 1;
         for (mode, execution, statement) in [
             (
                 PrepareMode::Write,
@@ -1613,8 +1614,10 @@ fn prepared_write_original_bytes_share_single_and_batch_execution_allowances() {
                 },
             )
             .await);
-            // Every SET writes the existing value. Native read-close leaves
-            // the graph and frontier fixed while finding its exact work floor.
+            // Every SET writes the existing value, so the graph and statement
+            // work stay fixed. The write classification still publishes one
+            // empty-effect commit (plan §8.1); it must not become ReadClosed.
+            // Refused probes must leave both graph and frontier unchanged.
             let mut low = 0;
             let mut high = 100_000;
             while low + 1 < high {
@@ -1624,13 +1627,19 @@ fn prepared_write_original_bytes_share_single_and_batch_execution_allowances() {
                     .unwrap();
                 match run_prepared(&root, db, &scoped, &definition, execution, &small).await {
                     Ok(answer) => {
+                        committed += 1;
                         assert_eq!(
                             answer.outcome,
-                            Outcome::ReadClosed {
-                                seq: 1,
+                            Outcome::WriteCommitted {
+                                seq: committed,
                                 statements: 1
                             }
                         );
+                        if mode == PrepareMode::WriteReturning {
+                            assert_eq!(answer.rows, [vec![WireValue::Int(7)]]);
+                        } else {
+                            assert!(answer.rows.is_empty());
+                        }
                         high = work;
                     }
                     Err(error) => {
@@ -1638,19 +1647,35 @@ fn prepared_write_original_bytes_share_single_and_batch_execution_allowances() {
                         low = work;
                     }
                 }
+                assert_eq!(
+                    db.db.read(&root).await.unwrap().frontier().unwrap(),
+                    CommitSeq(committed)
+                );
             }
             assert!(high > small_bytes && high < 100_000);
-            for (work, succeeds) in [(high + delta - 1, false), (high + delta, true)] {
+            // Lock the small-input floor on both sides of the padded calls.
+            // Empty commits advance history, but cannot shift this statement's
+            // billed work or let a failed probe acquire a terminal receipt.
+            for (work, succeeds, arguments) in [
+                (high - 1, false, &small),
+                (high, true, &small),
+                (high + delta - 1, false, &large),
+                (high + delta, true, &large),
+                (high - 1, false, &small),
+                (high, true, &small),
+            ] {
                 let scoped = token
                     .attenuate(fgdb_warden::Restriction::MaxWork(work))
                     .unwrap();
-                let result = run_prepared(&root, db, &scoped, &definition, execution, &large).await;
+                let result =
+                    run_prepared(&root, db, &scoped, &definition, execution, arguments).await;
                 if succeeds {
                     let answer = ok(result);
+                    committed += 1;
                     assert_eq!(
                         answer.outcome,
-                        Outcome::ReadClosed {
-                            seq: 1,
+                        Outcome::WriteCommitted {
+                            seq: committed,
                             statements: 1
                         }
                     );
@@ -1662,6 +1687,10 @@ fn prepared_write_original_bytes_share_single_and_batch_execution_allowances() {
                 } else {
                     assert_eq!(result.err().unwrap().code, ErrorCode::Budget);
                 }
+                assert_eq!(
+                    db.db.read(&root).await.unwrap().frontier().unwrap(),
+                    CommitSeq(committed)
+                );
             }
             if mode == PrepareMode::Write {
                 let records = [small.clone(), small.clone()];
@@ -1674,13 +1703,15 @@ fn prepared_write_original_bytes_share_single_and_batch_execution_allowances() {
                         .unwrap();
                     match run_prepared_batch(&root, db, &scoped, &definition, &records).await {
                         Ok(answer) => {
+                            committed += 1;
                             assert_eq!(
                                 answer.outcome,
-                                Outcome::ReadClosed {
-                                    seq: 1,
+                                Outcome::WriteCommitted {
+                                    seq: committed,
                                     statements: 2
                                 }
                             );
+                            assert!(answer.rows.is_empty());
                             high = work;
                         }
                         Err(error) => {
@@ -1688,31 +1719,63 @@ fn prepared_write_original_bytes_share_single_and_batch_execution_allowances() {
                             low = work;
                         }
                     }
+                    assert_eq!(
+                        db.db.read(&root).await.unwrap().frontier().unwrap(),
+                        CommitSeq(committed)
+                    );
                 }
                 assert!(high > 2 * small_bytes && high < 100_000);
-                let records = [large.clone(), large.clone()];
-                for (work, succeeds) in [(high + 2 * delta - 1, false), (high + 2 * delta, true)] {
+                let large_records = [large.clone(), large.clone()];
+                for (work, succeeds, arguments) in [
+                    (high - 1, false, &records),
+                    (high, true, &records),
+                    (high + 2 * delta - 1, false, &large_records),
+                    (high + 2 * delta, true, &large_records),
+                    (high - 1, false, &records),
+                    (high, true, &records),
+                ] {
                     let scoped = token
                         .attenuate(fgdb_warden::Restriction::MaxWork(work))
                         .unwrap();
                     let result =
-                        run_prepared_batch(&root, db, &scoped, &definition, &records).await;
+                        run_prepared_batch(&root, db, &scoped, &definition, arguments).await;
                     if succeeds {
+                        let answer = ok(result);
+                        committed += 1;
                         assert_eq!(
-                            ok(result).outcome,
-                            Outcome::ReadClosed {
-                                seq: 1,
+                            answer.outcome,
+                            Outcome::WriteCommitted {
+                                seq: committed,
                                 statements: 2
                             }
                         );
+                        assert!(answer.rows.is_empty());
                     } else {
                         assert_eq!(result.err().unwrap().code, ErrorCode::Budget);
                     }
+                    assert_eq!(
+                        db.db.read(&root).await.unwrap().frontier().unwrap(),
+                        CommitSeq(committed)
+                    );
                 }
             }
         }
         let guard = db.db.read(&root).await.unwrap();
-        assert_eq!(guard.frontier().unwrap(), CommitSeq(1));
+        assert_eq!(guard.frontier().unwrap(), CommitSeq(committed));
+        assert_eq!(guard.vertices().unwrap().len(), 1);
+        assert!(guard.edges().unwrap().is_empty());
+        let mut next_seq = 2;
+        for batch in guard.delta_since(CommitSeq(1)).unwrap() {
+            assert_eq!(batch.commit_seq(), CommitSeq(next_seq));
+            assert!(
+                batch
+                    .coordinate_entries()
+                    .iter()
+                    .all(|entry| { entry.rows.is_empty() && entry.schema_transition.is_none() })
+            );
+            next_seq += 1;
+        }
+        assert_eq!(next_seq, committed + 1);
         assert_eq!(
             guard.vertex(fgdb_types::VId(1)).unwrap().unwrap().props,
             vec![(

@@ -1301,6 +1301,99 @@ fn original_input_admission_precedes_catalog_and_statement_clock() {
 }
 
 #[test]
+fn prepared_definition_keeps_the_first_budget_and_expiry_refusal() {
+    lab(0xaa23, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let issuer = authority();
+        let scope = grant();
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let text = "CREATE (n:Visible {p:$record.key, q:datetime().epochMillis})";
+        let params = GqlParameters::new()
+            .with_map(
+                "record",
+                vec![("key".into(), GraphValue::Scalar(CanonicalScalar::Int(7)))],
+            )
+            .unwrap();
+        let db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = db.frontier().unwrap();
+        for published_view in [false, true] {
+            let prepare = |token: &CapabilityToken, clock: &mut dyn FnMut() -> u64| {
+                if published_view {
+                    db.pinned_read_view()
+                        .unwrap()
+                        .prepare_graph_write_script_authorized(
+                            &query, &commit, &issuer, token, "main", text, &params, symbols, R, 64,
+                            clock,
+                        )
+                } else {
+                    db.prepare_graph_write_script_authorized(
+                        &query, &commit, &issuer, token, "main", text, &params, symbols, R, 64,
+                        clock,
+                    )
+                }
+            };
+
+            // Exercise every preparation boundary, including representative
+            // binding after the original input and catalog have been admitted.
+            // PREPARE never captures the statement clock or publishes anything.
+            let mut calls = 0;
+            prepare(&token, &mut || {
+                calls += 1;
+                NOW
+            })
+            .unwrap();
+            assert!(calls > 3);
+            for expires_on in 0..calls {
+                let mut observed = 0;
+                let error = prepare(&token, &mut || {
+                    let now = if observed < expires_on {
+                        NOW
+                    } else {
+                        scope.expires_at_ms
+                    };
+                    observed += 1;
+                    now
+                })
+                .unwrap_err();
+                assert_eq!(
+                    authorization(&error),
+                    Some(Error::Expired),
+                    "view={published_view}, expiry boundary={expires_on}: {error:?}"
+                );
+            }
+
+            // A contiguous sweep reaches both binder-controlled stops and the
+            // final acceptance check; none may become ExecutionStopped.
+            let mut admitted = false;
+            for work in 0..1024 {
+                let limited = token
+                    .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                    .unwrap();
+                match prepare(&limited, &mut || NOW) {
+                    Ok(_) => {
+                        assert!(work > (text.len() + params.canonical_byte_len()) as u64);
+                        admitted = true;
+                        break;
+                    }
+                    Err(error) => assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(fgdb_warden::LimitDimension::Work)),
+                        "view={published_view}, work={work}: {error:?}"
+                    ),
+                }
+            }
+            assert!(
+                admitted,
+                "preparation must succeed within the fixture allowance"
+            );
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+        }
+    });
+}
+
+#[test]
 fn native_write_prices_original_utf8_payload_once_before_map_lowering() {
     lab(0xaa22, |contexts| async move {
         let commit = contexts.commit();

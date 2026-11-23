@@ -253,9 +253,20 @@ fn prepare<Clock: FnMut() -> u64>(
                     .iter()
                     .any(fgdb_gql::GqlParameterSpec::is_statement_time),
             )?;
-            let bound = Input::Script(&script, &sample).bind(cx, scope, execution);
+            let bound = match Input::Script(&script, &sample).bind(cx, scope, execution) {
+                Ok(bound) => bound,
+                Err(Fault::Binding(error)) => {
+                    // A value diagnostic must still pass the live controls.
+                    // Binding controls, however, already return their first
+                    // refusal: another poll would replace a stopped permit's
+                    // budget/expiry cause with ExecutionStopped.
+                    checkpoint(cx, execution).map_err(admission)?;
+                    return Err(Fault::Binding(error));
+                }
+                Err(error) => return Err(error),
+            };
             checkpoint(cx, execution).map_err(admission)?;
-            drop(bound?);
+            drop(bound);
             Ok(script)
         })()
         .map_err(|fault| restored(recipe, fault))?;
