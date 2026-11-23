@@ -821,6 +821,142 @@ async fn schema_response<'s>(
     }
 }
 
+enum MaintenanceRequest {
+    Compact,
+    Scrub,
+    Seal { relation: u64, retain_from: u64 },
+}
+
+impl MaintenanceRequest {
+    fn parse(verb: &str, request: &Request) -> Result<Self, Response> {
+        let malformed = |detail| refusal_response(ErrorCode::Protocol, detail);
+        match verb {
+            "compact" | "scrub" if !request.body.is_empty() => {
+                Err(malformed("maintenance takes an empty body"))
+            }
+            "compact" => Ok(Self::Compact),
+            "scrub" => Ok(Self::Scrub),
+            "seal" => {
+                let mut fields = body_fields(request)?;
+                let unsigned = |field| match field {
+                    Json::Number(text) if text.bytes().all(|byte| byte.is_ascii_digit()) => {
+                        text.parse::<u64>().ok()
+                    }
+                    _ => None,
+                };
+                let relation = fields
+                    .remove("relation")
+                    .and_then(unsigned)
+                    .ok_or_else(|| malformed("seal requires an unsigned 64-bit relation ID"))?;
+                let retain_from = match fields.remove("retain_from") {
+                    None => 0,
+                    Some(value) => unsigned(value).ok_or_else(|| {
+                        malformed("retain_from must be an unsigned 64-bit sequence")
+                    })?,
+                };
+                if !fields.is_empty() {
+                    return Err(malformed("unknown seal field"));
+                }
+                Ok(Self::Seal {
+                    relation,
+                    retain_from,
+                })
+            }
+            _ => Err(malformed("unknown maintenance operation")),
+        }
+    }
+
+    async fn execute(
+        self,
+        contexts: &fgdb_types::PurposeContexts,
+        database: &mut fgdb::Database,
+    ) -> Result<Response, crate::MaintenanceError> {
+        let commit = contexts.commit();
+        match self {
+            Self::Compact => {
+                database
+                    .compact(&commit)
+                    .await
+                    .map_err(crate::MaintenanceError::Engine)?;
+                Ok(json_response(
+                    200,
+                    r#"{"v":1,"operation":"compact","completed":true}"#.to_owned(),
+                ))
+            }
+            Self::Scrub => {
+                let summary = database
+                    .scrub(&commit)
+                    .await
+                    .map_err(|error| crate::MaintenanceError::Engine(error.into()))?;
+                Ok(json_response(
+                    200,
+                    format!(
+                        r#"{{"v":1,"operation":"scrub","objects":{},"clean":{},"repaired":{},"block_objects":{},"metadata_objects":{}}}"#,
+                        summary.objects,
+                        summary.clean.len(),
+                        summary.repaired.len(),
+                        summary.block_objects,
+                        summary.metadata_objects
+                    ),
+                ))
+            }
+            Self::Seal {
+                relation,
+                retain_from,
+            } => {
+                let Ok(fgdb_types::CommitSeq(seq)) = database.frontier() else {
+                    return Ok(refusal_response(
+                        ErrorCode::DatabaseUnavailable,
+                        "database is unavailable",
+                    ));
+                };
+                if retain_from > seq {
+                    return Ok(refusal_response(
+                        ErrorCode::Protocol,
+                        "retain_from exceeds the current frontier",
+                    ));
+                }
+                let result = database
+                    .seal_relation(
+                        &commit,
+                        &contexts.query(),
+                        fgdb_delta_types::RelationId(relation),
+                        fgdb_types::CommitSeq(retain_from),
+                        Default::default(),
+                        Default::default(),
+                    )
+                    .await;
+                let response = match result {
+                    Ok(run) => json_response(
+                        200,
+                        format!(
+                            r#"{{"v":1,"operation":"seal","seq":{seq},"relation":{relation},"retain_from":{retain_from},"run":"{}"}}"#,
+                            fgdb_protocol::json::hex(&run.0.0)
+                        ),
+                    ),
+                    Err(
+                        fgdb::SealPublicationError::Source(error)
+                        | fgdb::SealPublicationError::Run(
+                            fgdb_strata::tiered::sealed::AdjRunError::Sealed(error),
+                        ),
+                    ) if error.is_admission_limit() => {
+                        refusal_response(ErrorCode::Budget, "seal exceeded its storage limits")
+                    }
+                    Err(fgdb::SealPublicationError::Origin(error))
+                        if matches!(error.as_ref(), fgdb::OriginBirthError::Limit { .. }) =>
+                    {
+                        refusal_response(ErrorCode::Budget, "seal exceeded its origin limit")
+                    }
+                    Err(_) => {
+                        refusal_response(ErrorCode::Execution, "database sealing did not complete")
+                    }
+                };
+                Ok(response)
+            }
+        }
+    }
+}
+
 /// Physical maintenance is an explicit Admin operation, never a GQL write.
 /// Verify before lifecycle/storage admission and again after waiting for the
 /// existing writer. The usual HTTP output fence guards the returned summary.
@@ -865,31 +1001,36 @@ async fn maintenance_response<'s>(
     if !output.protected(cx, &db.authority, verified) {
         return refusal_response(ErrorCode::Execution, "connection unavailable");
     }
-    if !request.body.is_empty() {
-        return refusal_response(ErrorCode::Protocol, "maintenance takes an empty body");
-    }
+    let action = match MaintenanceRequest::parse(verb, request) {
+        Ok(action) => action,
+        Err(response) => return response,
+    };
     let operation = async {
         let (served, _operation) = server.maintenance_admission(cx, name)?;
-        let generation = served.db.generation().map_err(|_| crate::MaintenanceError::unavailable(cx, served))?;
-        let mut database = served.db.write(cx).await.map_err(|_| crate::MaintenanceError::unavailable(cx, served))?;
+        let generation = served
+            .db
+            .generation()
+            .map_err(|_| crate::MaintenanceError::unavailable(cx, served))?;
+        let mut database = served
+            .db
+            .write(cx)
+            .await
+            .map_err(|_| crate::MaintenanceError::unavailable(cx, served))?;
         // A request may have waited behind another write until its credential
         // expired or its issuer retired. No requested maintenance precedes this.
-        if served.authority.verify_at(&token, crate::TRUNK, crate::unix_millis())
+        if served
+            .authority
+            .verify_at(&token, crate::TRUNK, crate::unix_millis())
             .and_then(|verified| verified.check_admin_at(crate::TRUNK, crate::unix_millis()))
             .is_err()
         {
-            return Ok(refusal_response(ErrorCode::PermissionDenied, "maintenance authority is no longer valid"));
+            return Ok(refusal_response(
+                ErrorCode::PermissionDenied,
+                "maintenance authority is no longer valid",
+            ));
         }
         let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(cx);
-        let body = if verb == "compact" {
-            database.compact(&contexts.commit()).await.map_err(crate::MaintenanceError::Engine)?;
-            r#"{"v":1,"operation":"compact","completed":true}"#.to_owned()
-        } else {
-            let summary = database.scrub(&contexts.commit()).await
-                .map_err(|error| crate::MaintenanceError::Engine(error.into()))?;
-            format!(r#"{{"v":1,"operation":"scrub","objects":{},"clean":{},"repaired":{},"block_objects":{},"metadata_objects":{}}}"#,
-                summary.objects, summary.clean.len(), summary.repaired.len(), summary.block_objects, summary.metadata_objects)
-        };
+        let response = action.execute(&contexts, &mut database).await?;
         // Dropping the writer preserves the existing recovery/fencing path
         // for scrub losses or ambiguous publication. Never report success on
         // a retired generation, including while retained readers still exist.
@@ -898,10 +1039,14 @@ async fn maintenance_response<'s>(
             return Ok(refusal_response(error.code(), error.message()));
         }
         if !output.pin_generation(generation) {
-            return Ok(refusal_response(ErrorCode::Execution, "connection unavailable"));
+            return Ok(refusal_response(
+                ErrorCode::Execution,
+                "connection unavailable",
+            ));
         }
-        Ok(json_response(200, body))
-    }.await;
+        Ok(response)
+    }
+    .await;
     match operation {
         Ok(response) => response,
         Err(error) => {
@@ -961,7 +1106,7 @@ pub(crate) async fn respond<'s>(
     if verb == "schema" {
         return schema_response(cx, server, name, &request, output).await;
     }
-    if matches!(verb, "compact" | "scrub") {
+    if matches!(verb, "compact" | "scrub" | "seal") {
         return maintenance_response(cx, server, name, verb, &request, output).await;
     }
     let mode = match verb {

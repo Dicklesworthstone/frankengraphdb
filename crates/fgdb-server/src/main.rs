@@ -151,6 +151,9 @@ POST /v1/databases/<name>/compact and /scrub take an empty body and require
 grants physical maintenance only; it grants no query reads or writes. Query
 rights cannot be attenuated into Admin rights. Query ceilings apply to query
 execution; maintenance uses the server's existing engine/recovery ownership.
+POST /v1/databases/<name>/seal uses the same Admin grant. Send a JSON object
+with numeric relation and optional retain_from (unsigned 64-bit integers).
+The response identifies the durable run and the unchanged graph sequence.
 
 --bolt-listen adds the bounded Bolt-compat adapter for Neo4j drivers:
 bolt:// or neo4j:// URIs, authenticated with the hex token as a bearer

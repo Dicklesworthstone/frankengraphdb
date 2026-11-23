@@ -146,6 +146,99 @@ fn http_admin_maintenance_preserves_pinned_readers_and_the_committed_frontier() 
 }
 
 #[test]
+fn http_seal_publishes_a_run_and_keeps_both_graph_cuts_readable() {
+    let ((), report) = asupersync::lab::run_async_under_lab(0x79a0_0031, |root| async move {
+        use fgdb_delta_types::RelationId;
+        use fgdb_types::EId;
+
+        let (server, _, path) = served(&root, "http-seal").await;
+        let db = &server.databases["test"];
+        let admin = admin_token(db);
+        let commit = PurposeContexts::narrow_runtime_root(&root).commit();
+        let relation = RelationId(1);
+        let mut seed = vertex(1);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(7), VId(1), VId(2), vec![]);
+        assert_eq!(
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit, seed)
+                .await
+                .unwrap(),
+            CommitSeq(1)
+        );
+        let (pinned, generation) = db.db.read_view(&root).await.unwrap();
+        let before = std::fs::read(path.join("manifest.root")).unwrap();
+
+        for body in [
+            r#"{"relation":1,"retain_from":2}"#,
+            r#"{"relation":-1}"#,
+            r#"{"relation":18446744073709551616}"#,
+            r#"{"relation":1,"extra":0}"#,
+            r#"{"relation":1,"relation":2}"#,
+            r#"{"retain_from":0}"#,
+        ] {
+            let mut request = maintenance_request("test", "seal", &admin);
+            request.body = body.as_bytes().to_vec();
+            let reply = crate::http::respond(
+                &root,
+                &server,
+                request,
+                &crate::http::OutputAuthority::new(),
+            )
+            .await;
+            assert_eq!(reply.status, 400, "{body}: {reply:?}");
+            assert_eq!(std::fs::read(path.join("manifest.root")).unwrap(), before);
+        }
+
+        let mut request = maintenance_request("test", "seal", &admin);
+        request.body = br#"{"relation":1,"retain_from":1}"#.to_vec();
+        let reply = crate::http::respond(
+            &root,
+            &server,
+            request,
+            &crate::http::OutputAuthority::new(),
+        )
+        .await;
+        assert_eq!(reply.status, 200, "{reply:?}");
+        use fgdb_protocol::json::{Json, parse_json};
+        let Json::Object(mut fields) =
+            parse_json(std::str::from_utf8(&reply.body).unwrap(), 32, 128).unwrap()
+        else {
+            panic!("expected a seal receipt");
+        };
+        assert_eq!(fields.remove("seq"), Some(Json::Number("1".into())));
+        assert_eq!(fields.remove("retain_from"), Some(Json::Number("1".into())));
+        assert_eq!(fields.remove("relation"), Some(Json::Number("1".into())));
+        let Some(Json::String(run)) = fields.remove("run") else {
+            panic!("missing run identity")
+        };
+        assert_eq!(fgdb_protocol::json::bytes_from_hex(&run).unwrap().len(), 32);
+        assert_ne!(std::fs::read(path.join("manifest.root")).unwrap(), before);
+
+        let mut mutation = fgdb::WriteBatch::new(relation);
+        mutation.delete_edge(EId(7));
+        let mut writer = db.db.write(&root).await.unwrap();
+        assert_eq!(writer.write(&commit, mutation).await.unwrap(), CommitSeq(2));
+        writer.compact(&commit).await.unwrap();
+        drop(writer);
+        let (fresh, _) = db.db.read_view(&root).await.unwrap();
+        assert_eq!(fresh.frontier(), CommitSeq(2));
+        assert!(fresh.neighbours(VId(1), relation).unwrap().is_empty());
+        assert_eq!(
+            fresh.neighbours_at(VId(1), relation, CommitSeq(1)).unwrap(),
+            vec![VId(2)]
+        );
+        assert_eq!(pinned.neighbours(VId(1), relation).unwrap(), vec![VId(2)]);
+        generation.check().unwrap();
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn http_maintenance_denies_query_or_masked_authority_before_waiting_for_storage() {
     use fgdb_warden::{Restriction, Rights, Scope};
     let ((), report) = asupersync::lab::run_async_under_lab(0x79a0_0025, |root| async move {
@@ -199,7 +292,7 @@ fn http_maintenance_denies_query_or_masked_authority_before_waiting_for_storage(
         ] {
             denied.push(admin.attenuate(restriction).unwrap());
         }
-        for verb in ["compact", "scrub"] {
+        for verb in ["compact", "scrub", "seal"] {
             for token in &denied {
                 let output = crate::http::OutputAuthority::new();
                 let mut request = Box::pin(crate::http::respond(
