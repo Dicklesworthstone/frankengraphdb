@@ -24,6 +24,111 @@ struct Output<'a> {
 }
 
 impl PreparedGraphPattern<GraphValueRow> {
+    /// Compile the support of one unbounded directed TRAIL into a one-hop
+    /// relation and a lossless endpoint projection. The host must apply its
+    /// deletion-safe transitive-closure owner between these two stages.
+    ///
+    /// DISTINCT is load-bearing: closure has one row per reachable pair, not
+    /// one row per path. The admitted interval is exactly one-or-more hops,
+    /// with both distinct endpoint columns and no predicates, captures, order
+    /// or page. An undirected trail cannot use this recipe: traversing one
+    /// physical edge in both directions does not constitute a legal cycle.
+    /// Ordinary one-hop selection retains relation unions, wildcard types and
+    /// source authorization before the closure sees any incidence.
+    #[must_use]
+    pub fn incremental_closure_definition(
+        &self,
+    ) -> Option<(Self, crate::row_projection::RowProjectionSpec)> {
+        use crate::algebra::{GlaDirection, GraphColumn, GraphPatternBuilder, GraphWalkSearch};
+        use crate::{GraphSetColumnType, GraphSetProjection, GraphSetQuantifier, GraphSetValue};
+
+        let output = self.incremental_rows_output()?;
+        if !output.distinct
+            || !output.order.is_empty()
+            || output.offset != 0
+            || output.count.is_some()
+        {
+            return None;
+        }
+        let [
+            ValueProjection::Vertex { slot: left },
+            ValueProjection::Vertex { slot: right },
+        ] = output.columns
+        else {
+            return None;
+        };
+        if !matches!((left.ordinal(), right.ordinal()), (0, 1) | (1, 0)) {
+            return None;
+        }
+        let [
+            GlaOperator::ScanVertices,
+            GlaOperator::VarLengthExpand {
+                source,
+                relation,
+                direction,
+                bounds,
+                search,
+                edge_predicates,
+            },
+            remainder @ ..,
+        ] = &self.plan().operators()[..output.projection]
+        else {
+            return None;
+        };
+        if source.ordinal() != 0
+            || bounds.minimum() != 1
+            || bounds.is_bounded()
+            || *direction == GlaDirection::Undirected
+            || !edge_predicates.is_empty()
+        {
+            return None;
+        }
+        let different_edges = matches!(remainder,
+            [GlaOperator::DifferentEdges { segments }]
+                if segments.len() == 1 && segments[0].ordinal() == 1);
+        if !matches!(search, GraphWalkSearch::Trail | GraphWalkSearch::All)
+            || (!remainder.is_empty() && !different_edges)
+            || (*search == GraphWalkSearch::All && !different_edges)
+        {
+            return None;
+        }
+
+        let mut pattern = GraphPatternBuilder::new();
+        pattern.vertex("source").ok()?.vertex("destination").ok()?;
+        pattern
+            .edge("source", *relation, *direction, "destination")
+            .ok()?;
+        let input = pattern
+            .prepare_values(
+                &[
+                    GraphColumn::vertex("source", "source"),
+                    GraphColumn::vertex("destination", "destination"),
+                ],
+                0,
+                None,
+            )
+            .ok()?
+            .with_duplicates();
+        // Both endpoint columns occur exactly once, so this permutation
+        // preserves closure's DISTINCT support without another threshold.
+        let projection = crate::row_projection::RowProjectionSpec::new(
+            vec![GraphSetColumnType::Vertex; 2],
+            self.columns()
+                .iter()
+                .zip([left, right])
+                .map(|(name, slot)| {
+                    GraphSetProjection::new(
+                        name.clone(),
+                        GraphSetValue::Column(usize::from(slot.ordinal() == 1)),
+                    )
+                })
+                .collect(),
+            GraphSetQuantifier::All,
+        )
+        .ok()?;
+        Some((input, projection))
+    }
+
     fn incremental_rows_output(&self) -> Option<Output<'_>> {
         let ops = self.plan().operators();
         let order_at = ops.len().checked_sub(2)?;

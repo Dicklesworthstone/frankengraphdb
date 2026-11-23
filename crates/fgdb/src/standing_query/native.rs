@@ -91,6 +91,13 @@ impl PreparedNativeRead {
     /// collapsed parallel edges and kept or dropped self-loops. YIELD aliases
     /// and downstream row stages retain their native schema; unsupported
     /// projection recipes refuse.
+    /// A single uncaptured, unbounded directed TRAIL with exactly one-or-more
+    /// hops and DISTINCT endpoint pairs composes a maintained one-hop source
+    /// with deletion-safe recursive closure. Relation unions and wildcard
+    /// types keep their ordinary authorized source semantics; reversed output
+    /// columns keep their aliases. Path bags, zero/bounded hop intervals,
+    /// undirected trails, endpoint predicates and a path-local page/order
+    /// require other derivatives and remain unsupported.
     /// Core-number CALLs use the exact affected-component maintainer with
     /// self-loops dropped. Their checked integer rows and derivatives are
     /// retained only for native registration; typed core-number views do not
@@ -153,6 +160,9 @@ impl PreparedNativeRead {
                     let bound = prepared
                         .bind_parameters(params)
                         .map_err(|e| prepare_error(QueryError::PatternText(e)))?;
+                    if bound.incremental_closure_definition().is_some() {
+                        return set::register(database, cx, &bound.into(), policy);
+                    }
                     let layout = Layout::Rows {
                         columns: bound.columns().to_vec(),
                     };

@@ -2,7 +2,7 @@ use super::*;
 use crate::{DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use fgdb_gql::{GqlParameters, PreparedGraphSetText, PreparedGraphText};
-use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts};
 
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
@@ -27,6 +27,8 @@ fn addresses(db: &Database<MemVfs>, first: usize, root: usize) -> Vec<usize> {
         .map(|query| match query {
             StandingQuery::Rows { source, .. } => source.as_ref() as *const _ as usize,
             StandingQuery::Set(query) => query.as_ref() as *const _ as usize,
+            StandingQuery::Closure(query) => query.as_ref() as *const _ as usize,
+            StandingQuery::Projection(query) => query.as_ref() as *const _ as usize,
             _ => panic!("not a native set node"),
         })
         .collect()
@@ -212,6 +214,226 @@ fn complete_native_rebuild_replaces_no_old_node_until_every_stage_is_accepted() 
             rows.len(),
             2,
             "rebased dependencies must read original public indexes"
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn reachability_symbols(
+    kind: fgdb_gql::GraphSymbolKind,
+    name: &str,
+) -> Option<fgdb_gql::GraphSymbol> {
+    match (kind, name) {
+        (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+            Some(fgdb_gql::GraphSymbol::Relation(RelationId(1)))
+        }
+        (fgdb_gql::GraphSymbolKind::Relation, "S") => {
+            Some(fgdb_gql::GraphSymbol::Relation(RelationId(2)))
+        }
+        (fgdb_gql::GraphSymbolKind::Label, "L") => Some(fgdb_gql::GraphSymbol::Label(LabelId(1))),
+        _ => None,
+    }
+}
+
+#[test]
+fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_row_limit() {
+    let ((), report) = run_async_under_lab(0x6e73_7c11, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for id in 1..=3 {
+            seed.create_vertex(VId(id), vec![], vec![]);
+        }
+        for id in 1..=8 {
+            seed.add_edge(EId(id), VId(1), VId(2), vec![]);
+        }
+        seed.add_edge(EId(9), VId(2), VId(3), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let params = GqlParameters::new();
+        let prior = db
+            .register_standing_native(&cx, "MATCH (n) RETURN n", &params, none, policy())
+            .unwrap();
+        let before = db.standing_queries.len();
+        let prior_answer = db.standing_native_query(&cx, &prior, policy()).unwrap();
+        let text = "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b";
+        let query: PreparedGraphSet = PreparedGraphText::prepare(text, reachability_symbols)
+            .unwrap()
+            .bind_parameters(&params)
+            .unwrap()
+            .into();
+        let exact = GqlQueryPolicy::new(1000, 3, 10_000_000, 10_000_000);
+        let too_few = GqlQueryPolicy::new(1000, 2, 10_000_000, 10_000_000);
+        assert!(matches!(
+            register(&mut db, &cx, &query, too_few),
+            Err(StandingQueryError::Maintenance(
+                StandingQueryFailure::ResultBudget
+            ))
+        ));
+        assert_eq!(db.standing_queries.len(), before);
+        let mut calls = 0;
+        {
+            let mut staged = Staging::new(&mut db);
+            staged
+                .compile(&cx, &query, exact, &mut || {
+                    calls += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(staged.database.standing_queries.len(), before + 3);
+        }
+        assert!(calls >= 3);
+        assert_eq!(db.standing_queries.len(), before);
+        for stop in 1..=calls {
+            let mut visited = 0;
+            {
+                let mut staged = Staging::new(&mut db);
+                let error = staged
+                    .compile(&cx, &query, exact, &mut || {
+                        visited += 1;
+                        if visited == stop {
+                            Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::Interrupted,
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    StandingQueryError::Maintenance(StandingQueryFailure::Interrupted)
+                ));
+            }
+            assert_eq!(visited, stop);
+            assert_eq!(db.standing_queries.len(), before);
+            assert_eq!(
+                db.standing_native_query(&cx, &prior, policy()).unwrap(),
+                prior_answer
+            );
+        }
+        let handle = register(&mut db, &cx, &query, exact).unwrap();
+        assert_eq!(db.standing_queries.len(), before + 3);
+        let expected = db.standing_native_bag(&cx, &handle, exact).unwrap().1;
+        assert_eq!(expected.len(), 3);
+        assert_eq!(
+            db.standing_native_bag(&cx, &handle, exact).unwrap().1,
+            expected
+        );
+        let Layout::Circuit {
+            first,
+            private_inputs,
+            ..
+        } = handle.native.as_deref().unwrap()
+        else {
+            panic!("owned reachability circuit");
+        };
+        assert_eq!(private_inputs, &[true, false, false]);
+        let identities = addresses(&db, *first, handle.index);
+        assert!(db.rebuild_standing_query(&cx, &handle, too_few).is_err());
+        assert_eq!(addresses(&db, *first, handle.index), identities);
+        assert_eq!(
+            db.standing_native_bag(&cx, &handle, exact).unwrap().1,
+            expected
+        );
+        let mut rebuild_calls = 0;
+        rebuild_checked(
+            &mut db,
+            &cx,
+            *first,
+            handle.index,
+            private_inputs,
+            exact,
+            &mut || {
+                rebuild_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        for stop in 1..=rebuild_calls {
+            let identities = addresses(&db, *first, handle.index);
+            let mut visited = 0;
+            assert!(
+                rebuild_checked(
+                    &mut db,
+                    &cx,
+                    *first,
+                    handle.index,
+                    private_inputs,
+                    exact,
+                    &mut || {
+                        visited += 1;
+                        if visited == stop {
+                            Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::Interrupted,
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(visited, stop);
+            assert_eq!(addresses(&db, *first, handle.index), identities);
+            assert_eq!(db.standing_queries.len(), before + 3);
+            assert_eq!(
+                db.standing_native_bag(&cx, &handle, exact).unwrap().1,
+                expected
+            );
+        }
+        for unsupported in [
+            "MATCH (a)-[:R*]->(b) RETURN a,b",
+            "MATCH (a)-[:R*0..]->(b) RETURN DISTINCT a,b",
+            "MATCH (a)-[:R*2..]->(b) RETURN DISTINCT a,b",
+            "MATCH (a)-[:R*1..2]->(b) RETURN DISTINCT a,b",
+            "MATCH (a)-[:R*]-(b) RETURN DISTINCT a,b",
+            "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT a,b",
+            "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b LIMIT 0",
+        ] {
+            let prepared =
+                PreparedNativeRead::prepare(unsupported, &params, reachability_symbols).unwrap();
+            assert!(
+                prepared
+                    .register_standing(&mut db, &cx, &params, policy())
+                    .is_err(),
+                "{unsupported}"
+            );
+            assert_eq!(db.standing_queries.len(), before + 3, "{unsupported}");
+        }
+        let mut change = WriteBatch::new(RelationId(1));
+        change.delete_edge(EId(9));
+        db.write(&commit, change).await.unwrap();
+        assert_eq!(
+            db.standing_native_bag(&cx, &handle, exact).unwrap().1.len(),
+            1
+        );
+        // A durable write may outgrow this view's allowance. It must fence the
+        // dependent result, preserve an unrelated view, and permit an explicit
+        // complete rebuild under a sufficient budget.
+        let mut cycle = WriteBatch::new(RelationId(1));
+        cycle.add_edge(EId(10), VId(2), VId(3), vec![]);
+        cycle.add_edge(EId(11), VId(3), VId(1), vec![]);
+        db.write(&commit, cycle).await.unwrap();
+        assert!(db.standing_native_bag(&cx, &handle, policy()).is_err());
+        assert_eq!(
+            db.standing_native_query(&cx, &prior, policy()).unwrap().1,
+            prior_answer.1
+        );
+        db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
+        assert_eq!(db.standing_queries.len(), before + 3);
+        assert_eq!(
+            db.standing_native_bag(&cx, &handle, policy())
+                .unwrap()
+                .1
+                .len(),
+            9
+        );
+        assert_eq!(
+            db.standing_native_query(&cx, &handle, policy()).unwrap().1,
+            db.query(&cx, text, &params, reachability_symbols, policy())
+                .unwrap()
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

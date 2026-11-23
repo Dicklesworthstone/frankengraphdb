@@ -306,3 +306,71 @@ fn native_aggregate_with_and_compound_set_consumers_keep_the_identified_source()
         .unwrap();
     assert_eq!(result.value[0].values()[0].as_count(), Some(1));
 }
+
+#[test]
+fn closure_recipe_admits_only_distinct_directed_unbounded_endpoint_support() {
+    use fgdb_delta_types::LabelId;
+
+    let symbols = |kind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+        (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        _ => None,
+    };
+    let prepare = |text| {
+        PreparedGraphText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    for text in [
+        "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b",
+        "MATCH TRAIL (a)-[:R*1..]->(b) RETURN DISTINCT a,b",
+        "MATCH REPEATABLE ELEMENTS TRAIL (a)-[:R*]->(b) RETURN DISTINCT a,b",
+        "MATCH (a)<-[:R|S*]-(b) RETURN DISTINCT b AS target,a AS origin",
+        "MATCH (a)-[*]->(b) RETURN DISTINCT a AS origin,b AS target",
+    ] {
+        let pattern = prepare(text);
+        let (source, output) = pattern
+            .incremental_closure_definition()
+            .unwrap_or_else(|| panic!("eligible endpoint closure: {text}"));
+        assert!(source.preserves_duplicates(), "parallel support: {text}");
+        assert!(source.plan().scans_edges());
+        assert_eq!(
+            source.plan().edge_relations(),
+            pattern.plan().edge_relations()
+        );
+        assert_eq!(
+            output.columns().collect::<Vec<_>>(),
+            pattern
+                .columns()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert!(source.incremental_row_source_definition().is_some());
+        assert!(source.incremental_closure_definition().is_none());
+    }
+    for text in [
+        "MATCH (a)-[:R*]->(b) RETURN a,b",
+        "MATCH (a)-[:R*0..]->(b) RETURN DISTINCT a,b",
+        "MATCH (a)-[:R*2..]->(b) RETURN DISTINCT a,b",
+        "MATCH (a)-[:R*1..3]->(b) RETURN DISTINCT a,b",
+        "MATCH (a)-[:R*]-(b) RETURN DISTINCT a,b",
+        "MATCH ACYCLIC (a)-[:R*]->(b) RETURN DISTINCT a,b",
+        "MATCH p = (a)-[:R*]->(b) RETURN DISTINCT a,b,p",
+        "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT a,b",
+        "MATCH (a)-[:R*]->(b) WHERE b.p=1 RETURN DISTINCT a,b",
+        "MATCH (a)-[:R*]->(b) RETURN DISTINCT a",
+        "MATCH (a)-[:R*]->(b) RETURN DISTINCT a AS first,a AS second",
+        "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b ORDER BY b",
+        "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b LIMIT 0",
+        "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b SKIP 1",
+    ] {
+        assert!(
+            prepare(text).incremental_closure_definition().is_none(),
+            "path semantics cannot silently become closure: {text}"
+        );
+    }
+}

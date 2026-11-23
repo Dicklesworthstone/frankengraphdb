@@ -4,7 +4,7 @@ use fgdb::{
     Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryResult, QueryValue,
     StandingQueryError, StandingQueryFailure, StandingQueryHandle, WriteBatch,
 };
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, ZSet, ZWeight};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
 use fgdb_types::{
@@ -86,6 +86,392 @@ fn oracle(db: &Database<MemVfs>, op: usize) -> QueryResult {
         columns: vec!["p".into()],
         rows,
     }
+}
+
+// Full traversal of current graph facts, independent of the incremental
+// support arrangement, closure kernel and native TRAIL enumeration.
+fn reachable_pairs(
+    db: &Database<MemVfs>,
+    selected: &[RelationId],
+    reverse: bool,
+    swap: bool,
+) -> ZSet<Vec<QueryValue>> {
+    let mut adjacency: BTreeMap<VId, BTreeSet<VId>> = BTreeMap::new();
+    for row in db
+        .edges()
+        .unwrap()
+        .iter()
+        .filter(|row| selected.is_empty() || selected.contains(&row.entry.relation))
+    {
+        let (a, b) = if reverse {
+            (row.entry.dst, row.entry.src)
+        } else {
+            (row.entry.src, row.entry.dst)
+        };
+        adjacency.entry(a).or_default().insert(b);
+    }
+    let mut pairs = Vec::new();
+    for (&source, neighbors) in &adjacency {
+        let mut seen = BTreeSet::new();
+        let mut pending: Vec<_> = neighbors.iter().copied().collect();
+        while let Some(vertex) = pending.pop() {
+            if seen.insert(vertex)
+                && let Some(next) = adjacency.get(&vertex)
+            {
+                pending.extend(next);
+            }
+        }
+        for destination in seen {
+            let (a, b) = if swap {
+                (destination, source)
+            } else {
+                (source, destination)
+            };
+            pairs.push((
+                vec![
+                    QueryValue::Value(GraphValue::Vertex(a)),
+                    QueryValue::Value(GraphValue::Vertex(b)),
+                ],
+                ZWeight::ONE,
+            ));
+        }
+    }
+    ZSet::from_updates(pairs, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
+        Ok::<_, ()>(())
+    })
+    .unwrap()
+}
+
+#[test]
+fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit() {
+    let ((), report) = run_async_under_lab(0x6e73_7c10, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for id in [1, 2, 3, 4, 5, u128::MAX] {
+            seed.create_vertex(VId(id), vec![], vec![]);
+        }
+        for (id, a, b) in [(1, 1, 2), (2, 1, 2), (3, 2, 3), (4, 3, 1), (5, 4, 5)] {
+            seed.add_edge(EId(id), VId(a), VId(b), vec![]);
+        }
+        seed.add_edge(EId(6), VId(u128::MAX), VId(u128::MAX), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let mut other = WriteBatch::new(RelationId(2));
+        other.add_edge(EId(20), VId(3), VId(4), vec![]);
+        db.write(&commit, other).await.unwrap();
+        let cases = [
+            (
+                "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b",
+                vec![RelationId(1)],
+                false,
+                false,
+            ),
+            (
+                "MATCH TRAIL (a)<-[:R*]-(b) RETURN DISTINCT b AS target,a AS origin",
+                vec![RelationId(1)],
+                true,
+                true,
+            ),
+            (
+                "MATCH (a)-[:R|S*1..]->(b) RETURN DISTINCT a,b",
+                vec![RelationId(1), RelationId(2)],
+                false,
+                false,
+            ),
+            (
+                "MATCH (a)-[*]->(b) RETURN DISTINCT a,b",
+                vec![],
+                false,
+                false,
+            ),
+        ];
+        let params = GqlParameters::new();
+        let mut handles = Vec::new();
+        for (text, _, _, _) in &cases {
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+            let (reserved, _) = prepared.subscription_footprint(&cx, &params).unwrap();
+            let handle = prepared
+                .register_standing(&mut db, &cx, &params, policy())
+                .unwrap();
+            assert_eq!(reserved, 3);
+            assert_eq!(
+                db.standing_query_node_stats(&cx, &handle).unwrap().count(),
+                3
+            );
+            handles.push(handle);
+        }
+        assert_eq!(
+            db.standing_native_columns(&cx, &handles[1]).unwrap(),
+            ["target", "origin"]
+        );
+        let mut previous: Vec<_> = cases
+            .iter()
+            .map(|(_, selected, reverse, swap)| reachable_pairs(&db, selected, *reverse, *swap))
+            .collect();
+        let mut from = db.frontier().unwrap();
+        for tick in 0..=11 {
+            for (index, ((text, selected, reverse, swap), handle)) in
+                cases.iter().zip(&handles).enumerate()
+            {
+                let expected = reachable_pairs(&db, selected, *reverse, *swap);
+                let (at, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
+                assert_eq!(at, db.frontier().unwrap());
+                assert_eq!(
+                    actual, expected,
+                    "independent graph oracle, tick {tick}: {text}"
+                );
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                    db.query(&cx, text, &params, symbols, policy()).unwrap(),
+                    "ordinary TRAIL semantics, tick {tick}: {text}"
+                );
+                if tick != 0 {
+                    let (through, delta) = db
+                        .standing_native_delta(&cx, handle, from, policy())
+                        .unwrap();
+                    assert_eq!(through, at);
+                    previous[index]
+                        .integrate(&delta, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
+                            Ok::<_, ()>(())
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        previous[index], expected,
+                        "delivered retractions, tick {tick}"
+                    );
+                }
+                if tick == 5 {
+                    db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+                    assert_eq!(
+                        db.standing_query_node_stats(&cx, handle).unwrap().count(),
+                        3
+                    );
+                    assert_eq!(
+                        db.standing_native_bag(&cx, handle, policy()).unwrap().1,
+                        expected
+                    );
+                }
+            }
+            if tick == 11 {
+                break;
+            }
+            from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(if tick == 6 || tick == 8 {
+                RelationId(3)
+            } else {
+                RelationId(1)
+            });
+            match tick {
+                0 => {
+                    change.delete_edge(EId(1));
+                }
+                1 => {
+                    change.delete_edge(EId(2));
+                }
+                2 => {
+                    change.add_edge(EId(7), VId(1), VId(2), vec![]);
+                }
+                3 => {
+                    change.delete_edge(EId(4));
+                }
+                4 => {
+                    change.delete_edge(EId(6));
+                }
+                5 => {
+                    change.add_edge(EId(8), VId(3), VId(3), vec![]);
+                }
+                6 => {
+                    change.add_edge(EId(30), VId(5), VId(u128::MAX), vec![]);
+                }
+                7 => {
+                    change.create_vertex(VId(99), vec![], vec![]);
+                }
+                8 => {
+                    change.delete_edge(EId(30));
+                }
+                9 => {
+                    change.delete_vertex(VId(2));
+                }
+                10 => {
+                    change.add_edge(EId(9), VId(1), VId(3), vec![]);
+                }
+                _ => unreachable!(),
+            }
+            db.write(&commit, change).await.unwrap();
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state() {
+    use asupersync::security::key::AuthKey;
+    use fgdb::{NativeSubscriptionSetup, SubscriptionError};
+    use fgdb_delta_types::SchemaEpoch;
+    use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
+    use std::sync::Arc;
+
+    let ((), report) = run_async_under_lab(0x6e73_7c12, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut visible = Database::open_memory(&commit, keys()).await.unwrap();
+        for graph in [&mut db, &mut visible] {
+            let mut seed = WriteBatch::new(RelationId(1));
+            for id in 1..=3 {
+                seed.create_vertex(VId(id), vec![LabelId(1)], vec![]);
+            }
+            seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+            graph.write(&commit, seed).await.unwrap();
+        }
+        let mut bridge = WriteBatch::new(RelationId(1));
+        bridge.create_vertex(VId(10), vec![LabelId(2)], vec![]);
+        bridge.add_edge(EId(10), VId(2), VId(10), vec![]);
+        bridge.add_edge(EId(11), VId(10), VId(3), vec![]);
+        db.write(&commit, bridge).await.unwrap();
+        let mut hidden_relation = WriteBatch::new(RelationId(2));
+        hidden_relation.add_edge(EId(20), VId(3), VId(1), vec![]);
+        db.write(&commit, hidden_relation).await.unwrap();
+
+        let issuer = Authority::new(
+            AuthKey::from_seed(0x6e73_7c12),
+            DatabaseSecurityNamespaceId([0x52; 32]),
+            "graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 100_000,
+                max_work: 10_000_000,
+                max_rows: 100_000,
+            },
+        );
+        grant.labels = Scope::only([LabelId(1)]);
+        grant.relations = Scope::only([RelationId(1)]);
+        let token = issuer.issue_at(&grant, 0).unwrap();
+        let authority = issuer.verify_at(&token, "main", 1).unwrap();
+        let params = GqlParameters::new();
+        let query =
+            PreparedNativeRead::prepare("MATCH (a)-[*]->(b) RETURN DISTINCT a,b", &params, symbols)
+                .unwrap();
+        let control = query
+            .register_standing(&mut db, &cx, &params, policy())
+            .unwrap();
+        let (mut subscription, initial) = query
+            .subscribe_authorized(
+                &mut db,
+                &cx,
+                &params,
+                authority.predicates(),
+                NativeSubscriptionSetup {
+                    maintenance: policy(),
+                    delivery: policy(),
+                    retention: [16, 1000, 100_000],
+                },
+                |columns, batch| {
+                    assert_eq!(columns, ["a", "b"]);
+                    Ok::<_, SubscriptionError>(Arc::clone(batch))
+                },
+            )
+            .unwrap();
+        let mut delivered = initial.rows().clone();
+        subscription.acknowledge(initial.receipt()).unwrap();
+        assert_eq!(delivered, reachable_pairs(&visible, &[], false, false));
+        let hidden_bridge_pair = vec![
+            QueryValue::Value(GraphValue::Vertex(VId(1))),
+            QueryValue::Value(GraphValue::Vertex(VId(3))),
+        ];
+        assert!(!delivered.iter().any(|(row, _)| row == &hidden_bridge_pair));
+        assert!(
+            db.standing_native_bag(&cx, &control, policy())
+                .unwrap()
+                .1
+                .iter()
+                .any(|(row, _)| row == &hidden_bridge_pair)
+        );
+        for tick in 0..6 {
+            let mut change = WriteBatch::new(RelationId(1));
+            match tick {
+                0 => {
+                    change.delete_edge(EId(11));
+                }
+                1 => {
+                    change.add_edge(EId(12), VId(10), VId(3), vec![]);
+                }
+                2 => {
+                    change.add_edge(EId(2), VId(2), VId(3), vec![]);
+                }
+                3 => {
+                    change.delete_edge(EId(1));
+                }
+                4 => {
+                    change.delete_vertex(VId(10));
+                }
+                5 => {
+                    change.delete_edge(EId(2));
+                }
+                _ => unreachable!(),
+            }
+            if matches!(tick, 2 | 3 | 5) {
+                visible.write(&commit, change.clone()).await.unwrap();
+            }
+            db.write(&commit, change).await.unwrap();
+            if tick <= 1 {
+                assert_eq!(
+                    db.standing_native_bag(&cx, &control, policy())
+                        .unwrap()
+                        .1
+                        .iter()
+                        .any(|(row, _)| row == &hidden_bridge_pair),
+                    tick == 1,
+                    "removing and restoring the hidden bridge changes unscoped reachability"
+                );
+            }
+            if let Some(batch) = subscription.poll(&db, &cx, policy()).unwrap() {
+                if batch.is_snapshot() {
+                    delivered = batch.rows().clone();
+                } else {
+                    delivered
+                        .integrate(
+                            batch.rows(),
+                            fgdb_delta_types::LimbLimit::new(4),
+                            &mut |_| Ok::<_, ()>(()),
+                        )
+                        .unwrap();
+                }
+                subscription.acknowledge(batch.receipt()).unwrap();
+            }
+            assert_eq!(
+                delivered,
+                reachable_pairs(&visible, &[], false, false),
+                "visible-only independent oracle, tick {tick}"
+            );
+            assert_eq!(
+                db.standing_native_bag(&cx, &control, policy()).unwrap().1,
+                reachable_pairs(&db, &[], false, false),
+                "unscoped live control, tick {tick}"
+            );
+        }
+        assert_eq!(
+            subscription
+                .close_and_release(&mut db, &cx, policy())
+                .unwrap(),
+            5,
+            "mask, three recursive owners, replay"
+        );
+        assert_eq!(
+            db.standing_query_node_stats(&cx, &control).unwrap().count(),
+            3
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 fn analytic_field(metric: &str) -> &'static str {

@@ -159,6 +159,33 @@ these paths, with additional cases for rollback, authority and output limits.
 Compilation and runtime qualification remain pending; see
 [implementation status](IMPLEMENTATION_STATUS.md).
 
+### Maintained directed reachability — qualification pending
+
+Native standing queries and subscriptions can maintain distinct endpoint pairs
+for an unbounded directed path of one or more edges:
+
+```cypher
+SUBSCRIBE TO
+MATCH (source)-[:KNOWS*]->(target)
+RETURN DISTINCT source, target
+```
+
+The compiler connects the existing maintained one-hop relation to the
+deletion-safe reachability operator and an endpoint projection. Each reachable
+pair appears once, even when several paths or parallel edges support it.
+Removing one parallel edge preserves remaining support; breaking the last path
+retracts the pair. A nonempty directed cycle can make a vertex reach itself.
+Relation unions, wildcard relations, reverse direction, output aliases and
+reversed endpoint columns use the same path. Capability masking applies to the
+one-hop source before recursion, so a hidden intermediary cannot create a
+visible connection.
+
+This profile requires `DISTINCT` and both endpoint columns. Path bags or
+captures, undirected trails, zero-hop or bounded intervals, endpoint predicates
+and ordering/pagination inside this pattern remain unsupported. Registrations
+retain the existing session-local resident-state and resource limits; this
+does not introduce durable subscriptions or a general recursive language.
+
 ### Maintained correlated graph queries
 
 Standing queries and native subscriptions can maintain eligible returning `CALL` subqueries and `OPTIONAL MATCH` continuations through the existing incremental joins and projections:

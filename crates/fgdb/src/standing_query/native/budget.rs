@@ -91,6 +91,9 @@ fn circuit(
         return circuit(cx, &input, scoped)?.append(1);
     }
     if let Some(pattern) = query.incremental_pattern() {
+        if let Some((input, _)) = pattern.incremental_closure_definition() {
+            return circuit(cx, &input.into(), scoped)?.append(2);
+        }
         return Ok(Footprint {
             nodes: 1,
             source_width: pattern_width(pattern),
@@ -291,9 +294,13 @@ impl PreparedNativeRead {
                 let bound = prepared
                     .bind_parameters(params)
                     .map_err(|error| prepare_error(QueryError::PatternText(error)))?;
-                Footprint {
-                    nodes: 1,
-                    source_width: pattern_width(&bound),
+                if let Some((input, _)) = bound.incremental_closure_definition() {
+                    circuit(cx, &input.into(), scoped)?.append(2)?
+                } else {
+                    Footprint {
+                        nodes: 1,
+                        source_width: pattern_width(&bound),
+                    }
                 }
             }
             Self::Aggregate(prepared) => {

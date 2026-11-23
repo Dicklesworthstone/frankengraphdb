@@ -12,6 +12,39 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Maintained native directed reachability — qualification pending
+
+Native registration recognizes one uncaptured, unbounded, directed TRAIL with
+exactly one-or-more hops and DISTINCT endpoint pairs. It composes the existing
+duplicate-preserving one-hop row source, deletion-safe Closure, and endpoint
+alias/permutation projection. Forward/reverse traversal, relation unions and
+wildcard types retain their ordinary source semantics. Capability masking
+precedes recursion; the compiler does not run an eager path enumeration after
+each commit or replace the existing reachability kernel.
+
+Preflight accounts for all three owners. Private parallel-edge occurrences
+retain source/work/scratch limits without consuming the final reachable-pair
+row allowance. Construction and rebuild preserve the existing atomic staging
+guard. Undirected trails, bags/captures, zero-hop/minimum-above-one/bounded
+intervals, predicates and pattern-local order/pages retain their refusal.
+Typed `register_standing_rows` is unchanged. This is session-local maintained
+state, not a durable subscription or complete recursion workstream.
+
+Public regression sources compare independent BFS, eager TRAIL and exact
+delivered bags/deltas across twelve snapshots, parallel-edge removals, cycles,
+self-loops, full-width identities, relation changes, vertex deletion and
+rebuild. An authenticated hidden-bridge test compares a scoped subscription
+with a separate visible-only graph and a live unscoped control. A private
+regression covers every staged construction/rebuild interruption, final-row
+quotas, commit-time fencing and recovery with a sufficient rebuild budget.
+
+All seven changed Rust files pass the pinned formatter and whitespace checks.
+Compiler/runtime and full integrated-tree qualification remain UNRUN after an
+executor outage during dependency compilation. Public laws live in the
+`trail_text` and `native_standing_sets` integration targets; the injected
+atomicity law remains a library test. `fgdb-w6-recursion-x78` and
+`fgdb-w6-zset-circuits-kjv` retain their broader scope and open dependencies.
+
 ### Boolean clauses in composable hybrid retrieval — qualification pending
 
 The canonical exact-RRF request now accepts the existing bounded Boolean BM25

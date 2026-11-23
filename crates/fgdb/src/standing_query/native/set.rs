@@ -643,13 +643,42 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             )?;
             self.append(StandingQuery::Window(Box::new(state)))
         } else if let Some(pattern) = query.incremental_pattern() {
-            let query = self.database.prepare_registered_rows_with_delivery(
-                cx,
-                pattern.clone(),
-                policy,
-                self.group_input,
-            )?;
-            self.append(query)
+            if let Some((input, projection)) = pattern.incremental_closure_definition() {
+                // The one-hop relation owns actual edge lifetimes and masks
+                // incidence before recursion. Parallel support is private
+                // input, not delivered reachable-pair cardinality.
+                let input = self.compile_group_input(
+                    cx,
+                    &input.into(),
+                    group::input_policy(policy),
+                    checkpoint,
+                )?;
+                let closure = self.database.prepare_standing_closure(
+                    cx,
+                    input,
+                    [0, 1],
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                let closure = self.append(StandingQuery::Closure(Box::new(closure)));
+                checkpoint()?;
+                let output = self.database.prepare_standing_projection(
+                    cx,
+                    closure,
+                    projection,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                self.append(StandingQuery::Projection(Box::new(output)))
+            } else {
+                let query = self.database.prepare_registered_rows_with_delivery(
+                    cx,
+                    pattern.clone(),
+                    policy,
+                    self.group_input,
+                )?;
+                self.append(query)
+            }
         } else if let Some((source, spec)) =
             analytic_procedure(query, self.database.active_registration_scope.is_some())?
         {
@@ -1479,6 +1508,22 @@ fn rebuild_checked<V: Vfs + Clone>(
                     staged.database.standing_queries.len(),
                 )?))
             }
+            StandingQuery::Closure(query) => {
+                if query.input < first || query.input >= old {
+                    return Err(StandingQueryError::Unsupported);
+                }
+                let input = staged
+                    .first
+                    .checked_add(query.input - first)
+                    .ok_or(StandingQueryError::Unsupported)?;
+                StandingQuery::Closure(Box::new(staged.database.prepare_standing_closure(
+                    cx,
+                    input,
+                    query.endpoints,
+                    policy,
+                    staged.database.standing_queries.len(),
+                )?))
+            }
             StandingQuery::Projection(query) => {
                 if query.input < first || query.input >= old {
                     return Err(StandingQueryError::Unsupported);
@@ -1587,6 +1632,12 @@ fn rebuild_checked<V: Vfs + Clone>(
                     .and_then(|offset| first.checked_add(offset))
                     .ok_or(StandingQueryError::Unsupported)?;
             }
+        } else if let StandingQuery::Closure(query) = query {
+            query.input = query
+                .input
+                .checked_sub(staged.first)
+                .and_then(|offset| first.checked_add(offset))
+                .ok_or(StandingQueryError::Unsupported)?;
         } else if let StandingQuery::Projection(query) = query {
             query.input = query
                 .input
