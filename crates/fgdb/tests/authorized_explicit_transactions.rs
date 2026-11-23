@@ -1605,7 +1605,7 @@ fn preparation_errors_swallowed_meters_and_unwinds_abort_the_prefix() {
                             1 => {
                                 assert!(work(u64::MAX).is_err());
                             }
-                            2 => issuer.retire(),
+                            2 => assert!(issuer.retire()),
                             3 => {
                                 assert!(work(u64::MAX).is_err());
                                 return Err(WriteTxnError::AuthorizedMutationRefused);
@@ -1891,7 +1891,7 @@ fn aggregate_output_rechecks_authority_and_cancellation_before_returning_rows() 
                     assert_eq!(rows[0].values()[0].as_count(), Some(1));
                     observed = Some(probe.calls());
                     match fault {
-                        1 => issuer.retire(),
+                        1 => assert!(issuer.retire()),
                         2 => now.store(1000, Ordering::Relaxed),
                         _ => {}
                     }
@@ -2336,7 +2336,7 @@ fn savepoint_controls_abort_unknown_names_stale_bases_and_late_authority_failure
                     admitted = true;
                     match failure {
                         2 => now.store(1001, Ordering::Relaxed),
-                        3 => issuer.retire(),
+                        3 => assert!(issuer.retire()),
                         4 => {
                             let _ = work(u64::MAX);
                         }

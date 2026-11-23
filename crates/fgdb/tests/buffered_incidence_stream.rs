@@ -637,7 +637,8 @@ mod native_runs {
     use fgdb_strata::store::{BlockStore, RootReadLimits};
     use fgdb_strata::tiered::edge_scan::BufferedEdgeScanEvent;
     use fgdb_strata::tiered::sealed::SealedLimits;
-    use fgdb_types::{ObjectId, SimulationCheckpointProbe};
+    use fgdb_types::ObjectId;
+    use fgdb_types::context::SimulationCheckpointProbe;
     use std::sync::Arc;
 
     const ADDED: EId = EId(1_u128 << 127);

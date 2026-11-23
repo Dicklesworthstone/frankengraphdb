@@ -967,9 +967,9 @@ fn schema_registration_has_exact_robot_rows_and_idempotent_completion() {
     assert_eq!(repeated.terminal().get("count").unsigned(), 1);
     assert_rows(&repeated, expected);
     let conflict = db.command("schema", &["--label", "Registered=9"]);
-    conflict.error(3, "query");
+    conflict.failure(3, "query");
     let stale = db.command("schema", &["--property", "new=8", "--if-current", "0"]);
-    stale.error(3, "query");
+    stale.failure(3, "query");
     assert_eq!(stale.terminal().get("code").string(), "conflict");
 }
 
