@@ -87,9 +87,14 @@ pub(crate) fn without_terminator(text: &str) -> &str {
 /// Catalog binding follows complete native syntax validation. An unrelated
 /// grammar's later syntax failure cannot explain that accepted statement.
 fn catalog_binding_refusal(error: &QueryError) -> bool {
-    use GraphPatternTextErrorKind::Catalog;
+    use GraphPatternTextErrorKind::{Catalog, UnknownSymbol, WrongSymbolKind};
     match error {
-        QueryError::PatternText(error) => matches!(error.kind, Catalog(_)),
+        QueryError::PatternText(error) => {
+            matches!(
+                error.kind,
+                Catalog(_) | UnknownSymbol(_) | WrongSymbolKind { .. }
+            )
+        }
         QueryError::SetText(error) => {
             matches!(error.kind, GraphSetTextErrorKind::Pattern(Catalog(_)))
         }
@@ -98,7 +103,12 @@ fn catalog_binding_refusal(error: &QueryError) -> bool {
             GraphPipelineAggregateTextErrorKind::Input(GraphSetTextErrorKind::Pattern(Catalog(_)))
         ),
         QueryError::TemporalText(error) => {
-            matches!(error.kind, GraphTemporalTextErrorKind::Query(Catalog(_)))
+            matches!(
+                error.kind,
+                GraphTemporalTextErrorKind::Query(
+                    Catalog(_) | UnknownSymbol(_) | WrongSymbolKind { .. }
+                )
+            )
         }
         QueryError::TemporalSetText(error) => matches!(
             error.kind,
@@ -1458,7 +1468,36 @@ mod dispatch_tests {
                 zone_reads: &old_zone_reads,
             },
         ));
-        assert_eq!(current, original, "{text}");
+        match catalog {
+            Catalog::Present => assert_eq!(current, original, "{text}"),
+            Catalog::Missing | Catalog::WrongKind => {
+                // These inputs are complete ordinary patterns. A competing
+                // grammar can stop at a later byte, but the native pattern
+                // binder owns the missing name, its kind and its byte.
+                assert!(matches!(original, Outcome::Refused(_, _)), "{text}");
+                let error = PreparedGraphText::prepare_with_parameter_types_and_resolver(
+                    text,
+                    &[],
+                    Resolver {
+                        catalog,
+                        calls: &RefCell::new(Vec::new()),
+                        zone_reads: &Cell::new(0),
+                    },
+                )
+                .map(|_| ())
+                .expect_err("catalog must refuse the complete pattern");
+                assert!(matches!(
+                    error.kind,
+                    GraphPatternTextErrorKind::UnknownSymbol(_)
+                        | GraphPatternTextErrorKind::WrongSymbolKind { .. }
+                ));
+                let expected = QueryError::Refused {
+                    facade: NativeReadClass::Pattern,
+                    source: Box::new(QueryError::PatternText(error)),
+                };
+                assert_eq!(current, outcome(Err(expected)), "{text}");
+            }
+        }
         assert_eq!(
             *calls.borrow(),
             *old_calls.borrow(),
