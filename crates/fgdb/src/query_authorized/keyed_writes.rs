@@ -84,6 +84,12 @@ fn domains<'p, Row>(
     domains.into_iter().collect()
 }
 
+/// The overlay adapter reuses this same complete visibility/totality proof.
+/// Recognition does not probe a source or grant authority over its candidates.
+pub(super) fn supports<Row>(plan: &GlaPlan<Row>, scope: &PlannerPredicates) -> bool {
+    domains(plan, scope).is_some()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn admit<'a, Row: GlaOutput>(
     snapshot: &'a Snapshot,

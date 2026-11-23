@@ -560,6 +560,215 @@ fn indexed_overlay_membership_and_refused_attempts_survive_later_success() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn scoped_unstaged_keyed_selection_preserves_bags_and_hidden_data_charges() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0xa725, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (query, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let verified = issuer.verify_at(&token, "main", 100).unwrap();
+        for (text, expected, records) in [
+            (
+                "MATCH (a:L {p:10}) RETURN a",
+                vec![vec![GraphValue::Vertex(VId(10))]],
+                1,
+            ),
+            (
+                "MATCH (a {p:10}) RETURN a",
+                vec![vec![GraphValue::Vertex(VId(10))]],
+                1,
+            ),
+            (
+                "MATCH (a:L {p:10}), (b:L {p:20}) RETURN a,b",
+                vec![vec![
+                    GraphValue::Vertex(VId(10)),
+                    GraphValue::Vertex(VId(20)),
+                ]],
+                2,
+            ),
+            (
+                "MATCH (a:L {p:10}), (b:L {p:10}) RETURN a,b",
+                vec![vec![
+                    GraphValue::Vertex(VId(10)),
+                    GraphValue::Vertex(VId(10)),
+                ]],
+                1,
+            ),
+            ("MATCH (a:L {p:777}) RETURN a", vec![], 0),
+            // The equality index may not prune on a hidden property. The
+            // original masked scan observes NULL and returns no matches.
+            ("MATCH (a:L {secret:900}) RETURN a", vec![], 2),
+            // A range is outside the complete keyed-write proof and keeps
+            // the same full, masked source even when it selects one vertex.
+            (
+                "MATCH (a:L) WHERE a.p >= 10 AND a.p <= 10 RETURN a",
+                vec![vec![GraphValue::Vertex(VId(10))]],
+                2,
+            ),
+        ] {
+            let pattern = pattern(text);
+            let mut visible_receipt = None;
+            for hidden in [false, true] {
+                let mut db = seed(&commit, hidden).await;
+                if hidden {
+                    let mut edit = WriteBatch::new(R);
+                    edit.set_vertex_property(VId(99), P, Some(CanonicalScalar::Int(10)));
+                    db.write(&commit, edit).await.unwrap();
+                }
+                let mut transaction = db.begin(&txcx).unwrap();
+                let trace = Trace::default();
+                let actual = sparse(
+                    &db,
+                    &transaction,
+                    &query,
+                    &pattern,
+                    verified.predicates(),
+                    GqlQueryPolicy::new(records, 100, 100_000, 100_000),
+                    &trace,
+                )
+                .unwrap();
+                assert_eq!(actual.rows.snapshot_records, records, "{text}");
+                assert_eq!(
+                    actual
+                        .value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "{text}"
+                );
+                let reference = incumbent(
+                    &db,
+                    &transaction,
+                    &query,
+                    &pattern,
+                    verified.predicates(),
+                    policy(),
+                    &Trace::default(),
+                )
+                .unwrap();
+                assert_eq!(actual.value, reference.value, "{text}");
+                let receipt = (actual, trace.events.into_inner());
+                if let Some(visible) = &visible_receipt {
+                    assert_eq!(
+                        &receipt, visible,
+                        "hidden indexed candidates changed {text}"
+                    );
+                } else {
+                    visible_receipt = Some(receipt);
+                }
+                if records > 0 {
+                    assert!(matches!(
+                        sparse(
+                            &db,
+                            &transaction,
+                            &query,
+                            &pattern,
+                            verified.predicates(),
+                            GqlQueryPolicy::new(records - 1, 100, 100_000, 100_000),
+                            &Trace::default(),
+                        ),
+                        Err(GqlQueryError::Rows(error))
+                            if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                    ));
+                }
+                transaction.abort();
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn scoped_unstaged_keyed_selection_retains_absence_and_refused_read_witnesses() {
+    let ((), report) = run_async_under_lab(0xa726, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (query, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let verified = issuer.verify_at(&token, "main", 100).unwrap();
+        for case in 0..10 {
+            let mut db = seed(&commit, false).await;
+            let mut transaction = db.begin(&txcx).unwrap();
+            let absent = matches!(case, 4 | 8 | 9);
+            let pattern = pattern(match case {
+                4 => "MATCH (a:L {p:30}) RETURN a",
+                8 => "MATCH (a:L {p:10}), (b:L {p:30}) RETURN a,b",
+                9 => "MATCH (a:L {p:30}), (b:L {p:10}) RETURN a,b",
+                _ => "MATCH (a:L {p:10}) RETURN a",
+            });
+            if (5..8).contains(&case) {
+                let allowance = if case == 5 {
+                    GqlQueryPolicy::new(0, 100, 100_000, 100_000)
+                } else {
+                    GqlQueryPolicy::new(1, 0, 100_000, 100_000)
+                };
+                assert!(matches!(
+                    sparse(
+                        &db,
+                        &transaction,
+                        &query,
+                        &pattern,
+                        verified.predicates(),
+                        allowance,
+                        &Trace::default(),
+                    ),
+                    Err(GqlQueryError::Rows(_))
+                ));
+            }
+            let rows = sparse(
+                &db,
+                &transaction,
+                &query,
+                &pattern,
+                verified.predicates(),
+                GqlQueryPolicy::new(1, 1, 100_000, 100_000),
+                &Trace::default(),
+            )
+            .unwrap();
+            assert_eq!(rows.value.len(), usize::from(!absent));
+            assert_eq!(rows.rows.snapshot_records, u64::from(case != 4));
+
+            let mut concurrent = WriteBatch::new(R);
+            match case {
+                0 | 5 | 6 => {
+                    concurrent.set_vertex_property(VId(20), P, Some(CanonicalScalar::Int(21)))
+                }
+                1 => concurrent.set_vertex_property(VId(20), P, Some(CanonicalScalar::Int(10))),
+                2 => concurrent.set_vertex_label(VId(10), L, false),
+                3 | 4 | 8 | 9 => concurrent.create_vertex(
+                    VId(30),
+                    vec![L],
+                    vec![(P, CanonicalScalar::Int(if absent { 30 } else { 10 }))],
+                ),
+                7 => concurrent.set_vertex_property(VId(10), P, Some(CanonicalScalar::Int(11))),
+                _ => unreachable!(),
+            }
+            db.write(&commit, concurrent).await.unwrap();
+            let completion = transaction.finish_strict(&mut db, &commit).await;
+            if case == 0 {
+                assert!(matches!(
+                    completion,
+                    Ok(fgdb_types::EmbeddedTxnCompletion::ReadClosed { .. })
+                ));
+            } else {
+                assert!(
+                    completion.as_ref().is_err_and(|error| {
+                        format!("{error:?}").contains("FG-LAW-FCW-READ-01")
+                    }),
+                    "case {case}: lost membership, absence or failed-attempt witness: {completion:?}"
+                );
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn seeded_sparse(
     database: &Database<MemVfs>,

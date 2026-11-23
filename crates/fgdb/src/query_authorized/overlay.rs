@@ -6,7 +6,7 @@ use super::{
     AdmissionUsage, Database, Fault, GlaOutput, Governed, GqlQueryError, GqlQueryPolicy,
     GraphPatternFactorExecution, PlannerPredicates, PreparedGraphPattern,
     PreparedGraphPatternFactors, QueryCx, QueryError, ReadError, Tables, Vfs,
-    execute_factor_tables, execute_tables,
+    execute_factor_tables, execute_tables, keyed_writes,
 };
 use crate::write_txn::overlay_scan::{BoundOverlayCandidates, OverlayRows};
 
@@ -210,13 +210,25 @@ fn admit_overlay_tables<'a, V: Vfs + Clone, Row: GlaOutput>(
     };
     // Physical traversal and sparse shadowing only poll. The same native
     // indexed closure as the owner path is usable when the scope hides
-    // nothing; scoped or unsupported plans retain complete masked admission.
+    // nothing. Before staging, the keyed-write proof also admits scoped total
+    // equality selections without giving up the overlay's read witnesses.
+    // Other scoped or unsupported plans retain complete masked admission.
     // Every retained winner still crosses the ordinary signed/native charge
     // boundary, and all statements continue sharing one permit and allowance.
     let mut scan = |_| poll().map_err(GqlQueryError::Interrupted);
     let bound = match seeds {
         Some(seeds) => overlay.seeded_candidates(pattern.plan(), seeds, scope, &mut scan)?,
-        None => overlay.bound_candidates(pattern.plan(), scope, &mut scan)?,
+        None => {
+            let keyed = if keyed_writes::supports(pattern.plan(), scope) {
+                overlay.unstaged_bound_candidates(pattern.plan(), &mut scan)?
+            } else {
+                None
+            };
+            match keyed {
+                Some(bound) => Some(bound),
+                None => overlay.bound_candidates(pattern.plan(), scope, &mut scan)?,
+            }
+        }
     };
     let mut admit_vertex = |row: &'a crate::VertexRow, _: &mut _| {
         tables

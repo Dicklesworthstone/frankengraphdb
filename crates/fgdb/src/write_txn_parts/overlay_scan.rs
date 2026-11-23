@@ -209,6 +209,27 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
             .bound_overlay_candidates(&self.database.snapshot, plan, control)
     }
 
+    /// Candidate-only access for a scoped equality-bound write before staging.
+    /// The caller must first prove that every pruning predicate is visible and
+    /// total with the authorized keyed-write recognizer. Ordinary masked table
+    /// admission still decides which candidates may enter the evaluator.
+    ///
+    /// Keep the native membership/read owner even for an empty workspace:
+    /// immutable indexed admission alone loses both absent-key observations
+    /// and attempts that later fail a resource check. Staged workspaces retain
+    /// their existing scoped path until its candidate proof is extended.
+    pub(crate) fn unstaged_bound_candidates<E, Row: GlaOutput>(
+        &self,
+        plan: &GlaPlan<Row>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<BoundOverlayCandidates>, E> {
+        if !self.transaction.staged.is_empty() {
+            return Ok(None);
+        }
+        self.transaction
+            .bound_overlay_candidates(&self.database.snapshot, plan, control)
+    }
+
     /// Relational seeds use the same native candidate and read-witness owner.
     /// They are never an authority grant: a restricted scope declines before
     /// probing a property posting or retaining any candidate identity.
