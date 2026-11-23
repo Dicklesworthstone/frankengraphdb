@@ -154,8 +154,7 @@ fn ordered_reads_bind_durable_names_at_the_selected_cut_and_fence_stale_preparat
             );
             let refusal = session
                 .prepare(&query, missing, &empty)
-                .err()
-                .expect("later names cannot bind against an earlier catalog");
+                .expect_err("later names cannot bind against an earlier catalog");
             assert_eq!(refusal.code, ErrorCode::Statement);
         }
         let newer =

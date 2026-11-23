@@ -73,8 +73,7 @@ fn write_metadata_admission_checks_exact_frames_capacity_and_signed_work() {
     );
     assert!(used > 1 && calls > 1);
     let error = admit_write_metadata(metadata(), encoded.len() - 1, &mut |_| Ok(()))
-        .err()
-        .expect("the SUCCESS structure header is part of the limit");
+        .expect_err("the SUCCESS structure header is part of the limit");
     assert_eq!(error.code, ErrorCode::Budget);
     for fail_at in 1..=calls {
         let mut call = 0;
@@ -88,8 +87,7 @@ fn write_metadata_admission_checks_exact_frames_capacity_and_signed_work() {
                 Ok(())
             }
         })
-        .err()
-        .expect("no partial metadata escapes a meter refusal");
+        .expect_err("no partial metadata escapes a meter refusal");
         assert_eq!(error.code, ErrorCode::Budget);
         assert_eq!(call, fail_at);
     }
@@ -145,8 +143,7 @@ fn write_metadata_admission_checks_exact_frames_capacity_and_signed_work() {
                 .charge_work_at(1, units)
                 .map_err(fgdb::WriteTxnError::Authorization)
         })
-        .err()
-        .expect("the original signed allowance and live authority still govern metadata");
+        .expect_err("the original signed allowance and live authority still govern metadata");
         assert_eq!(
             error.code,
             if late_stop {

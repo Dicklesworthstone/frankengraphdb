@@ -11,9 +11,11 @@ use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteMode, Outcome};
 use fgdb_types::{CommitSeq, PurposeContexts};
 use fgdb_warden::CapabilityToken;
 
+type ReadOwner<'s> = AuthorizedReadTransaction<'s, crate::Symbols, fn() -> u64>;
+
 pub(crate) struct NativeReadTransaction<'s> {
     db: &'s Served,
-    owner: Option<Box<AuthorizedReadTransaction<'s, crate::Symbols, fn() -> u64>>>,
+    owner: Option<Box<ReadOwner<'s>>>,
     generation: Generation,
     basis: CommitSeq,
 }

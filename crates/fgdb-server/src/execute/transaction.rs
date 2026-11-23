@@ -73,12 +73,14 @@ impl NativeTransaction<'_> {
     }
 }
 
+type WriteOwner<'s> = AuthorizedWriteTransaction<'s, fn() -> u64>;
+
 /// Connection-scoped ownership of the existing native transaction. This does
 /// not add a durable transaction lease, reattachment, or outcome lookup.
 pub(crate) struct NativeWriteTransaction<'s> {
     db: &'s Served,
     token: CapabilityToken,
-    owner: Option<Box<AuthorizedWriteTransaction<'s, fn() -> u64>>>,
+    owner: Option<Box<WriteOwner<'s>>>,
     generation: Generation,
     basis: CommitSeq,
     symbols: Symbols,
@@ -777,7 +779,7 @@ mod tests {
 
     #[test]
     fn native_owner_retains_provisional_reads_and_publishes_only_at_commit() {
-        let ((), report) = run_async_under_lab(0xf6_7a_0001, |cx| async move {
+        let ((), report) = run_async_under_lab(0xf67a_0001, |cx| async move {
             let (server, token, _) = served(&cx, "fgp-transaction-shared-owner").await;
             let db = &server.databases["test"];
             let before = state(&cx, db).await;
@@ -843,7 +845,7 @@ mod tests {
 
     #[test]
     fn native_owner_rolls_back_on_mode_input_and_output_refusals() {
-        let ((), report) = run_async_under_lab(0xf6_7a_0002, |cx| async move {
+        let ((), report) = run_async_under_lab(0xf67a_0002, |cx| async move {
             let (server, token, _) = served(&cx, "fgp-transaction-refusals").await;
             let db = &server.databases["test"];
             let before = state(&cx, db).await;
@@ -906,7 +908,7 @@ mod tests {
 
     #[test]
     fn native_owner_rollback_drop_and_read_close_never_publish() {
-        let ((), report) = run_async_under_lab(0xf6_7a_0003, |cx| async move {
+        let ((), report) = run_async_under_lab(0xf67a_0003, |cx| async move {
             let (server, token, _) = served(&cx, "fgp-transaction-rollback").await;
             let db = &server.databases["test"];
             let before = state(&cx, db).await;
@@ -952,7 +954,7 @@ mod tests {
 
     #[test]
     fn native_owner_refuses_a_new_frontier_without_replaying_staged_work() {
-        let ((), report) = run_async_under_lab(0xf6_7a_0004, |cx| async move {
+        let ((), report) = run_async_under_lab(0xf67a_0004, |cx| async move {
             let (server, token, _) = served(&cx, "fgp-transaction-stale-frontier").await;
             let db = &server.databases["test"];
             let mut transaction = accepted(NativeWriteTransaction::begin(&cx, db, &token).await);
