@@ -1020,14 +1020,17 @@ impl<'a> Parser<'a> {
                             };
                             depth = next;
                         }
-                        TokenKind::Word(word) if !after_dot => {
-                            if !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(' | b':'))
-                            {
-                                if graph_any(word) {
-                                    return Ok(None);
-                                }
-                                reads_row |= imported_word(word);
+                        TokenKind::Word(word)
+                            if !after_dot
+                                && !matches!(
+                                    lexer.clone().next()?.kind,
+                                    TokenKind::Punct(b'(' | b':')
+                                ) =>
+                        {
+                            if graph_any(word) {
+                                return Ok(None);
                             }
+                            reads_row |= imported_word(word);
                         }
                         _ => {}
                     }
