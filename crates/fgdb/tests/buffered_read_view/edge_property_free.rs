@@ -841,8 +841,8 @@ fn selected_edge_property_queries_fit_without_unrelated_payloads_and_keep_output
             // endpoint property still requires complete source records.
             for field in ["r.p", "a.p"] {
                 // Even the selected edge payload alone exceeds the 3 MiB
-                // allowance at this width: 72 * 4 * 12 KiB > 3 MiB.
-                let required_columns = (0..40)
+                // allowance at the public column limit: 65 * 4 * 12 KiB > 3 MiB.
+                let required_columns = (0..33)
                     .map(|at| format!("{field} AS required_{at}"))
                     .collect::<Vec<_>>()
                     .join(",");

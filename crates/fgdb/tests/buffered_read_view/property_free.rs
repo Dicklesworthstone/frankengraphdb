@@ -190,7 +190,6 @@ fn property_free_projection_fits_a_pool_that_refuses_the_requested_payload() {
             " WHERE true",
             " WHERE n=n AND true",
             " WHERE true OR n<>n",
-            " WHERE id(n)=id(n) AND NOT false",
         ] {
             let text = format!("MATCH (n:L){predicate} RETURN {identity_columns}");
             let identities = query(&text);
@@ -200,6 +199,26 @@ fn property_free_projection_fits_a_pool_that_refuses_the_requested_payload() {
             assert_eq!(stats.snapshot_records, 2);
             assert_eq!(stats.result_rows, 1);
         }
+
+        // Element identity preserves all 128 bits. The integer id() function
+        // must report overflow when this same element has no signed image.
+        let numeric = query(&format!(
+            "MATCH (n:L) WHERE id(n)=id(n) AND NOT false RETURN {identity_columns}"
+        ));
+        let mut cursor = view
+            .stream_graph_values_governed(&cx, &numeric, query_policy())
+            .unwrap();
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                kind: fgdb_gql::GraphIntegerErrorKind::Overflow,
+                ..
+            })))
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
 
         let mut cursor = view
             .stream_graph_values_governed(&cx, &properties, query_policy())
@@ -774,14 +793,14 @@ fn selected_vertex_query_omits_unrelated_payload_charges_and_retains_output_owne
         let memory = pool();
         let mut view = open_selected_vertices(&contexts, &vfs, &memory).await;
         let columns = std::iter::once("n".to_owned())
-            .chain((1..96).map(|at| {
+            .chain((1..64).map(|at| {
                 let field = if at % 2 == 1 { "q" } else { "r" };
                 format!("n.{field} AS copy_{at}")
             }))
             .collect::<Vec<_>>()
             .join(",");
         let occupied = memory
-            .reserve(&cx, memory.available() - 4 * 1024 * 1024)
+            .reserve(&cx, memory.available() - 3 * 1024 * 1024)
             .unwrap();
         let prepared = selected_vertex_query(&format!(
             "MATCH (n:L) WHERE n.q>=5 AND n.r>0 RETURN {columns}"
@@ -800,7 +819,8 @@ fn selected_vertex_query_omits_unrelated_payload_charges_and_retains_output_owne
             }
         }
         // Requesting the large property must charge its 12 KiB for every
-        // cell: 96 * 4 * 12 KiB already exceeds the remaining 4 MiB.
+        // cell. Even 64 * 4 * 12 KiB fills the remaining 3 MiB before
+        // accounting for scan state. The extra projection is column 65.
         for text in [
             format!("MATCH (n:L) RETURN {columns},n.p"),
             format!("MATCH (n:L) WHERE n.p IS NOT NULL RETURN {columns}"),
