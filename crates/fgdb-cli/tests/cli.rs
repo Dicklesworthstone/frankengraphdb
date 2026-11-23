@@ -3250,6 +3250,15 @@ fn bounded_catalog_discovery_refuses_lagging_publication_without_resident_recove
         ),
         2
     );
+    let query_with_one_byte =
+        |text| fixture.discovered("query", &["--buffered", "--buffer-memory-bytes", "1", text]);
+    let denied = query_with_one_byte("MATCH (n:Person) RETURN n,n.id");
+    refused(&denied, 4, "open");
+    assert!(terminal(&denied).contains("ResourceExhausted"));
+    assert!(rows(&denied).is_empty());
+    let malformed = query_with_one_byte("MATCH (");
+    refused(&malformed, 3, "query");
+    assert!(terminal(&malformed).contains("\"code\":\"syntax\""));
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let cx = PurposeContexts::narrow_runtime_root(&root).commit();

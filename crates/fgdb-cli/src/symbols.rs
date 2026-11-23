@@ -212,6 +212,29 @@ fn requested_cuts(
     }
 }
 
+pub(super) enum CatalogDiscovery {
+    Ready,
+    Buffered(Box<fgdb::BufferedReadPublication>),
+    Unavailable {
+        failure: Failure,
+        admission_refused: bool,
+    },
+}
+
+impl CatalogDiscovery {
+    /// Syntax errors survive a failed open. A name lookup cannot establish
+    /// absence when the memory or root-size limit prevented the catalog read.
+    pub(super) fn preflight_error(&self, error: Failure) -> Failure {
+        match self {
+            Self::Unavailable {
+                failure,
+                admission_refused: true,
+            } if error.refusal == refusal::Code::NotFound => failure.clone(),
+            _ => error,
+        }
+    }
+}
+
 /// A current checkpoint needs only authenticated catalog metadata. Ordinary
 /// admission may first recover publication of previously committed effects;
 /// bounded hosts require a current checkpoint and never use that fallback.
@@ -225,28 +248,49 @@ pub(super) async fn discover(
     resolver: Option<&PinnedTzdb>,
     open_cx: &CommitCx,
     cx: &QueryCx,
-) -> Result<Option<Failure>, Failure> {
+) -> Result<CatalogDiscovery, Failure> {
     let requested = requested_cuts(command, options, resolver, cx)?;
     // Bounded graph hosts must never recover through a resident graph while
     // discovering names. They retain the same current-checkpoint requirement
     // as their eventual buffered/sealed source open.
+    let mut admission_refused = false;
     let opened = if options.buffered.enabled() {
-        match options.buffered.admission(options.budget.policy()) {
-            Ok((pool, limits)) => Database::open_buffered_symbol_catalog_with_vfs(
+        async {
+            let (pool, limits) = options.buffered.admission(options.budget.policy())?;
+            let publication = Database::open_buffered_publication_with_vfs(
                 open_cx,
                 asupersync::fs::UnixVfs::new(),
                 &options.db,
                 keys,
-                &pool,
+                pool,
                 limits,
             )
             .await
-            .map_err(super::buffered::open_failure),
-            Err(error) => Err(error),
+            .map_err(|error| {
+                admission_refused = match &error {
+                    fgdb::BufferedOpenError::Memory(_)
+                    | fgdb::BufferedOpenError::Read(fgdb::BufferedReadError::Limit { .. }) => true,
+                    fgdb::BufferedOpenError::Read(fgdb::BufferedReadError::Store(source)) => {
+                        matches!(
+                            source.as_ref(),
+                            fgdb_strata::store::StoreError::ObjectTooLarge { .. }
+                        )
+                    }
+                    _ => false,
+                };
+                super::buffered::open_failure(error)
+            })?;
+            let view = publication
+                .symbol_catalog(open_cx)
+                .await
+                .map_err(open_failure)?;
+            Ok((view, CatalogDiscovery::Buffered(Box::new(publication))))
         }
+        .await
     } else if options.fnx.is_sealed() {
         Database::open_current_symbol_catalog(open_cx, &options.db, keys)
             .await
+            .map(|view| (view, CatalogDiscovery::Ready))
             .map_err(|error| match error {
                 fgdb::SymbolCatalogOpenError::Open(source) => open_failure(*source),
                 error => Failure::open(error),
@@ -254,11 +298,17 @@ pub(super) async fn discover(
     } else {
         Database::open_symbol_catalog(open_cx, &options.db, keys)
             .await
+            .map(|view| (view, CatalogDiscovery::Ready))
             .map_err(open_failure)
     };
-    let view = match opened {
-        Ok(view) => view,
-        Err(error) => return Ok(Some(error)),
+    let (view, discovery) = match opened {
+        Ok(ready) => ready,
+        Err(failure) => {
+            return Ok(CatalogDiscovery::Unavailable {
+                failure,
+                admission_refused,
+            });
+        }
     };
     let mut cuts: BTreeSet<_> = requested
         .into_iter()
@@ -285,7 +335,7 @@ pub(super) async fn discover(
     }
     merge(options, &selected)?;
     options.catalog_frontier = Some(view.frontier());
-    Ok(None)
+    Ok(discovery)
 }
 
 /// A second open must not silently pair prepared names with another current

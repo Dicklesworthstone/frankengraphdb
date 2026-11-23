@@ -228,9 +228,13 @@ impl SchemaState {
                     {
                         return Err(invalid("catalog transition has a different before binding"));
                     }
-                    let transition = store
-                        .get_schema_transition(cx, SchemaTransitionVersion(transition_oid))
-                        .await?;
+                    // Prove Send for cold object reads here. A downstream
+                    // authorized transaction can carry a local-only clock;
+                    // its callers need not traverse the storage futures.
+                    let read_transition: crate::SendFuture<'_, _> = Box::pin(
+                        store.get_schema_transition(cx, SchemaTransitionVersion(transition_oid)),
+                    );
+                    let transition = read_transition.await?;
                     if (transition.graph, transition.branch) != (GRAPH, BRANCH)
                         || transition.apply_basis != predecessor
                         || transition.before != self.reference
@@ -240,7 +244,9 @@ impl SchemaState {
                             "catalog transition does not match the committed basis",
                         ));
                     }
-                    let catalog = store.get_catalog(cx, transition.after.root).await?;
+                    let read_catalog: crate::SendFuture<'_, _> =
+                        Box::pin(store.get_catalog(cx, transition.after.root));
+                    let catalog = read_catalog.await?;
                     if catalog.epoch() != transition.after.epoch {
                         return Err(invalid("catalog object and transition epochs disagree"));
                     }
@@ -366,7 +372,7 @@ impl core::fmt::Debug for SymbolCatalogReadView {
 impl SymbolCatalogReadView {
     pub(super) async fn from_published<V: Vfs>(
         cx: &CommitCx,
-        published: PublishedRead<V>,
+        published: &PublishedRead<V>,
     ) -> Result<Self, OpenError> {
         let schema = SchemaState::load(
             cx,
@@ -450,7 +456,7 @@ impl<V: Vfs + Clone> Database<V> {
         require_database_dir(cx, &vfs, path).await?;
         match Self::read_current_generation(cx, &vfs, path, &keys, None).await? {
             ReadGeneration::Current(published) => {
-                SymbolCatalogReadView::from_published(cx, published)
+                SymbolCatalogReadView::from_published(cx, &published)
                     .await
                     .map_err(Into::into)
             }
@@ -472,7 +478,7 @@ impl<V: Vfs + Clone> Database<V> {
         require_database_dir(cx, &vfs, path).await?;
         match Self::read_current_generation(cx, &vfs, path, &keys, None).await? {
             ReadGeneration::Current(published) => {
-                SymbolCatalogReadView::from_published(cx, published).await
+                SymbolCatalogReadView::from_published(cx, &published).await
             }
             ReadGeneration::Lagging(_) | ReadGeneration::Unselected => {
                 // Healing and live-writer arbitration already belong to this

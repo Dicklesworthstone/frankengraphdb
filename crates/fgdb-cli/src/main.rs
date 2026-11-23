@@ -685,7 +685,7 @@ errors.codes), the statement byte offset when one is known, and messages.
 Exit codes: 0 success, 2 usage/schema, 3 query refusal, 4 open/key, 5 I/O/corruption.
 ";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Failure {
     code: u8,
     class: &'static str,
@@ -2474,17 +2474,17 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 // Ordinary admission may finish previously committed publication;
                 // this command cannot stage effects until its preflight finishes.
                 // Bounded hosts require a current checkpoint without recovery.
-                let catalog_open_error = if matches!(command, "query" | "write" | "diff" | "transaction" | "import-csv" | "load" | "search") {
+                let discovery = if matches!(command, "query" | "write" | "diff" | "transaction" | "import-csv" | "load" | "search") {
                     symbols::discover(
                         command, &mut options, keys.clone(), artifact.as_deref(),
                         &contexts.commit(), &contexts.query(),
                     ).await?
-                } else { None };
+                } else { symbols::CatalogDiscovery::Ready };
                 // Every CSV record is read and bound before this import can
                 // stage or publish any of its input.
                 let import = if command == "import-csv" { Some(import::prepare(&options, &contexts.query())?) } else { None };
                 // Likewise a Prism call's arguments and projection.
-                let analytics = if options.fnx_call { Some(fnx::prepare(&options)?) } else { None };
+                let analytics = if options.fnx_call { Some(fnx::prepare(&options).map_err(|e| discovery.preflight_error(e))?) } else { None };
                 // A composed compressed read retains the native template and
                 // its query-local projections, all bound before graph open.
                 let sealed_read = if !options.fnx_call && options.fnx.is_sealed() && !options.buffered.enabled() {
@@ -2523,17 +2523,16 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 // execution. Report a failed catalog open only after these checks:
                 // a missing database cannot hide an intrinsic input/plan refusal.
                 let buffered_query = if options.buffered.enabled() && analytics.is_none() {
-                    Some(buffered::prepare_query(&options)?)
-                } else { None };
-                let mut buffered_admission = if options.buffered.enabled() {
-                    Some(options.buffered.admission(options.budget.policy())?)
+                    Some(buffered::prepare_query(&options).map_err(|e| discovery.preflight_error(e))?)
                 } else { None };
                 let native_run_limits = if buffered_query.is_some() {
                     options.buffered.native_run_limits()?
                 } else { None };
-                if let Some(error) = catalog_open_error {
-                    return Err(error);
-                }
+                let publication = match discovery {
+                    symbols::CatalogDiscovery::Ready => None,
+                    symbols::CatalogDiscovery::Buffered(publication) => Some(publication),
+                    symbols::CatalogDiscovery::Unavailable { failure, .. } => return Err(failure),
+                };
                 if let Some(prepared) = &sealed_read {
                     return fnx::run_sealed_read(
                         &contexts.commit(), &contexts.query(), &options, keys, prepared, robot, out,
@@ -2542,23 +2541,15 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 // The buffered profile binds and compiles before graph open,
                 // then admits checkpoint objects through the extent cache.
                 // It never constructs the resident read view below.
-                if let Some(prepared) = analytics.as_ref().filter(|_| options.buffered.enabled()) {
-                    let (pool, limits) = buffered_admission.take().expect("buffered admission");
-                    let mut view = Database::open_buffered_read_view(
-                        &contexts.commit(), &options.db, keys, pool, limits,
-                    ).await.map_err(buffered::open_failure)?;
-                    symbols::check_frontier(&options, view.frontier())?;
-                    return fnx::run_buffered(
-                        &mut view, &contexts.query(), prepared, robot, out,
-                    ).await;
-                }
-                if options.buffered.enabled() {
+                if let Some(publication) = publication {
+                    let mut view = publication.into_read_view(&contexts.commit()).await
+                        .map_err(buffered::open_failure)?;
+                    if let Some(prepared) = analytics.as_ref() {
+                        return fnx::run_buffered(
+                            &mut view, &contexts.query(), prepared, robot, out,
+                        ).await;
+                    }
                     let prepared = buffered_query.expect("native buffered preparation");
-                    let (pool, limits) = buffered_admission.take().expect("buffered admission");
-                    let mut view = Database::open_buffered_read_view(
-                        &contexts.commit(), &options.db, keys, pool, limits,
-                    ).await.map_err(buffered::open_failure)?;
-                    symbols::check_frontier(&options, view.frontier())?;
                     if let Some(limits) = native_run_limits {
                         view.set_native_run_limits(&contexts.query(), Some(limits))
                             .map_err(execution_failure)?;

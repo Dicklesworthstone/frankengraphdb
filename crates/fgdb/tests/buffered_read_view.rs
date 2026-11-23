@@ -409,7 +409,7 @@ fn buffered_catalog_charges_root_selection_and_keeps_historical_names() {
         };
         let catalog = Database::open_buffered_symbol_catalog_with_vfs(
             &commit,
-            vfs,
+            vfs.clone(),
             &path,
             keys(),
             &pool,
@@ -419,10 +419,43 @@ fn buffered_catalog_charges_root_selection_and_keeps_historical_names() {
         .unwrap();
         assert_eq!(catalog.frontier(), frontier);
         assert_eq!(catalog.symbol_catalog_at(frontier).unwrap(), names);
+        let origin = db.symbol_catalog_at(CommitSeq::ORIGIN).unwrap();
+        assert!(origin.bindings().next().is_none());
         assert_eq!(
             catalog.symbol_catalog_at(CommitSeq::ORIGIN).unwrap(),
-            SymbolCatalog::default()
+            origin
         );
+        assert_eq!(pool.used(), 0);
+        let publication = Database::open_buffered_publication_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let later = db.write(&commit, vertex_batch(2, 99)).await.unwrap();
+        assert!(later > frontier);
+        let pinned = publication.symbol_catalog(&commit).await.unwrap();
+        assert_eq!(pinned.frontier(), frontier);
+        assert_eq!(pinned.symbol_catalog_at(frontier).unwrap(), names);
+        let mut view = publication.into_read_view(&commit).await.unwrap();
+        assert_eq!(view.frontier(), pinned.frontier());
+        assert!(
+            view.vertex(&contexts.query(), VId(1))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            view.vertex(&contexts.query(), VId(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        drop(view);
         assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
