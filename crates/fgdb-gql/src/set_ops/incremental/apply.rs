@@ -116,24 +116,28 @@ fn body<'a, E>(
             stages.push(Stage::Filter(code));
             Ok(Some(base))
         }
-        SetNode::Join { left, right, spec } if spec.kind() == RowJoinKind::Inner => {
-            Ok(Some(Base {
-                arguments: Some(left),
-                right,
-                spec: Some(spec),
-            }))
-        }
-        SetNode::CrossJoin { left, right } => Ok(Some(Base {
+        _ => Ok(body_base(query, no_imports)),
+    }
+}
+
+fn body_base(query: &PreparedGraphSet, no_imports: bool) -> Option<Base<'_>> {
+    match &query.node {
+        SetNode::Join { left, right, spec } if spec.kind() == RowJoinKind::Inner => Some(Base {
+            arguments: Some(left),
+            right,
+            spec: Some(spec),
+        }),
+        SetNode::CrossJoin { left, right } => Some(Base {
             arguments: Some(left),
             right,
             spec: None,
-        })),
-        SetNode::Pattern(_) if no_imports => Ok(Some(Base {
+        }),
+        SetNode::Pattern(_) if no_imports => Some(Base {
             arguments: None,
             right: query,
             spec: None,
-        })),
-        _ => Ok(None),
+        }),
+        _ => None,
     }
 }
 

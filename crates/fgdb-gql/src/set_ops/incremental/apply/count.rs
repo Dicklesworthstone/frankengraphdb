@@ -140,24 +140,36 @@ fn scalar_summary<'a, E>(
     }
 }
 
-/// Preserve the ordinary row conversion boundary of an intermediate group.
-/// Its exact aggregate cells are converted by the native group owner BEFORE
-/// these row-local stages, just as in the original relation. Internal aggregate
-/// output transforms and HAVING keep their separate exact-domain contract and
-/// are not silently converted into row expressions here.
-fn summary_tail<'a, E>(
+enum SummaryStage<'a> {
+    Project(
+        &'a PreparedGraphSet,
+        &'a [GraphSetProjection],
+        GraphSetQuantifier,
+    ),
+    Filter(&'a [GraphSetPredicateOp]),
+    Restore(&'a PreparedGraphSet, Vec<usize>),
+}
+
+/// Peel row stages on either side of the aggregate without moving them across
+/// its conversion boundary. Rejoining a projection of Arguments contributes
+/// exactly one row from this invocation, even when an imported value is NULL.
+fn summary_stages<'a, E>(
     query: &'a PreparedGraphSet,
-    stages: &mut Vec<Stage<'a>>,
+    imports: &[usize],
+    stages: &mut Vec<SummaryStage<'a>>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<Option<&'a PreparedGraphSetAggregate>, E> {
+) -> Result<Option<&'a PreparedGraphSet>, E> {
     control(GlaExecutionEvent::Work)?;
     if !query.unadorned_incremental_node() {
         return Ok(None);
     }
-    match &query.node {
-        SetNode::Scope(input) => summary_tail(input, stages, control),
+    let (input, stage) = match &query.node {
+        SetNode::Scope(input) => return summary_stages(input, imports, stages, control),
         SetNode::Project {
-            input, projection, ..
+            input,
+            projection,
+            quantifier,
+            ..
         } => {
             for cell in projection {
                 control(GlaExecutionEvent::Work)?;
@@ -165,27 +177,93 @@ fn summary_tail<'a, E>(
                     return Ok(None);
                 }
             }
-            let Some(summary) = summary_tail(input, stages, control)? else {
-                return Ok(None);
-            };
-            control(GlaExecutionEvent::ScratchEntry)?;
-            stages.push(Stage::Project(query, projection));
-            Ok(Some(summary))
+            (input, SummaryStage::Project(query, projection, *quantifier))
         }
         SetNode::Filter { input, .. } => {
             let Some((_, code)) = query.incremental_filter() else {
                 return Ok(None);
             };
-            let Some(summary) = summary_tail(input, stages, control)? else {
-                return Ok(None);
-            };
-            control(GlaExecutionEvent::ScratchEntry)?;
-            stages.push(Stage::Filter(code));
-            Ok(Some(summary))
+            (input, SummaryStage::Filter(code))
         }
-        SetNode::Aggregate(_) => scalar_summary(query, control),
-        _ => Ok(None),
+        SetNode::CrossJoin { left, right } => {
+            let Some(columns) = argument_slots(right, imports, control)? else {
+                return Ok(Some(query));
+            };
+            (left, SummaryStage::Restore(query, columns))
+        }
+        _ => return Ok(Some(query)),
+    };
+    let Some(base) = summary_stages(input, imports, stages, control)? else {
+        return Ok(None);
+    };
+    control(GlaExecutionEvent::ScratchEntry)?;
+    stages.push(stage);
+    Ok(Some(base))
+}
+
+/// The private suffix contains the non-null join key and any original nullable
+/// values restored by WITH. They depend only on the invocation, so retaining
+/// them across DISTINCT preserves its original per-invocation multiplicity.
+fn summary_steps<E>(
+    initial: RowProjectionSpec,
+    stages: Vec<SummaryStage<'_>>,
+    restored: &[usize],
+    key_width: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<Vec<RowProjectionSpec>>, E> {
+    let mut steps = vec![initial];
+    let private_width = key_width + restored.len();
+    for stage in stages {
+        control(GlaExecutionEvent::Work)?;
+        let types = steps.last().expect("initial frame").column_types();
+        let width = types.len() - private_width;
+        let (query, mut values, quantifier) = match stage {
+            SummaryStage::Filter(code) => {
+                charge(types.len() + code.len(), control)?;
+                let Ok(step) =
+                    RowProjectionSpec::selection(types.to_vec(), names(types.len()), code)
+                else {
+                    return Ok(None);
+                };
+                steps.push(step);
+                continue;
+            }
+            SummaryStage::Project(query, cells, quantifier) => {
+                charge(cells.len(), control)?;
+                (
+                    query,
+                    cells
+                        .iter()
+                        .map(|cell| cell.value().clone())
+                        .collect::<Vec<_>>(),
+                    quantifier,
+                )
+            }
+            SummaryStage::Restore(query, columns) => {
+                charge(width + columns.len(), control)?;
+                let mut values: Vec<_> = (0..width).map(GraphSetValue::Column).collect();
+                for column in columns {
+                    charge(restored.len(), control)?;
+                    let Some(position) = restored.iter().position(|slot| *slot == column) else {
+                        return Ok(None);
+                    };
+                    values.push(GraphSetValue::Column(width + key_width + position));
+                }
+                (query, values, GraphSetQuantifier::All)
+            }
+        };
+        charge(private_width, control)?;
+        let public_width = values.len();
+        values.extend((width..types.len()).map(GraphSetValue::Column));
+        let Some(step) = distinct::projection(types, values, quantifier, control)? else {
+            return Ok(None);
+        };
+        if step.column_types().get(..public_width) != Some(query.types.as_slice()) {
+            return Ok(None);
+        }
+        steps.push(step);
     }
+    Ok(Some(steps))
 }
 
 // The source-restriction recipe below is specific to COUNT. In particular,
@@ -265,33 +343,21 @@ impl PreparedGraphSet {
             return Ok(None);
         }
         let mut tail = Vec::new();
-        let Some(summary) = summary_tail(body_query, &mut tail, control)? else {
+        let Some(group_input) = summary_stages(body_query, imports, &mut tail, control)? else {
+            return Ok(None);
+        };
+        let Some(summary) = scalar_summary(group_input, control)? else {
             return Ok(None);
         };
         let mut stages = Vec::new();
-        let Some(base) = body(
-            summary.input(),
-            imports.is_empty(),
-            true,
-            &mut stages,
-            control,
-        )?
-        else {
+        let Some(source) = summary_stages(summary.input(), imports, &mut stages, control)? else {
+            return Ok(None);
+        };
+        let Some(base) = body_base(source, imports.is_empty()) else {
             return Ok(None);
         };
         if !independent(base.right, control)? {
             return Ok(None);
-        }
-        for stage in &stages {
-            control(GlaExecutionEvent::Work)?;
-            if let Stage::Project(_, cells) = stage {
-                for cell in *cells {
-                    control(GlaExecutionEvent::Work)?;
-                    if !cell.value().is_scan_local() {
-                        return Ok(None);
-                    }
-                }
-            }
         }
         let slots = match base.arguments {
             Some(input) => {
@@ -302,16 +368,35 @@ impl PreparedGraphSet {
             }
             None => Vec::new(),
         };
-        let Some(outer) = distinct::keyed_outer(&left.types, &slots, control)? else {
+        let mut restored = Vec::new();
+        charge(slots.len(), control)?;
+        let mut key_slots = slots.clone();
+        for stage in stages.iter().chain(&tail) {
+            control(GlaExecutionEvent::Work)?;
+            if let SummaryStage::Restore(_, columns) = stage {
+                for column in columns {
+                    charge(1 + restored.len() + key_slots.len(), control)?;
+                    if !restored.contains(column) {
+                        restored.push(*column);
+                    }
+                    if !key_slots.contains(column) {
+                        key_slots.push(*column);
+                    }
+                }
+            }
+        }
+        let Some(outer) = distinct::keyed_outer(&left.types, &key_slots, control)? else {
             return Ok(None);
         };
         let left_width = left.types.len();
         let argument_width = slots.len();
         let key_width = outer.column_types().len() - left_width;
+        let private_width = key_width + restored.len();
         let right_width = base.right.types.len();
-        charge(argument_width + key_width, control)?;
+        charge(argument_width + private_width, control)?;
         let mut values: Vec<_> = slots.into_iter().map(GraphSetValue::Column).collect();
         values.extend((left_width..left_width + key_width).map(GraphSetValue::Column));
+        values.extend(restored.iter().copied().map(GraphSetValue::Column));
         let Some(arguments) = distinct::projection(
             outer.column_types(),
             values,
@@ -334,7 +419,7 @@ impl PreparedGraphSet {
         if let Some(code) = base.spec.and_then(RowJoinSpec::predicate) {
             charge(argument_width + right_width, control)?;
             let positions: Vec<_> = (0..argument_width)
-                .chain((0..right_width).map(|column| argument_width + key_width + column))
+                .chain((0..right_width).map(|column| argument_width + private_width + column))
                 .collect();
             let code = rebound(code, &positions, control)?;
             let Ok(selected) = join.with_predicate(&code) else {
@@ -344,55 +429,20 @@ impl PreparedGraphSet {
         }
         // Keep original body positions unchanged; append invocation identity
         // after the complete argument/source frame and after each projection.
-        charge(argument_width + right_width + key_width, control)?;
+        charge(argument_width + right_width + private_width, control)?;
         let values = (0..argument_width)
-            .chain(argument_width + key_width..argument_width + key_width + right_width)
-            .chain(argument_width..argument_width + key_width)
+            .chain(argument_width + private_width..argument_width + private_width + right_width)
+            .chain(argument_width..argument_width + private_width)
             .map(GraphSetValue::Column)
             .collect();
         let input_types: Vec<_> = join.column_types().collect();
         let Some(frame) = project(&input_types, values, control)? else {
             return Ok(None);
         };
-        let mut types = frame.column_types().to_vec();
-        let mut width = argument_width + right_width;
-        let mut body = vec![frame];
-        for stage in stages {
-            control(GlaExecutionEvent::Work)?;
-            let step = match stage {
-                Stage::Project(query, cells) => {
-                    let SetNode::Project { quantifier, .. } = &query.node else {
-                        return Ok(None);
-                    };
-                    charge(cells.len() + key_width, control)?;
-                    let mut values: Vec<_> =
-                        cells.iter().map(|cell| cell.value().clone()).collect();
-                    values.extend((width..width + key_width).map(GraphSetValue::Column));
-                    // DISTINCT is local to one argument tuple, even when a
-                    // projection discards every imported public column.
-                    let Some(step) = distinct::projection(&types, values, *quantifier, control)?
-                    else {
-                        return Ok(None);
-                    };
-                    if step.column_types().get(..cells.len()) != Some(query.types.as_slice()) {
-                        return Ok(None);
-                    }
-                    width = cells.len();
-                    step
-                }
-                Stage::Filter(code) => {
-                    charge(types.len() + code.len(), control)?;
-                    let Ok(step) =
-                        RowProjectionSpec::selection(types.clone(), names(types.len()), code)
-                    else {
-                        return Ok(None);
-                    };
-                    step
-                }
-            };
-            types = step.column_types().to_vec();
-            body.push(step);
-        }
+        let Some(body) = summary_steps(frame, stages, &restored, key_width, control)? else {
+            return Ok(None);
+        };
+        let width = body.last().expect("body frame").column_types().len() - private_width;
         // Grouping retains the actual complete relational input. The host
         // builds this same shared-source circuit, not a same-schema surrogate.
         charge(left.types.len() + base.right.types.len(), control)?;
@@ -492,23 +542,22 @@ impl PreparedGraphSet {
         // invocation. Complete it against distinct arguments before applying
         // any post-group filter; a rejected completed row must not be mistaken
         // for an absent body and zero-filled again during outer restoration.
-        // Repeated imports can outnumber outer columns. Completion needs only
-        // their key, not another copy of the arguments; retain the original
-        // join width boundary even for such wide invocation signatures.
-        charge(key_width, control)?;
-        let values = (argument_width..argument_width + key_width)
+        // Retain raw values only for explicit argument reattachment. Other
+        // signatures, including repeated imports, need only their join key.
+        charge(private_width, control)?;
+        let values = (argument_width..argument_width + private_width)
             .map(GraphSetValue::Column)
             .collect();
         let Some(invocations) = project(arguments.column_types(), values, control)? else {
             return Ok(None);
         };
-        charge(key_width * 2 + group_types.len(), control)?;
+        charge(key_width + private_width + group_types.len(), control)?;
         let keys: Vec<_> = (0..key_width).map(|key| (key, key)).collect();
         let Ok(complete) = RowJoinSpec::new(invocations.column_types(), &group_types, &keys) else {
             return Ok(None);
         };
         let complete = complete.with_kind(RowJoinKind::Left);
-        let aggregate_start = key_width * 2;
+        let aggregate_start = private_width + key_width;
         let mut values = Vec::new();
         for (column, (function, _)) in summary.aggregate_specs().enumerate() {
             charge(4, control)?;
@@ -534,49 +583,18 @@ impl PreparedGraphSet {
             };
             values.push(restored);
         }
-        let mut width = values.len();
-        charge(key_width, control)?;
-        values.extend((0..key_width).map(GraphSetValue::Column));
+        charge(private_width, control)?;
+        values.extend((0..private_width).map(GraphSetValue::Column));
         let types: Vec<_> = complete.column_types().collect();
         let Some(completed) = project(&types, values, control)? else {
             return Ok(None);
         };
-        let mut types = completed.column_types().to_vec();
-        let mut post_group = vec![completed];
-        for stage in tail {
-            control(GlaExecutionEvent::Work)?;
-            let step = match stage {
-                Stage::Project(query, cells) => {
-                    let SetNode::Project { quantifier, .. } = &query.node else {
-                        return Ok(None);
-                    };
-                    charge(cells.len() + key_width, control)?;
-                    let mut values: Vec<_> =
-                        cells.iter().map(|cell| cell.value().clone()).collect();
-                    values.extend((width..width + key_width).map(GraphSetValue::Column));
-                    let Some(step) = distinct::projection(&types, values, *quantifier, control)?
-                    else {
-                        return Ok(None);
-                    };
-                    if step.column_types().get(..cells.len()) != Some(query.types.as_slice()) {
-                        return Ok(None);
-                    }
-                    width = cells.len();
-                    step
-                }
-                Stage::Filter(code) => {
-                    charge(types.len() + code.len(), control)?;
-                    let Ok(step) =
-                        RowProjectionSpec::selection(types.clone(), names(types.len()), code)
-                    else {
-                        return Ok(None);
-                    };
-                    step
-                }
-            };
-            types = step.column_types().to_vec();
-            post_group.push(step);
-        }
+        let Some(post_group) = summary_steps(completed, tail, &restored, key_width, control)?
+        else {
+            return Ok(None);
+        };
+        let types = post_group.last().expect("completed group").column_types();
+        let width = types.len() - private_width;
         if types.get(..width) != Some(body_query.types.as_slice()) {
             return Ok(None);
         }
@@ -590,7 +608,7 @@ impl PreparedGraphSet {
         let keys: Vec<_> = (0..key_width)
             .map(|key| (left_width + key, width + key))
             .collect();
-        let Ok(restore) = RowJoinSpec::new(outer.column_types(), &types, &keys) else {
+        let Ok(restore) = RowJoinSpec::new(outer.column_types(), types, &keys) else {
             return Ok(None);
         };
         let restore = restore.with_kind(if *kind == ApplyKind::Optional {

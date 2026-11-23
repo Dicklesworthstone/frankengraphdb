@@ -1282,6 +1282,82 @@ fn native_filtered_counts_accept_imported_thresholds_and_static_property_sources
 }
 
 #[test]
+fn restored_call_imports_keep_nulls_and_outer_multiplicity_across_distinct_and_group() {
+    let frame = || arguments(vec![GraphSetColumnType::Vertex, GraphSetColumnType::Stored]);
+    let token = || {
+        frame()
+            .project_ordered_output(vec![GraphSetProjection::new(
+                "restored",
+                GraphSetValue::Column(1),
+            )])
+            .unwrap()
+    };
+    let owner = frame()
+        .project_ordered_output(vec![GraphSetProjection::new(
+            "owner",
+            GraphSetValue::Column(0),
+        )])
+        .unwrap();
+    let source = right();
+    let on = RowJoinSpec::new(owner.column_types(), source.column_types(), &[(0, 0)]).unwrap();
+    let body = owner
+        .join(source, on)
+        .unwrap()
+        .project(
+            vec![GraphSetProjection::new("target", GraphSetValue::Column(2))],
+            GraphSetQuantifier::Distinct,
+        )
+        .unwrap()
+        .cross_join(token())
+        .unwrap()
+        .group_by(&[], &[GraphAggregate::count("n", 1)])
+        .unwrap()
+        .cross_join(token())
+        .unwrap();
+    let query = outer().apply(body, vec![1, 0]).unwrap();
+    let mut circuit = FilteredCircuit::new(&query);
+    let literal_false = GraphValue::Scalar(CanonicalScalar::Bool(false));
+    let outer_row = |token: GraphValue| row(vec![token, vertex(1), vertex(8)]);
+    let left = bag([
+        (outer_row(scalar(None)), 2),
+        (outer_row(literal_false.clone()), 3),
+    ]);
+    let edge = row(vec![vertex(1), vertex(9)]);
+    let expected = |nonnull_count| {
+        plain(&bag([
+            (
+                row(vec![
+                    scalar(None),
+                    vertex(1),
+                    vertex(8),
+                    scalar(Some(0)),
+                    scalar(None),
+                ]),
+                2,
+            ),
+            (
+                row(vec![
+                    literal_false.clone(),
+                    vertex(1),
+                    vertex(8),
+                    scalar(Some(nonnull_count)),
+                    literal_false.clone(),
+                ]),
+                3,
+            ),
+        ]))
+    };
+    circuit.tick(&left, &bag([(edge.clone(), 2)])).unwrap();
+    assert_eq!(plain(circuit.rows()), expected(1));
+    circuit
+        .tick(&ZSet::new(), &bag([(edge.clone(), -1)]))
+        .unwrap();
+    assert_eq!(plain(circuit.rows()), expected(1));
+    circuit.tick(&ZSet::new(), &bag([(edge, -1)])).unwrap();
+    assert_eq!(plain(circuit.rows()), expected(0));
+}
+
+#[test]
 fn filtered_count_keeps_dead_expression_order_and_empty_outer_semantics() {
     let divide = GraphSetValue::Integer(
         GraphIntegerExpression::prepare(&[

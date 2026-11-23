@@ -269,6 +269,7 @@ impl PreparedGraphPattern<GraphValueRow> {
             matches!(
                 operator,
                 GlaOperator::Select { .. }
+                    | GlaOperator::VertexIdentity { .. }
                     | GlaOperator::Expand { .. }
                     | GlaOperator::VarLengthExpand { .. }
                     | GlaOperator::DifferentEdges { .. }
