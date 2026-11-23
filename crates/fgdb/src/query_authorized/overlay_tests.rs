@@ -618,7 +618,7 @@ fn scoped_unstaged_keyed_selection_preserves_bags_and_hidden_data_charges() {
                     edit.set_vertex_property(VId(99), P, Some(CanonicalScalar::Int(10)));
                     db.write(&commit, edit).await.unwrap();
                 }
-                let mut transaction = db.begin(&txcx).unwrap();
+                let transaction = db.begin(&txcx).unwrap();
                 let trace = Trace::default();
                 let actual = sparse(
                     &db,
@@ -747,7 +747,7 @@ fn scoped_unstaged_keyed_selection_retains_absence_and_refused_read_witnesses() 
                 ),
                 7 => concurrent.set_vertex_property(VId(10), P, Some(CanonicalScalar::Int(11))),
                 _ => unreachable!(),
-            }
+            };
             db.write(&commit, concurrent).await.unwrap();
             let completion = transaction.finish_strict(&mut db, &commit).await;
             if case == 0 {
