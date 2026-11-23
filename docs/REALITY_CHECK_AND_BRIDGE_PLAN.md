@@ -1,5 +1,18 @@
 # Reality Check and Bridge Plan
 
+## November 23, 2026 — an online seal survives writes, compaction and restart
+
+The source-built embedded example now runs on the pinned Linux toolchain. It commits a graph at sequence 1 and returns neighbors 2 and 3 before compaction, after compaction and after reopening. The server now accepts `POST /v1/databases/<name>/seal` through the existing unrestricted Admin maintenance route. Embedded code, the offline CLI and the online admin operation all use the same relation publisher.
+
+| Ordinary client operation | Observed result |
+|---|---|
+| FGP and HTTP reads before sealing | Both returned score 7 at sequence 1. The authorized seal returned a 32-byte run identity and kept sequence 1. A future retention floor returned HTTP 400. A read-only seal returned 403. |
+| Later writes and compaction | An FGP insert produced scores 7 and 11 at sequence 2. An HTTP deletion left 11 at sequence 3. Compaction completed, and scrub reported three clean objects with zero repairs. |
+| Historical reads, replay and rollback | The buffered reader returned the correct edge and score at both cuts with the documented four-column projection and GQL temporal selector. Certificate replay returned 7 at sequence 1 with the original symbol bindings. Rollback left sequence 3 intact. |
+| Restart | Two consecutive server processes drained with exit 0. The restarted server returned 11 at sequence 3 and 7 at sequence 1. A separate persisted-catalog database replayed its earlier certificate from a new CLI process without supplying binding flags. |
+
+The transcripts identify both executable hashes and the exact answers in `/data/ssd/build/fgdb-g1-20261123-1UYwnY8q/live-server.log` and `durable-catalog.log`. The 13 server maintenance tests passed, including the pinned-reader, requested-floor and issuer-retirement cases. A separate full server library run on the initial candidate passed 273 of 283 tests. Four failures exposed a replay bug in Beacon restart and recovery. After correcting the optional Chronicle predecessor check and verifying the chain hash on each pull, all eight configured-Beacon recovery tests passed. Integrated workspace qualification remains open under `fgdb-qualify-integrated-nov22-maz0p`.
+
 ## November 22, 2026 — the source build, the usable database, and the path to G1
 
 A developer following the first command in the README cannot build the embedded example on the audited Linux checkout. The pinned compiler reaches the product and rejects three error returns in the GQL library. The CLI and server also depend on that library. Earlier binaries demonstrate that real data survives a write, a process boundary and certified replay. Both facts matter to someone deciding whether to adopt the project today.
