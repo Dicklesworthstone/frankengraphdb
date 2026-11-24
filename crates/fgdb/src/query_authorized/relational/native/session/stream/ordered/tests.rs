@@ -21,6 +21,8 @@ mod imported;
 mod terminal_aggregate;
 #[path = "tests/vertex_probes.rs"]
 mod vertex_probes;
+#[path = "tests/walk.rs"]
+mod walk;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x86; 32]);
 type Resolver = fn(GraphSymbolKind, &str) -> Option<GraphSymbol>;

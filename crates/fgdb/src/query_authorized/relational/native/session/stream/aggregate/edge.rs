@@ -11,6 +11,9 @@ use fgdb_gql::edge_stream::{
     EdgeScanState,
 };
 
+#[path = "edge/walk.rs"]
+mod walk;
+
 struct Source<'q, Edges, Vertices, Clock> {
     edges: Edges,
     vertices: ScopedSource<'q, Vertices, Clock>,
@@ -476,6 +479,34 @@ pub(in super::super) fn ordered_source<'q, C: FnMut() -> u64 + Send>(
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
 ) -> Result<impl EdgeScanSource<Error = QueryError> + Send + 'q + use<'q, C>, QueryError> {
+    Ok(Source {
+        edges: view.edge_scan_source(cx, at).map_err(QueryError::Read)?,
+        vertices: ScopedSource {
+            inner: view.vertex_scan_source(cx, at).map_err(QueryError::Read)?,
+            execution,
+        },
+        after: None,
+    })
+}
+
+// Variable paths use the same scoped root and independent incidence readers.
+// Their native asynchronous cursor owns occurrence and shortest-path state;
+// this resident source provides logical admission, not a graph-byte bound.
+pub(in super::super) fn ordered_walk_source<'q, C: FnMut() -> u64 + Send>(
+    at: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+) -> Result<
+    impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
+        Error = QueryError,
+        OutputGuard = (),
+        TraversalGuard = (),
+    >
+    + 'q
+    + use<'q, C>,
+    QueryError,
+> {
     Ok(Source {
         edges: view.edge_scan_source(cx, at).map_err(QueryError::Read)?,
         vertices: ScopedSource {

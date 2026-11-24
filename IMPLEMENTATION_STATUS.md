@@ -12,6 +12,57 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Authorized external variable paths, aggregates and historical reads — qualification pending
+
+Capability-scoped external ordering now admits the variable-path profiles
+already sealed by the native walk compiler. Direct patterns, complete relations
+and terminal aggregates share the existing async walk cursor and external
+ordering/relation owners. Prepared queries can rebind to retained historical
+cuts through the same path.
+
+```gql
+MATCH REPEATABLE ELEMENTS WALK (a:Person)-[:KNOWS*0..2]->(b:Person)
+RETURN a.age AS origin,b.age AS destination
+ORDER BY origin,destination
+
+MATCH (a:Person)-[:KNOWS*1..2]->(b:Person)
+RETURN b.age AS destination,count(*) AS paths
+ORDER BY destination
+```
+
+The scoped source admits a relationship and both endpoints before producing a
+candidate, copies only authorized labels and properties, and independently
+enumerates visible zero-hop roots. The native cursor retains edge identities,
+parallel occurrences, repeated-element versus different-edge semantics, and
+its existing ACYCLIC, SIMPLE and shortest-selector admission rules. Unsupported
+definitions still fail during complete recursive preflight, before any sibling
+opens a source or either scratch file. Procedure sources remain unsupported.
+
+Walk rows enter the original external sort, DISTINCT/window and aggregate
+pipeline. Reached expression errors and private input limits still apply under
+LIMIT 0. Source enumeration, traversal scratch events and evaluator polls use
+the original live signed allowance; cancellation, expiry and pending ownership
+remain with the existing execution and spill owners. The adapter uses resident
+graph records and unit ownership guards. This extension does not establish
+byte-level traversal admission or a graph larger than memory.
+
+Six native regression sources cover literal path bags, zero-hop isolates,
+parallel edges, cycles and shortest ties; scoped versus physically reduced
+graph transcripts; forced one-row spill runs; DISTINCT/window and terminal
+COUNT/SUM; masked values and empty global summaries; recursive preflight;
+reached errors and private quotas under LIMIT 0; pending drop/expiry; and
+prepared historical rebinding after edge deletion and property replacement.
+A served FGP regression covers 16 WALK occurrences, ten different-edge paths,
+grouped counts, masked values, prepared cuts 1/2/1, paged delivery and cleanup.
+
+Pinned formatting and whitespace checks passed, and independent source reviews
+found no remaining blocker. Compilation, Rust runtime tests, Clippy, UBS and
+exact-tree qualification remain UNRUN in this environment: dependency caches
+are absent and the workspace lacks safe build capacity. These are regression
+sources, not a passing runtime verdict. The executor, historical-query and
+integrated qualification work remains open under `fgdb-w5-executor-olp`,
+`fgdb-w10-snapshotquery-rzh` and `fgdb-qualify-integrated-nov22-maz0p`.
+
 ### Maintained correlated UNWIND and argument-only summaries — qualification pending
 
 Returning CALL and OPTIONAL CALL aggregate bodies can now begin with imported
@@ -210,7 +261,8 @@ CALL bodies. The shared physical compiler retains each probe; the recursive
 admission fence validates every graph leaf against the existing scoped native
 reader before any sibling opens a source or scratch file. Execution reuses
 that reader's masking, snapshot, native budget and live signed allowance.
-Outer walk and procedure sources retain their explicit refusal boundary.
+Procedure sources and unsupported walk definitions retain their explicit
+refusal boundary; the external-path extension above admits native walk sources.
 
 Regression sources compare native and external row order and literal bags,
 fixed and finite-hop probes, repeated correlated input, denied property values,
