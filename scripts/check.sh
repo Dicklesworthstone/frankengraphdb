@@ -1813,10 +1813,17 @@ run_ubs() {
 # six property-key ID lookups. Cargo dep-info places the 19 panics in test
 # targets. The new equality admits the observed counts and rejects the older
 # counts. Adding or removing one finding in isolation still fails the gate.
+# On 6cb60ebc0 the full scanner found five new test-helper panics and one
+# comparison of authorized historical commit sequences. UBS 5.5.26's
+# --all-occurrences output on the changed Rust sources accounts for all 24
+# earlier and 30 current critical findings. The additions are two count
+# fixture assertions, two correlated-window row assertions, one FGP
+# loopback fixture's unexpected-age arm, and the buffered source's
+# `at != backend.at` snapshot check. No prior finding disappeared.
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=1"
-  "Secret/token comparisons without timing-safe equality=49"
-  "panic!/unreachable!/todo!/unimplemented!=251"
+  "Secret/token comparisons without timing-safe equality=50"
+  "panic!/unreachable!/todo!/unimplemented!=256"
   "Request-derived response headers=3"
   "Security-sensitive non-crypto randomness=3"
 )
