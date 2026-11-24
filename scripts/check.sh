@@ -1800,10 +1800,17 @@ run_ubs() {
 # both directions of count drift, unknown classes and incomplete scans.
 # Actual added runtime-panic and auth-token findings still fail the ratchet.
 # A full gate must freshly execute all partitions; reuse is review evidence only.
+# fgdb-ehnuj: the reporter selected the regex table on f8948b3fa. Replaying
+# the installed panic rule and comparison analyzer on b77948305 and b80c12d00
+# found 19 added test-helper panics and 11 added test comparisons, zero removed.
+# The comparisons cover two fault selectors, three authorization errors and
+# six property-key ID lookups. Cargo dep-info places the 19 panics in test
+# targets. The new equality admits the observed counts and rejects the older
+# counts. Adding or removing one finding in isolation still fails the gate.
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=1"
-  "Secret/token comparisons without timing-safe equality=38"
-  "panic!/unreachable!/todo!/unimplemented!=232"
+  "Secret/token comparisons without timing-safe equality=49"
+  "panic!/unreachable!/todo!/unimplemented!=251"
   "Request-derived response headers=3"
   "Security-sensitive non-crypto randomness=3"
 )
@@ -1820,7 +1827,8 @@ UBS_CRITICAL_BASELINE=(
 # fgdb-l9vc0: UBS v5.4.9's Rust path never prints "ast-grep available" (the
 # string occurs only in its Java scanner). The mode is not selected even with
 # ast-grep on PATH, so this table is unreachable with the installed tool. It
-# is kept equal to the measured regex table, not independently measured.
+# was seeded from the measured regex table. November's scanner transcript
+# never selected this mode, so its previous expectations are retained here.
 # Still true of v5.4.17 (none of the 30 partition transcripts print it).
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=1"
