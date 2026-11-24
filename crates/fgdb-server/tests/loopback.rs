@@ -22,6 +22,9 @@ use std::sync::Arc;
 #[path = "loopback/source_stream.rs"]
 mod source_stream;
 
+#[path = "loopback/buffered_stream.rs"]
+mod buffered_stream;
+
 #[path = "loopback/ordered_stream.rs"]
 mod ordered_stream;
 

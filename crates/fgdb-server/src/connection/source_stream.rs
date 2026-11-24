@@ -167,6 +167,64 @@ impl Lane {
         };
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query = crate::query_cx(&contexts);
+        if db.buffered_reads.is_some() {
+            let generation = match crate::execute::ordered::ordered_generation(db, token) {
+                Ok(generation) => generation,
+                Err(error) => {
+                    return self
+                        .refuse(cx, request, stream, binding, error.code, &error.message)
+                        .await;
+                }
+            };
+            self.send_generation = Some(generation.clone());
+            let (text, definition) = match statement {
+                SourceStatement::Text(text) => (text, None),
+                SourceStatement::Prepared(prepared) => (prepared.statement(), Some(prepared)),
+            };
+            let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
+                .map_err(|_| Stop::Transport)?;
+            // Keep one opening future across control frames. Cold admission
+            // must also release promptly on disconnect, cancel or recovery.
+            let opened = self
+                .read_progress(
+                    cx,
+                    waiter,
+                    &mut window,
+                    stream,
+                    request,
+                    binding,
+                    crate::execute::buffered::read_buffered_session_for(
+                        cx,
+                        db,
+                        token,
+                        definition,
+                        generation,
+                        text,
+                        &parameters,
+                    ),
+                )
+                .await?;
+            let (mut session, prepared) = match opened {
+                Ok(opened) => opened,
+                Err(error) => {
+                    return self
+                        .refuse(cx, request, stream, binding, error.code, &error.message)
+                        .await;
+                }
+            };
+            self.send_generation = Some(session.generation());
+            let source = match session.stream_prepared(&query, &prepared, &parameters) {
+                Ok(source) => source,
+                Err(error) => {
+                    return self
+                        .refuse(cx, request, stream, binding, error.code, &error.message)
+                        .await;
+                }
+            };
+            return self
+                .deliver_source(cx, waiter, request, stream, binding, source, window)
+                .await;
+        }
         let opened = match statement {
             SourceStatement::Text(text) => {
                 match crate::execute::read_session_for(cx, db, token, &[(text, &parameters)]).await
@@ -194,7 +252,7 @@ impl Lane {
             }
         };
         self.send_generation = Some(session.generation());
-        let mut source = match session.stream_prepared(&query, &prepared, &parameters) {
+        let source = match session.stream_prepared(&query, &prepared, &parameters) {
             Ok(source) => source,
             Err(error) => {
                 return self
@@ -202,12 +260,29 @@ impl Lane {
                     .await;
             }
         };
+        let window = FlowWindow::new(self.initial_window, self.maximum_window)
+            .map_err(|_| Stop::Transport)?;
+        self.deliver_source(cx, waiter, request, stream, binding, source, window)
+            .await
+    }
+
+    /// Both resident and buffered native sources use the same credit window,
+    /// measured pending row, control loop and fresh physical-send guards.
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver_source(
+        &mut self,
+        cx: &Cx,
+        waiter: &Waiter,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        mut source: crate::execute::ReadCursor<'_>,
+        mut window: FlowWindow,
+    ) -> Result<(), Stop> {
         let outcome = Outcome::Rows {
             seq: source.snapshot_seq(),
         };
         let mut chunks = Chunks::new(source.columns().to_vec());
-        let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
-            .map_err(|_| Stop::Transport)?;
         let framing = binding.header_len() + CHUNK_OVERHEAD;
         let frame_budget = self.send_limits.max_frame_len() - framing;
         let mut delivered = 0u64;

@@ -134,6 +134,12 @@ impl Symbols {
         })
     }
 
+    /// A catalog-only physical source cannot silently acquire additional
+    /// process-local names. Exact durable redeclarations remain harmless.
+    pub(crate) fn matches_catalog(&self, durable: &SymbolCatalog) -> bool {
+        self.catalog.as_ref() == durable
+    }
+
     /// Resolve a name in exactly the requested kind; never across kinds.
     #[must_use]
     pub fn resolve(&self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {

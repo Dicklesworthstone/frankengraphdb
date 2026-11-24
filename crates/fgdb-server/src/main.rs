@@ -14,8 +14,8 @@ use fgdb_beacon::{DistanceMetric, HnswConfig, IndexConfig};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GraphSymbol, GraphSymbolKind};
 use fgdb_server::{
-    BeaconIndexConfig, DatabaseConfig, MaintenanceEvent, MaintenanceSchedule, OrderedReadConfig,
-    Server, ServerLimits, Symbols,
+    BeaconIndexConfig, BufferedReadConfig, DatabaseConfig, MaintenanceEvent, MaintenanceSchedule,
+    OrderedReadConfig, Server, ServerLimits, Symbols,
 };
 use fgdb_warden::{Grant, QueryLimits, Restriction, Rights, Scope};
 use std::collections::BTreeSet;
@@ -35,6 +35,7 @@ USAGE:
       DATABASE := --database <name>=<path> --key-file <path> --issuer-key-file <path>
                   [--kek-passphrase-file <path>] [--strata-ecs]
                   [--policy-epoch <n>] [--write-relation <u64>] [--query-scratch-dir <path>]
+                  [--buffered-reads-memory-bytes <n>]
                   [--max-snapshot-records <n>] [--max-result-rows <n>]
                   [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
                   [--compact-interval-seconds <n>] [--scrub-interval-seconds <n>]
@@ -116,6 +117,12 @@ a replacement baseline. This option does not enable durable reconnect resume.
 query-private files in an existing directory. The operator chooses this path;
 clients request ReadOrdered or prepared OrderedStream without supplying paths
 or scratch limits. Databases without this option refuse those execution modes.
+
+--buffered-reads-memory-bytes selects bounded cold sources for FGP ReadStream
+and prepared SourceStream on that database. The byte pool is shared across
+four concurrent reads, including readers waiting for credit. This profile uses
+durable catalog names and native vertex/typed-edge queries; unsupported shapes
+refuse. Other read modes and the live writer retain their existing sources.
 
 --compact-interval-seconds and --scrub-interval-seconds opt that database
 into fixed periodic maintenance while fgdbd retains its writer lease. Both
@@ -263,6 +270,7 @@ struct DatabaseOptions {
     strata_ecs: bool,
     issuer_key_file: Option<PathBuf>,
     query_scratch_dir: Option<PathBuf>,
+    buffered_reads_memory_bytes: Option<NonZeroUsize>,
     policy_epoch: u64,
     write_relation: u64,
     /// `--max-snapshot-records`, `--max-result-rows`, `--max-work-units` and
@@ -553,6 +561,7 @@ impl ServeOptions {
                         strata_ecs: false,
                         issuer_key_file: None,
                         query_scratch_dir: None,
+                        buffered_reads_memory_bytes: None,
                         policy_epoch: 1,
                         write_relation: 1,
                         query_limits: [None; 4],
@@ -585,6 +594,12 @@ impl ServeOptions {
                         }
                         "--query-scratch-dir" if db.query_scratch_dir.is_none() => {
                             db.query_scratch_dir = Some(PathBuf::from(value(args, &mut at, flag)?));
+                        }
+                        "--buffered-reads-memory-bytes"
+                            if db.buffered_reads_memory_bytes.is_none() =>
+                        {
+                            db.buffered_reads_memory_bytes =
+                                Some(number(value(args, &mut at, flag)?, flag)?);
                         }
                         "--policy-epoch" => {
                             db.policy_epoch = number(value(args, &mut at, flag)?, flag)?
@@ -828,6 +843,9 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         config.write_relation = RelationId(db.write_relation);
         config.symbols = db.symbols;
         config.ordered_reads = db.query_scratch_dir.map(OrderedReadConfig::new);
+        config.buffered_reads = db
+            .buffered_reads_memory_bytes
+            .map(|bytes| BufferedReadConfig::new(bytes.get()));
         if let Some(ticks) = db.subscription_coalesce_ticks {
             config.subscription_max_coalesced_ticks = ticks;
         }

@@ -7,6 +7,7 @@ use fgdb_gql::{GqlParameters, PreparedGraphBranchText, PreparedGraphWriteScript}
 use fgdb_protocol::body::{Prepare, PrepareMode, PreparedExecutionMode};
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub(crate) struct PreparedRead {
     pub(super) selector: Arc<PreparedGraphBranchText>,
     pub(super) native: Arc<PreparedNativeRead>,
@@ -163,6 +164,39 @@ fn authorized_branch(selected: &fgdb_gql::BoundGraphBranchText<'_>) -> Result<()
     }
 }
 
+/// One template owner for normal PREPARE and text reads selecting another
+/// admitted physical backend. The caller admits original source/arguments and
+/// checks live controls around this synchronous compiler/catalog callback.
+pub(super) fn prepare_read_with_symbols(
+    generation: Generation,
+    text: &str,
+    parameters: &GqlParameters,
+    symbols_for: impl FnOnce(&str, &GqlParameters) -> Result<crate::Symbols, Refusal>,
+) -> Result<PreparedRead, Refusal> {
+    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, parameters);
+    let (statement, parameters) = lowered
+        .as_ref()
+        .map_or((text, parameters), |(lowered, derived)| {
+            (lowered.text(), derived)
+        });
+    let selector = PreparedGraphBranchText::prepare(statement).map_err(branch_error)?;
+    let selected = selector.bind_parameters(parameters).map_err(branch_error)?;
+    authorized_branch(&selected)?;
+    refuse_element_identity(selected.statement())?;
+    let symbols = symbols_for(selected.statement(), selected.parameters())?;
+    let native =
+        PreparedNativeRead::prepare(selected.statement(), selected.parameters(), symbols.clone())
+            .map_err(query_refusal)?;
+    Ok(PreparedRead {
+        selector: Arc::new(selector),
+        native: Arc::new(native),
+        lowered: lowered.map(|(lowered, _)| Arc::new(lowered)),
+        symbols,
+        generation,
+        source_bytes: text.len(),
+    })
+}
+
 pub(crate) async fn prepare_read(
     cx: &Cx,
     db: &Served,
@@ -215,35 +249,18 @@ pub(crate) async fn prepare_read(
     }
     let definition = query.with_restriction(|| {
         let parameters = parameters?;
-        let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&request.statement, &parameters);
-        let (statement, parameters) = lowered.as_ref().map_or(
-            (request.statement.as_str(), &parameters),
-            |(lowered, derived)| (lowered.text(), derived),
-        );
-        let selector = PreparedGraphBranchText::prepare(statement).map_err(branch_error)?;
-        let selected = selector.bind_parameters(parameters).map_err(branch_error)?;
-        authorized_branch(&selected)?;
-        refuse_element_identity(selected.statement())?;
-        let symbols = symbols_at(
-            &view,
-            &db.symbols,
-            &[statement_catalog_cut(
-                selected.statement(),
-                selected.parameters(),
-            )?],
-        )?;
-        let native = PreparedNativeRead::prepare(
-            selected.statement(),
-            selected.parameters(),
-            symbols.clone(),
+        prepare_read_with_symbols(
+            generation.clone(),
+            &request.statement,
+            &parameters,
+            |statement, parameters| {
+                symbols_at(
+                    &view,
+                    &db.symbols,
+                    &[statement_catalog_cut(statement, parameters)?],
+                )
+            },
         )
-        .map_err(query_refusal)?;
-        Ok::<_, Refusal>((
-            selector,
-            native,
-            lowered.map(|(lowered, _)| lowered),
-            symbols,
-        ))
     });
     // A late invalidation wins even over a syntax error. No template is
     // installed after expiry, retirement, cancellation or generation fencing.
@@ -254,15 +271,7 @@ pub(crate) async fn prepare_read(
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
     generation.check().map_err(Refusal::from)?;
-    let (selector, native, lowered, symbols) = definition?;
-    Ok(PreparedRead {
-        selector: Arc::new(selector),
-        native: Arc::new(native),
-        lowered: lowered.map(Arc::new),
-        symbols,
-        generation,
-        source_bytes: request.statement.len(),
-    })
+    definition
 }
 
 /// Convert one wire transcript, recheck live controls, then reserve its original

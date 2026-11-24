@@ -12,6 +12,45 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Served buffered source streams — qualification pending
+
+`DatabaseConfig::buffered_reads` and the per-database
+`--buffered-reads-memory-bytes` option select capability-authorized cold sources
+for FGP ReadStream and prepared SourceStream. The server captures the publication
+and historical catalog from the same healthy live database generation, releases
+the writer borrow before asynchronous admission, and rechecks the exact catalog
+through the canonical prepared-session constructor. A prepared handle can bind
+another historical cut when its immutable symbol bindings still agree.
+
+The host owns a shared memory pool, physical limits and concurrent-source slots.
+Slots remain occupied while a client waits for credit and retire with the native
+session on completion, refusal, cancellation or disconnect. Buffered and resident
+sources use one delivery loop, retaining the existing measured pending row,
+credit accounting, control-frame processing and physical-send generation checks.
+Every opening and pull poll is fenced by the served recovery generation. Reads
+keep their captured publication when the live writer advances; they do not hold
+a resident Snapshot or a writer lock while waiting for cold I/O or client credit.
+
+This initial served profile admits native vertex-local and typed single-edge
+source queries, including selected properties, predicates, historical cuts and
+finite native pages. Signed scope masking and source/delivery quotas remain in
+the canonical authorized owner. Unsupported shapes refuse without a resident
+fallback. Durable catalog names and exact operator redeclarations are accepted;
+process-local names absent from the selected catalog refuse. Physical errors
+map to stable public classes without exposing storage paths or hidden identities.
+
+Three public loopback regression sources cover literal vertex/edge rows, property
+masking, historical prepared rebinding, credit and cancellation, signed-budget
+failure, authentication precedence and catalog refusal. A lab regression covers
+publication pinning across writes, admission release and recovery fencing.
+Independent source review, pinned Rustfmt parsing/checks on all ten changed
+server files, and whitespace checks passed. Compilation, runtime tests, Clippy,
+UBS and integrated qualification remain UNRUN after the pinned dependency build
+was terminated. `fgdb-w5-executor-olp` and
+`fgdb-qualify-integrated-nov22-maz0p` remain open. Default reads, other execution
+modes, startup and the live writer retain their existing resident owners; this
+does not qualify whole-server out-of-core operation.
+
 ### Maintained pages over correlated aggregates — qualification pending
 
 Returning CALL and OPTIONAL CALL bodies can maintain one terminal finite page
@@ -70,8 +109,8 @@ node admission and selected-property decoding. A denied explicit relation yields
 an empty cursor without opening a graph source. Unsupported joins, walks,
 aggregates, complete property maps and computed output profiles refuse before
 candidate I/O. The existing synchronous resident session remains source-compatible
-through its default backend; ordinary server requests still use that resident
-path.
+through its default backend. The server defaults to that resident path; the
+opt-in buffered source-stream integration is described above.
 
 The public backend always uses the bounded-history profile. It cannot enable
 the complete-image native-run mode. Detached scan positions bind the exact

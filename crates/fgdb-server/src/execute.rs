@@ -2,6 +2,7 @@
 //! path every surface (FGP, HTTP and Bolt) shares, so adapters differ only in
 //! framing, never in authority, statement classes or error classes.
 
+pub(crate) mod buffered;
 mod conditional;
 mod difference;
 mod edge_upsert_output;
@@ -198,6 +199,7 @@ pub(crate) struct ReadCursor<'q> {
 enum ReadSource<'q> {
     Rows(fgdb::AuthorizedAsyncRowCursor<'q>),
     Aggregate(fgdb::AuthorizedAsyncAggregateCursor<'q>),
+    Buffered(fgdb::AuthorizedBufferedRowCursor<'q, asupersync::fs::UnixVfs, fn() -> u64>),
 }
 
 impl ReadCursor<'_> {
@@ -210,18 +212,21 @@ impl ReadCursor<'_> {
         match &self.native {
             ReadSource::Rows(cursor) => cursor.columns(),
             ReadSource::Aggregate(cursor) => cursor.columns(),
+            ReadSource::Buffered(cursor) => cursor.columns(),
         }
     }
     pub(crate) fn snapshot_seq(&self) -> u64 {
         match &self.native {
             ReadSource::Rows(cursor) => cursor.snapshot_seq().0,
             ReadSource::Aggregate(cursor) => cursor.snapshot_seq().0,
+            ReadSource::Buffered(cursor) => cursor.snapshot_seq().0,
         }
     }
     pub(crate) fn exhausted(&self) -> bool {
         let state = match &self.native {
             ReadSource::Rows(cursor) => cursor.state(),
             ReadSource::Aggregate(cursor) => cursor.state(),
+            ReadSource::Buffered(cursor) => cursor.state(),
         };
         state == fgdb_gql::stream::VertexScanState::Exhausted
     }
@@ -233,28 +238,39 @@ impl ReadCursor<'_> {
                 ReadSource::Rows(cursor) => cursor
                     .next_row()
                     .await
-                    .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect())),
-                ReadSource::Aggregate(cursor) => cursor.next_row().await.map(|row| {
-                    row.map(|row| {
-                        // The native compiler validates these RETURN ordinals before
-                        // opening a source. Preserve exact aggregate domains and
-                        // repeated keys without a lossy row-value intermediate.
-                        cursor
-                            .output_slots()
-                            .iter()
-                            .map(|slot| match *slot {
-                                fgdb_gql::GraphAggregateTextSlot::GroupKey(at) => {
-                                    convert::graph(&row.keys()[at])
-                                }
-                                fgdb_gql::GraphAggregateTextSlot::Aggregate(at) => {
-                                    convert::cell(&row.values()[at])
-                                }
-                            })
-                            .collect()
+                    .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect()))
+                    .map_err(query_refusal),
+                ReadSource::Aggregate(cursor) => cursor
+                    .next_row()
+                    .await
+                    .map(|row| {
+                        row.map(|row| {
+                            // The native compiler validates these RETURN ordinals before
+                            // opening a source. Preserve exact aggregate domains and
+                            // repeated keys without a lossy row-value intermediate.
+                            cursor
+                                .output_slots()
+                                .iter()
+                                .map(|slot| match *slot {
+                                    fgdb_gql::GraphAggregateTextSlot::GroupKey(at) => {
+                                        convert::graph(&row.keys()[at])
+                                    }
+                                    fgdb_gql::GraphAggregateTextSlot::Aggregate(at) => {
+                                        convert::cell(&row.values()[at])
+                                    }
+                                })
+                                .collect()
+                        })
                     })
-                }),
+                    .map_err(query_refusal),
+                ReadSource::Buffered(cursor) => cursor
+                    .next()
+                    .await
+                    .transpose()
+                    .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect()))
+                    .map_err(buffered::refusal),
             };
-            result.map_err(query_refusal)
+            result
         })
         .await
     }

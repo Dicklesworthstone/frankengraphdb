@@ -90,6 +90,7 @@
 pub mod aegis;
 mod beacon;
 mod bolt;
+mod buffered;
 mod commits;
 mod connection;
 mod convert;
@@ -105,6 +106,7 @@ mod tls;
 
 pub use aegis::{AegisReplicaCoordinator, SingleMemberPublisher};
 pub use beacon::{BeaconCheckpointReport, BeaconIndexConfig, BeaconIndexStatus};
+pub use buffered::BufferedReadConfig;
 pub use fgdb_resource::{
     Admitted as AdmittedResources, ResourceAxis, ResourceCeiling, ResourceError, ResourceVector,
 };
@@ -267,6 +269,10 @@ pub struct DatabaseConfig {
     /// trusted scratch directory and physical limits. Request bodies cannot
     /// replace those files, limits or the database's shared resident pool.
     pub ordered_reads: Option<OrderedReadConfig>,
+    /// Opt FGP source-stream reads into bounded cold-storage sources. This
+    /// uses durable catalog names and refuses unsupported native profiles;
+    /// other read modes and the live writer retain their existing owners.
+    pub buffered_reads: Option<BufferedReadConfig>,
 }
 
 impl DatabaseConfig {
@@ -294,6 +300,7 @@ impl DatabaseConfig {
             max_subscriptions: 64,
             subscription_max_coalesced_ticks: NonZeroUsize::MIN,
             ordered_reads: None,
+            buffered_reads: None,
         }
     }
 
@@ -352,6 +359,7 @@ pub enum ServerError {
     Open(fgdb::OpenError),
     Catalog(fgdb::ReadError),
     Symbols(SymbolConflict),
+    BufferedSymbols,
     CatalogChanged {
         expected: fgdb_types::CommitSeq,
         actual: fgdb_types::CommitSeq,
@@ -381,6 +389,9 @@ impl core::fmt::Display for ServerError {
             Self::Open(error) => write!(f, "cannot open database: {error}"),
             Self::Catalog(error) => write!(f, "cannot read database symbol catalog: {error}"),
             Self::Symbols(error) => write!(f, "cannot configure database symbols: {error}"),
+            Self::BufferedSymbols => f.write_str(
+                "buffered source reads require operator declarations to match durable catalog names",
+            ),
             Self::CatalogChanged { expected, actual } => write!(
                 f,
                 "database publication changed from {} to {} while binding its symbol catalog; retry startup",
@@ -494,6 +505,7 @@ pub(crate) struct Served {
     pub(crate) incarnation: [u8; 32],
     pub(crate) authority_commitment: [u8; 32],
     pub(crate) ordered_reads: Option<ordered::OrderedReads>,
+    pub(crate) buffered_reads: Option<buffered::BufferedReads>,
 }
 
 impl Served {
@@ -578,6 +590,10 @@ impl Server {
             Some(config) => Some(ordered::OrderedReads::open(cx, config).await?),
             None => None,
         };
+        let buffered_reads = config
+            .buffered_reads
+            .map(buffered::BufferedReads::new)
+            .transpose()?;
         let namespace = config.keys.namespace.0;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let mut db = Database::open(&contexts.commit(), path, config.keys)
@@ -593,6 +609,11 @@ impl Server {
             .symbols
             .with_catalog(db.symbol_catalog().map_err(ServerError::Catalog)?)
             .map_err(ServerError::Symbols)?;
+        if buffered_reads.is_some()
+            && !symbols.matches_catalog(db.symbol_catalog().map_err(ServerError::Catalog)?)
+        {
+            return Err(ServerError::BufferedSymbols);
+        }
         let statement_clock = fgdb::StatementClock::new(|_| {
             let elapsed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -648,6 +669,7 @@ impl Server {
                 incarnation,
                 authority_commitment,
                 ordered_reads,
+                buffered_reads,
             }),
         );
         Ok(())
