@@ -60,20 +60,14 @@ pub enum EdgeScanPropertyDemand {
     Complete,
 }
 
-impl EdgeScanPropertyDemand {
-    fn with_edge_property(self, key: PropertyKeyId) -> Self {
-        match self {
-            Self::Topology => Self::Properties(PropertySelection::one(key)),
-            Self::Properties(mut selected) => {
-                if selected.insert(key).is_ok() {
-                    Self::Properties(selected)
-                } else {
-                    Self::Complete
-                }
-            }
-            Self::Complete => Self::Complete,
-        }
-    }
+/// Bounded property fields used by a complete single-edge evaluator. Endpoint
+/// keys are the union for both logical vertices: either physical endpoint may
+/// occupy either binding slot under incoming or undirected traversal. Reading
+/// this selection still requires independent topology and property authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EdgeScanPropertySelection {
+    pub edge: PropertySelection,
+    pub endpoints: PropertySelection,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,36 +142,65 @@ impl EdgeScanPlan {
     /// captures in this local profile denote the same single physical edge.
     #[must_use]
     pub fn property_demand(&self) -> EdgeScanPropertyDemand {
-        use EdgeScanPropertyDemand::{Complete, Topology};
-
-        if self.joined.is_some() {
-            return Complete;
+        match self.selected_property_demand() {
+            Some(selected) if selected.endpoints.is_empty() => {
+                if selected.edge.is_empty() {
+                    EdgeScanPropertyDemand::Topology
+                } else {
+                    EdgeScanPropertyDemand::Properties(selected.edge)
+                }
+            }
+            _ => EdgeScanPropertyDemand::Complete,
         }
-        let mut demand = Topology;
+    }
+
+    /// Prove bounded selections for edge and endpoint properties together.
+    /// All predicates, eager Boolean operands, hidden sort cells and aggregate
+    /// inputs participate, including operands of branches that may not run.
+    /// Each selection has its own fixed key bound. A complete property map,
+    /// joined/probed program, or an unproved instruction returns `None`.
+    ///
+    /// Unlike [`Self::property_demand`], this proof is for sources that can
+    /// retain selected properties for both endpoints. It does not change the
+    /// conservative complete-record contract of that existing API.
+    #[must_use]
+    pub fn selected_property_demand(&self) -> Option<EdgeScanPropertySelection> {
+        if self.joined.is_some() {
+            return None;
+        }
+        let mut selected = EdgeScanPropertySelection {
+            edge: PropertySelection::EMPTY,
+            endpoints: PropertySelection::EMPTY,
+        };
         for instruction in self.instructions.iter() {
             match instruction {
                 GlaOperator::Select { predicates, .. } => {
-                    if predicates
-                        .iter()
-                        .any(|predicate| !matches!(predicate, VertexPredicate::HasLabel(_)))
-                    {
-                        return Complete;
+                    for key in predicates.iter().filter_map(VertexPredicate::property_key) {
+                        selected.endpoints.insert(key).ok()?;
                     }
                 }
                 GlaOperator::VertexIdentity { .. } | GlaOperator::CapturePath { .. } => {}
+                GlaOperator::CompareProperties {
+                    left_key,
+                    right_key,
+                    ..
+                } => {
+                    selected.endpoints.insert(*left_key).ok()?;
+                    selected.endpoints.insert(*right_key).ok()?;
+                }
                 GlaOperator::SelectBoolean { expression } => {
-                    if expression.referenced_vertex_properties().next().is_some() {
-                        return Complete;
+                    for (_, key) in expression.referenced_vertex_properties() {
+                        selected.endpoints.insert(key).ok()?;
                     }
                     for (_, key) in expression.referenced_edge_properties() {
-                        demand = demand.with_edge_property(key);
+                        selected.edge.insert(key).ok()?;
                     }
                 }
-                _ => return Complete,
+                _ => return None,
             }
         }
         let GlaOperator::ProjectValues { columns } = self.projection.as_ref() else {
-            return Complete;
+            return None;
         };
         for column in columns {
             match column {
@@ -191,13 +214,16 @@ impl EdgeScanPlan {
                         | GraphPathFunction::Edge,
                     ..
                 } => {}
-                ValueProjection::EdgeProperty { key, .. } => {
-                    demand = demand.with_edge_property(*key);
+                ValueProjection::Property { key, .. } => {
+                    selected.endpoints.insert(*key).ok()?;
                 }
-                _ => return Complete,
+                ValueProjection::EdgeProperty { key, .. } => {
+                    selected.edge.insert(*key).ok()?;
+                }
+                _ => return None,
             }
         }
-        demand
+        Some(selected)
     }
 
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {

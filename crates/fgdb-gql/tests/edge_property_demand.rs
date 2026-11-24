@@ -250,6 +250,7 @@ fn joined_and_probed_edge_plans_keep_complete_property_demand() {
             EdgeScanPropertyDemand::Complete,
             "{text}"
         );
+        assert_eq!(ordinary.selected_property_demand(), None, "{text}");
         assert!(AsyncEdgeScanPlan::compile(query.plan()).is_err(), "{text}");
         assert!(
             AsyncEdgeScanPlan::compile_sort_input(query.plan()).is_err(),
@@ -452,5 +453,180 @@ fn selected_edge_aggregate_demand_covers_grouping_having_and_hidden_arguments() 
             panic!("expected a single-edge aggregate input: {text}");
         };
         assert_eq!(input.property_demand(), expected, "{text}");
+    }
+}
+
+#[test]
+fn selected_endpoint_demand_covers_orientation_predicates_and_eager_operands() {
+    use fgdb_delta_types::PropertySelection;
+    use fgdb_gql::edge_stream::EdgeScanPropertySelection;
+    let none = PropertySelection::EMPTY;
+    let p = PropertySelection::one(PropertyKeyId(1));
+    let q = PropertySelection::one(PropertyKeyId((1_u64 << 40) | 1));
+    let both =
+        PropertySelection::try_from_slice(&[PropertyKeyId(1), PropertyKeyId((1_u64 << 40) | 1)])
+            .unwrap();
+    for (text, edge, endpoints) in [
+        ("MATCH (a)-[r:R]->(b) RETURN r,a,b", none, none),
+        ("MATCH (a)-[r:R]->(b) RETURN r,r.p,a.p,b.q", p, both),
+        ("MATCH (a)<-[r:R]-(b) RETURN r,a.p,b.q", none, both),
+        ("MATCH (a)-[r:R]-(b) RETURN r,a,a.p,b.q", none, both),
+        ("MATCH (a)-[r:R]->(a) RETURN r,a.p", none, p),
+        (
+            "MATCH (a:L)-[r:R]->(b) WHERE a.p=1 RETURN r,b.q",
+            none,
+            both,
+        ),
+        ("MATCH (a)-[r:R]->(b) WHERE a.p IS NULL RETURN r", none, p),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE b.q IS NOT NULL RETURN r",
+            none,
+            q,
+        ),
+        ("MATCH (a)-[r:R]->(b) WHERE a.p<b.q RETURN r,r.p", p, both),
+        ("MATCH (a)-[r:R]->(b) WHERE true OR a.p=1 RETURN r", none, p),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE false AND b.q=1 RETURN r,r.p",
+            p,
+            q,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE coalesce(CASE WHEN true THEN 1 ELSE b.q END,0)=1 RETURN r,a.p",
+            none,
+            both,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE 1/(a.p-1)>0 RETURN r,b.q LIMIT 0",
+            none,
+            both,
+        ),
+    ] {
+        let query = prepared(text);
+        let before = query.plan().canonical_bytes();
+        let ordinary =
+            EdgeScanPlan::compile(query.plan()).unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let asynchronous = AsyncEdgeScanPlan::compile(query.plan())
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let expected = Some(EdgeScanPropertySelection { edge, endpoints });
+        assert_eq!(ordinary.selected_property_demand(), expected, "{text}");
+        assert_eq!(asynchronous.selected_property_demand(), expected, "{text}");
+        if !endpoints.is_empty() {
+            assert_eq!(ordinary.property_demand(), EdgeScanPropertyDemand::Complete);
+            assert_eq!(
+                asynchronous.property_demand(),
+                EdgeScanPropertyDemand::Complete
+            );
+        }
+        assert_eq!(query.plan().canonical_bytes(), before);
+    }
+}
+
+#[test]
+fn selected_endpoint_union_has_an_independent_full_width_key_bound() {
+    use fgdb_delta_types::PropertySelection;
+    use fgdb_gql::edge_stream::EdgeScanPropertySelection;
+    for distinct in [PropertySelection::CAPACITY, PropertySelection::CAPACITY + 1] {
+        let endpoints = (0..distinct).map(|key| {
+            format!(
+                "{}.k{key} AS endpoint_{key}",
+                if key % 2 == 0 { "a" } else { "b" }
+            )
+        });
+        let edges = (0..PropertySelection::CAPACITY).map(|key| format!("r.k{key} AS edge_{key}"));
+        let fields = endpoints
+            .chain(edges)
+            .chain(["b.k0 AS repeated".into()])
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = PreparedGraphText::prepare(
+            &format!("MATCH (a)-[r:R]->(b) RETURN r,{fields}"),
+            |kind, name| match kind {
+                GraphSymbolKind::Property => name
+                    .strip_prefix('k')
+                    .and_then(|key| key.parse::<u64>().ok())
+                    .map(|key| GraphSymbol::Property(PropertyKeyId((key << 40) | 7))),
+                _ => symbols(kind, name),
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let plan = AsyncEdgeScanPlan::compile(query.plan()).unwrap();
+        let expected = if distinct == PropertySelection::CAPACITY {
+            let keys: Vec<_> = (0..distinct as u64)
+                .map(|key| PropertyKeyId((key << 40) | 7))
+                .collect();
+            let selected = PropertySelection::try_from_slice(&keys).unwrap();
+            Some(EdgeScanPropertySelection {
+                edge: selected,
+                endpoints: selected,
+            })
+        } else {
+            None
+        };
+        assert_eq!(plan.selected_property_demand(), expected);
+        assert_eq!(plan.property_demand(), EdgeScanPropertyDemand::Complete);
+    }
+}
+
+#[test]
+fn selected_endpoint_demand_includes_hidden_sort_and_aggregate_inputs() {
+    use fgdb_delta_types::PropertySelection;
+    use fgdb_gql::edge_stream::EdgeScanPropertySelection;
+    let p = PropertySelection::one(PropertyKeyId(1));
+    let both =
+        PropertySelection::try_from_slice(&[PropertyKeyId(1), PropertyKeyId((1_u64 << 40) | 1)])
+            .unwrap();
+    let query = prepared("MATCH (a)-[r:R]->(b) WHERE a.p>0 RETURN r,r.p ORDER BY b.q LIMIT 0");
+    let (input, tail) = AsyncEdgeScanPlan::compile_sort_input(query.plan()).unwrap();
+    assert_eq!(tail.count(), Some(0));
+    assert_eq!(
+        input.selected_property_demand(),
+        Some(EdgeScanPropertySelection {
+            edge: p,
+            endpoints: both
+        })
+    );
+    for (text, edge, endpoints) in [
+        (
+            "MATCH (a)-[r:R]->(b) RETURN SUM(a.p+b.p) AS total",
+            PropertySelection::EMPTY,
+            p,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE a.q>0 RETURN SUM(r.p) AS total GROUP BY b.p",
+            p,
+            both,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS rows GROUP BY a ORDER BY SUM(b.p+1) DESC LIMIT 0",
+            PropertySelection::EMPTY,
+            p,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN SUM(a.p) AS total HAVING SUM(b.q)>0",
+            PropertySelection::EMPTY,
+            both,
+        ),
+    ] {
+        let aggregate = PreparedGraphAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let AsyncSpillAggregatePlan::Edge(input) = AsyncSpillAggregatePlan::compile(&aggregate)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        else {
+            panic!("expected a single-edge aggregate input: {text}");
+        };
+        assert_eq!(
+            input.selected_property_demand(),
+            Some(EdgeScanPropertySelection { edge, endpoints }),
+            "{text}"
+        );
+        assert_eq!(
+            input.property_demand(),
+            EdgeScanPropertyDemand::Complete,
+            "{text}"
+        );
     }
 }

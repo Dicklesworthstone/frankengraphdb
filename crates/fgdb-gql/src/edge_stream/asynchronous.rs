@@ -111,6 +111,12 @@ impl AsyncEdgeScanPlan {
         self.inner.property_demand()
     }
 
+    /// Exact edge and endpoint selections for sources that support both.
+    #[must_use]
+    pub fn selected_property_demand(&self) -> Option<EdgeScanPropertySelection> {
+        self.inner.selected_property_demand()
+    }
+
     /// The checked root selector, for source-level descriptor pruning before
     /// heap admission or payload reads. This conveys no authorization; the
     /// source must still enforce its own visibility and capability boundary.

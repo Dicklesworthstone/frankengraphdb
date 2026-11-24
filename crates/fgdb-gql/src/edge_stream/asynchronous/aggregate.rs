@@ -26,6 +26,12 @@ impl AsyncEdgeSpillAggregatePlan {
         self.input.property_demand()
     }
 
+    /// Exact edge and endpoint selections across the aggregate input program.
+    #[must_use]
+    pub fn selected_property_demand(&self) -> Option<EdgeScanPropertySelection> {
+        self.input.selected_property_demand()
+    }
+
     /// The checked input selector, before aggregate occurrence evaluation.
     pub fn root_relation(&self) -> EdgeRelation {
         self.input.root_relation()

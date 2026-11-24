@@ -30,6 +30,7 @@ pub(super) struct Source<'q, V: Vfs, C> {
     execution: Shared<'q, C>,
     pool: MemoryPool,
     keys: PropertySelection,
+    endpoint_keys: PropertySelection,
 }
 
 impl<'q, V: Vfs + Clone, C> Source<'q, V, C> {
@@ -38,6 +39,7 @@ impl<'q, V: Vfs + Clone, C> Source<'q, V, C> {
         returned: Returned<V>,
         position: Position,
         keys: PropertySelection,
+        endpoint_keys: PropertySelection,
         cx: &'q QueryCx,
         execution: Shared<'q, C>,
     ) -> Self {
@@ -50,6 +52,7 @@ impl<'q, V: Vfs + Clone, C> Source<'q, V, C> {
             execution,
             pool,
             keys,
+            endpoint_keys,
         }
     }
 }
@@ -160,17 +163,14 @@ impl AsyncEdgeScanRecord for EdgeRecord {
     }
     fn vertex(&self, vid: VId) -> Option<VertexScanRow<'_>> {
         let edge = self.fields.edge().entry();
-        let labels = if vid == edge.src {
-            &self.source_labels
+        let (labels, properties) = if vid == edge.src {
+            (&self.source_labels, self.fields.source_properties())
         } else if vid == edge.dst {
-            &self.target_labels
+            (&self.target_labels, self.fields.target_properties())
         } else {
             return None;
         };
-        Some(VertexScanRow {
-            labels,
-            properties: &[],
-        })
+        Some(VertexScanRow { labels, properties })
     }
 }
 
@@ -416,10 +416,11 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource for Sourc
             };
             let result = self
                 .cx
-                .with_restriction_async(scan.next_admitted_properties_with_endpoints(
+                .with_restriction_async(scan.next_admitted_properties_and_endpoint_properties(
                     self.cx,
                     relation.one(),
                     self.keys,
+                    self.endpoint_keys,
                     &mut admit,
                     &mut observe,
                 ))
@@ -485,7 +486,18 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource for Sourc
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<OutputGuard, EdgeScanSourceError<Self::Error, C>> {
         let mut bytes = 1024usize;
-        for (_, value) in record.fields.edge().properties() {
+        let edge = record.fields.edge();
+        let target_properties = if edge.entry().src == edge.entry().dst {
+            &[][..]
+        } else {
+            record.fields.target_properties()
+        };
+        for (_, value) in edge
+            .properties()
+            .iter()
+            .chain(record.fields.source_properties())
+            .chain(target_properties)
+        {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
             let payload = value
                 .canonical_encoded_len()

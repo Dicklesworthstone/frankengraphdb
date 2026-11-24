@@ -12,6 +12,35 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Cold selected endpoint properties — qualification pending
+
+Authorized buffered single-edge reads now admit selected endpoint properties
+in predicates, projections, hidden sort keys and aggregate inputs. The same
+native leaf supplies embedded source cursors, external relational/aggregate
+execution and configured FGP source/ordered streams, including prepared and
+historical requests. Incoming and undirected bindings retain native orientation;
+parallel edges retain multiplicity and a self-loop shares one endpoint owner.
+
+The compiler proves independent bounded key sets for the edge and the union of
+its endpoint fields. Both sets are intersected with the signed property scope.
+Strata admits the relation and both endpoint topologies before materializing
+selected values, then verifies each endpoint reread against the admitted
+identity, lifetime and labels at the same cut. All reads share the detached
+scan's cumulative physical allowance. Selected storage values and returned row
+copies keep affine pool reservations, including after cursor/session drop.
+The existing conservative edge-only demand API retains its contract. Complete
+maps, carried-element readers, fixed-edge joins and probes remain outside this
+new cold leaf profile; whole-server resident startup/writer ownership is unchanged.
+
+Regression sources cover explicit literal values and resident parity, historical
+updates, orientation/self-loops, missing versus stored NULL fields, hidden
+endpoints and unselected unavailable scalar artifacts, exact/one-short work and
+node limits, cancellation, retained output charges, prepared reuse, sorted pages
+and exact aggregates. Pinned formatting and independent source review passed.
+The targeted offline check exits 101 at missing `aes 0.9.2` before first-party
+compilation; runtime tests and integrated qualification remain UNRUN. The W5
+executor and integrated qualification beads remain open.
+
 ### Served cold ordered relations and aggregates — qualification pending
 
 When a database configures both buffered reads and trusted query scratch,
@@ -82,8 +111,8 @@ opening a graph scan. Per-row scope and both endpoint lifetimes remain enforced.
 
 Selected property sidecars stay behind admission. Topology and endpoint-label
 reads for mixed selectors remain subject to the separate physical limits; this
-does not establish hidden-I/O or timing noninterference. Complete maps, endpoint
-property payloads, walks, fixed-edge joins and probes retain their existing
+does not establish hidden-I/O or timing noninterference. Complete maps, walks,
+fixed-edge joins and probes retain their existing
 refusal boundaries. This closes a cold-route gap under `fgdb-du0xg`; it does not
 close that bead's broader qualification or the integrated qualification bead.
 
@@ -112,8 +141,8 @@ do not gain a second evaluator or reducer.
 Authorization, immutable prepared-handle identity, exact historical cut and
 recursive effect admission precede candidate and scratch access. Every branch
 and correlated body is checked, even under empty inputs or LIMIT zero. Complete
-property maps, carried-element property/metadata readers, endpoint property
-payloads, walks, probes, fixed-edge joins and procedures still refuse. Direct
+property maps, carried-element property/metadata readers, walks, probes,
+fixed-edge joins and procedures still refuse. Direct
 selected leaf properties remain behind staged visibility admission; supported
 row-only expressions can compose over already captured scalar values.
 
@@ -133,7 +162,8 @@ selected products and CALL, weighted UNION rows, exact numeric and collection
 aggregates, historical cuts, preflight before I/O, pending-drop closure, late
 expiry, final quotas and retained output charges. The served-source regression
 also distinguishes native identity-ordered scalar output from unsupported
-unordered output and endpoint-property reads. Independent source review,
+unordered output; selected endpoint fields now use the leaf extension above.
+Independent source review,
 pinned Rustfmt parsing/checks and whitespace checks passed. Compilation, runtime
 tests, Clippy, UBS and integrated qualification remain UNRUN after the earlier
 pinned dependency compiler termination. This API does not route server ordered

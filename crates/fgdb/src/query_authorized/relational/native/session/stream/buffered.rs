@@ -11,7 +11,7 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::PropertySelection;
 use fgdb_delta_types::catalog::SymbolCatalog;
 use fgdb_gql::edge_stream::{
-    AsyncEdgeScanCursor, AsyncEdgeScanPlan, EdgeScanPropertyDemand, EdgeScanState,
+    AsyncEdgeScanCursor, AsyncEdgeScanPlan, EdgeScanPropertySelection, EdgeScanState,
 };
 use fgdb_gql::stream::{AsyncVertexScanCursor, AsyncVertexScanPlan, VertexScanPropertyDemand};
 use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
@@ -137,8 +137,8 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     ///
     /// Use the returned canonical session's prepare and stream methods. This
     /// profile supports native ordered vertex-local and single-edge patterns
-    /// with one, any or a finite set of relation types, selected scalar
-    /// properties, predicates, SKIP and LIMIT.
+    /// with one, any or a finite set of relation types, selected edge and
+    /// endpoint properties, local predicates, SKIP and LIMIT.
     /// Complete native-run images are not enabled by this constructor; its
     /// private source always uses the selected-row bounded history profile.
     /// Unsupported plans refuse before candidate I/O. Initial cold admission
@@ -488,7 +488,7 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> AuthorizedBufferedRowCursor<'_, V
 
 enum Plan {
     Vertex(AsyncVertexScanPlan<GraphValueRow>, PropertySelection),
-    Edge(AsyncEdgeScanPlan, PropertySelection, EdgeRelation),
+    Edge(AsyncEdgeScanPlan, EdgeScanPropertySelection, EdgeRelation),
 }
 
 // A finite selector with no allowed member needs no physical source. Any
@@ -525,13 +525,11 @@ fn compile(
             QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(error)))
         })?;
         let relation = plan.root_relation();
-        let keys = match plan.property_demand() {
-            EdgeScanPropertyDemand::Topology => PropertySelection::EMPTY,
-            EdgeScanPropertyDemand::Properties(keys) => select(keys),
-            EdgeScanPropertyDemand::Complete => {
-                return Err(QueryError::StreamingUnsupported { facade }.into());
-            }
-        };
+        let mut keys = plan
+            .selected_property_demand()
+            .ok_or(QueryError::StreamingUnsupported { facade })?;
+        keys.edge = select(keys.edge);
+        keys.endpoints = select(keys.endpoints);
         Ok(Plan::Edge(plan, keys, relation))
     } else {
         let plan = AsyncVertexScanPlan::compile(pattern.plan()).map_err(plan_error)?;
@@ -685,14 +683,16 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
                     return Err(error.into());
                 }
             };
-            let keys = match &plan {
-                Plan::Vertex(_, keys) | Plan::Edge(_, keys, _) => *keys,
+            let (keys, endpoint_keys) = match &plan {
+                Plan::Vertex(_, keys) => (*keys, PropertySelection::EMPTY),
+                Plan::Edge(_, keys, _) => (keys.edge, keys.endpoints),
             };
             let source = Source::new(
                 backend,
                 returned.clone(),
                 position,
                 keys,
+                endpoint_keys,
                 cx,
                 execution.clone(),
             );

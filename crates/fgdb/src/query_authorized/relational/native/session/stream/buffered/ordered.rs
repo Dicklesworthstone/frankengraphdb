@@ -43,7 +43,8 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     /// scalar-stage, CALL and grouping owners. Complete
     /// maps, carried-element lookups, walks, probes, fixed-edge joins and
     /// procedures refuse recursively before candidate or scratch access.
-    /// Selected leaf properties retain the same staged visibility admission.
+    /// Selected leaf properties, including both endpoints of a single edge,
+    /// retain the same staged visibility admission before value decoding.
     /// This is an explicit cold execution capability, not a server default or
     /// a claim that the result value itself can exceed its admitted row bound.
     #[allow(clippy::too_many_arguments)]
@@ -241,7 +242,7 @@ fn admit(plan: &AsyncSpillSetPlan, facade: crate::NativeReadClass) -> Result<()>
             }
         }
         AsyncSpillSetSourcePlan::Edge(plan) => {
-            if matches!(plan.property_demand(), EdgeScanPropertyDemand::Complete) {
+            if plan.selected_property_demand().is_none() {
                 Err(unsupported(facade))
             } else {
                 Ok(())
@@ -561,13 +562,11 @@ impl<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> Host<'q, V, C> {
                 }
                 AsyncSpillSetSourcePlan::Edge(plan) => {
                     let relation = plan.root_relation();
-                    let keys = match plan.property_demand() {
-                        EdgeScanPropertyDemand::Topology => PropertySelection::EMPTY,
-                        EdgeScanPropertyDemand::Properties(keys) => selected_keys(keys, scope),
-                        EdgeScanPropertyDemand::Complete => {
-                            return Err(unsupported(crate::NativeReadClass::Set));
-                        }
-                    };
+                    let mut keys = plan
+                        .selected_property_demand()
+                        .ok_or_else(|| unsupported(crate::NativeReadClass::Set))?;
+                    keys.edge = selected_keys(keys.edge, scope);
+                    keys.endpoints = selected_keys(keys.endpoints, scope);
                     Plan::Edge(plan.clone(), keys, relation)
                 }
                 _ => return Err(unsupported(crate::NativeReadClass::Set)),
@@ -620,14 +619,16 @@ impl<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> Host<'q, V, C> {
                 return Err(error);
             }
         };
-        let keys = match &selected {
-            Plan::Vertex(_, keys) | Plan::Edge(_, keys, _) => *keys,
+        let (keys, endpoint_keys) = match &selected {
+            Plan::Vertex(_, keys) => (*keys, PropertySelection::EMPTY),
+            Plan::Edge(_, keys, _) => (keys.edge, keys.endpoints),
         };
         let source = Source::new(
             backend,
             self.returned.clone(),
             position,
             keys,
+            endpoint_keys,
             self.cx,
             self.execution.clone(),
         );

@@ -3348,7 +3348,264 @@ fn detached_edge_positions_keep_owner_progress_work_and_terminal_state() {
 }
 
 #[test]
-fn staged_edge_properties_never_materialize_hidden_sidecar_siblings() {
+fn staged_endpoint_fields_preserve_history_absence_null_and_affine_owners() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let mut root = view.root().clone();
+        drop(view);
+        let high = PropertyKeyId((1_u64 << 40) | P.0);
+        let keys = PropertySelection::try_from_slice(&[P, high]).unwrap();
+        let mut absent = vertex(1, 6, None, 0);
+        absent.props = vec![(high, CanonicalScalar::Null.into())];
+        let mut null = vertex(2, 6, None, 0);
+        null.props = vec![
+            (P, CanonicalScalar::Null.into()),
+            (high, CanonicalScalar::Int(99).into()),
+        ];
+        let rows = [
+            vertex(1, 3, Some(6), 11),
+            absent,
+            vertex(2, 1, Some(6), 20),
+            null,
+        ];
+        let patch = store
+            .put_patch(&commit, &encode_patch(&rows).unwrap())
+            .await
+            .unwrap();
+        root.published_at = CommitSeq(6);
+        root.vertex_patches.push(PatchRef {
+            patch_id: patch.0,
+            first_seq: CommitSeq(1),
+            last_seq: CommitSeq(6),
+        });
+        let id = store.put_root(&commit, &root).await.unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        drop(view.reserve_scan_bytes(&cx, pool.limit()));
+        let baseline = pool.used();
+        let fields = |vid: VId, cut: u64| -> Vec<(PropertyKeyId, CanonicalPropertyValue)> {
+            match (vid.0, cut) {
+                (1, 6..) => vec![(high, CanonicalScalar::Null.into())],
+                (2, 6..) => vec![
+                    (P, CanonicalScalar::Null.into()),
+                    (high, CanonicalScalar::Int(99).into()),
+                ],
+                (1, 3..) => vec![(P, CanonicalScalar::Int(11).into())],
+                (id, _) => vec![(P, CanonicalScalar::Int(id as i64 * 10).into())],
+            }
+        };
+        for cut in [2, 5, 6, 2] {
+            let mut scan = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
+            let mut found = Vec::new();
+            while let Some(candidate) = scan
+                .next_admitted_properties_and_endpoint_properties(
+                    &cx,
+                    None,
+                    PropertySelection::one(P),
+                    keys,
+                    &mut |_| Ok::<_, ()>(true),
+                    &mut |_| Ok(()),
+                )
+                .await
+                .unwrap()
+            {
+                if let Some(row) = candidate.row {
+                    let edge = *row.edge().entry();
+                    assert_eq!(row.source_properties(), fields(edge.src, cut));
+                    assert_eq!(row.target_properties(), fields(edge.dst, cut));
+                    if edge.src == edge.dst {
+                        assert!(core::ptr::eq(row.source_vertex(), row.target_vertex()));
+                        assert!(core::ptr::eq(
+                            row.source_properties(),
+                            row.target_properties()
+                        ));
+                        assert!(row.target_properties.is_none());
+                    }
+                    found.push((edge, row.edge().properties().to_vec()));
+                }
+            }
+            assert_eq!(
+                found,
+                expected(cut.min(5))
+                    .into_iter()
+                    .map(|row| (row.entry, row.props))
+                    .collect::<Vec<_>>()
+            );
+            drop(scan);
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            assert_eq!(pool.used(), baseline, "cut {cut}");
+        }
+        let mut scan = view.edge_scan(&cx, CommitSeq(6)).unwrap();
+        let held = scan
+            .next_admitted_properties_and_endpoint_properties(
+                &cx,
+                None,
+                PropertySelection::one(P),
+                keys,
+                &mut |_| Ok::<_, ()>(true),
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        drop(scan);
+        drop(view);
+        assert!(
+            pool.used() > 0,
+            "selected fields retain their own pool owner"
+        );
+        assert_eq!(held.source_properties(), fields(VId(2), 6));
+        assert_eq!(held.target_properties(), held.source_properties());
+        drop(held);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn staged_endpoint_work_survives_detachment_and_refusal_refunds_every_owner() {
+    use std::sync::atomic::AtomicBool;
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        drop(view.reserve_scan_bytes(&cx, pool.limit()));
+        let baseline = pool.used();
+        let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+        while scan
+            .next_admitted_properties_and_endpoint_properties(
+                &cx,
+                None,
+                PropertySelection::one(P),
+                PropertySelection::one(P),
+                &mut |_| Ok::<_, ()>(true),
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap()
+            .is_some()
+        {}
+        let complete_work = scan.work_used();
+        drop(scan);
+        assert!(complete_work > 0);
+        for limit in [complete_work - 1, complete_work] {
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            let mut position = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_state();
+            position.work.limit = limit;
+            let mut refused = false;
+            let mut delivered = Vec::new();
+            loop {
+                let before = position.work_used();
+                let mut scan = view.resume_edge_scan(&cx, position).unwrap();
+                assert_eq!(scan.work_used(), before);
+                let result = scan
+                    .next_admitted_properties_and_endpoint_properties(
+                        &cx,
+                        None,
+                        PropertySelection::one(P),
+                        PropertySelection::one(P),
+                        &mut |_| Ok::<_, ()>(true),
+                        &mut |_| Ok(()),
+                    )
+                    .await;
+                position = scan.into_state();
+                assert!(position.work_used() >= before);
+                match result {
+                    Ok(Some(candidate)) => {
+                        if candidate.row.is_some() {
+                            delivered.push(candidate.eid);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(BufferedScanError::Read(BufferedReadError::Limit {
+                        resource: "buffered source work",
+                        requested,
+                        limit: found,
+                    })) => {
+                        assert_eq!((requested, found), (complete_work, complete_work - 1));
+                        refused = true;
+                        break;
+                    }
+                    other => panic!("unexpected selected endpoint result {other:?}"),
+                }
+            }
+            assert_eq!(refused, limit < complete_work);
+            assert!(position.is_finished());
+            if !refused {
+                assert_eq!(
+                    delivered,
+                    expected(5)
+                        .iter()
+                        .map(|row| row.entry.eid)
+                        .collect::<Vec<_>>()
+                );
+            }
+            drop(position);
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            assert_eq!(pool.used(), baseline);
+        }
+        // Refuse after topology admission, while the selected value read is
+        // about to start. No candidate or partial field owner may survive.
+        let admitted = AtomicBool::new(false);
+        let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+        assert!(matches!(
+            scan.next_admitted_properties_and_endpoint_properties(
+                &cx,
+                None,
+                PropertySelection::EMPTY,
+                PropertySelection::one(P),
+                &mut |_| {
+                    admitted.store(true, Ordering::Relaxed);
+                    Ok::<_, &str>(true)
+                },
+                &mut |_| if admitted.load(Ordering::Relaxed) {
+                    Err("selected endpoint refused")
+                } else {
+                    Ok(())
+                },
+            )
+            .await,
+            Err(BufferedScanError::Control("selected endpoint refused"))
+        ));
+        assert!(admitted.load(Ordering::Relaxed));
+        assert!(scan.is_finished());
+        assert!(
+            scan.next_admitted_properties_and_endpoint_properties(
+                &cx,
+                None,
+                PropertySelection::one(P),
+                PropertySelection::one(P),
+                &mut |_| -> Result<bool, ()> { panic!("terminal admission") },
+                &mut |_| -> Result<(), ()> { panic!("terminal work") },
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        drop(scan);
+        drop(view.reserve_scan_bytes(&cx, pool.limit()));
+        assert_eq!(pool.used(), baseline);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn staged_edge_and_endpoint_properties_never_materialize_hidden_siblings() {
     use fgdb_types::{
         CanonicalTimestamp, CollationResolver, CollationResolverError, NonBinaryTextBinding,
         ObjectId, TzdbResolver,
@@ -3408,179 +3665,214 @@ fn staged_edge_properties_never_materialize_hidden_sidecar_siblings() {
         }
     }
 
-    run(|contexts, path| async move {
-        let commit = contexts.commit();
-        let cx = contexts.query();
-        let resolver = Arc::new(Resolver {
-            available: AtomicBool::new(true),
-            calls: AtomicUsize::new(0),
-        });
-        let store = BlockStore::open(
-            &commit,
-            &path,
-            [0x37; 32],
-            DatabaseSecurityNamespaceId([0x63; 32]),
-        )
-        .await
-        .unwrap()
-        .with_scalar_resolver(resolver.clone());
-        // The hidden edge is first in adjacency/sidecar order, while the
-        // visible edge is first in candidate EId order.
-        let entries = [entry(9, 1, 2, R, 1, None), entry(1, 1, 3, R, 1, None)];
-        let hidden = CanonicalScalar::Timestamp(
-            CanonicalTimestamp::zoned(
-                1_735_689_600_123_456_789,
-                -18_000,
-                "America/New_York",
-                ObjectId([9; 32]),
-                resolver.as_ref(),
-            )
-            .unwrap(),
-        );
-        let rows = vec![
-            vec![(P, hidden.into())],
-            vec![(P, CanonicalScalar::Int(7).into())],
-        ];
-        let sidecar = store
-            .put_edge_property_patch(&commit, &encode_property_patch(&rows).unwrap())
-            .await
-            .unwrap();
-        let bytes =
-            encode_block_with_properties(0, None, &entries, sidecar.0, &[1, 2], &rows).unwrap();
-        let block = store.put(&commit, &bytes).await.unwrap();
-        let mut hidden_vertex = vertex(2, 1, None, 20);
-        hidden_vertex.labels = vec![LabelId(77)];
-        let vertices = [
-            vertex(1, 1, None, 10),
-            hidden_vertex,
-            vertex(3, 1, None, 30),
-        ];
-        let patch = store
-            .put_patch(&commit, &encode_patch(&vertices).unwrap())
-            .await
-            .unwrap();
-        let id = store
-            .put_root(
+    for endpoint_fields in [false, true] {
+        run(move |contexts, path| async move {
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let resolver = Arc::new(Resolver {
+                available: AtomicBool::new(true),
+                calls: AtomicUsize::new(0),
+            });
+            let store = BlockStore::open(
                 &commit,
-                &PartitionRoot {
-                    graph: GraphId(1),
-                    branch: BranchId(2),
-                    partition: 0,
-                    published_at: CommitSeq(1),
-                    blocks: vec![BlockRef {
-                        block_id: block.0,
-                        first_seq: CommitSeq(1),
-                        last_seq: CommitSeq(1),
-                    }],
-                    vertex_patches: vec![PatchRef {
-                        patch_id: patch.0,
-                        first_seq: CommitSeq(1),
-                        last_seq: CommitSeq(1),
-                    }],
-                },
-            )
-            .await
-            .unwrap();
-        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
-        let mut view = store
-            .open_buffered_root(&cx, id, pool.clone(), limits())
-            .await
-            .unwrap();
-        drop(view.reserve_scan_bytes(&cx, pool.limit()));
-        let baseline = pool.used();
-        resolver.available.store(false, Ordering::Relaxed);
-        resolver.calls.store(0, Ordering::Relaxed);
-
-        let mut scan = view.edge_scan(&cx, CommitSeq(1)).unwrap();
-        let mut identities = Vec::new();
-        let mut visible = Vec::new();
-        while let Some(candidate) = scan
-            .next_admitted_properties_with_endpoints(
-                &cx,
-                None,
-                PropertySelection::one(P),
-                &mut |row| Ok(!row.target_vertex().labels().contains(&LabelId(77))),
-                &mut |event| {
-                    if let BufferedEdgeScanEvent::Identity(eid) = event {
-                        identities.push(eid);
-                    }
-                    Ok::<_, ()>(())
-                },
+                &path,
+                [0x37; 32],
+                DatabaseSecurityNamespaceId([0x63; 32]),
             )
             .await
             .unwrap()
-        {
-            if let Some(row) = candidate.row {
-                visible.push((candidate.eid, row.edge().value(P).cloned()));
+            .with_scalar_resolver(resolver.clone());
+            // The hidden edge is first in adjacency/sidecar order, while the
+            // visible edge is first in candidate EId order.
+            let entries = [entry(9, 1, 2, R, 1, None), entry(1, 1, 3, R, 1, None)];
+            let hidden = CanonicalScalar::Timestamp(
+                CanonicalTimestamp::zoned(
+                    1_735_689_600_123_456_789,
+                    -18_000,
+                    "America/New_York",
+                    ObjectId([9; 32]),
+                    resolver.as_ref(),
+                )
+                .unwrap(),
+            );
+            let rows = vec![
+                vec![(P, hidden.clone().into())],
+                vec![(P, CanonicalScalar::Int(7).into())],
+            ];
+            let sidecar = store
+                .put_edge_property_patch(&commit, &encode_property_patch(&rows).unwrap())
+                .await
+                .unwrap();
+            let bytes =
+                encode_block_with_properties(0, None, &entries, sidecar.0, &[1, 2], &rows).unwrap();
+            let block = store.put(&commit, &bytes).await.unwrap();
+            let mut hidden_vertex = vertex(2, 1, None, 20);
+            hidden_vertex.labels = vec![LabelId(77)];
+            hidden_vertex.props = vec![(P, hidden.clone().into())];
+            let mut source_vertex = vertex(1, 1, None, 10);
+            let mut target_vertex = vertex(3, 1, None, 30);
+            // Allowed endpoints also carry an unselected key whose scalar
+            // resolver is unavailable after root admission.
+            let hidden_key = PropertyKeyId(u64::MAX);
+            source_vertex
+                .props
+                .push((hidden_key, hidden.clone().into()));
+            target_vertex.props.push((hidden_key, hidden.into()));
+            let vertices = [source_vertex, hidden_vertex, target_vertex];
+            let patch = store
+                .put_patch(&commit, &encode_patch(&vertices).unwrap())
+                .await
+                .unwrap();
+            let id = store
+                .put_root(
+                    &commit,
+                    &PartitionRoot {
+                        graph: GraphId(1),
+                        branch: BranchId(2),
+                        partition: 0,
+                        published_at: CommitSeq(1),
+                        blocks: vec![BlockRef {
+                            block_id: block.0,
+                            first_seq: CommitSeq(1),
+                            last_seq: CommitSeq(1),
+                        }],
+                        vertex_patches: vec![PatchRef {
+                            patch_id: patch.0,
+                            first_seq: CommitSeq(1),
+                            last_seq: CommitSeq(1),
+                        }],
+                    },
+                )
+                .await
+                .unwrap();
+            let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+            let mut view = store
+                .open_buffered_root(&cx, id, pool.clone(), limits())
+                .await
+                .unwrap();
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            let baseline = pool.used();
+            resolver.available.store(false, Ordering::Relaxed);
+            resolver.calls.store(0, Ordering::Relaxed);
+            let (edge_keys, endpoint_keys) = if endpoint_fields {
+                (PropertySelection::EMPTY, PropertySelection::one(P))
+            } else {
+                (PropertySelection::one(P), PropertySelection::EMPTY)
+            };
+
+            let mut scan = view.edge_scan(&cx, CommitSeq(1)).unwrap();
+            let mut identities = Vec::new();
+            let mut visible = Vec::new();
+            while let Some(candidate) = scan
+                .next_admitted_properties_and_endpoint_properties(
+                    &cx,
+                    None,
+                    edge_keys,
+                    endpoint_keys,
+                    &mut |row| Ok(!row.target_vertex().labels().contains(&LabelId(77))),
+                    &mut |event| {
+                        if let BufferedEdgeScanEvent::Identity(eid) = event {
+                            identities.push(eid);
+                        }
+                        Ok::<_, ()>(())
+                    },
+                )
+                .await
+                .unwrap()
+            {
+                if let Some(row) = candidate.row {
+                    let selected = if endpoint_fields {
+                        assert_eq!(
+                            row.source_properties(),
+                            [(P, CanonicalScalar::Int(10).into())]
+                        );
+                        row.target_properties()
+                            .iter()
+                            .find(|(key, _)| *key == P)
+                            .map(|(_, value)| value.clone())
+                    } else {
+                        row.edge().value(P).cloned()
+                    };
+                    visible.push((candidate.eid, selected));
+                }
             }
-        }
-        assert_eq!(identities, [EId(1), EId(9)]);
-        assert_eq!(visible, [(EId(1), Some(CanonicalScalar::Int(7).into()))]);
-        assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
-        drop(scan);
-        drop(view.reserve_scan_bytes(&cx, pool.limit()));
-        assert_eq!(pool.used(), baseline);
+            assert_eq!(identities, [EId(1), EId(9)]);
+            assert_eq!(
+                visible,
+                [(
+                    EId(1),
+                    Some(CanonicalScalar::Int(if endpoint_fields { 30 } else { 7 }).into())
+                )]
+            );
+            assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
+            drop(scan);
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            assert_eq!(pool.used(), baseline);
 
-        // Accepting that sibling makes its unavailable payload a real read
-        // error, after the earlier visible row was delivered without it.
-        let mut scan = view.edge_scan(&cx, CommitSeq(1)).unwrap();
-        let first = scan
-            .next_admitted_properties_with_endpoints(
-                &cx,
-                None,
-                PropertySelection::one(P),
-                &mut |_| Ok::<_, ()>(true),
-                &mut |_| Ok(()),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(first.eid, EId(1));
-        assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
-        drop(first);
-        let mut admitted = Vec::new();
-        assert!(matches!(
-            scan.next_admitted_properties_with_endpoints(
-                &cx,
-                None,
-                PropertySelection::one(P),
-                &mut |row| {
-                    admitted.push(row.edge().entry().eid);
-                    Ok::<_, ()>(true)
-                },
-                &mut |_| Ok(()),
-            )
-            .await,
-            Err(BufferedScanError::Read(_))
-        ));
-        assert_eq!(admitted, [EId(9)]);
-        assert!(resolver.calls.load(Ordering::Relaxed) > 0);
-        assert!(scan.is_finished());
-        drop(scan);
-        drop(view.reserve_scan_bytes(&cx, pool.limit()));
-        assert_eq!(pool.used(), baseline);
+            // Accepting that sibling makes its unavailable payload a real read
+            // error, after the earlier visible row was delivered without it.
+            let mut scan = view.edge_scan(&cx, CommitSeq(1)).unwrap();
+            let first = scan
+                .next_admitted_properties_and_endpoint_properties(
+                    &cx,
+                    None,
+                    edge_keys,
+                    endpoint_keys,
+                    &mut |_| Ok::<_, ()>(true),
+                    &mut |_| Ok(()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.eid, EId(1));
+            assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
+            drop(first);
+            let mut admitted = Vec::new();
+            assert!(matches!(
+                scan.next_admitted_properties_and_endpoint_properties(
+                    &cx,
+                    None,
+                    edge_keys,
+                    endpoint_keys,
+                    &mut |row| {
+                        admitted.push(row.edge().entry().eid);
+                        Ok::<_, ()>(true)
+                    },
+                    &mut |_| Ok(()),
+                )
+                .await,
+                Err(BufferedScanError::Read(_))
+            ));
+            assert_eq!(admitted, [EId(9)]);
+            assert!(resolver.calls.load(Ordering::Relaxed) > 0);
+            assert!(scan.is_finished());
+            drop(scan);
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            assert_eq!(pool.used(), baseline);
 
-        // Re-enabling the resolver makes both selected rows readable; no
-        // failed prefix altered the immutable source.
-        resolver.available.store(true, Ordering::Relaxed);
-        let mut scan = view.edge_scan(&cx, CommitSeq(1)).unwrap();
-        let mut found = Vec::new();
-        while let Some(candidate) = scan
-            .next_admitted_properties_with_endpoints(
-                &cx,
-                None,
-                PropertySelection::one(P),
-                &mut |_| Ok::<_, ()>(true),
-                &mut |_| Ok(()),
-            )
-            .await
-            .unwrap()
-        {
-            found.push(candidate.eid);
-        }
-        assert_eq!(found, [EId(1), EId(9)]);
-        drop(scan);
-        drop(view);
-        assert_eq!(pool.used(), 0);
-    });
+            // Re-enabling the resolver makes both selected rows readable; no
+            // failed prefix altered the immutable source.
+            resolver.available.store(true, Ordering::Relaxed);
+            let mut scan = view.edge_scan(&cx, CommitSeq(1)).unwrap();
+            let mut found = Vec::new();
+            while let Some(candidate) = scan
+                .next_admitted_properties_and_endpoint_properties(
+                    &cx,
+                    None,
+                    edge_keys,
+                    endpoint_keys,
+                    &mut |_| Ok::<_, ()>(true),
+                    &mut |_| Ok(()),
+                )
+                .await
+                .unwrap()
+            {
+                found.push(candidate.eid);
+            }
+            assert_eq!(found, [EId(1), EId(9)]);
+            drop(scan);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+        });
+    }
 }

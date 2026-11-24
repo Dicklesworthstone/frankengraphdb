@@ -980,6 +980,131 @@ fn cold_aggregates_keep_exact_cells_complete_groups_and_empty_input_semantics() 
 }
 
 #[test]
+fn cold_endpoint_fields_compose_with_sorting_scalar_stages_and_exact_aggregates() {
+    use GraphAggregateValue::{Count, Integer, Value};
+    let ((), report) = run_async_under_lab(0xa8_0210, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let authority = issuer();
+        // Three physical edges admit their two endpoints once each. The
+        // hidden fixture must retain this exact visible-node boundary.
+        let token = authority.issue_at(&grant(6, 3), 100).unwrap();
+        let args = GqlParameters::new();
+        for hidden in [false, true] {
+            let (vfs, _db, old, current) = fixture(&commit, hidden).await;
+            for (at, source) in [(old, 3), (current, 30)] {
+                let pool = memory();
+                let (mut ordered, _) = session(
+                    &commit,
+                    &cx,
+                    &vfs,
+                    &pool,
+                    &authority,
+                    &token,
+                    at,
+                    || 100,
+                    policy(3),
+                )
+                .await;
+                for (text, expected) in [
+                    (
+                        "MATCH (a)-[r:R]->(b) RETURN r,a.score AS origin,b.score AS destination, \
+                         a.secret AS hidden ORDER BY destination DESC,origin,r",
+                        vec![
+                            vec![GraphValue::Edge(EId(103)), scalar(1), scalar(3), null()],
+                            vec![
+                                GraphValue::Edge(EId(101)),
+                                scalar(source),
+                                scalar(1),
+                                null(),
+                            ],
+                            vec![
+                                GraphValue::Edge(EId(102)),
+                                scalar(source),
+                                scalar(1),
+                                null(),
+                            ],
+                        ],
+                    ),
+                    (
+                        "MATCH (a)-[r:R]->(b) WHERE a.score>b.score AND b.secret IS NULL \
+                         RETURN r,a.score,b.score ORDER BY r DESC",
+                        vec![
+                            vec![GraphValue::Edge(EId(102)), scalar(source), scalar(1)],
+                            vec![GraphValue::Edge(EId(101)), scalar(source), scalar(1)],
+                        ],
+                    ),
+                    (
+                        "MATCH (a)-[r:R]->(b) WITH a.score AS origin,b.score AS destination \
+                         RETURN origin+destination AS score ORDER BY score DESC",
+                        vec![
+                            vec![scalar(source + 1)],
+                            vec![scalar(source + 1)],
+                            vec![scalar(4)],
+                        ],
+                    ),
+                    (
+                        "MATCH (a)-[r:R]->(b) RETURN r,b.score AS score LIMIT 0",
+                        vec![],
+                    ),
+                ] {
+                    let prepared = ordered.prepare(&cx, text, &args).unwrap();
+                    let execution = ordered.execute_ordered(&cx, &prepared, &args).unwrap();
+                    assert_send(&execution);
+                    let mut cursor = execution.await.unwrap();
+                    assert_eq!(cursor.snapshot_seq(), at);
+                    assert_eq!(
+                        values(&mut cursor).await,
+                        expected,
+                        "{text}; hidden={hidden}"
+                    );
+                    drop(cursor);
+                    assert!(!ordered.is_closed());
+                }
+                for (text, expected) in [
+                    (
+                        "MATCH (a)-[r:R]->(b) RETURN a.score AS origin,count(*) AS edges, \
+                         sum(b.score) AS total GROUP BY a.score ORDER BY origin DESC",
+                        vec![
+                            vec![Value(scalar(source)), Count(2), Integer(2)],
+                            vec![Value(scalar(1)), Count(1), Integer(3)],
+                        ],
+                    ),
+                    (
+                        "MATCH (a)-[r:R]->(b) RETURN sum(a.score) AS total, \
+                         collect(b.score) AS destinations,count(a.secret) AS hidden",
+                        vec![vec![
+                            Integer(i128::from(2 * source + 1)),
+                            Value(GraphValue::List(vec![scalar(1), scalar(1), scalar(3)])),
+                            Count(0),
+                        ]],
+                    ),
+                ] {
+                    let prepared = ordered.prepare(&cx, text, &args).unwrap();
+                    let execution = ordered
+                        .execute_ordered_aggregate(&cx, &prepared, &args)
+                        .unwrap();
+                    assert_send(&execution);
+                    let mut cursor = execution.await.unwrap();
+                    assert_eq!(cursor.snapshot_seq(), at);
+                    assert_eq!(
+                        aggregates(&mut cursor).await,
+                        expected,
+                        "{text}; hidden={hidden}"
+                    );
+                    drop(cursor);
+                    assert!(!ordered.is_closed());
+                }
+                drop(ordered);
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_pages() {
     let ((), report) = run_async_under_lab(0xa8_0203, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
@@ -1016,7 +1141,7 @@ fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_
                 false,
             ),
             (
-                "MATCH (a)-[r:R]->(b) RETURN r,b.score AS score LIMIT 0",
+                "MATCH (a)-[r:R]->(b) RETURN r,properties(b) AS fields LIMIT 0",
                 false,
             ),
             (
@@ -1054,6 +1179,23 @@ fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_
             assert_eq!(pool.used(), bytes, "{text}");
             assert!(!ordered.is_closed());
         }
+        // The selected endpoint leaf is supported before execution, even
+        // with no node allowance. An unpolled external execution is inert;
+        // once polled, its private input still owns the ordinary node quota.
+        let endpoint = ordered
+            .prepare(
+                &cx,
+                "MATCH (a)-[r:R]->(b) RETURN r,b.score AS score LIMIT 0",
+                &args,
+            )
+            .unwrap();
+        vfs.reset();
+        let before = observations(&files);
+        let execution = ordered.execute_ordered(&cx, &endpoint, &args).unwrap();
+        drop(execution);
+        assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(observations(&files), before);
+        assert!(!ordered.is_closed());
         let selected = GqlParameters::new().with_uint64("cut", current.0).unwrap();
         let prepared = ordered
             .prepare(

@@ -14,7 +14,7 @@ use crate::AdjacencyEntry;
 use crate::edge_props::BlockProps;
 use crate::store::{
     BufferedEdge, BufferedPartition, BufferedReadError, BufferedScanError, BufferedValue,
-    BufferedVertexTopology,
+    BufferedVertexProperties, BufferedVertexTopology,
 };
 use crate::tiered::buffer::BufferError;
 use crate::tiered::memory::{MemoryCharge, MemoryError};
@@ -158,14 +158,17 @@ impl core::fmt::Debug for BufferedEdgeTopologyEndpoints {
     }
 }
 
-/// Selected edge properties and both visible endpoint identities/labels at
-/// the cursor's cut. The distinct field types retain the projection boundary:
+/// Selected edge/endpoint properties and both visible endpoint identities and
+/// labels at the cursor's cut. The distinct field types retain the projection boundary:
 /// neither the edge nor either endpoint is a complete stored property record.
-/// A self-loop shares its one endpoint owner.
+/// Endpoint properties are empty unless explicitly selected by the caller.
+/// A self-loop shares its topology and selected-property endpoint owners.
 pub struct BufferedEdgePropertiesEndpoints {
     edge: BufferedEdgeProperties,
     source: BufferedVertexTopology,
     target: Option<BufferedVertexTopology>,
+    source_properties: Option<BufferedVertexProperties>,
+    target_properties: Option<BufferedVertexProperties>,
 }
 
 impl BufferedEdgePropertiesEndpoints {
@@ -179,6 +182,24 @@ impl BufferedEdgePropertiesEndpoints {
 
     pub fn target_vertex(&self) -> &BufferedVertexTopology {
         self.target.as_ref().unwrap_or(&self.source)
+    }
+
+    /// Only requested, present source fields from the already admitted cut.
+    pub fn source_properties(&self) -> &[(PropertyKeyId, CanonicalPropertyValue)] {
+        self.source_properties
+            .as_ref()
+            .map_or(&[], BufferedVertexProperties::properties)
+    }
+
+    /// Only requested, present target fields; a self-loop borrows its source.
+    pub fn target_properties(&self) -> &[(PropertyKeyId, CanonicalPropertyValue)] {
+        if self.target.is_none() {
+            self.source_properties()
+        } else {
+            self.target_properties
+                .as_ref()
+                .map_or(&[], BufferedVertexProperties::properties)
+        }
     }
 }
 
@@ -1033,6 +1054,8 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 edge: BufferedEdgeProperties(edge),
                 source,
                 target,
+                source_properties: None,
+                target_properties: None,
             })
         } else {
             None
@@ -1062,6 +1085,38 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         cx: &QueryCx,
         relation: Option<RelationId>,
         keys: PropertySelection,
+        admit: &mut (impl FnMut(&BufferedEdgeTopologyEndpoints) -> Result<bool, C> + Send),
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertiesEndpoints>>, BufferedScanError<C>>
+    {
+        self.next_admitted_properties_and_endpoint_properties(
+            cx,
+            relation,
+            keys,
+            PropertySelection::EMPTY,
+            admit,
+            observe,
+        )
+        .await
+    }
+
+    /// Admit relation and both endpoint topologies before materializing any
+    /// selected edge or endpoint value. Endpoint keys apply to both physical
+    /// endpoints; callers can union logical binding demands without guessing
+    /// which native orientation will be evaluated. The same cumulative source
+    /// allowance covers root history and every endpoint reread. Each reread
+    /// must match the exact admitted identity, lifetime and label set.
+    ///
+    /// Empty endpoint selections preserve topology-only endpoint access. A
+    /// self-loop retains one selected endpoint owner. Denied candidates never
+    /// decode selected values, and every error or dropped pending pull fuses
+    /// the cursor under the existing staged-admission ownership contract.
+    pub async fn next_admitted_properties_and_endpoint_properties<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        relation: Option<RelationId>,
+        keys: PropertySelection,
+        endpoint_keys: PropertySelection,
         admit: &mut (impl FnMut(&BufferedEdgeTopologyEndpoints) -> Result<bool, C> + Send),
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertiesEndpoints>>, BufferedScanError<C>>
@@ -1133,10 +1188,28 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                     }
                     selected
                 };
+                let (source_properties, target_properties) = if endpoint_keys.is_empty() {
+                    (None, None)
+                } else {
+                    let source_properties = self
+                        .resolve_selected_vertex(cx, &source, endpoint_keys, observe)
+                        .await?;
+                    let target_properties = if let Some(target) = target.as_ref() {
+                        Some(
+                            self.resolve_selected_vertex(cx, target, endpoint_keys, observe)
+                                .await?,
+                        )
+                    } else {
+                        None
+                    };
+                    (Some(source_properties), target_properties)
+                };
                 Some(BufferedEdgePropertiesEndpoints {
                     edge: BufferedEdgeProperties(edge),
                     source,
                     target,
+                    source_properties,
+                    target_properties,
                 })
             } else {
                 None
@@ -1151,6 +1224,50 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             eid: candidate.eid,
             row,
         }))
+    }
+
+    async fn resolve_selected_vertex<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        topology: &BufferedVertexTopology,
+        keys: PropertySelection,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<BufferedVertexProperties, BufferedScanError<C>> {
+        let fields = self
+            .partition
+            .edge_scan_vertex_properties(
+                cx,
+                topology.vid(),
+                keys,
+                self.as_of,
+                &mut self.work,
+                observe,
+            )
+            .await?
+            .ok_or(BufferedReadError::DanglingEndpoint)?;
+        self.work.step(cx, observe)?;
+        if (
+            fields.vid(),
+            fields.birth_ordinal(),
+            fields.created_at(),
+            fields.retired_at(),
+            fields.labels().len(),
+        ) != (
+            topology.vid(),
+            topology.birth_ordinal(),
+            topology.created_at(),
+            topology.retired_at(),
+            topology.labels().len(),
+        ) {
+            return Err(invalid_load().into());
+        }
+        for (actual, admitted) in fields.labels().iter().zip(topology.labels()) {
+            self.work.step(cx, observe)?;
+            if actual != admitted {
+                return Err(invalid_load().into());
+            }
+        }
+        Ok(fields)
     }
 
     // Both projected root modes prove the same endpoint lifetimes and labels.

@@ -471,6 +471,31 @@ fn any_and_finite_relation_sources_preserve_occurrences_scopes_and_history() {
                     .await,
                     relation_rows(&undirected)
                 );
+                let endpoint_rows: Vec<_> = undirected
+                    .iter()
+                    .map(|&(edge, a, b, score)| {
+                        GraphValueRow::from_owned_values(vec![
+                            GraphValue::Edge(EId(edge)),
+                            GraphValue::Vertex(VId(a)),
+                            GraphValue::Vertex(VId(b)),
+                            GraphValue::Scalar(CanonicalScalar::Int(if a == 1 { 11 } else { 2 })),
+                            GraphValue::Scalar(CanonicalScalar::Int(if b == 1 { 11 } else { 2 })),
+                            GraphValue::Scalar(CanonicalScalar::Int(score)),
+                            GraphValue::Scalar(CanonicalScalar::Null),
+                            GraphValue::Scalar(CanonicalScalar::Null),
+                        ])
+                    })
+                    .collect();
+                assert_eq!(
+                    collect(
+                        &mut session,
+                        &cx,
+                        "MATCH (a)-[r]-(b) RETURN r,a,b,a.score,b.score,r.score,a.secret,b.secret"
+                    )
+                    .await,
+                    endpoint_rows,
+                    "physical endpoint fields must follow each native orientation, including self-loops"
+                );
                 drop(session);
                 assert_eq!(pool.used(), 0);
 
@@ -1146,6 +1171,165 @@ fn clean_and_hidden_sources_have_identical_rows_and_visible_budget_boundaries() 
 }
 
 #[test]
+fn cold_endpoint_fields_preserve_history_predicates_scope_and_node_admission() {
+    let ((), report) = run_async_under_lab(0xa6_0113, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let authority = issuer();
+        let token = authority.issue_at(&grant(2), 100).unwrap();
+        let args = GqlParameters::new();
+        for hidden in [false, true] {
+            let (vfs, _db, old, current) = fixture(&commit, hidden).await;
+            for (at, source, weight) in [(old, 1, 7), (current, 11, 17)] {
+                let pool = memory();
+                let mut reader =
+                    session(&commit, &cx, &vfs, &pool, &authority, &token, at, || 100).await;
+                for (text, first, second) in [
+                    (
+                        "MATCH (a)-[r:R]->(b) RETURN r,a.score,b.score,r.score,a.secret,b.secret",
+                        source,
+                        2,
+                    ),
+                    (
+                        "MATCH (a)<-[r:R]-(b) RETURN r,a.score,b.score,r.score,a.secret,b.secret",
+                        2,
+                        source,
+                    ),
+                ] {
+                    assert_eq!(
+                        collect(&mut reader, &cx, text).await,
+                        vec![GraphValueRow::from_owned_values(vec![
+                            GraphValue::Edge(EId(101)),
+                            GraphValue::Scalar(CanonicalScalar::Int(first)),
+                            GraphValue::Scalar(CanonicalScalar::Int(second)),
+                            GraphValue::Scalar(CanonicalScalar::Int(weight)),
+                            GraphValue::Scalar(CanonicalScalar::Null),
+                            GraphValue::Scalar(CanonicalScalar::Null),
+                        ])],
+                        "{text}; cut={at:?}; hidden={hidden}"
+                    );
+                }
+                // This was the original unsupported source shape. It now
+                // uses the same selected endpoint owner as the full tuple.
+                assert_eq!(
+                    collect(&mut reader, &cx, "MATCH (a)-[r:R]->(b) RETURN r,a.score").await,
+                    vec![GraphValueRow::from_owned_values(vec![
+                        GraphValue::Edge(EId(101)),
+                        GraphValue::Scalar(CanonicalScalar::Int(source)),
+                    ])]
+                );
+                let filtered = collect(
+                    &mut reader,
+                    &cx,
+                    "MATCH (a)-[r:R]->(b) WHERE a.score>b.score AND a.secret IS NULL \
+                     AND b.secret IS NULL RETURN r,a.score,b.score",
+                )
+                .await;
+                let expected = if at == old {
+                    vec![]
+                } else {
+                    vec![GraphValueRow::from_owned_values(vec![
+                        GraphValue::Edge(EId(101)),
+                        GraphValue::Scalar(CanonicalScalar::Int(11)),
+                        GraphValue::Scalar(CanonicalScalar::Int(2)),
+                    ])]
+                };
+                assert_eq!(filtered, expected);
+                assert!(
+                    collect(
+                        &mut reader,
+                        &cx,
+                        "MATCH (a)-[r:R]->(b) WHERE a.secret=999 RETURN r,a.score"
+                    )
+                    .await
+                    .is_empty()
+                );
+                drop(reader);
+                assert_eq!(pool.used(), 0);
+
+                let tight = authority.issue_at(&grant(1), 100).unwrap();
+                let mut reader =
+                    session(&commit, &cx, &vfs, &pool, &authority, &tight, at, || 100).await;
+                let prepared = reader
+                    .prepare(&cx, "MATCH (a)-[r:R]->(b) RETURN r,a.score,b.score", &args)
+                    .unwrap();
+                let mut cursor = reader.stream(&cx, &prepared, &args).unwrap();
+                assert!(matches!(
+                    cursor.next().await.unwrap(),
+                    Err(AuthorizedBufferedError::Query(QueryError::Authorization(
+                        Error::LimitExceeded(LimitDimension::Nodes)
+                    )))
+                ));
+                assert!(cursor.next().await.is_none());
+                drop(cursor);
+                assert!(!reader.is_closed());
+                assert!(
+                    collect(
+                        &mut reader,
+                        &cx,
+                        "MATCH (a)-[r:R]->(b) RETURN r,a.score,b.score LIMIT 0"
+                    )
+                    .await
+                    .is_empty()
+                );
+                drop(reader);
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn returned_endpoint_payloads_retain_their_memory_after_source_and_session_drop() {
+    let ((), report) = run_async_under_lab(0xa6_0114, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, mut db, _, _) = fixture(&commit, false).await;
+        let left = CanonicalScalar::bytes(vec![0x31; 4096]).unwrap();
+        let right = CanonicalScalar::bytes(vec![0x32; 4096]).unwrap();
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(VId(1), P, Some(left.clone()));
+        edit.set_vertex_property(VId(2), P, Some(right.clone()));
+        let at = db.write(&commit, edit).await.unwrap();
+        let pool = memory();
+        let authority = issuer();
+        let token = authority.issue_at(&grant(2), 100).unwrap();
+        let mut reader = session(&commit, &cx, &vfs, &pool, &authority, &token, at, || 100).await;
+        let args = GqlParameters::new();
+        let prepared = reader
+            .prepare(
+                &cx,
+                "MATCH (a)-[r:R]->(b) RETURN r,a.score,b.score LIMIT 1",
+                &args,
+            )
+            .unwrap();
+        let mut cursor = reader.stream(&cx, &prepared, &args).unwrap();
+        let held = cursor.next().await.unwrap().unwrap();
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        drop(cursor);
+        drop(reader);
+        assert_eq!(
+            held.values(),
+            &[
+                GraphValue::Edge(EId(101)),
+                GraphValue::Scalar(left),
+                GraphValue::Scalar(right),
+            ]
+        );
+        assert!(
+            pool.used() >= 8192,
+            "both returned endpoint payloads stay charged"
+        );
+        drop(held);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn catalog_and_graph_stay_on_one_cut_and_profile_refusal_precedes_payloads() {
     let ((), report) = run_async_under_lab(0xa6_0102, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
@@ -1203,7 +1387,7 @@ fn catalog_and_graph_stay_on_one_cut_and_profile_refusal_precedes_payloads() {
             "MATCH (n) RETURN n.score",
             "MATCH (n) RETURN n,n.score ORDER BY n.score",
             "MATCH (a)-[r*1..2]->(b) RETURN r",
-            "MATCH (a)-[r:R]->(b) RETURN r,a.score",
+            "MATCH (a)-[r:R]->(b) RETURN r,properties(a)",
             "MATCH (n) RETURN n,42 AS value",
         ] {
             let prepared = session.prepare(&cx, text, &args).unwrap();
