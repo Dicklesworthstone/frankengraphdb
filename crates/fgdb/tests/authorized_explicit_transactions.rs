@@ -835,11 +835,7 @@ fn output_errors_swallowed_meter_failures_and_unwinds_restore_the_live_database(
                     .unwrap();
                 if advanced {
                     let mut winner = WriteBatch::new(R);
-                    winner.create_vertex(
-                        VId(999),
-                        vec![L],
-                        vec![(P, CanonicalScalar::Int(99))],
-                    );
+                    winner.create_vertex(VId(999), vec![L], vec![(P, CanonicalScalar::Int(99))]);
                     db.write(commit, winner).await.unwrap();
                 }
                 let live = db.frontier().unwrap();
@@ -928,7 +924,10 @@ fn foreign_handle_refuses_before_continuing_the_prefix() {
             )
             .unwrap_err();
         assert!(!reached);
-        assert!(has_error(&error, |e| matches!(e, WriteTxnError::WrongDatabase)));
+        assert!(has_error(&error, |e| matches!(
+            e,
+            WriteTxnError::WrongDatabase
+        )));
         assert!(!owner.is_active());
         assert!(other.vertices().unwrap().is_empty());
         assert!(db.vertices().unwrap().is_empty());
@@ -1229,27 +1228,20 @@ fn historical_create_and_merge_skip_vertex_and_edge_ids_occupied_after_begin() {
             let mut reference = Database::open_memory(commit, keys()).await.unwrap();
             let issuer = authority();
             let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
-            let create =
-                chain("CREATE (a:Visible {p:1})-[r:R]->(b:Visible {p:2}) RETURN a, r, b");
+            let create = chain("CREATE (a:Visible {p:1})-[r:R]->(b:Visible {p:2}) RETURN a, r, b");
             // Equal keys and initial state reveal the next engine reservations
             // without guessing or exposing the private allocator.
             let mut reference_owner = reference
-                .begin_authorized_write(
-                    txn,
-                    commit,
-                    &issuer,
-                    &token,
-                    "main",
-                    policy(),
-                    10,
-                    || NOW,
-                )
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
                 .unwrap();
             let reserved = reference_owner
                 .stage_chain(&mut reference, query, &create, |_, _, _| Ok(()))
                 .unwrap();
-            let [GraphValue::Vertex(first), GraphValue::Edge(edge), GraphValue::Vertex(second)] =
-                reserved.value[0].values()
+            let [
+                GraphValue::Vertex(first),
+                GraphValue::Edge(edge),
+                GraphValue::Vertex(second),
+            ] = reserved.value[0].values()
             else {
                 panic!("created graph identities")
             };
@@ -1281,8 +1273,11 @@ fn historical_create_and_merge_skip_vertex_and_edge_ids_occupied_after_begin() {
                 .stage_chain(&mut db, query, &statement, |_, _, _| Ok(()))
                 .unwrap();
             assert_eq!(created.value.len(), 1);
-            let [GraphValue::Vertex(new_first), GraphValue::Edge(new_edge), GraphValue::Vertex(new_second)] =
-                created.value[0].values()
+            let [
+                GraphValue::Vertex(new_first),
+                GraphValue::Edge(new_edge),
+                GraphValue::Vertex(new_second),
+            ] = created.value[0].values()
             else {
                 panic!("new graph identities")
             };

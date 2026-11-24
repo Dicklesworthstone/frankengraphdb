@@ -722,7 +722,11 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 // Move the original row into and back out of the native collector;
                 // do not duplicate a carried list/map for each relationship probe.
                 let (merged, targets, mut rows) =
-                    edge_merge::apply_occurrence_reusing_targets_with_allocator::<EdgeUpsertRowTargets, _, _>(
+                    edge_merge::apply_occurrence_reusing_targets_with_allocator::<
+                        EdgeUpsertRowTargets,
+                        _,
+                        _,
+                    >(
                         transaction,
                         database,
                         cx,

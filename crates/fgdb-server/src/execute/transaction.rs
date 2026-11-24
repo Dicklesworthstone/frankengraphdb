@@ -976,7 +976,10 @@ mod tests {
             assert_eq!(committed, (CommitSeq(1), 1));
             let resumed = accepted(transaction.execute_framed(&cx, &read, 4096).await);
             assert_eq!(resumed.columns, original.columns);
-            assert_eq!(resumed.rows, original.rows, "retain the same private identity");
+            assert_eq!(
+                resumed.rows, original.rows,
+                "retain the same private identity"
+            );
             assert_eq!(resumed.outcome, Outcome::Rows { seq: 0 });
             assert_eq!(resumed.created.vertices, 0);
             assert_eq!(transaction.basis(), CommitSeq(0));
@@ -1015,23 +1018,14 @@ mod tests {
             assert_eq!(first.created.vertices, 1);
             assert_eq!(first.outcome, Outcome::Rows { seq: 0 });
             accepted(
-                super::super::write(
-                    &cx,
-                    db,
-                    &token,
-                    &request(ExecuteMode::Write, "CREATE (n)"),
-                )
-                .await,
+                super::super::write(&cx, db, &token, &request(ExecuteMode::Write, "CREATE (n)"))
+                    .await,
             );
             assert_eq!(state(&cx, db).await, (CommitSeq(1), 1));
 
             let read = accepted(
                 transaction
-                    .execute_framed(
-                        &cx,
-                        &request(ExecuteMode::Read, "RETURN 11 AS value"),
-                        4096,
-                    )
+                    .execute_framed(&cx, &request(ExecuteMode::Read, "RETURN 11 AS value"), 4096)
                     .await,
             );
             assert_eq!(read.rows, [vec![WireValue::Int(11)]]);

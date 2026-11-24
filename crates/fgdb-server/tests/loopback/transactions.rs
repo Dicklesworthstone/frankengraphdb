@@ -850,12 +850,7 @@ fn explicit_transactions_continue_on_the_begin_snapshot_across_other_clients_com
         assert_eq!(first.end.handle, begun.handle);
         assert_eq!(first.end.statement, 1);
         let advanced = concurrent
-            .execute(
-                cx,
-                ExecuteMode::Write,
-                "CREATE (:Company {age:90})",
-                vec![],
-            )
+            .execute(cx, ExecuteMode::Write, "CREATE (:Company {age:90})", vec![])
             .await
             .unwrap();
         assert_eq!(

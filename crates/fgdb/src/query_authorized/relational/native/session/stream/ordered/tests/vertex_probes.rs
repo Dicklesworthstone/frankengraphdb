@@ -139,8 +139,7 @@ fn probe_relation_empty_pages_preserve_reached_errors_and_private_limits() {
         let token = issuer.issue_at(&allowed, 100).unwrap();
         let pool = MemoryPool::new(65_536, 0).unwrap();
         let params = GqlParameters::new();
-        let (mut ordered, _, _) =
-            session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
+        let (mut ordered, _, _) = session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
         let prepared = ordered
             .prepare(
                 &cx,
@@ -168,8 +167,7 @@ fn probe_relation_empty_pages_preserve_reached_errors_and_private_limits() {
         // final empty page. They are private input, not delivered result rows.
         let mut physical = limits();
         physical.max_input_rows = 1;
-        let (mut ordered, _, _) =
-            session(&db, &cx, &issuer, &token, &pool, || 100, physical).await;
+        let (mut ordered, _, _) = session(&db, &cx, &issuer, &token, &pool, || 100, physical).await;
         let prepared = ordered
             .prepare(
                 &cx,

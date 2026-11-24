@@ -18,9 +18,8 @@ use fgdb_delta_types::DeltaRow;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{
-    GqlQueryError, GqlQueryExecution, GraphAggregateRow, GraphWriteChainError,
-    PreparedGraphSet, PreparedGraphSetAggregate, PreparedGraphTransactionControl,
-    PreparedGraphWriteChain,
+    GqlQueryError, GqlQueryExecution, GraphAggregateRow, GraphWriteChainError, PreparedGraphSet,
+    PreparedGraphSetAggregate, PreparedGraphTransactionControl, PreparedGraphWriteChain,
 };
 use fgdb_strata::writer::BlockWriter;
 use fgdb_types::{CommitSeq, QueryCx};
@@ -208,7 +207,6 @@ impl<V: Vfs + Clone> PreparationBasis<'_, V> {
     ) -> Result<(), AuthorizedFault> {
         owner.control_selected(self.database, cx, control, admit)
     }
-
 }
 
 impl<V: Vfs + Clone> Database<V> {

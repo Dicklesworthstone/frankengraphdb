@@ -1779,7 +1779,7 @@ fn native_reachability_authorized_updates(reflexive: bool, selected: bool, bound
     use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
     use std::sync::Arc;
 
-    let ((), report) = run_async_under_lab(0x6e73_7c12, |root| async move {
+    let ((), report) = run_async_under_lab(0x6e73_7c12, move |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();

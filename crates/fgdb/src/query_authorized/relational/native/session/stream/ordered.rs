@@ -512,8 +512,7 @@ fn bind_projected_order(
         return Ok((plan, tail, at, query.columns().to_vec(), Some(pull), None));
     }
     let unsupported = || QueryError::StreamingUnsupported { facade };
-    let stages =
-        AsyncSpillSetPlan::compile_with_bounded_walks(query).map_err(|_| unsupported())?;
+    let stages = AsyncSpillSetPlan::compile_with_bounded_walks(query).map_err(|_| unsupported())?;
     admit_external_sources(&stages)?;
     // A unary program retains one ordinary scoped graph source. Its canonical
     // order/page must finish before the first stage evaluates a row, including
