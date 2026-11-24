@@ -554,9 +554,36 @@ mod authorized {
                     match dimension {
                         1 => assert_eq!(before, 6),
                         2 => assert_eq!(before, 2),
-                        // Two admitted edges plus the BFS, ranking and fusion
-                        // state the same allowance holds since 0b24aa88.
-                        4 => assert_eq!(before, 25),
+                        4 => {
+                            // Two edges, six BFS entries, four graph heap/output
+                            // entries, four graph validation/rank entries, four
+                            // distinct fused IDs, and eight fused heap/output entries.
+                            assert_eq!(before, 28);
+                            for db in [&clean, &full] {
+                                let search = |limit| {
+                                    let mut bounded = spec;
+                                    bounded.limits.max_source_scratch = limit;
+                                    db.beacon_search_graph_authorized(
+                                        &cx,
+                                        &authority,
+                                        &token,
+                                        BRANCH,
+                                        &options(),
+                                        q,
+                                        bounded,
+                                        || NOW,
+                                    )
+                                };
+                                assert_eq!(search(before).unwrap(), expected);
+                                assert!(matches!(
+                                    search(before - 1),
+                                    Err(Error::Index(BeaconError::ResourceLimit {
+                                        resource: "graph query scratch entries",
+                                        limit,
+                                    })) if limit == before - 1
+                                ));
+                            }
+                        }
                         3 => assert_eq!(before, 3),
                         _ => assert!(before > 0),
                     }

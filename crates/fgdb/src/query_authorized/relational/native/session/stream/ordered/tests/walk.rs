@@ -278,11 +278,25 @@ fn reached_path_errors_and_private_input_limits_survive_outer_limit_zero() {
         let token = issuer.issue_at(&grant(), 100).unwrap();
         let pool = MemoryPool::new(262_144, 0).unwrap();
         let params = GqlParameters::new();
-        let (mut ordered, _, _) = session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
+        let (mut ordered, scratch, destination) =
+            session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
+        // Capability preparation refuses engine identities before the path
+        // or its arithmetic can execute, even beneath an empty result page.
+        let denied = ordered.prepare(
+            &cx,
+            "MATCH p = WALK (a:L)-[:R*1..2]->(b:L) WHERE 1/(id(b)-2)>0 RETURN p LIMIT 0",
+            &params,
+        );
+        assert!(matches!(
+            denied,
+            Err(QueryError::Authorization(AuthorizationError::ScopeDenied))
+        ));
+        assert!(scratch.0.lock().unwrap().bytes.get_ref().is_empty());
+        assert!(destination.0.lock().unwrap().bytes.get_ref().is_empty());
         let prepared = ordered
             .prepare(
                 &cx,
-                "MATCH p = WALK (a:L)-[:R*1..2]->(b:L) WHERE 1/(id(b)-2)>0 RETURN p LIMIT 0",
+                "MATCH p = WALK (a:L)-[:R*1..2]->(b:L) WHERE 1/(b.p-1)>0 RETURN p LIMIT 0",
                 &params,
             )
             .unwrap();
@@ -315,7 +329,8 @@ fn reached_path_errors_and_private_input_limits_survive_outer_limit_zero() {
             .await;
         assert!(matches!(result,
             Err(NativeSpoolError::Authorized(error)) if matches!(*error,
-                QueryError::EdgeStream(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::ResultRows
+                QueryError::EdgeStream(GqlQueryError::Rows(error))
+                    if error.dimension == GqlBudgetDimension::ResultRows && error.limit == 4 && error.observed == 5
             )
         ));
         assert_eq!(pool.used(), 0);
@@ -350,6 +365,8 @@ fn pending_path_spill_drop_and_expiry_release_the_generation_and_all_frames() {
                 },
             )
             .await;
+            let session_pins = Arc::strong_count(&db.snapshot);
+            assert!(session_pins > pins);
             let prepared = ordered
                 .prepare(
                     &cx,
@@ -371,9 +388,16 @@ fn pending_path_spill_drop_and_expiry_release_the_generation_and_all_frames() {
                 refusal(result, AuthorizationError::Expired);
             }
             drop(future);
-            assert!(ordered.is_closed());
-            assert_eq!(Arc::strong_count(&db.snapshot), pins);
             assert_eq!(pool.used(), 0);
+            assert!(ordered.scratch.is_poisoned() || ordered.destination.is_poisoned());
+            assert_eq!(ordered.is_closed(), expire);
+            if !expire {
+                // Dropping the write releases the walk frames. The resident
+                // session keeps only its original snapshot until closed.
+                assert_eq!(Arc::strong_count(&db.snapshot), session_pins);
+                ordered.close();
+            }
+            assert_eq!(Arc::strong_count(&db.snapshot), pins);
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

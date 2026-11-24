@@ -1626,7 +1626,10 @@ fn scalar_identity_correlations_seed_resident_matches_and_preserve_capability_re
         // Tight max_vertices budget: only 4 distinct valid seeds (1, 2, 3, 999) may
         // be probed from the 205-vertex snapshot; an unseeded full scan fails max_vertices.
         let seeded_policy = GqlQueryPolicy::new(8, 100, 100_000, 100_000);
-        let expected_vals = vec![3_i64, 1, 3, 2];
+        // The direct cross consumes UNWIND occurrences in order. WITH opens
+        // a row join whose projection uses canonical row order.
+        let cross_order = [3, 1, 3, 2];
+        let join_order = [1, 2, 3, 3];
 
         let row_ints = |result: QueryResult| -> Vec<i64> {
             let QueryResult::Rows { rows, .. } = result else {
@@ -1640,27 +1643,48 @@ fn scalar_identity_correlations_seed_resident_matches_and_preserve_capability_re
                 .collect()
         };
 
-        for query_text in [
-            "UNWIND $ids AS id MATCH (n) WHERE id(n) = id RETURN n.x AS x",
-            "UNWIND $ids AS id MATCH (n) WHERE id = id(n) RETURN n.x AS x",
-            "UNWIND $ids AS id WITH id MATCH (n) WHERE id(n) = id RETURN n.x AS x",
-            "UNWIND $ids AS id WITH id MATCH (n) WHERE id = id(n) RETURN n.x AS x",
+        for (query_text, expected) in [
+            (
+                "UNWIND $ids AS id MATCH (n) WHERE id(n) = id RETURN n.x AS x",
+                cross_order,
+            ),
+            (
+                "UNWIND $ids AS id MATCH (n) WHERE id = id(n) RETURN n.x AS x",
+                cross_order,
+            ),
+            (
+                "UNWIND $ids AS id WITH id MATCH (n) WHERE id(n) = id RETURN n.x AS x",
+                join_order,
+            ),
+            (
+                "UNWIND $ids AS id WITH id MATCH (n) WHERE id = id(n) RETURN n.x AS x",
+                join_order,
+            ),
         ] {
             let result = db
                 .query(&c.query(), query_text, &ids_param, symbols, seeded_policy)
                 .unwrap();
-            assert_eq!(row_ints(result), expected_vals, "{query_text}");
+            assert_eq!(row_ints(result), expected, "{query_text}");
         }
 
-        for query_text in [
-            "UNWIND $eids AS eid MATCH (n) WHERE elementId(n) = eid RETURN n.x AS x",
-            "UNWIND $eids AS eid MATCH (n) WHERE eid = elementId(n) RETURN n.x AS x",
-            "UNWIND $eids AS eid WITH eid MATCH (n) WHERE elementId(n) = eid RETURN n.x AS x",
+        for (query_text, expected) in [
+            (
+                "UNWIND $eids AS eid MATCH (n) WHERE elementId(n) = eid RETURN n.x AS x",
+                cross_order,
+            ),
+            (
+                "UNWIND $eids AS eid MATCH (n) WHERE eid = elementId(n) RETURN n.x AS x",
+                cross_order,
+            ),
+            (
+                "UNWIND $eids AS eid WITH eid MATCH (n) WHERE elementId(n) = eid RETURN n.x AS x",
+                join_order,
+            ),
         ] {
             let result = db
                 .query(&c.query(), query_text, &eids_param, symbols, seeded_policy)
                 .unwrap();
-            assert_eq!(row_ints(result), expected_vals, "{query_text}");
+            assert_eq!(row_ints(result), expected, "{query_text}");
         }
 
         // Unseeded compound OR falls back to row filter cleanly under a generous vertex budget,
@@ -1674,7 +1698,7 @@ fn scalar_identity_correlations_seed_resident_matches_and_preserve_capability_re
         let full_res = db
             .query(&c.query(), unseeded_or, &ids_param, symbols, policy())
             .unwrap();
-        assert_eq!(row_ints(full_res), expected_vals);
+        assert_eq!(row_ints(full_res), cross_order);
 
         // Capability-masked read session refuses both id(n) = id and elementId(n) = eid (FG-INV-20).
         let authority = Authority::new(

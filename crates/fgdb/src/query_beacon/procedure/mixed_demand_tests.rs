@@ -984,10 +984,54 @@ fn authorized_mixed_demand_counts_the_whole_population_once_even_for_empty_outpu
         let token = authority.issue_at(&mixed_grant(37), 100).unwrap();
         let short = token.attenuate(Restriction::MaxNodes(36)).unwrap();
         let exact = GqlQueryPolicy::new(37, 100, 10_000_000, 1_000_000);
+        // The public procedure validates these arguments even with no eligible vertices.
+        for (argument, invalid) in [
+            ("k", CALL.replace("k => 1)", "k => 0)")),
+            (
+                "graph_weight",
+                CALL.replace("graph_weight => 100", "graph_weight => 0"),
+            ),
+        ] {
+            for accept in [false, true] {
+                let plan = prepare(&invalid, &parameters(accept));
+                let governed = db
+                    .execute_graph_set_governed(&cx, &plan, policy())
+                    .unwrap_err();
+                let signed = db
+                    .execute_graph_set_authorized(
+                        &cx,
+                        &authority,
+                        &token,
+                        "main",
+                        &plan,
+                        exact,
+                        || 100,
+                    )
+                    .unwrap_err();
+                let crate::QueryError::Set(signed) = signed else {
+                    panic!("expected a procedure argument refusal: {signed:?}");
+                };
+                for error in [governed, signed] {
+                    assert!(
+                        matches!(
+                            error,
+                            GqlQueryError::Source(GraphSetExecutionError::Source(GqlError::Procedure(
+                                ProcedureError::Search(HybridCallError::Argument {
+                                    name,
+                                    expected: "a positive integer in range",
+                                })
+                            ))) if name == argument
+                        ),
+                        "{error:?}"
+                    );
+                }
+            }
+        }
+        // Zero hops is a valid graph lane with no expansion. Both calls still
+        // admit the complete signed population when eligibility rejects every row.
         for statement in [
             CALL.to_owned(),
-            CALL.replace("k => 1)", "k => 0)"),
-            CALL.replace("graph_weight => 100", "graph_weight => 0"),
+            CALL.replace("max_hops => 2", "max_hops => 0"),
         ] {
             for accept in [false, true] {
                 let plan = prepare(&statement, &parameters(accept));
@@ -995,6 +1039,10 @@ fn authorized_mixed_demand_counts_the_whole_population_once_even_for_empty_outpu
                     .execute_graph_set_governed(&cx, &plan, policy())
                     .unwrap()
                     .value;
+                assert_eq!(expected.len(), usize::from(accept));
+                if accept {
+                    assert_eq!(expected[0].values()[0], GraphValue::Vertex(HIGH));
+                }
                 assert_eq!(
                     db.execute_graph_set_authorized(
                         &cx,
@@ -1023,24 +1071,42 @@ fn authorized_mixed_demand_counts_the_whole_population_once_even_for_empty_outpu
                         fgdb_warden::Error::LimitExceeded(LimitDimension::Nodes)
                     ))
                 ));
-                for limited in [
-                    GqlQueryPolicy::new(36, 100, 10_000_000, 1_000_000),
-                    GqlQueryPolicy::new(37, 100, 0, 1_000_000),
-                    GqlQueryPolicy::new(37, 100, 10_000_000, 0),
+                let refusal = |limited| {
+                    db.execute_graph_set_authorized(
+                        &cx,
+                        &authority,
+                        &token,
+                        "main",
+                        &plan,
+                        limited,
+                        || 100,
+                    )
+                    .unwrap_err()
+                };
+                assert!(matches!(
+                    refusal(GqlQueryPolicy::new(36, 100, 10_000_000, 1_000_000)),
+                    crate::QueryError::Pattern(GqlQueryError::Rows(fgdb_gql::GqlBudgetExceeded {
+                        dimension: fgdb_gql::GqlBudgetDimension::SnapshotRecords,
+                        limit: 36,
+                        observed: 37,
+                    }))
+                ));
+                for (limited, expected_dimension) in [
+                    (
+                        GqlQueryPolicy::new(37, 100, 0, 1_000_000),
+                        fgdb_gql::GlaLimitDimension::WorkUnits,
+                    ),
+                    (
+                        GqlQueryPolicy::new(37, 100, 10_000_000, 0),
+                        fgdb_gql::GlaLimitDimension::ScratchEntries,
+                    ),
                 ] {
-                    assert!(
-                        db.execute_graph_set_authorized(
-                            &cx,
-                            &authority,
-                            &token,
-                            "main",
-                            &plan,
-                            limited,
-                            || 100,
-                        )
-                        .is_err(),
-                        "empty output cannot bypass source, work or scratch admission"
-                    );
+                    assert!(matches!(
+                        refusal(limited),
+                        crate::QueryError::Set(GqlQueryError::Evaluator(fgdb_gql::GlaLimitExceeded {
+                            dimension, limit: 0, observed: 1,
+                        })) if dimension == expected_dimension
+                    ));
                 }
             }
         }
