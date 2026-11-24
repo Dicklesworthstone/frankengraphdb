@@ -1179,12 +1179,9 @@ impl FnxCallSpec {
         graph: &SealedGraphView,
         limits: FnxExecutionLimits,
         memory: FnxMemoryLimits,
-        guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
+        mut guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
     ) -> Result<FnxResult> {
-        let guard = RefCell::new(guard);
-        let invoke = || (guard.borrow_mut())();
-        let control = Control::new(cx, &invoke);
-        self.execute_controlled(&control, graph, limits, memory, Delivery::Collected)?
+        self.execute_controlled(cx, graph, limits, memory, Delivery::Collected, &mut guard)?
             .collected()
     }
 
@@ -1214,23 +1211,26 @@ impl FnxCallSpec {
         graph: &SealedGraphView,
         limits: FnxExecutionLimits,
         memory: FnxMemoryLimits,
-        guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
+        mut guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
     ) -> Result<FnxRowCursor> {
-        let guard = RefCell::new(guard);
-        let invoke = || (guard.borrow_mut())();
-        let control = Control::new(cx, &invoke);
-        self.execute_controlled(&control, graph, limits, memory, Delivery::Retained)?
+        self.execute_controlled(cx, graph, limits, memory, Delivery::Retained, &mut guard)?
             .retained()
     }
 
     fn execute_controlled(
         &self,
-        cx: &Control<'_, impl Guard>,
+        query: &QueryCx,
         graph: &SealedGraphView,
         limits: FnxExecutionLimits,
         memory: FnxMemoryLimits,
         delivery: Delivery,
+        guard: &mut dyn FnMut() -> std::result::Result<(), SealedProjectionError>,
     ) -> Result<Finished> {
+        // Borrow the caller's live guard for this synchronous execution. All
+        // callers share the same compiled kernels and keep their own checks.
+        let guard = RefCell::new(guard);
+        let invoke = || (guard.borrow_mut())();
+        let cx = &Control::new(query, &invoke);
         checkpoint(cx)?;
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
