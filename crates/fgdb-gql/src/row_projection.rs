@@ -326,6 +326,45 @@ impl RowProjectionSpec {
         Some((&self.projection, &self.filter))
     }
 
+    /// Recover the original list/range expression of an unfiltered UNWIND.
+    /// Its inherited cells are untouched input copies. Range bounds are an
+    /// internal carrier, not the list of members, so logical reconstruction
+    /// must restore range() rather than accidentally unwind those bounds.
+    pub(crate) fn unwind_value(&self) -> Option<(&str, GraphSetValue)> {
+        if !self.expand_last
+            || !self.filter.is_empty()
+            || self.quantifier != GraphSetQuantifier::All
+            || self.projection.len() != self.input.len() + 1
+        {
+            return None;
+        }
+        let (last, prefix) = self.projection.split_last()?;
+        if prefix.iter().enumerate().any(|(column, cell)| {
+            !matches!(cell.value(), GraphSetValue::Column(input) if *input == column)
+        }) {
+            return None;
+        }
+        let value = if self.expand_range {
+            let GraphSetValue::List(bounds) = last.value() else {
+                return None;
+            };
+            let [start, end, step @ ..] = bounds.as_slice() else {
+                return None;
+            };
+            if step.len() > 1 {
+                return None;
+            }
+            GraphSetValue::Range {
+                start: Box::new(start.clone()),
+                end: Box::new(end.clone()),
+                step: step.first().cloned().map(Box::new),
+            }
+        } else {
+            last.value().clone()
+        };
+        Some((last.name(), value))
+    }
+
     pub fn input_types(&self) -> &[GraphSetColumnType] {
         &self.input
     }

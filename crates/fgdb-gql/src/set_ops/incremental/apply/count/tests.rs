@@ -1193,7 +1193,7 @@ fn filtered_count_recipe_retains_the_complete_input_and_all_cancellation_points(
         .unwrap()
         .unwrap();
     assert_eq!(recipe.left, &outer());
-    assert_eq!(recipe.right, &right());
+    assert_eq!(recipe.right.as_ref(), &right());
     assert_eq!(recipe.arguments.quantifier(), GraphSetQuantifier::Distinct);
     assert_eq!(recipe.complete.kind(), RowJoinKind::Left);
     assert_eq!(recipe.restore.kind(), RowJoinKind::Inner);
@@ -1204,7 +1204,7 @@ fn filtered_count_recipe_retains_the_complete_input_and_all_cancellation_points(
         .unwrap()
         .project_incremental_spec(&recipe.arguments)
         .unwrap()
-        .join(recipe.right.clone(), recipe.join.clone())
+        .join(recipe.right.as_ref().clone(), recipe.join.clone())
         .unwrap();
     for step in &recipe.body {
         input = input.project_incremental_spec(step).unwrap();
@@ -1232,7 +1232,22 @@ fn filtered_count_recipe_retains_the_complete_input_and_all_cancellation_points(
         GraphSetValue::List(vec![]),
     )
     .unwrap();
-    assert!(outer().project_incremental_spec(&expanded).is_none());
+    assert_eq!(
+        outer().project_incremental_spec(&expanded).unwrap(),
+        outer()
+            .unwind("expanded".into(), GraphSetValue::List(vec![]))
+            .unwrap()
+    );
+    assert!(
+        outer()
+            .project_incremental_spec(
+                &expanded
+                    .with_filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                    .unwrap()
+            )
+            .is_none(),
+        "filtered expansions need their own logical selection stage"
+    );
     for stop in 1..=calls {
         let mut seen = 0;
         let result = query.incremental_filtered_aggregate_with_control(&mut |_| {
@@ -1665,7 +1680,7 @@ fn scalar_recipe_retains_complete_input_and_cancellation_while_count_fast_path_s
             .unwrap()
             .project_incremental_spec(&recipe.arguments)
             .unwrap()
-            .join(recipe.right.clone(), recipe.join.clone())
+            .join(recipe.right.as_ref().clone(), recipe.join.clone())
             .unwrap();
         for step in &recipe.body {
             input = input.project_incremental_spec(step).unwrap();
@@ -2012,7 +2027,7 @@ fn mixed_summary_recipe_keeps_complete_input_schema_and_each_cancellation_point(
         .unwrap()
         .project_incremental_spec(&recipe.arguments)
         .unwrap()
-        .join(recipe.right.clone(), recipe.join.clone())
+        .join(recipe.right.as_ref().clone(), recipe.join.clone())
         .unwrap();
     for stage in &recipe.body {
         input = input.project_incremental_spec(stage).unwrap();
@@ -2861,6 +2876,485 @@ fn native_grouped_recipes_preserve_definition_cancellation_and_source_boundaries
             }),
             Err(at) if at == stop
         ));
+        assert_eq!(seen, stop);
+        assert_eq!(query.canonical_bytes(), original);
+    }
+}
+
+fn unwind_summary(profile: usize, optional: bool) -> PreparedGraphSet {
+    let is_null = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare_scalar(&[
+            GraphIntegerOp::PresenceColumn(0),
+            GraphIntegerOp::IsNull(true),
+        ])
+        .unwrap(),
+    );
+    let next = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Column(0),
+            GraphIntegerOp::Literal(Some(1)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Add),
+        ])
+        .unwrap(),
+    );
+    let members = GraphSetValue::Case {
+        arms: vec![(is_null, GraphSetValue::List(vec![]))],
+        otherwise: Some(Box::new(GraphSetValue::List(vec![
+            GraphSetValue::Column(0),
+            GraphSetValue::Column(0),
+            next,
+        ]))),
+    };
+    let bucket = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Column(1),
+            GraphIntegerOp::Literal(Some(2)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Remainder),
+        ])
+        .unwrap(),
+    );
+    let body = arguments(vec![GraphSetColumnType::Stored])
+        .unwind("member".into(), members)
+        .unwrap()
+        .project(
+            vec![
+                GraphSetProjection::new("bucket", bucket),
+                GraphSetProjection::new("value", GraphSetValue::Column(1)),
+            ],
+            if profile & 2 != 0 {
+                GraphSetQuantifier::Distinct
+            } else {
+                GraphSetQuantifier::All
+            },
+        )
+        .unwrap();
+    let grouped = profile & 1 != 0;
+    let body = body
+        .group_by(
+            if grouped { &[0] } else { &[] },
+            &[
+                GraphAggregate::count_rows("n"),
+                GraphAggregate::sum_int("total", 1),
+            ],
+        )
+        .unwrap();
+    let count_column = usize::from(grouped);
+    let expanded = body.column_types().len();
+    let body = body
+        .unwind(
+            "again".into(),
+            GraphSetValue::List(vec![
+                GraphSetValue::Column(count_column),
+                GraphSetValue::Column(count_column),
+            ]),
+        )
+        .unwrap()
+        .project(
+            vec![GraphSetProjection::new(
+                "answer",
+                GraphSetValue::Column(expanded),
+            )],
+            if profile & 4 != 0 {
+                GraphSetQuantifier::Distinct
+            } else {
+                GraphSetQuantifier::All
+            },
+        )
+        .unwrap();
+    if optional {
+        outer().optional_apply(body, vec![0]).unwrap()
+    } else {
+        outer().apply(body, vec![0]).unwrap()
+    }
+}
+
+fn unwind_outer(mask: usize) -> ZSet<GraphValueRow> {
+    bag([
+        (0, row(vec![scalar(Some(2)), vertex(1), vertex(8)]), 2),
+        (1, row(vec![scalar(Some(2)), vertex(2), vertex(8)]), 3),
+        (2, row(vec![scalar(Some(3)), vertex(3), vertex(9)]), 4),
+        (3, row(vec![scalar(None), vertex(4), vertex(0)]), 5),
+    ]
+    .into_iter()
+    .filter_map(|(bit, row, weight)| (mask & (1 << bit) != 0).then_some((row, weight))))
+}
+
+// Expand literal occurrences, count each user's bucket, expand its tail list,
+// then deduplicate exported values only when requested. This oracle has no
+// invocation-key encoding, incremental operator or recipe-derived layout.
+fn unwind_summary_oracle(left: &ZSet<GraphValueRow>, profile: usize, optional: bool) -> Bag {
+    let mut output = Bag::new();
+    for (outer, multiplicity) in left.iter() {
+        let mut members = match outer.values()[0] {
+            GraphValue::Scalar(CanonicalScalar::Int(score)) => vec![score, score, score + 1],
+            _ => vec![],
+        };
+        if profile & 2 != 0 {
+            members.sort_unstable();
+            members.dedup();
+        }
+        let mut counts = BTreeMap::new();
+        if profile & 1 == 0 {
+            counts.insert(0, 0_i64);
+        }
+        for value in members {
+            *counts
+                .entry(if profile & 1 != 0 { value % 2 } else { 0 })
+                .or_default() += 1;
+        }
+        let mut answers: Vec<_> = counts
+            .into_values()
+            .flat_map(|count| [scalar(Some(count)), scalar(Some(count))])
+            .collect();
+        if profile & 4 != 0 {
+            answers.sort();
+            answers.dedup();
+        }
+        if optional && answers.is_empty() {
+            answers.push(scalar(None));
+        }
+        for answer in answers {
+            let mut cells = outer.values().to_vec();
+            cells.push(answer);
+            *output.entry(row(cells)).or_default() += multiplicity.to_i128().unwrap();
+        }
+    }
+    output
+}
+
+#[test]
+fn correlated_unwind_body_and_summary_match_2048_weighted_transitions() {
+    let unit = bag([(row(vec![]), 1)]);
+    for profile in 0..8 {
+        let query = unwind_summary(profile, true);
+        let recipe = query
+            .incremental_filtered_aggregate_with_control(&mut allow)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(&recipe.right, Cow::Owned(_)));
+        assert_eq!(recipe.right.as_ref(), &PreparedGraphSet::singleton());
+        for before in 0..16 {
+            for after in 0..16 {
+                let old = unwind_outer(before);
+                let next = unwind_outer(after);
+                let mut circuit = FilteredCircuit::new(&query);
+                circuit.tick(&old, &unit).unwrap();
+                assert_eq!(
+                    plain(circuit.rows()),
+                    unwind_summary_oracle(&old, profile, true)
+                );
+                let delta = circuit
+                    .tick(&difference(&next, &old), &ZSet::new())
+                    .unwrap();
+                let expected = unwind_summary_oracle(&next, profile, true);
+                assert_eq!(
+                    plain(circuit.rows()),
+                    expected,
+                    "profile {profile}: {before}->{after}"
+                );
+                let mut integrated = bag(unwind_summary_oracle(&old, profile, true));
+                integrated
+                    .integrate(&delta, LIMBS, &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
+                assert_eq!(plain(&integrated), expected, "exact derivative");
+            }
+        }
+        let mut inner = FilteredCircuit::new(&unwind_summary(profile, false));
+        inner.tick(&unwind_outer(15), &unit).unwrap();
+        assert_eq!(
+            plain(inner.rows()),
+            unwind_summary_oracle(&unwind_outer(15), profile, false)
+        );
+    }
+}
+
+#[test]
+fn source_free_ranges_keep_unit_activation_and_reconstruct_the_original_members() {
+    for (start, end, step, count, sum) in [
+        (3, -1, Some(-2), 3, 3),
+        (0, 4, None, 5, 10),
+        (2, 0, None, 0, 0),
+    ] {
+        let range = GraphSetValue::Range {
+            start: Box::new(GraphSetValue::Value(scalar(Some(start)))),
+            end: Box::new(GraphSetValue::Value(scalar(Some(end)))),
+            step: step.map(|value| Box::new(GraphSetValue::Value(scalar(Some(value))))),
+        };
+        let source = PreparedGraphSet::singleton();
+        let expanded = source
+            .clone()
+            .unwind("member".into(), range.clone())
+            .unwrap();
+        let spec = RowProjectionSpec::unwind(vec![], vec![], "member".into(), range).unwrap();
+        assert_eq!(source.project_incremental_spec(&spec).unwrap(), expanded);
+        let body = expanded
+            .group_by(
+                &[],
+                &[
+                    GraphAggregate::count_rows("n"),
+                    GraphAggregate::sum_int("total", 0),
+                ],
+            )
+            .unwrap();
+        let query = outer().apply(body, vec![]).unwrap();
+        let recipe = query
+            .incremental_filtered_aggregate_with_control(&mut allow)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(&recipe.right, Cow::Borrowed(_)));
+        let mut active = recipe
+            .left
+            .clone()
+            .project_incremental_spec(&recipe.outer)
+            .unwrap()
+            .project_incremental_spec(&recipe.arguments)
+            .unwrap()
+            .join(recipe.right.as_ref().clone(), recipe.join.clone())
+            .unwrap();
+        for stage in &recipe.body {
+            active = active.project_incremental_spec(stage).unwrap();
+        }
+        assert_eq!(
+            recipe.group.input(),
+            &active,
+            "the actual expanded logical input is retained"
+        );
+        let mut circuit = FilteredCircuit::new(&query);
+        circuit
+            .tick(&ZSet::new(), &bag([(row(vec![]), 1)]))
+            .unwrap();
+        assert!(
+            circuit.rows().is_empty(),
+            "a unit does not invent an invocation"
+        );
+        let left = unwind_outer(7);
+        circuit.tick(&left, &ZSet::new()).unwrap();
+        let expected = left
+            .iter()
+            .map(|(outer, weight)| {
+                let mut cells = outer.values().to_vec();
+                cells.extend([
+                    scalar(Some(count)),
+                    if count == 0 {
+                        scalar(None)
+                    } else {
+                        scalar(Some(sum))
+                    },
+                ]);
+                (row(cells), weight.to_i128().unwrap())
+            })
+            .collect::<Bag>();
+        assert_eq!(plain(circuit.rows()), expected);
+        circuit
+            .tick(&difference(&ZSet::new(), &left), &ZSet::new())
+            .unwrap();
+        assert!(
+            circuit.rows().is_empty(),
+            "the last outer retraction deactivates the unit body"
+        );
+    }
+}
+
+#[test]
+fn correlated_unwind_preserves_lazy_and_discarded_effect_boundaries() {
+    let divide = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Literal(Some(1)),
+            GraphIntegerOp::Literal(Some(0)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+        ])
+        .unwrap(),
+    );
+    for arguments_only in [false, true] {
+        for after_summary in [false, true] {
+            for filter_first in [false, true] {
+                let mut body = if arguments_only {
+                    arguments(vec![GraphSetColumnType::Stored])
+                } else {
+                    PreparedGraphSet::singleton()
+                };
+                if after_summary {
+                    body = counted(body);
+                }
+                if filter_first {
+                    body = body
+                        .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                        .unwrap();
+                }
+                body = body
+                    .unwind("failed".into(), GraphSetValue::List(vec![divide.clone()]))
+                    .unwrap();
+                if !filter_first {
+                    body = body
+                        .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                        .unwrap();
+                }
+                if !after_summary {
+                    body = counted(body);
+                }
+                let query = outer()
+                    .apply(body, if arguments_only { vec![0] } else { vec![] })
+                    .unwrap();
+                let mut circuit = FilteredCircuit::new(&query);
+                circuit
+                    .tick(&ZSet::new(), &bag([(row(vec![]), 1)]))
+                    .unwrap();
+                assert!(
+                    circuit.rows().is_empty(),
+                    "no eager evaluation for inactive invocations"
+                );
+                let result = circuit.tick(&unwind_outer(1), &ZSet::new());
+                assert_eq!(
+                    result.is_ok(),
+                    filter_first,
+                    "ordered body/tail effect: {arguments_only}/{after_summary}/{filter_first}"
+                );
+            }
+        }
+    }
+    for value in [
+        GraphSetValue::Value(scalar(Some(1))),
+        GraphSetValue::Range {
+            start: Box::new(GraphSetValue::Value(scalar(Some(0)))),
+            end: Box::new(GraphSetValue::Value(scalar(Some(2)))),
+            step: Some(Box::new(GraphSetValue::Value(scalar(Some(0))))),
+        },
+    ] {
+        let body = counted(
+            PreparedGraphSet::singleton()
+                .unwind("invalid".into(), value)
+                .unwrap(),
+        );
+        let query = outer().apply(body, vec![]).unwrap();
+        let mut circuit = FilteredCircuit::new(&query);
+        circuit
+            .tick(&ZSet::new(), &bag([(row(vec![]), 1)]))
+            .unwrap();
+        assert!(circuit.tick(&unwind_outer(1), &ZSet::new()).is_err());
+    }
+    // The unused CASE branch remains lazy inside an active body, rather than
+    // merely being suppressed by an empty outer input.
+    let value = GraphSetValue::Case {
+        arms: vec![(
+            GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(true))),
+            GraphSetValue::List(vec![]),
+        )],
+        otherwise: Some(Box::new(GraphSetValue::List(vec![divide]))),
+    };
+    let query = outer()
+        .apply(
+            counted(
+                PreparedGraphSet::singleton()
+                    .unwind("safe".into(), value)
+                    .unwrap(),
+            ),
+            vec![],
+        )
+        .unwrap();
+    let mut circuit = FilteredCircuit::new(&query);
+    circuit
+        .tick(&unwind_outer(1), &bag([(row(vec![]), 1)]))
+        .unwrap();
+    assert_eq!(
+        plain(circuit.rows()),
+        BTreeMap::from([(
+            row(vec![scalar(Some(2)), vertex(1), vertex(8), scalar(Some(0))]),
+            2,
+        )])
+    );
+}
+
+#[test]
+fn empty_post_summary_unwind_null_extends_optional_calls_without_repeating_the_tail() {
+    for empty_body in [false, true] {
+        let mut body = arguments(vec![GraphSetColumnType::Stored]);
+        if empty_body {
+            body = body
+                .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                .unwrap();
+        }
+        let divide = GraphSetValue::Integer(
+            GraphIntegerExpression::prepare(&[
+                GraphIntegerOp::Literal(Some(1)),
+                GraphIntegerOp::Literal(Some(0)),
+                GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+            ])
+            .unwrap(),
+        );
+        let body = counted(body)
+            .unwind("absent".into(), GraphSetValue::List(vec![]))
+            .unwrap()
+            .project(
+                vec![GraphSetProjection::new("unexecuted", divide)],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        let query = outer().optional_apply(body, vec![0]).unwrap();
+        let mut circuit = FilteredCircuit::new(&query);
+        let left = unwind_outer(15);
+        circuit.tick(&left, &bag([(row(vec![]), 1)])).unwrap();
+        let expected = left
+            .iter()
+            .map(|(outer, weight)| {
+                let mut cells = outer.values().to_vec();
+                cells.push(scalar(None));
+                (row(cells), weight.to_i128().unwrap())
+            })
+            .collect::<Bag>();
+        assert_eq!(
+            plain(circuit.rows()),
+            expected,
+            "the optional row is NULL, not a zero-filled or re-evaluated summary"
+        );
+    }
+}
+
+#[test]
+fn native_correlated_unwind_profiles_keep_reader_page_and_cancellation_boundaries() {
+    for text in [
+        "MATCH (a:L) WITH a,a.p AS value CALL(value) { RETURN count(*) AS degree,count(value) AS present,sum(value) AS total } RETURN a,degree,present,total",
+        "MATCH (a:L) WITH a CALL() { UNWIND [1,1,NULL] AS value RETURN count(*) AS degree,count(value) AS present,sum(value) AS total } RETURN a,degree,present,total",
+        "MATCH (a:L) WITH a,a.p AS score OPTIONAL CALL(score) { UNWIND CASE WHEN score IS NULL THEN [] ELSE [score,score,score+1] END AS value RETURN value%2 AS bucket,count(*) AS degree,sum(value) AS total } RETURN a,bucket,degree,total",
+        "MATCH (a:L) WITH a,a.p AS score CALL(a,score) { MATCH (a)-[:R]->(b:L) UNWIND [score,score] AS value WITH DISTINCT b,value RETURN value AS bucket,count(*) AS degree } RETURN a,bucket,degree",
+        "MATCH (a:L) WITH a,a.p AS score CALL(a,score) { UNWIND [score,score] AS value WITH count(value) AS degree UNWIND [degree,degree] AS copy RETURN a AS owner,copy } RETURN a,owner,copy",
+        "MATCH (a:L) WITH a CALL() { UNWIND range(3,-1,-2) AS value WITH value%2 AS bucket,count(*) AS degree UNWIND [degree,degree] AS copy RETURN DISTINCT copy } RETURN a,copy",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(has_filtered_aggregate(&query), "{text}");
+    }
+    for text in [
+        "MATCH (a:L) WITH a CALL(a) { UNWIND a.p AS value RETURN count(*) AS degree } RETURN a,degree",
+        "MATCH (a:L) WITH a CALL(a) { UNWIND [rand()] AS value RETURN count(*) AS degree } RETURN a,degree",
+        "MATCH (a:L) WITH a CALL() { UNWIND [1,2] AS value WITH value LIMIT 0 RETURN count(*) AS degree } RETURN a,degree",
+        "MATCH (a:L) WITH a CALL() { WITH count(*) AS degree UNWIND [degree,degree] AS copy RETURN copy LIMIT 0 } RETURN a,copy",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(!has_filtered_aggregate(&query), "{text}");
+    }
+    let query = unwind_summary(7, true);
+    let original = query.canonical_bytes();
+    let mut calls = 0;
+    query
+        .incremental_filtered_aggregate_with_control(&mut |_| {
+            calls += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap()
+        .unwrap();
+    for stop in 1..=calls {
+        let mut seen = 0;
+        assert!(
+            matches!(query.incremental_filtered_aggregate_with_control(&mut |_| {
+            seen += 1;
+            if seen == stop { Err(stop) } else { Ok(()) }
+        }), Err(at) if at == stop)
+        );
         assert_eq!(seen, stop);
         assert_eq!(query.canonical_bytes(), original);
     }
