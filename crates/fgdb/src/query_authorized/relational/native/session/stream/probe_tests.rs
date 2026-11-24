@@ -70,9 +70,9 @@ fn deny_before_endpoint_and_incidence_still_checks_the_live_permit() {
     let verified = issuer.verify_at(&token, "branch", 100).unwrap();
     let permit = verified.begin_read_at("branch", 100).unwrap();
     let mut clock = || 100;
-    let execution = Shared(Arc::new(Mutex::new(Execution::new(
+    let execution = Shared(Arc::new(Mutex::new(Some(Execution::new(
         &cx, permit, &mut clock,
-    ))));
+    )))));
     let source = ScopedSource {
         inner: NoReads,
         execution: execution.clone(),
@@ -211,7 +211,9 @@ fn property_observation(
     let verified = issuer.verify_at(&token, "branch", 100).unwrap();
     let permit = verified.begin_read_at("branch", 100).unwrap();
     let mut clock = || 100;
-    let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
+    let execution = Shared(Arc::new(Mutex::new(Some(Execution::new(
+        cx, permit, &mut clock,
+    )))));
     let source = ScopedSource {
         inner: PropertyRow {
             fields: fields.to_vec(),

@@ -531,7 +531,8 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                 GraphEdgeMergeRowAction::Value { key, value, .. }
                 | GraphEdgeMergeRowAction::RowVertex { key, value, .. } => {
                     let inputs = match definition {
-                        GraphEdgeMergeRowAction::Value { inputs, .. } => inputs.as_deref(),
+                        GraphEdgeMergeRowAction::Value { inputs, .. }
+                        | GraphEdgeMergeRowAction::RowVertex { inputs, .. } => inputs.as_deref(),
                         _ => None,
                     };
                     let frame = inputs

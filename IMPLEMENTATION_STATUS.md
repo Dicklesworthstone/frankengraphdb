@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-22 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-24 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,79 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Scoped graph algorithms enter external relational ordering — qualification pending
+
+Authorized ordered sessions can use registered native fnx.* procedure rows
+as inputs to the existing external relational and terminal-aggregate owners.
+This includes procedure sources inside supported correlated bodies. Complete
+recursive source admission checks the registry and static call shape before
+opening any graph source or scratch file; argument expressions retain their
+ordinary reached/inactive-body evaluation rules.
+
+```gql
+CALL fnx.core_number({relations:['KNOWS'], direction:'undirected',
+                      parallel:'collapse', self_loops:'drop'})
+YIELD vertex AS person, core
+RETURN person.age AS age, core
+ORDER BY core DESC, age
+```
+
+The procedure executes over the original capability-masked projection at the
+selected snapshot. A synchronous private bridge borrows the same execution
+permit for the existing analytics owner; only completed owned cursor state
+crosses into asynchronous spooling. Native source, kernel and cursor-pull work
+remain governed. Intermediate algorithm rows consume private input allowance;
+only final delivered rows or groups consume the signed result-row allowance.
+
+Sorting, joins, DISTINCT, windows and aggregation retain their shared spill
+owners. The analytics projection and kernel still have their existing bounded
+resident-memory contract; this change does not make those algorithms fully
+external-memory. Hybrid and catalog procedures remain outside this source
+profile rather than falling through to a privileged reader.
+
+Regression sources exercise scoped topology and property masking, native versus
+external results, correlated arguments, exact historical cuts, terminal
+aggregates, live limits, cancellation and scratch cleanup. A real FGP client
+law checks a hidden cycle against literal core-number results, prepared
+1/2/1 snapshot rebinding, and two public aggregate rows from five private
+algorithm rows. Independent source review, pinned formatting of the changed Rust sources,
+and whitespace checks passed. Rust compilation and runtime
+qualification, Clippy, UBS and exact-tree gates remain incomplete in this
+execution environment. The W5 executor, W10 snapshot-query and integrated
+qualification tasks remain open.
+
+### Relationship MERGE actions combine row and relationship values — qualification pending
+
+Relationship MERGE actions can assign to a carried endpoint using both the
+selected relationship's properties and values imported by the incoming row.
+The compiler builds the same typed mixed input frame already used by
+relationship-target assignments; the shared native and authorized action
+evaluator consumes that frame before staging the clause's assignments.
+
+This closes the refusal of shapes such as:
+
+```gql
+MATCH (a:Person), (b:Person)
+WITH a,b,2 AS bonus
+MERGE (a)-[r:KNOWS]->(b)
+ON MATCH SET a.score = r.weight + bonus
+```
+
+Row-only actions retain their existing canonical transcript. Mixed frames
+carry an explicit transcript arm, validate their property/column schema, and
+translate fresh-endpoint provenance back to the original row. The change
+retains simultaneous-assignment preimages, cumulative work and scratch
+admission, selected-edge read witnesses, and atomic rollback on a failed
+action. It does not create another evaluator or transaction owner.
+
+Regression sources cover preparation, frame validation, existing and new
+relationships, endpoint provenance, and the native and capability-scoped
+write paths. Independent source review, pinned formatting of the changed Rust sources,
+and whitespace checks passed. Rust compilation and runtime
+qualification, Clippy, UBS and exact-tree gates remain incomplete in this
+execution environment. The broader relationship-MERGE and integrated
+qualification work remains open.
 
 ### Authorized external variable paths, aggregates and historical reads — qualification pending
 
@@ -36,7 +109,9 @@ enumerates visible zero-hop roots. The native cursor retains edge identities,
 parallel occurrences, repeated-element versus different-edge semantics, and
 its existing ACYCLIC, SIMPLE and shortest-selector admission rules. Unsupported
 definitions still fail during complete recursive preflight, before any sibling
-opens a source or either scratch file. Procedure sources remain unsupported.
+opens a source or either scratch file. Registered native FnX procedure sources
+follow the scoped route described above; hybrid and catalog procedures remain
+outside this external source profile.
 
 Walk rows enter the original external sort, DISTINCT/window and aggregate
 pipeline. Reached expression errors and private input limits still apply under

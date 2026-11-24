@@ -1196,3 +1196,373 @@ fn vertex_intake_refusal_releases_both_merges_and_never_restarts() {
         assert_eq!(pool.used(), 0);
     });
 }
+
+#[test]
+fn incidence_candidate_admission_precedes_sidecar_faults_on_every_cursor() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        // This is the fixture's single-row (9)-[EId(7):R]->(10) sidecar.
+        // Reusing its exact immutable bytes recovers its ordinary store path.
+        let properties = vec![vec![(P, CanonicalScalar::Int(70).into())]];
+        let sidecar = store
+            .put_edge_property_patch(
+                &contexts.commit(),
+                &encode_property_patch(&properties).unwrap(),
+            )
+            .await
+            .unwrap();
+        let sidecar_path = store.path(sidecar.0);
+        let original = std::fs::read(&sidecar_path).unwrap();
+        let mut damaged = original.clone();
+        let last = damaged.len() - 1;
+        damaged[last] ^= 1;
+
+        // Even an identity invisible at the query cut is admitted before its
+        // selected history is resolved. Initial root admission remains complete.
+        for cut in [0, 3] {
+            let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+            let mut view = store
+                .open_buffered_root(&cx, id, pool.clone(), limits())
+                .await
+                .unwrap();
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            let baseline = pool.used();
+            std::fs::write(&sidecar_path, &damaged).unwrap();
+
+            for retained in [false, true] {
+                for admit in [false, true] {
+                    let before = view.stats();
+                    let mut scan = view
+                        .edge_scan(&cx, CommitSeq(cut))
+                        .unwrap()
+                        .into_join_scan();
+                    let mut identities = Vec::new();
+                    let mut observe = |event| match event {
+                        BufferedEdgeScanEvent::Work => Ok(()),
+                        BufferedEdgeScanEvent::Identity(eid) => {
+                            identities.push(eid);
+                            if admit { Ok(()) } else { Err("candidate quota") }
+                        }
+                    };
+                    let result = if retained {
+                        scan.next_incident_retained_with_endpoints(
+                            &cx,
+                            VId(9),
+                            Some(R),
+                            BufferedEdgeDirection::Outgoing,
+                            None,
+                            &mut observe,
+                        )
+                        .await
+                    } else {
+                        scan.next_incident_with_endpoints(
+                            &cx,
+                            VId(9),
+                            Some(R),
+                            BufferedEdgeDirection::Outgoing,
+                            None,
+                            &mut observe,
+                        )
+                        .await
+                    };
+                    assert_eq!(identities, [EId(7)]);
+                    if admit {
+                        assert!(matches!(
+                            result,
+                            Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                                BufferError::ChecksumMismatch
+                            )))
+                        ));
+                    } else {
+                        assert!(matches!(
+                            result,
+                            Err(BufferedScanError::Control("candidate quota"))
+                        ));
+                    }
+                    assert!(scan.is_closed());
+                    assert!(
+                        scan.next_with_endpoints(&cx, None, &mut |_| {
+                            Err::<(), _>("must not resume")
+                        })
+                        .await
+                        .unwrap()
+                        .is_none()
+                    );
+                    drop(scan);
+                    if !admit {
+                        let after = view.stats();
+                        assert_eq!(
+                            after.hits + after.misses,
+                            before.hits + before.misses + 1,
+                            "head discovery faults topology only"
+                        );
+                    }
+                    drop(view.reserve_scan_bytes(&cx, pool.limit()));
+                    assert_eq!(pool.used(), baseline);
+                }
+            }
+
+            for admit in [false, true] {
+                let before = view.stats();
+                let mut scan = view
+                    .edge_scan(&cx, CommitSeq(cut))
+                    .unwrap()
+                    .into_incidence_scan(
+                        VId(10),
+                        Some(R),
+                        BufferedEdgeDirection::Incoming,
+                        None,
+                    );
+                let mut identities = Vec::new();
+                let result = scan
+                    .next_candidate_with(&cx, &mut |event| match event {
+                        BufferedEdgeScanEvent::Work => Ok(()),
+                        BufferedEdgeScanEvent::Identity(eid) => {
+                            identities.push(eid);
+                            if admit { Ok(()) } else { Err("candidate quota") }
+                        }
+                    })
+                    .await;
+                assert_eq!(identities, [EId(7)]);
+                if admit {
+                    assert!(matches!(
+                        result,
+                        Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                            BufferError::ChecksumMismatch
+                        )))
+                    ));
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(BufferedScanError::Control("candidate quota"))
+                    ));
+                }
+                assert!(scan.is_finished());
+                assert!(
+                    scan.next_candidate_with(&cx, &mut |_| Err::<(), _>("must not resume"))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                drop(scan);
+                if !admit {
+                    let after = view.stats();
+                    assert_eq!(
+                        after.hits + after.misses,
+                        before.hits + before.misses + 1
+                    );
+                }
+                drop(view.reserve_scan_bytes(&cx, pool.limit()));
+                assert_eq!(pool.used(), baseline);
+            }
+
+            // A topology-only consumer never needs the damaged sidecar.
+            let count = view
+                .edge_scan(&cx, CommitSeq(cut))
+                .unwrap()
+                .into_incidence_scan(VId(9), Some(R), BufferedEdgeDirection::Undirected, None)
+                .count_visible(&cx)
+                .await
+                .unwrap();
+            assert_eq!(count, if cut == 3 { 1 } else { 0 });
+
+            // Restore the actual source bytes, not a cached result. A fresh
+            // full-record cursor must still return the original property and
+            // both endpoints at the same cut.
+            std::fs::write(&sidecar_path, &original).unwrap();
+            let mut scan = view
+                .edge_scan(&cx, CommitSeq(cut))
+                .unwrap()
+                .into_incidence_scan(VId(9), Some(R), BufferedEdgeDirection::Outgoing, None);
+            let row = scan.next(&cx).await.unwrap();
+            if cut == 3 {
+                let row = row.unwrap();
+                assert_eq!(row.edge().entry.eid, EId(7));
+                assert_eq!(row.edge().props, properties[0]);
+                assert_eq!(row.source_vertex().vid, VId(9));
+                assert_eq!(row.target_vertex().vid, VId(10));
+            } else {
+                assert!(row.is_none());
+            }
+            drop(scan);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+}
+
+#[test]
+fn join_conversion_cannot_revive_a_terminal_edge_source() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        drop(view.reserve_scan_bytes(&cx, pool.limit()));
+        let baseline = pool.used();
+        enum Stop {
+            Close,
+            Refuse,
+            Exhaust,
+        }
+        for stop in [Stop::Close, Stop::Refuse, Stop::Exhaust] {
+            let mut source = view.edge_scan(&cx, CommitSeq(3)).unwrap();
+            match stop {
+                Stop::Close => source.close(),
+                Stop::Refuse => {
+                    let result = source
+                        .next_candidate_with(&cx, &mut |event| match event {
+                            BufferedEdgeScanEvent::Work => Ok(()),
+                            BufferedEdgeScanEvent::Identity(_) => Err("candidate quota"),
+                        })
+                        .await;
+                    assert!(matches!(
+                        result,
+                        Err(BufferedScanError::Control("candidate quota"))
+                    ));
+                }
+                Stop::Exhaust => {
+                    // The final candidate already exhausts the source;
+                    // conversion must not require a subsequent EOF pull.
+                    for &(eid, _, _, _) in TOPOLOGY.iter() {
+                        let candidate = source
+                            .next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(candidate.eid, EId(eid));
+                    }
+                }
+            }
+            assert!(source.is_finished());
+            let work = source.work_used();
+            let before = source.partition.stats();
+            let mut scan = source.into_join_scan();
+            assert!(scan.is_closed());
+            assert_eq!(scan.snapshot_seq(), CommitSeq(3));
+            assert_eq!(scan.work_used(), work);
+            assert!(
+                scan.next_with_endpoints(&cx, None, &mut |_| Err::<(), _>("must not resume"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                scan.next_vertex_candidate(&cx, &mut |_| Err::<(), _>("must not resume"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                scan.vertex_candidate_with(&cx, VId(1), &mut |_| {
+                    Err::<(), _>("must not resume")
+                })
+                .await
+                .unwrap()
+                .is_none()
+            );
+            for retained in [false, true] {
+                let result = if retained {
+                    scan.next_incident_retained_with_endpoints(
+                        &cx,
+                        VId(9),
+                        Some(R),
+                        BufferedEdgeDirection::Outgoing,
+                        None,
+                        &mut |_| Err::<(), _>("must not resume"),
+                    )
+                    .await
+                } else {
+                    scan.next_incident_with_endpoints(
+                        &cx,
+                        VId(9),
+                        Some(R),
+                        BufferedEdgeDirection::Outgoing,
+                        None,
+                        &mut |_| Err::<(), _>("must not resume"),
+                    )
+                    .await
+                };
+                assert!(result.unwrap().is_none());
+            }
+            assert_eq!(scan.work_used(), work);
+            drop(scan);
+            let after = view.stats();
+            assert_eq!(after.hits + after.misses, before.hits + before.misses);
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            assert_eq!(pool.used(), baseline);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn active_join_conversion_keeps_root_position_and_final_root_children() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let mut source = view.edge_scan(&cx, CommitSeq(3)).unwrap();
+        drop(source.next_candidate_with(&cx, &mut |_| Ok::<_, ()>(())));
+        assert!(!source.is_finished());
+        assert_eq!(source.work_used(), 0);
+        let first = source
+            .next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.eid, EId(0));
+        drop(first);
+        let work = source.work_used();
+        let before = source.partition.stats();
+        let mut scan = source.into_join_scan();
+        assert!(!scan.is_closed());
+        assert_eq!(scan.work_used(), work);
+        let after = scan.driver.as_ref().unwrap().root.partition.stats();
+        assert_eq!(after.hits + after.misses, before.hits + before.misses);
+        let mut remaining = Vec::new();
+        while let Some(candidate) = scan
+            .next_with_endpoints(&cx, None, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+        {
+            remaining.push(candidate.eid);
+        }
+        assert_eq!(
+            remaining,
+            TOPOLOGY[1..].iter().map(|row| EId(row.0)).collect::<Vec<_>>()
+        );
+        assert!(!scan.is_closed());
+        let child = scan
+            .next_incident_retained_with_endpoints(
+                &cx,
+                VId(9),
+                Some(R),
+                BufferedEdgeDirection::Outgoing,
+                None,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        assert_eq!(child.edge().entry.eid, EId(7));
+        assert_eq!(child.source_vertex().vid, VId(9));
+        assert_eq!(child.target_vertex().vid, VId(10));
+        drop(scan);
+        drop(view);
+        assert!(pool.used() > 0);
+        drop(child);
+        assert_eq!(pool.used(), 0);
+    });
+}

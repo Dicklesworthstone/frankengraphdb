@@ -577,11 +577,11 @@ fn denied_root_relations_open_no_directory_and_unscoped_access_refuses() {
     let token = issuer.issue_at(&grant(), 100).unwrap();
     let verified = issuer.verify_at(&token, "main", 100).unwrap();
     let mut clock = || 100;
-    let execution = Shared(Arc::new(Mutex::new(Execution::new(
+    let execution = Shared(Arc::new(Mutex::new(Some(Execution::new(
         &cx,
         verified.begin_read_at("main", 100).unwrap(),
         &mut clock,
-    ))));
+    )))));
     let mut source = Source {
         edges: NoReads,
         vertices: ScopedSource {

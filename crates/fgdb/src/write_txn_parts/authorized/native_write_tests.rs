@@ -1478,3 +1478,110 @@ fn native_write_prices_original_utf8_payload_once_before_map_lowering() {
         }
     });
 }
+
+#[test]
+fn carried_vertex_merge_actions_mask_relationship_inputs_and_roll_back() {
+    lab(0xaa24, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let mut scope = grant();
+        scope.labels = Scope::only([L]);
+        scope.properties = Scope::only([P, Q]);
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                || NOW,
+            )
+            .await
+        };
+        let int = |value| fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+        for secret in [
+            None,
+            Some(CanonicalScalar::Int(99)),
+            Some(CanonicalScalar::ucs_basic_text(&"x".repeat(8_192)).unwrap()),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = crate::WriteBatch::new(R);
+            seed.create_vertex(VId(10), vec![L], vec![(P, CanonicalScalar::Int(10))]);
+            seed.create_vertex(VId(20), vec![L], vec![(P, CanonicalScalar::Int(20))]);
+            let mut properties = vec![(P, CanonicalScalar::Int(7))];
+            if let Some(value) = &secret {
+                properties.push((SECRET, value.clone()));
+            }
+            seed.add_edge(fgdb_types::EId(30), VId(10), VId(20), properties);
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let text = "MATCH (a:Visible {p:10}), (b:Visible {p:20}) WITH a,b,{step:2} AS row \
+                        MERGE (a)-[r:R]->(b) \
+                        ON MATCH SET a.q=coalesce(r.secret,-1)+r.p+row.step,r.p=r.p+1";
+            let result = write(&mut db, text).await.unwrap();
+            let QueryResult::Write {
+                receipt,
+                completion,
+            } = result
+            else {
+                panic!("write receipt")
+            };
+            let seq = db.frontier().unwrap();
+            assert_eq!(seq.0, before.0 + 1);
+            assert_eq!(receipt.stats().completed_statements, 1);
+            assert_eq!(
+                (
+                    receipt.stats().created_vertices,
+                    receipt.stats().created_edges
+                ),
+                (0, 0)
+            );
+            assert_eq!(
+                completion,
+                Some(fgdb_types::EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq })
+            );
+            // Hidden edge data is NULL before expression evaluation, for both
+            // absent and arbitrarily larger payloads. The visible p is frozen
+            // at seven despite its simultaneous update to eight.
+            assert_eq!(
+                db.vertex(VId(10)).unwrap().unwrap().props,
+                vec![(P, int(10)), (Q, int(8))]
+            );
+            assert_eq!(
+                db.vertex(VId(20)).unwrap().unwrap().props,
+                vec![(P, int(20))]
+            );
+            let mut expected_edge = vec![(P, int(8))];
+            if let Some(value) = &secret {
+                expected_edge.push((SECRET, value.clone().into()));
+            }
+            assert_eq!(
+                db.edge(fgdb_types::EId(30)).unwrap().unwrap().props,
+                expected_edge
+            );
+            let before = (seq, db.vertices().unwrap(), db.edges().unwrap());
+            let refused = "MATCH (a:Visible {p:10}), (b:Visible {p:20}) WITH a,b \
+                           MERGE (a)-[r:R]->(b) \
+                           ON MATCH SET a.q=r.p+1,b.q=1 / (r.p-r.p)";
+            assert!(write(&mut db, refused).await.is_err());
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}

@@ -1614,6 +1614,7 @@ impl PreparedGraphEdgeMergeText {
                     if let crate::mutation_text::VertexMergeRowActionTemplate::RowVertex {
                         column,
                         key,
+                        inputs,
                         value,
                         at,
                     } = template
@@ -1621,6 +1622,7 @@ impl PreparedGraphEdgeMergeText {
                         return Ok(EdgeAction::RowVertex {
                             column: *column,
                             key: *key,
+                            inputs: inputs.clone(),
                             value: crate::GraphEdgeMergeRowComputed(super::merge::bind_row_value(
                                 value, values, *at,
                             )?),

@@ -26,7 +26,9 @@ fn compile_graph_input(
     // variable-path aggregate also normalizes through the native complete
     // relation, preserving occurrence order before COUNT or COLLECT.
     if definition.input_relation().is_some() || has_walk(definition.input_pattern()) {
-        AsyncSpillAggregatePlan::compile_with_bounded_walks(definition)
+        AsyncSpillAggregatePlan::compile_with_bounded_walks(definition).or_else(|_| {
+            AsyncSpillAggregatePlan::compile_with_repeated_procedures_and_bounded_walks(definition)
+        })
     } else {
         AsyncSpillAggregatePlan::compile_complete_relation(definition)
     }
@@ -57,7 +59,13 @@ fn bind_aggregate_order(
                 .bind_relation_parameters(params)
                 .map_err(QueryError::PipelineText)?;
             (
-                AsyncSpillAggregatePlan::compile_relation_with_bounded_walks(&definition),
+                AsyncSpillAggregatePlan::compile_relation_with_bounded_walks(&definition).or_else(
+                    |_| {
+                        AsyncSpillAggregatePlan::compile_relation_with_repeated_procedures_and_bounded_walks(
+                            &definition,
+                        )
+                    },
+                ),
                 template.columns(),
                 template.output_slots(),
                 default,
@@ -72,7 +80,13 @@ fn bind_aggregate_order(
                     compile_graph_input(definition)
                 }
                 fgdb_gql::TemporalAggregatePlan::Relation(definition) => {
-                    AsyncSpillAggregatePlan::compile_relation_with_bounded_walks(definition)
+                    AsyncSpillAggregatePlan::compile_relation_with_bounded_walks(definition).or_else(
+                        |_| {
+                            AsyncSpillAggregatePlan::compile_relation_with_repeated_procedures_and_bounded_walks(
+                                definition,
+                            )
+                        },
+                    )
                 }
             };
             (

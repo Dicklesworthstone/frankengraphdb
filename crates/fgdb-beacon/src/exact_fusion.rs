@@ -7,7 +7,7 @@
 pub mod graph;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, btree_map::Entry};
 use std::num::NonZeroU32;
 
 use fgdb_types::{CanonicalDecimal, VId};
@@ -324,8 +324,11 @@ impl IndexSnapshot {
     /// This is exact fusion of the selected candidates, not an exhaustive
     /// hybrid top-k or an AnswerContract::Exact certificate. In particular,
     /// VectorSearch::Approximate remains approximate. No fallback is hidden.
-    /// Additional fusion memory is bounded by the candidate depths plus k. Errors expose no
-    /// partial result, and the final publication has its own work checkpoint.
+    /// Fusion evidence, retained ranking slots and output rows use the caller's
+    /// scratch hook before retention. Each candidate identity owns one evidence
+    /// entry across both lanes; heap replacements reuse their admitted slot.
+    /// Source searches retain their separate admission contracts. Errors expose
+    /// no partial result, and final publication has its own work checkpoint.
     pub fn hybrid_search_exact_fusion(
         &self,
         query: ExactHybridQuery<'_>,
@@ -357,6 +360,7 @@ impl IndexSnapshot {
                 ),
             };
             if best.len() < query.k {
+                work.reserve_scratch(1)?;
                 best.push(candidate);
             } else if best.peek().is_some_and(|worst| candidate < *worst) {
                 best.pop();
@@ -366,6 +370,7 @@ impl IndexSnapshot {
         let mut rows = Vec::new();
         while !best.is_empty() {
             work.charge(1 + best.len().checked_ilog2().unwrap_or(0) as usize)?;
+            work.reserve_scratch(1)?;
             let hit = best
                 .pop()
                 .ok_or(BeaconError::Invariant("RRF heap disappeared"))?;
@@ -394,6 +399,22 @@ impl IndexSnapshot {
     }
 }
 
+// Shared by two- and three-lane fusion. A hit in both index lanes retains
+// one union entry, and a refused reservation never inserts an unadmitted ID.
+fn admit_evidence<'a>(
+    fused: &'a mut BTreeMap<VId, Evidence>,
+    id: VId,
+    work: &mut dyn WorkControl,
+) -> Result<&'a mut Evidence, BeaconError> {
+    match fused.entry(id) {
+        Entry::Occupied(entry) => Ok(entry.into_mut()),
+        Entry::Vacant(entry) => {
+            work.reserve_scratch(1)?;
+            Ok(entry.insert(Evidence::default()))
+        }
+    }
+}
+
 impl IndexSnapshot {
     fn fusion_candidates(
         &self,
@@ -414,7 +435,7 @@ impl IndexSnapshot {
             )?;
             for (offset, hit) in hits.into_iter().enumerate() {
                 work.charge(1)?;
-                let row = fused.entry(hit.id).or_default();
+                let row = admit_evidence(&mut fused, hit.id, work)?;
                 row.vector_rank = Some(rank(offset)?);
                 row.vector_distance = Some(hit.distance);
             }
@@ -428,7 +449,7 @@ impl IndexSnapshot {
             };
             for (offset, hit) in hits.into_iter().enumerate() {
                 work.charge(1)?;
-                let row = fused.entry(hit.id).or_default();
+                let row = admit_evidence(&mut fused, hit.id, work)?;
                 row.text_rank = Some(rank(offset)?);
                 row.text_score = Some(hit.score);
             }

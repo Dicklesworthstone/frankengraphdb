@@ -33,21 +33,68 @@ pub use ordered::{
     AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
-// Synchronization is local to ONE cursor's sequential callbacks. No guard is
-// held across a source call or suspension. Keeping the actual borrowed clock
-// permits both existing thread-local clocks and Send task-owned cursors.
-struct Shared<'q, Clock>(Arc<Mutex<Execution<'q, 'q, &'q mut Clock>>>);
+// Synchronization is local to ONE cursor's sequential callbacks. No guard
+// crosses a suspension. Ordinary pulls release it before source calls; a
+// synchronous native owner may temporarily borrow the same execution below.
+// Keeping the actual clock permits both thread-local and Send task-owned cursors.
+struct Shared<'q, Clock>(Arc<Mutex<Option<Execution<'q, 'q, &'q mut Clock>>>>);
+
+struct SharedBorrow<'lock, 'q, Clock>(MutexGuard<'lock, Option<Execution<'q, 'q, &'q mut Clock>>>);
+impl<'q, Clock> core::ops::Deref for SharedBorrow<'_, 'q, Clock> {
+    type Target = Execution<'q, 'q, &'q mut Clock>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("authorized execution is installed")
+    }
+}
+impl<Clock> core::ops::DerefMut for SharedBorrow<'_, '_, Clock> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("authorized execution is installed")
+    }
+}
 impl<Clock> Clone for Shared<'_, Clock> {
     fn clone(&self) -> Self {
         Self(Arc::clone(&self.0))
     }
 }
 impl<'q, Clock> Shared<'q, Clock> {
-    fn borrow(&self) -> MutexGuard<'_, Execution<'q, 'q, &'q mut Clock>> {
-        self.0.lock().expect("authorized cursor callback unwound")
+    fn borrow(&self) -> SharedBorrow<'_, 'q, Clock> {
+        SharedBorrow(self.0.lock().expect("authorized cursor callback unwound"))
     }
-    fn borrow_mut(&self) -> MutexGuard<'_, Execution<'q, 'q, &'q mut Clock>> {
+    fn borrow_mut(&self) -> SharedBorrow<'_, 'q, Clock> {
         self.borrow()
+    }
+
+    /// Lend the ONE execution to an existing synchronous native owner. Its
+    /// callbacks must borrow this local cell, never re-lock Shared. Nothing
+    /// borrowed from the cell can escape the call, and no lock crosses await.
+    /// The original permit, clock, failures and deferred-work state are restored
+    /// together, including during unwind; no replacement allowance is minted.
+    fn with_local<T>(
+        &self,
+        run: impl FnOnce(&RefCell<Execution<'q, 'q, &'q mut Clock>>) -> T,
+    ) -> T {
+        struct Restore<'lock, 'q, Clock> {
+            slot: MutexGuard<'lock, Option<Execution<'q, 'q, &'q mut Clock>>>,
+            local: Option<RefCell<Execution<'q, 'q, &'q mut Clock>>>,
+        }
+        impl<Clock> Drop for Restore<'_, '_, Clock> {
+            fn drop(&mut self) {
+                if let Some(local) = self.local.take() {
+                    *self.slot = Some(local.into_inner());
+                }
+            }
+        }
+        let mut slot = self.0.lock().expect("authorized cursor callback unwound");
+        let execution = slot.take().expect("authorized execution is installed");
+        let owner = Restore {
+            slot,
+            local: Some(RefCell::new(execution)),
+        };
+        run(owner
+            .local
+            .as_ref()
+            .expect("synchronous execution is owned"))
     }
 }
 type Pull<'q, Row> = Box<dyn FnMut() -> Result<(Option<Row>, bool), QueryError> + 'q>;
@@ -953,12 +1000,12 @@ fn open<'q, C: FnMut() -> u64, Plan, Output>(
     let permit = capability
         .begin_read_at(branch, now)
         .map_err(QueryError::Authorization)?;
-    let execution = Shared(Arc::new(Mutex::new(Execution::tracking(
+    let execution = Shared(Arc::new(Mutex::new(Some(Execution::tracking(
         cx,
         permit,
         clock,
         last_now_ms,
-    ))));
+    )))));
     execution.borrow_mut().checkpoint()?;
     let selected = (|| {
         prepared.admit_input(owner, params, &mut execution.borrow_mut())?;

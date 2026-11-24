@@ -100,12 +100,17 @@ pub struct BufferedEdgeJoinScan<'source, V: Vfs> {
 impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
     /// Add independently positioned cold incidence access without reading or
     /// allocating routing metadata. An unpolled query still does no source I/O.
+    /// A live source preserves its current root position and cumulative work.
+    /// A source closed, failed or exhausted before conversion stays terminal.
+    /// After conversion, ordinary root exhaustion still permits children of
+    /// the final root.
     pub fn into_join_scan(self) -> BufferedEdgeJoinScan<'source, V> {
+        let active = self.state.is_some();
         BufferedEdgeJoinScan {
             as_of: self.as_of,
             work: self.work.used,
             continuation: None,
-            driver: Some(Driver {
+            driver: active.then_some(Driver {
                 root: self,
                 vertices: None,
                 native_incident: None,
@@ -686,7 +691,7 @@ impl<V: Vfs> Driver<'_, V> {
         cx: &QueryCx,
         request: Incidence,
         retained: bool,
-        properties: EdgePropertyAccess,
+        _properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<State, BufferedScanError<C>> {
         self.root.work.step(cx, observe)?;
@@ -722,8 +727,13 @@ impl<V: Vfs> Driver<'_, V> {
             let Some(block) = block else {
                 break;
             };
+            // Routing discovers historical identities, not their values. A
+            // candidate must be admitted by advance before a property sidecar
+            // can fault, allocate or report corruption. The complete-record
+            // path upgrades this topology image after that admission, keeping
+            // the same original row positions and retained permutation.
             self.root
-                .load(&mut state, cx, block, None, properties, observe)
+                .load(&mut state, cx, block, None, EdgePropertyAccess::Skip, observe)
                 .await?;
             let active = state.active.as_ref().ok_or_else(invalid_load)?;
             let mut ordinal = 0;

@@ -22,6 +22,8 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+#[path = "ordered/procedure.rs"]
+mod procedure;
 #[path = "ordered/terminal_aggregate.rs"]
 mod terminal_aggregate;
 pub use terminal_aggregate::{AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor};
@@ -559,7 +561,9 @@ fn bind_projected_order(
         return Ok((plan, tail, at, query.columns().to_vec(), Some(pull), None));
     }
     let unsupported = || QueryError::StreamingUnsupported { facade };
-    let stages = AsyncSpillSetPlan::compile_with_bounded_walks(query).map_err(|_| unsupported())?;
+    let stages = AsyncSpillSetPlan::compile_with_bounded_walks(query)
+        .or_else(|_| AsyncSpillSetPlan::compile_with_repeated_procedures_and_bounded_walks(query))
+        .map_err(|_| unsupported())?;
     admit_external_sources(&stages)?;
     // A unary program retains one ordinary scoped graph source. Its canonical
     // order/page must finish before the first stage evaluates a row, including
@@ -624,9 +628,15 @@ enum BoundExternalOrder {
 // a resident evaluator after a sibling has already consumed private input.
 fn admit_external_sources(plan: &AsyncSpillSetPlan) -> core::result::Result<(), QueryError> {
     match plan.source() {
-        AsyncSpillSetSourcePlan::Procedure(_) => Err(QueryError::StreamingUnsupported {
-            facade: crate::NativeReadClass::Set,
-        }),
+        AsyncSpillSetSourcePlan::Procedure(source) => {
+            if procedure::admit(source) {
+                Ok(())
+            } else {
+                Err(QueryError::StreamingUnsupported {
+                    facade: crate::NativeReadClass::Set,
+                })
+            }
+        }
         // Walk is already sealed by its native compiler, including finite
         // occurrence modes and shortest-path eligibility. Its source below
         // implements roots and independent incidences at this same scoped cut.
@@ -716,14 +726,14 @@ fn bind_external_order(
         return bind_projected_order(&query, at, prepared.facade_class())
             .map(|bound| BoundExternalOrder::Linear(Box::new(bound)));
     }
-    // This compiler retains finite semi/anti probes inside graph leaves.
-    // The recursive fence below admits only sources implemented by this
-    // authorized host; unsupported walks and procedures refuse before I/O.
-    let plan = AsyncSpillSetPlan::compile_with_bounded_walks(&query).map_err(|_| {
-        QueryError::StreamingUnsupported {
+    // This compiler retains finite semi/anti probes and per-occurrence CALL
+    // bodies. The recursive fence admits only this host's scoped native graph
+    // profiles and registered FnX sources before any sibling performs I/O.
+    let plan = AsyncSpillSetPlan::compile_with_bounded_walks(&query)
+        .or_else(|_| AsyncSpillSetPlan::compile_with_repeated_procedures_and_bounded_walks(&query))
+        .map_err(|_| QueryError::StreamingUnsupported {
             facade: prepared.facade_class(),
-        }
-    })?;
+        })?;
     admit_external_sources(&plan)?;
     if matches!(plan.source(), AsyncSpillSetSourcePlan::Walk(_)) {
         return Ok(BoundExternalOrder::Relation(Box::new(plan), at));
@@ -1255,7 +1265,7 @@ impl<C: FnMut() -> u64 + Send> ExternalOrderHost for ScopedOrderHost<'_, C> {
     fn leaf<'q, A, B>(
         &'q mut self,
         plan: &'q AsyncSpillSetPlan,
-        _arguments: Option<&'q GraphValueRow>,
+        arguments: Option<&'q GraphValueRow>,
         snapshot: CommitSeq,
         cx: &'q QueryCx,
         policy: GqlQueryPolicy,
@@ -1270,6 +1280,19 @@ impl<C: FnMut() -> u64 + Send> ExternalOrderHost for ScopedOrderHost<'_, C> {
     {
         Box::pin(async move {
             self.check_snapshot(snapshot)?;
+            if let AsyncSpillSetSourcePlan::Procedure(source) = plan.source() {
+                return procedure::execute(
+                    self,
+                    source,
+                    arguments,
+                    snapshot,
+                    cx,
+                    policy,
+                    destination,
+                    limits,
+                )
+                .await;
+            }
             let pattern = plan.source_pattern().ok_or(SpillError::InvalidRun)?;
             if let AsyncSpillSetSourcePlan::Walk(walk) = plan.source() {
                 let source = aggregate::edge::ordered_walk_source(
@@ -1550,7 +1573,11 @@ where
     /// Correlated CALL, OPTIONAL MATCH, EXISTS and COUNT complete each body in
     /// external scratch under the same pin and cumulative allowances. Nested
     /// argument frames are lexical; duplicate outer rows remain occurrences.
-    /// Collected-list Apply and procedure bodies retain admission refusals.
+    /// Collected-list Apply preserves body order, mapped NULLs and duplicates.
+    /// Registered FnX sources also compose inside correlated bodies and terminal
+    /// aggregates. Their projection and kernel remain bounded resident owners;
+    /// only completed rows enter the external relation. Capability masking runs
+    /// before graph construction. Other procedure namespaces still refuse.
     ///
     /// Opening binds and admits the exact snapshot synchronously; a refusal
     /// returns immediately without creating a future. The successful future
