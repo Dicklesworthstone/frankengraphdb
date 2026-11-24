@@ -1007,40 +1007,70 @@ fn explicit_preparation_is_separate_but_query_must_not_refresh_its_binding_allow
             })
             .unwrap();
         let mut scope = grant();
-        // Session entry, original text, post-classification, and the complete
-        // controlled binder. Nothing remains for the native execution phase.
-        scope.limits.max_work = text.len() as u64 + 2 + binding_work;
-        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let text_and_binding = text.len() as u64 + 2 + binding_work;
+        let complete_binding = text_and_binding + arguments.canonical_byte_len() as u64;
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let basis = db.frontier().unwrap();
-        let mut session = db
-            .authorized_write_session(
-                &txn,
-                &commit,
-                &issuer,
-                &token,
-                BRANCH,
-                symbols,
-                R,
-                policy(),
-                64,
-                || NOW,
-            )
-            .unwrap();
-        let error = session.query(&query, text, &arguments).await.unwrap_err();
-        assert!(matches!(
-            authorization(&error),
-            Some(Error::LimitExceeded(_))
-        ));
-        assert!(matches!(error, Fault::BatchProgram { location: None, .. }));
-        assert!(session.is_closed());
-        drop(session);
-        assert_eq!(db.frontier().unwrap(), basis);
-        assert!(db.vertices().unwrap().is_empty());
+        // Keep both original allowances. The input bill includes the full
+        // parameter transcript before the controlled binder can spend work.
+        for limit in [
+            text_and_binding,
+            text_and_binding + 1,
+            complete_binding - 1,
+            complete_binding,
+        ] {
+            scope.limits.max_work = limit;
+            let token = issuer.issue_at(&scope, NOW).unwrap();
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    symbols,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
+                )
+                .unwrap();
+            let error = session.query(&query, text, &arguments).await.unwrap_err();
+            assert_eq!(
+                authorization(&error),
+                Some(Error::LimitExceeded(LimitDimension::Work))
+            );
+            if limit == complete_binding {
+                // No units remain for the newly bound batch's first execution.
+                assert!(
+                    matches!(error, Fault::BatchProgram { location: None, .. }),
+                    "{error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        error,
+                        Fault::Program(fgdb_gql::GraphWriteProgramError::Program(
+                            fgdb_gql::GraphMutationProgramError::Preflight(
+                                WriteTxnError::Authorization(Error::LimitExceeded(
+                                    LimitDimension::Work
+                                ))
+                            )
+                        ))
+                    ),
+                    "{error:?}"
+                );
+            }
+            assert!(session.is_closed());
+            drop(session);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
         // One extra unit admits bind_unwind_batch's final handle acceptance.
         // Each execute_bound_batch is explicitly a NEW operation, not a hidden
         // reset inside query. This budget is sufficient for the write itself.
-        scope.limits.max_work += 1;
+        scope.limits.max_work = complete_binding + 1;
         let token = issuer.issue_at(&scope, NOW).unwrap();
         let mut session = db
             .authorized_write_session(

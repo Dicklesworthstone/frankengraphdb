@@ -1942,11 +1942,13 @@ fn original_text_and_compiler_work_share_the_transaction_allowance() {
             .unwrap();
         // Original ingress bytes are reserved before any parser or catalog
         // callback, even when most bytes are an ignorable comment.
-        let text = format!("/*{}*/ RETURN 1", "x".repeat(300_000));
+        // Two prepares cost just over 950,000 of the signed 1,000,000 work
+        // units. The third text alone then exceeds what remains.
+        let text = format!("/*{}*/ RETURN 1", "x".repeat(60_000));
         for _ in 0..2 {
             owner
                 .prepare_statement(&db, query, &text, &GqlParameters::new(), |_, _, work| {
-                    work(100_000)
+                    work(415_000)
                 })
                 .unwrap();
         }
@@ -1956,7 +1958,12 @@ fn original_text_and_compiler_work_share_the_transaction_allowance() {
                 reached = true;
                 Ok(())
             });
-        assert!(matches!(refused, Err(WriteTxnError::Authorization(_))));
+        assert!(matches!(
+            refused,
+            Err(WriteTxnError::Authorization(Error::LimitExceeded(
+                fgdb_warden::LimitDimension::Work
+            )))
+        ));
         assert!(!reached);
         assert!(!owner.is_active());
         assert!(matches!(
@@ -2039,7 +2046,8 @@ fn preparation_errors_swallowed_meters_and_unwinds_abort_the_prefix() {
 #[test]
 fn preparation_refuses_zero_statements_forbidden_identity_and_foreign_handles_before_callbacks() {
     run(async |commit, query, txn| {
-        for fault in 0..3 {
+        let oversized = format!("/*{}*/ RETURN 1", "x".repeat(300_000));
+        for fault in 0..4 {
             let mut db = Database::open_memory(commit, keys()).await.unwrap();
             let foreign = Database::open_memory(commit, keys()).await.unwrap();
             let issuer = authority();
@@ -2056,10 +2064,10 @@ fn preparation_refuses_zero_statements_forbidden_identity_and_foreign_handles_be
                     || NOW,
                 )
                 .unwrap();
-            let text = if fault == 1 {
-                "MATCH (n) RETURN elementId(n)"
-            } else {
-                "RETURN 1"
+            let text = match fault {
+                1 => "MATCH (n) RETURN elementId(n)",
+                3 => &oversized,
+                _ => "RETURN 1",
             };
             let database = if fault == 2 { &foreign } else { &db };
             let mut reached = false;
@@ -2072,7 +2080,7 @@ fn preparation_refuses_zero_statements_forbidden_identity_and_foreign_handles_be
             assert!(!reached);
             assert!(match fault {
                 0 => matches!(error, WriteTxnError::StatementLimit { limit: 0 }),
-                1 => matches!(error, WriteTxnError::Authorization(Error::ScopeDenied)),
+                1 | 3 => matches!(error, WriteTxnError::Authorization(Error::ScopeDenied)),
                 _ => matches!(error, WriteTxnError::WrongDatabase),
             });
             assert!(!owner.is_active());
@@ -2439,37 +2447,82 @@ fn savepoints_restore_deleted_metadata_nested_prefixes_and_one_atomic_commit() {
     run(async |commit, query, txn| {
         let mut db = Database::open_memory(commit, keys()).await.unwrap();
         let issuer = authority();
-        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
-        let mut owner = db
-            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 20, || NOW)
-            .unwrap();
-        owner
-            .stage_chain(
-                &mut db,
-                query,
-                &chain("CREATE (a:Visible {p:1})-[:R]->(b:Visible {p:2})"),
-                |_, _, _| Ok(()),
-            )
-            .unwrap();
-        owner
-            .control(
-                &mut db,
-                query,
-                &savepoint_control("SAVEPOINT kept"),
-                |rows, _, _| {
-                    assert!(rows.is_empty());
-                    Ok(())
-                },
-            )
-            .unwrap();
-        owner
-            .stage_chain(
-                &mut db,
+        let stage_deletion = |db: &mut Database<fgdb::MemVfs>, scope: &Grant| {
+            let token = issuer.issue_at(scope, NOW).unwrap();
+            let mut owner = db
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 20, || NOW)
+                .unwrap();
+            owner
+                .stage_chain(
+                    db,
+                    query,
+                    &chain("CREATE (a:Visible {p:1})-[:R]->(b:Visible {p:2})"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            owner
+                .control(
+                    db,
+                    query,
+                    &savepoint_control("SAVEPOINT kept"),
+                    |rows, _, _| {
+                        assert!(rows.is_empty());
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            let result = owner.stage_chain(
+                db,
                 query,
                 &chain("MATCH (n:Visible {p:1}) DETACH DELETE n"),
                 |_, _, _| Ok(()),
+            );
+            (owner, result)
+        };
+        let mut scope = grant(Rights::ReadWrite);
+        let (refused, result) = stage_deletion(&mut db, &scope);
+        assert!(has_error(&result.unwrap_err(), |error| matches!(
+            error,
+            WriteTxnError::Authorization(Error::ScopeDenied)
+        )));
+        assert!(matches!(
+            refused.commit(&mut db).await,
+            Err(WriteTxnError::Finished)
+        ));
+        assert_eq!(db.frontier().unwrap().0, 0);
+        assert!(db.vertices().unwrap().is_empty());
+        assert!(db.edges().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+
+        scope.labels = Scope::All;
+        scope.relations = Scope::All;
+        scope.properties = Scope::All;
+        let (mut owner, result) = stage_deletion(&mut db, &scope);
+        result.unwrap();
+        let remaining = owner
+            .read(
+                &mut db,
+                query,
+                &read("MATCH (n:Visible) RETURN n.p AS p"),
+                |_, _, _| Ok(()),
             )
             .unwrap();
+        let [survivor] = remaining.value.as_slice() else {
+            panic!("only the second provisional vertex should survive DETACH DELETE")
+        };
+        assert_eq!(survivor.values(), &[integer(2)]);
+        assert!(
+            owner
+                .read(
+                    &mut db,
+                    query,
+                    &read("MATCH (a:Visible)-[:R]->(b:Visible) RETURN a, b"),
+                    |_, _, _| Ok(())
+                )
+                .unwrap()
+                .value
+                .is_empty()
+        );
         owner
             .control(
                 &mut db,

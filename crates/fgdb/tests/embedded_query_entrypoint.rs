@@ -399,18 +399,10 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
         let db = seeded(&contexts.commit()).await;
         let cx = contexts.query();
         for (text, expected_facade) in [
-            // The refusal names the facade whose parser got furthest.
-            // `EXPLAIN RETURN 1` itself is answered at ad2a4059, so the probe
-            // repeats an alias, which every facade refuses; the set facade reads
-            // furthest into it (observed at 3c44cc6a). The laws below (typed
-            // refusal, in-text offset, deterministic diagnostics, cached misses)
-            // are unchanged. That the winner moves at all is the parser race
-            // tracked by fgdb-crate-layer-drift-phjcs.
+            // The set parser reaches the repeated alias. A completed pattern's
+            // missing label takes precedence over competing syntax diagnostics.
             ("EXPLAIN RETURN 1 AS x, 2 AS x", fgdb::NativeReadClass::Set),
-            (
-                "MATCH (n:Missing) RETURN n",
-                fgdb::NativeReadClass::Aggregate,
-            ),
+            ("MATCH (n:Missing) RETURN n", fgdb::NativeReadClass::Pattern),
         ] {
             let mut runs = Vec::new();
             for _ in 0..2 {
@@ -432,7 +424,18 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
                 assert_eq!(*facade, expected_facade, "{text}");
                 let offset = match source.as_ref() {
                     QueryError::SetText(error) => error.offset,
-                    QueryError::PatternText(error) => error.offset,
+                    QueryError::PatternText(error) => {
+                        assert_eq!(
+                            error.kind,
+                            GraphPatternTextErrorKind::UnknownSymbol(GraphSymbolKind::Label)
+                        );
+                        assert_eq!(
+                            calls.get(&(GraphSymbolKind::Label, "Missing".into())),
+                            Some(&1)
+                        );
+                        assert_eq!(error.offset, text.find("Missing").unwrap());
+                        error.offset
+                    }
                     QueryError::PipelineText(error) => error.offset,
                     other => panic!("{text}: wrong typed source: {other:?}"),
                 };

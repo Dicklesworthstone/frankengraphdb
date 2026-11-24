@@ -392,14 +392,36 @@ fn identity_counters_and_their_flag_bit_must_agree() {
         counters_without_bit.canonical_bytes(),
         Err(ChainError::IdentityCountersFlagMismatch)
     );
-    // validate checks sequence and head CAS first, so make those hold for an
-    // empty chain and let the hash meet the mismatch.
+    let chain = MarkerChain::new();
     counters_without_bit.commit_seq = 1;
     counters_without_bit.head_updates.clear();
+    // A predecessor from the populated fixture is invalid at genesis, before
+    // validation reaches the marker transcript.
+    let predecessor = counters_without_bit
+        .prev_global
+        .expect("fixture predecessor");
     assert_eq!(
-        MarkerChain::new()
+        chain
             .validate(&counters_without_bit)
             .map(|chained| chained.marker_oid),
+        Err(ChainError::GlobalPredecessorMismatch(Box::new(
+            GlobalPredecessorMismatch {
+                expected: None,
+                found: predecessor,
+            }
+        )))
+    );
+    let mut origin = counters_without_bit;
+    origin.prev_global = None;
+    assert_eq!(
+        chain.validate(&origin).map(|chained| chained.marker_oid),
+        Err(ChainError::IdentityCountersFlagMismatch)
+    );
+    origin.flags |= MARKER_FLAG_IDENTITY_COUNTERS;
+    chain.validate(&origin).expect("matching counters and bit");
+    origin.identity_counters = None;
+    assert_eq!(
+        chain.validate(&origin).map(|chained| chained.marker_oid),
         Err(ChainError::IdentityCountersFlagMismatch)
     );
 }

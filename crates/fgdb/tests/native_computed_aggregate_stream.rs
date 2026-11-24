@@ -94,8 +94,8 @@ const SUMMARY: &str = "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n, LOWER(r.kind) 
 /// A computed WITH pipeline that streams natively (refused before the native
 /// aggregate cursors; fgdb-4wrnd) streams the eager outcome: the same columns
 /// and rows, or - when the eager read fails, as a planted overflow makes it -
-/// a terminal error before any row is published. One that still does not
-/// stream (a DISTINCT WITH) is refused by its plan.
+/// a terminal error before any row is published. An intermediate ORDER BY
+/// still requires a different plan.
 fn assert_streams_the_eager_outcome(
     db: &Database<fgdb::MemVfs>,
     cx: &fgdb_types::QueryCx,
@@ -107,12 +107,20 @@ fn assert_streams_the_eager_outcome(
     let eager = query.execute(db, cx, &args, wide());
     let stream = query.stream_aggregate(db, cx, &args, wide());
     if !streams {
-        // Still outside the native cursor: a typed plan refusal, never an
-        // eager answer behind the stream.
+        // Ordering the DISTINCT price input still has a well-defined eager sum.
+        assert!(
+            matches!(eager, Ok(QueryResult::Rows { rows, .. })
+            if rows == [vec![GraphAggregateValue::Integer(i128::from(i64::MAX))]]),
+            "{text}"
+        );
         assert!(
             matches!(
                 stream,
-                Err(QueryError::AggregateStreamPlan(_) | QueryError::EdgeAggregateStreamPlan(_))
+                Err(QueryError::AggregateStreamPlan(
+                    fgdb_gql::stream::aggregate::VertexAggregateBuildError::RequiresPlainGlobalAggregate
+                ) | QueryError::EdgeAggregateStreamPlan(
+                    fgdb_gql::edge_stream::aggregate::EdgeAggregateBuildError::RequiresPlainGlobalAggregate
+                ))
             ),
             "{text}"
         );
@@ -135,6 +143,34 @@ fn assert_streams_the_eager_outcome(
             assert_eq!(cursor.row_stats().result_rows, 0, "{text}");
             assert!(cursor.next().is_none(), "{text}");
         }
+    }
+}
+
+fn assert_distinct_sums(
+    db: &Database<fgdb::MemVfs>,
+    cx: &fgdb_types::QueryCx,
+    head: &str,
+    variable: &str,
+    kind: ScanKind,
+) {
+    let args = GqlParameters::new();
+    for (property, sum) in [("price", i128::from(i64::MAX)), ("qty", 10)] {
+        let text = format!("{head} WITH DISTINCT {variable}.{property} AS p RETURN SUM(p) AS n");
+        let query = PreparedNativeRead::prepare(&text, &args, symbols()).unwrap();
+        let expected = vec![GraphAggregateValue::Integer(sum)];
+        let QueryResult::Rows { columns, rows } = query.execute(db, cx, &args, wide()).unwrap()
+        else {
+            panic!("expected aggregate rows for {text}");
+        };
+        assert_eq!(columns, ["n"]);
+        assert_eq!(rows.as_slice(), std::slice::from_ref(&expected), "{text}");
+        let mut cursor = query.stream_aggregate(db, cx, &args, wide()).unwrap();
+        assert_eq!(cursor.kind(), kind);
+        assert_eq!(cursor.columns(), columns);
+        assert_eq!(cursor.row_stats().snapshot_records, 0);
+        assert_eq!(cursor.next().unwrap().unwrap().values(), expected, "{text}");
+        assert!(cursor.next().is_none());
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
     }
 }
 
@@ -330,12 +366,13 @@ fn projection_quota_and_late_overflow_refusals_are_terminal_and_with_pipelines_s
                 true,
             ),
             (
-                "MATCH (a)-[r:R]->(b) WITH DISTINCT r.price AS p RETURN SUM(p) AS n",
+                "MATCH (a)-[r:R]->(b) WITH DISTINCT r.price AS p ORDER BY p RETURN SUM(p) AS n",
                 false,
             ),
         ] {
             assert_streams_the_eager_outcome(&db, &cx, text, streams);
         }
+        assert_distinct_sums(&db, &cx, "MATCH (a)-[r:R]->(b)", "r", ScanKind::Edge);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -568,12 +605,13 @@ fn computed_vertex_empty_results_quotas_late_errors_and_with_pipelines_keep_the_
             ("MATCH (n:L) WITH n.price*2 AS p RETURN SUM(p) AS n", true),
             ("MATCH (n:L) WITH n.price*2 AS p RETURN AVG(p) AS n", true),
             (
-                "MATCH (n:L) WITH DISTINCT n.price AS p RETURN SUM(p) AS n",
+                "MATCH (n:L) WITH DISTINCT n.price AS p ORDER BY p RETURN SUM(p) AS n",
                 false,
             ),
         ] {
             assert_streams_the_eager_outcome(&db, &cx, text, streams);
         }
+        assert_distinct_sums(&db, &cx, "MATCH (n:L)", "n", ScanKind::Vertex);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
