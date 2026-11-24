@@ -1052,6 +1052,11 @@ role = "candidate"
 reason = "fgdb-verified-landing-queue-kqglu: seven-scenario controls for scripts/merge_train.sh over a throwaway remote with a fake check.sh (nothing to promote, --no-ff promotion with pass note, red bounce with FAIL-line note, no re-proof of a bounced pair, conflict note, audit violation for a direct toolchain-less push, --no-push dry run), MEASURED green (exit 0) on 2026-09-22 and mutation-proven (4 of 4 planted train defects turn it red). Not promoted for the same retained-fixture reason as scripts/local_proof_selftest.sh"
 
 [[script_disposition]]
+path = "scripts/real_graph_gauntlet.sh"
+role = "advisory"
+reason = "fgdb-rc1017-bridge-wvze5.14: operator comparison on hash-pinned datasets with a live external Kùzu installation. The fast local check exercises only the normalization and result oracle."
+
+[[script_disposition]]
 path = "scripts/git_hooks/install.sh"
 role = "advisory"
 reason = "fgdb-eesn: an explicit operator installer/status command for the landing-lease pre-commit hook. Its --install mode mutates the repository's shared Git hook directory, so executing it inside check.sh would be an unauthorized state change rather than an assertion"

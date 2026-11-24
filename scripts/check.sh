@@ -442,6 +442,8 @@ coverage_of() {
   case "$1" in
     *.rs)                                echo "cargo fmt/check/clippy/test" ;;
     *.sh|*.bash)                         echo "bash -n + shellcheck (next step)" ;;
+    crates/fgdb-bench/examples/real_graph_gauntlet.py)
+      echo "real_graph_gauntlet --self-test (dataset normalization, scalar oracle and wrong-answer controls)" ;;
     crates/fgdb-server/src/studio/tests/experience.test.mjs|\
     crates/fgdb-server/src/studio/tests/flow.test.mjs|\
     crates/fgdb-server/src/studio/tests/force.test.mjs|\
@@ -662,6 +664,10 @@ run_file_coverage() {
     return 1
   fi
   check_retained_bead_import || return 1
+  local gauntlet=crates/fgdb-bench/examples/real_graph_gauntlet.py
+  if git ls-files --error-unmatch -- "$gauntlet" >/dev/null 2>&1; then
+    python3 "$gauntlet" --self-test || return 1
+  fi
   echo "    coverage: $COV_TRACKED tracked = $COV_INSPECTED inspected + $COV_EXEMPT declared-not-inspected"
 }
 
