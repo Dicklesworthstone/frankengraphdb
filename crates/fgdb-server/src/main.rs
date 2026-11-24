@@ -33,6 +33,7 @@ USAGE:
   fgdbd serve --listen <addr:port> [--http-listen <addr:port> [--http-allow-host <host>]...]
       [--bolt-listen <addr:port>] [--tls-cert-file <path> --tls-key-file <path>] DATABASE...
       DATABASE := --database <name>=<path> --key-file <path> --issuer-key-file <path>
+                  [--kek-passphrase-file <path>] [--strata-ecs]
                   [--policy-epoch <n>] [--write-relation <u64>] [--query-scratch-dir <path>]
                   [--max-snapshot-records <n>] [--max-result-rows <n>]
                   [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
@@ -45,6 +46,7 @@ USAGE:
                     [--beacon-label <label>] [--beacon-metric l2|cosine|dot]]...
       [--max-connections <n>]
   fgdbd token --key-file <path> --issuer-key-file <path> [--policy-epoch <n>]
+      [--kek-passphrase-file <path>]
       [--rights read|write|read-write|admin] [--expires-in <seconds>]
       [--allow-label <u64>]... [--allow-relation <u64>]... [--allow-property <u64>]...
       [--max-nodes <n>] [--max-work <n>] [--max-rows <n>]
@@ -52,7 +54,7 @@ USAGE:
       [--not-before-in <seconds>] [--allow-label <u64>]... [--allow-relation <u64>]...
       [--allow-property <u64>]... [--deny-property <u64>]...
       [--max-nodes <n>] [--max-work <n>] [--max-rows <n>]   < token.hex
-  fgdbd keygen --database <path> | --issuer <path>
+  fgdbd keygen --database <path> [--passphrase-file <path>] | --issuer <path>
   fgdbd help
 
 serve opens each database and accepts FGP connections. Options after a
@@ -180,9 +182,12 @@ those properties, --rights and the limits can only lower, and --expires-in /
 verifies nothing; the server authenticates the result. At least one flag is
 required. Delegate this way: mint once with token, attenuate per holder.
 
-keygen writes a fresh owner-only (0600) key file: three lines for a database
-(the fgdb CLI's --key-file format) or one line for an issuer. It refuses to
-overwrite an existing file.
+keygen writes a new owner-only (0600) key file. For databases it writes a
+raw three-line key by default. Supply an owner-only --passphrase-file to wrap
+the key and enable protected Strata storage. Then pass --kek-passphrase-file
+to serve and token. With a raw database key, serve can select protected Strata
+storage with --strata-ecs. Issuer keys contain one line. An existing output
+file is refused.
 
 Exit codes: 0 success, 2 usage, 4 key or open failure, 5 I/O failure.
 ";
