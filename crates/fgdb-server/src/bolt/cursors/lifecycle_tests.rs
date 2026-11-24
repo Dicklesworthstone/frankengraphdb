@@ -1560,7 +1560,11 @@ fn explicit_write_owners_release_idle_locks_and_refuse_conflicting_or_recovered_
         let refused = send(&root, &mut client, &mut io, Request::Commit).await;
         assert_eq!(
             get(summary(&refused, 0x7f), "code").and_then(Value::as_str),
-            Some("Neo.DatabaseError.Statement.ExecutionFailed")
+            Some("Neo.TransientError.Transaction.Outdated")
+        );
+        assert_eq!(
+            get(summary(&refused, 0x7f), "message").and_then(Value::as_str),
+            Some("A concurrent commit invalidated this transaction. Retry from a fresh snapshot.")
         );
         assert!(client.transaction.is_none());
         assert_committed_vertices(&root, db, 1, 1).await;

@@ -779,7 +779,19 @@ impl<'s> Connection<'s> {
                     .check()
                     .map_err(|error| Failure::from_refusal(error.into()))?;
                 let completion = (*owner).commit(&mut guard).await.map_err(|error| {
-                    Failure::from_refusal(crate::execute::write_refusal(&error))
+                    // The owner aborted before publication. A driver may retry
+                    // the entire transaction without exposing witness identities.
+                    if matches!(
+                        error,
+                        fgdb::WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins { .. })
+                    ) {
+                        Failure::new(
+                            "Neo.TransientError.Transaction.Outdated",
+                            "A concurrent commit invalidated this transaction. Retry from a fresh snapshot.",
+                        )
+                    } else {
+                        Failure::from_refusal(crate::execute::write_refusal(&error))
+                    }
                 })?;
                 drop(guard);
                 match completion {
