@@ -490,6 +490,47 @@ impl Database<UnixVfs> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Capture this healthy writer's exact publication for deferred cold reads.
+    ///
+    /// This copies only the immutable store, root, manifest, frontier and catalog
+    /// identities. It performs no storage I/O, reopens no independently selected
+    /// root, and retains neither the resident snapshot nor the writer lease.
+    /// Later writes, compaction and writer drop cannot change the selected cut.
+    ///
+    /// The returned publication can be consumed by
+    /// [`BufferedReadPublication::into_authorized_read_session`], which verifies
+    /// the signed capability before catalog or graph admission. Graph admission
+    /// remains the ordinary bounded cold validation: this handle does not copy
+    /// the writer's private receipts or manufacture an admission bypass. Use
+    /// [`Self::buffered_read_view`] when a trusted host instead wants immediate
+    /// receipt-backed admission of a privileged read view.
+    ///
+    /// The caller must retain the immutable object directory while the
+    /// publication or its readers are live. This is an in-process selection,
+    /// not the still-unimplemented cross-process retention lease.
+    pub fn buffered_read_publication(
+        &self,
+        cx: &QueryCx,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+    ) -> Result<BufferedReadPublication<V>, BufferedOpenError> {
+        self.ensure_readable()
+            .map_err(|_| BufferedOpenError::RecoveryRequired)?;
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        Ok(BufferedReadPublication {
+            namespace: self.keys.namespace,
+            published: PublishedRead {
+                store: self.store.clone().with_buffered_reads(pool.clone()),
+                root_id: self.snapshot.root,
+                manifest: self.snapshot.manifest,
+                published_at: self.snapshot.frontier,
+                schema: self.snapshot.schema.reference,
+            },
+            pool,
+            limits,
+        })
+    }
+
     /// Capture this healthy handle's exact published generation as an owned
     /// buffered source. Its opaque publication receipts already prove every
     /// payload, chain link and history law, so constructing another source

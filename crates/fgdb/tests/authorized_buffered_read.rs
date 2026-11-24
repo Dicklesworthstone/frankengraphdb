@@ -8,8 +8,8 @@ use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{
     AuthorizedBufferedError, AuthorizedBufferedReadSource, AuthorizedReadSession, BufferLimits,
-    BufferedReadLimits, Database, DatabaseKeys, MemVfs, MemVfsFile, MemoryPool, QueryError,
-    WriteBatch,
+    BufferedOpenError, BufferedReadLimits, Database, DatabaseKeys, DerivedPublicationStage, MemVfs,
+    MemVfsFile, MemoryPool, QueryError, WriteBatch,
 };
 use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
@@ -301,6 +301,206 @@ async fn collect<R: GraphSymbolResolver, C: FnMut() -> u64 + Send>(
     assert_eq!(cursor.state(), VertexScanState::Exhausted);
     assert!(cursor.next().await.is_none());
     rows
+}
+
+#[test]
+fn live_publication_keeps_one_cut_without_retaining_the_writer_or_resident_snapshot() {
+    let ((), report) = run_async_under_lab(0xa6_0107, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, mut db, _, at) = fixture(&commit, true).await;
+        let expected_root = db.partition_root().unwrap();
+        let expected_manifest = db.manifest().unwrap();
+        let weak = db.pinned_read_view().unwrap().downgrade();
+        let pool = memory();
+        vfs.reset();
+        vfs.refuse.store(true, Ordering::SeqCst);
+        let publication = db
+            .buffered_read_publication(&cx, pool.clone(), limits())
+            .unwrap();
+        let physical = db
+            .buffered_read_publication(&cx, memory(), limits())
+            .unwrap();
+        assert_eq!(publication.frontier(), at);
+        assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.used(), 0, "capture does not admit graph storage");
+        vfs.refuse.store(false, Ordering::SeqCst);
+
+        let mut extra = SymbolCatalog::default();
+        extra
+            .bind_all([("later", CatalogSymbol::Property(PropertyKeyId(3)))])
+            .unwrap();
+        db.register_symbols(&commit, &extra).await.unwrap();
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(111)));
+        edit.set_edge_property(EId(101), P, Some(CanonicalScalar::Int(117)));
+        let later = db.write(&commit, edit).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        assert!(
+            weak.upgrade().is_none(),
+            "capture retained a resident snapshot"
+        );
+        drop(db);
+        // The captures own no writer lease: a new writer opens while they live.
+        let reopened =
+            Database::open_with_vfs(&commit, vfs.clone(), vfs.memory.database_dir(), keys())
+                .await
+                .unwrap();
+        assert_eq!(reopened.frontier().unwrap(), later);
+        let physical = physical.into_read_view(&commit).await.unwrap();
+        assert_eq!(physical.partition_root(), expected_root);
+        assert_eq!(physical.manifest(), expected_manifest);
+        assert_eq!(physical.frontier(), at);
+        drop(physical);
+
+        let authority = issuer();
+        let token = authority.issue_at(&grant(2), 100).unwrap();
+        let mut session = publication
+            .into_authorized_read_session(
+                &commit,
+                &cx,
+                &authority,
+                &token,
+                "main",
+                at,
+                policy(),
+                || 100,
+            )
+            .await
+            .unwrap();
+        assert!(
+            session
+                .prepare(&cx, "MATCH (n) RETURN n,n.later", &GqlParameters::new())
+                .is_err(),
+            "later catalog names leaked into the captured cut"
+        );
+        assert_eq!(
+            collect(&mut session, &cx, "MATCH (n) RETURN n,n.score").await,
+            [
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(11)),
+                ]),
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(2)),
+                    GraphValue::Scalar(CanonicalScalar::Int(2)),
+                ]),
+            ]
+        );
+        assert_eq!(
+            collect(&mut session, &cx, "MATCH (a)-[r:R]->(b) RETURN r,r.score").await,
+            [GraphValueRow::from_owned_values(vec![
+                GraphValue::Edge(EId(101)),
+                GraphValue::Scalar(CanonicalScalar::Int(17)),
+            ])]
+        );
+        drop(session);
+        assert_eq!(pool.used(), 0);
+        drop(reopened);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn live_publication_preserves_authorization_and_cold_memory_admission() {
+    let ((), report) = run_async_under_lab(0xa6_0108, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, db, _, at) = fixture(&commit, false).await;
+        for wrong_namespace in [false, true] {
+            let pool = memory();
+            vfs.reset();
+            vfs.refuse.store(true, Ordering::SeqCst);
+            let publication = db
+                .buffered_read_publication(&cx, pool.clone(), limits())
+                .unwrap();
+            let authority = if wrong_namespace {
+                Authority::new(
+                    AuthKey::from_seed(0xa601),
+                    DatabaseSecurityNamespaceId([0xff; 32]),
+                    "graph",
+                    SchemaEpoch(1),
+                    1,
+                )
+                .unwrap()
+            } else {
+                issuer()
+            };
+            let mut denied = grant(2);
+            if !wrong_namespace {
+                denied.rights = fgdb_warden::Rights::None;
+            }
+            let token = authority.issue_at(&denied, 100).unwrap();
+            let result = publication
+                .into_authorized_read_session(
+                    &commit,
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    at,
+                    policy(),
+                    || 100,
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(AuthorizedBufferedError::Query(QueryError::Authorization(
+                    Error::WrongAuthority | Error::PermissionDenied
+                )))
+            ));
+            assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.used(), 0);
+        }
+        vfs.refuse.store(false, Ordering::SeqCst);
+        let pool = MemoryPool::new(1, 0).unwrap();
+        let publication = db
+            .buffered_read_publication(&cx, pool.clone(), limits())
+            .unwrap();
+        let result = publication.into_read_view(&commit).await;
+        assert!(matches!(
+            result,
+            Err(BufferedOpenError::Read(fgdb::BufferedReadError::Memory(_)))
+        ));
+        assert_eq!(
+            pool.used(),
+            0,
+            "refused admission releases every reservation"
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn live_publication_refuses_a_fenced_writer_instead_of_exporting_its_stale_root() {
+    let ((), report) = run_async_under_lab(0xa6_0109, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, mut db, _, _) = fixture(&commit, false).await;
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(111)));
+        assert!(
+            db.write_with_publication_failure(
+                &commit,
+                edit,
+                DerivedPublicationStage::PublishRootSlot,
+            )
+            .await
+            .is_err()
+        );
+        vfs.reset();
+        vfs.refuse.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            db.buffered_read_publication(&cx, memory(), limits()),
+            Err(BufferedOpenError::RecoveryRequired)
+        ));
+        assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+        vfs.refuse.store(false, Ordering::SeqCst);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
