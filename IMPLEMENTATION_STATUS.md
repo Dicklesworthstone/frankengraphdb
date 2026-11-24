@@ -12,6 +12,29 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Detached authorized transaction validation — qualification pending
+
+Detached authorized write transactions now keep private intervening-history
+validation outside the caller's signed work allowance. The transaction's own
+mutation footprint remains charged. History authentication and conflict checks
+still poll host cancellation, while hidden row and label counts no longer
+determine signed charges or holder-clock calls.
+
+A fixed live-authority check follows validation before either a clean outcome,
+conflict, or source error can escape. The existing final pre-publication check,
+strict conflict rules, terminal cleanup and single publication owner remain.
+Ordinary unscoped completion preserves its existing checkpoint behavior.
+
+Three native regression sources compare identical visible worlds with two
+intervening commits containing 1, 16 or 64 hidden rows and labels. They retain
+exact and one-short signed limits, equal clock-call counts, expiry/retirement
+before conflict disclosure, cancellation during private traversal, visible
+conflict rollback and obligation cleanup. Pinned formatting, whitespace checks
+and independent source review passed. Native compilation/runtime and full
+exact-tree qualification remain UNRUN after executor disk exhaustion and a
+failed pinned-dependency fetch. `fgdb-4iiho` and
+`fgdb-qualify-integrated-nov22-maz0p` remain open.
+
 ### Equality inside nested list comprehensions — qualification pending
 
 Bare comprehension locals now use the existing governed value-equality path

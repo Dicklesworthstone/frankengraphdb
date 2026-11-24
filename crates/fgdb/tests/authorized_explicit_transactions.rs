@@ -1586,6 +1586,251 @@ fn retirement_and_expiry_between_calls_cannot_publish_an_earlier_prefix() {
 }
 
 #[test]
+fn completion_work_threshold_ignores_hidden_intervening_rows_and_labels() {
+    async fn admits(
+        commit: &CommitCx,
+        query: &QueryCx,
+        txn: &TxnCx,
+        writing: bool,
+        hidden_rows: u64,
+        max_work: u64,
+    ) -> Option<u64> {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+        db.write(commit, seed).await.unwrap();
+        let issuer = authority();
+        let mut scope = grant(Rights::ReadWrite);
+        scope.limits.max_work = max_work;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let budget = |error: &WriteTxnError| {
+            matches!(
+                error,
+                WriteTxnError::Authorization(Error::LimitExceeded(
+                    fgdb_warden::LimitDimension::Work
+                ))
+            )
+        };
+        let clock_calls = AtomicU64::new(0);
+        let mut owner = match db.begin_authorized_write(
+            txn,
+            commit,
+            &issuer,
+            &token,
+            "main",
+            policy(),
+            10,
+            || {
+                clock_calls.fetch_add(1, Ordering::Relaxed);
+                NOW
+            },
+        ) {
+            Ok(owner) => owner,
+            Err(error) => {
+                assert!(budget(&error), "unexpected admission error: {error:?}");
+                assert_eq!(txn.outstanding_obligations(), 0);
+                return None;
+            }
+        };
+        let basis = owner.basis();
+        let selected = if writing {
+            owner.stage_chain(
+                &mut db,
+                query,
+                &chain("MATCH (n:Visible) SET n.p=8 RETURN n.p AS p"),
+                |_, _, _| Ok(()),
+            )
+        } else {
+            owner.read(
+                &mut db,
+                query,
+                &read("MATCH (n:Visible) RETURN n.p AS p"),
+                |_, _, _| Ok(()),
+            )
+        };
+        match selected {
+            Ok(selected) => {
+                assert_eq!(selected.value.len(), 1);
+                assert_eq!(
+                    selected.value[0].values(),
+                    &[integer(if writing { 8 } else { 7 })]
+                );
+            }
+            Err(error) => {
+                assert!(
+                    has_error(&error, budget),
+                    "unexpected statement error: {error:?}"
+                );
+                drop(owner);
+                assert_eq!(db.frontier().unwrap(), basis);
+                assert_eq!(txn.outstanding_obligations(), 0);
+                return None;
+            }
+        }
+        // Each world has the same visible state and two intervening commits.
+        // Only the private row/label cardinality differs; there is no visible
+        // conflict, and no later statement can rebill a changed source scan.
+        for batch in 0..2_u64 {
+            let mut hidden = WriteBatch::new(R);
+            for offset in 0..hidden_rows {
+                hidden.create_vertex(
+                    VId(u128::from(1000 + batch * 64 + offset)),
+                    (2..2 + hidden_rows).map(LabelId).collect(),
+                    vec![],
+                );
+            }
+            db.write(commit, hidden).await.unwrap();
+        }
+        let frontier = db.frontier().unwrap();
+        let published = db.vertices().unwrap();
+        let result = owner.commit(&mut db).await;
+        assert_eq!(txn.outstanding_obligations(), 0);
+        match result {
+            Ok(completion) => {
+                if writing {
+                    assert_eq!(completion.commit_seq().unwrap().0, frontier.0 + 1);
+                    assert_eq!(
+                        db.vertex(VId(1)).unwrap().unwrap().props,
+                        vec![(P, CanonicalScalar::Int(8).into())]
+                    );
+                } else {
+                    assert_eq!(
+                        completion,
+                        EmbeddedTxnCompletion::ReadClosed {
+                            snapshot_seq: basis,
+                            validated_through: frontier,
+                        }
+                    );
+                    assert_eq!(db.vertices().unwrap(), published);
+                }
+                Some(clock_calls.load(Ordering::Relaxed))
+            }
+            Err(error) => {
+                assert!(budget(&error), "unexpected completion error: {error:?}");
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!(
+                    db.vertices().unwrap(),
+                    published,
+                    "the private prefix must abort"
+                );
+                None
+            }
+        }
+    }
+
+    run(async |commit, query, txn| {
+        for writing in [false, true] {
+            let mut low = 0;
+            let mut high = 1_000_000;
+            assert!(admits(commit, query, txn, writing, 1, high).await.is_some());
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if admits(commit, query, txn, writing, 1, middle)
+                    .await
+                    .is_some()
+                {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            assert!(
+                low > 0,
+                "ordinary input and own-footprint work remain charged"
+            );
+            let clock_calls = admits(commit, query, txn, writing, 1, low).await.unwrap();
+            for hidden_rows in [1, 16, 64] {
+                assert_eq!(
+                    admits(commit, query, txn, writing, hidden_rows, low).await,
+                    Some(clock_calls),
+                    "hidden cardinality cannot change signed work or clock sampling"
+                );
+                assert!(
+                    admits(commit, query, txn, writing, hidden_rows, low - 1)
+                        .await
+                        .is_none()
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn completion_rechecks_authority_after_private_validation_before_conflict_disclosure() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    run(async |commit, query, txn| {
+        for conflict in [false, true] {
+            for retire in [false, true] {
+                let mut db = Database::open_memory(commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+                db.write(commit, seed).await.unwrap();
+                let issuer = authority();
+                let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let checked = commit.with_checkpoint_probe(Arc::clone(&probe));
+                let invalidate_after = AtomicU64::new(u64::MAX);
+                let mut owner = db
+                    .begin_authorized_write(
+                        txn,
+                        &checked,
+                        &issuer,
+                        &token,
+                        "main",
+                        policy(),
+                        10,
+                        || {
+                            if probe.calls() as u64 > invalidate_after.load(Ordering::Relaxed) {
+                                if retire {
+                                    issuer.retire();
+                                } else {
+                                    return 1000;
+                                }
+                            }
+                            NOW
+                        },
+                    )
+                    .unwrap();
+                owner
+                    .read(
+                        &mut db,
+                        query,
+                        &read("MATCH (n:Visible) RETURN n.p AS p"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
+                let mut concurrent = WriteBatch::new(R);
+                for id in 100..116 {
+                    concurrent.create_vertex(VId(id), vec![HIDDEN], vec![]);
+                }
+                if conflict {
+                    concurrent.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(8)));
+                }
+                db.write(commit, concurrent).await.unwrap();
+                let frontier = db.frontier().unwrap();
+                let published = db.vertices().unwrap();
+                // A read-only footprint adds no scalable logical work. Let the
+                // two entry checks pass, then change authority only after host
+                // validation has polled. No clock is needed inside that loop.
+                invalidate_after.store(probe.calls() as u64 + 2, Ordering::Relaxed);
+                let error = owner.commit(&mut db).await.unwrap_err();
+                assert!(
+                    matches!(
+                        (&error, retire),
+                        (WriteTxnError::Authorization(Error::AuthorityRetired), true)
+                            | (WriteTxnError::Authorization(Error::Expired), false)
+                    ),
+                    "authority must precede clean acceptance and conflict disclosure: {error:?}"
+                );
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!(db.vertices().unwrap(), published);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
 fn retirement_and_expiry_during_output_admission_abort_before_returning_rows() {
     run(async |commit, query, txn| {
         for writing in [false, true] {
@@ -1676,6 +1921,102 @@ fn retirement_and_expiry_during_output_admission_abort_before_returning_rows() {
                 assert_eq!(txn.outstanding_obligations(), 0);
             }
         }
+    });
+}
+
+#[test]
+fn completion_retains_visible_conflicts_and_cancellation_inside_hidden_history() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+
+    async fn attempt(
+        commit: &CommitCx,
+        query: &QueryCx,
+        txn: &TxnCx,
+        hidden_rows: u128,
+        stop: Option<usize>,
+        conflict: bool,
+    ) -> (usize, usize) {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+        db.write(commit, seed).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let probe = Arc::new(SimulationCheckpointProbe::new(stop));
+        let checked = commit.with_checkpoint_probe(Arc::clone(&probe));
+        let mut owner = db
+            .begin_authorized_write(txn, &checked, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        owner
+            .read(
+                &mut db,
+                query,
+                &read("MATCH (n:Visible) RETURN n.p AS p"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        if conflict {
+            owner
+                .stage_chain(
+                    &mut db,
+                    query,
+                    &chain("CREATE (:Visible {p:99})"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+        }
+        let mut concurrent = WriteBatch::new(R);
+        for id in 100..100 + hidden_rows {
+            concurrent.create_vertex(VId(id), vec![HIDDEN], vec![]);
+        }
+        if conflict {
+            concurrent.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(8)));
+        }
+        db.write(commit, concurrent).await.unwrap();
+        let frontier = db.frontier().unwrap();
+        let published = db.vertices().unwrap();
+        let before = probe.calls();
+        let result = owner.commit(&mut db).await;
+        if stop.is_some() {
+            assert!(matches!(result, Err(WriteTxnError::Interrupted(_))));
+        } else if conflict {
+            assert!(matches!(
+                result,
+                Err(WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ));
+        } else {
+            assert!(matches!(
+                result.unwrap(),
+                EmbeddedTxnCompletion::ReadClosed { .. }
+            ));
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(
+            db.vertices().unwrap(),
+            published,
+            "no private prefix may escape"
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+        (before, probe.calls())
+    }
+
+    run(async |commit, query, txn| {
+        let small = attempt(commit, query, txn, 1, None, false).await;
+        let large = attempt(commit, query, txn, 64, None, false).await;
+        assert_eq!(small.0, large.0, "identical visible setup");
+        assert!(
+            large.1 > small.1 + 8,
+            "private row traversal must keep polling"
+        );
+        // This checkpoint is later than the complete small-history run, yet
+        // inside the large run's private traversal, before its fixed terminal
+        // checks. An interrupted poll cannot become a successful read close.
+        let interrupted = attempt(commit, query, txn, 64, Some(small.1 + 1), false).await;
+        assert_eq!(interrupted.0, small.0);
+        attempt(commit, query, txn, 64, None, true).await;
     });
 }
 
