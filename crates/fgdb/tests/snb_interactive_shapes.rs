@@ -210,6 +210,16 @@ fn rendered(result: QueryResult) -> Vec<Vec<String>> {
         .collect()
 }
 
+// The workload asks whether the authors are distinct and connected.
+// Simple CASE compares with equality, so WHEN null cannot detect a missing edge.
+const IS7: &str =
+    "MATCH (msg:Message {id:60})<-[:REPLY_OF]-(reply:Comment)-[:HAS_CREATOR]->(writer:Person)
+    OPTIONAL MATCH (msg)-[:HAS_CREATOR]->(author:Person)-[friend:KNOWS]-(writer)
+    RETURN reply.id AS comment, reply.content AS content, reply.creationDate AS at,
+       writer.id AS person, writer.firstName AS first, writer.lastName AS last,
+       CASE WHEN friend IS NULL THEN false ELSE writer <> author END AS knows
+    ORDER BY at DESC, person";
+
 /// The hand-derived answer of each read shape, row by row in its ORDER BY.
 #[allow(clippy::type_complexity)]
 fn reads() -> Vec<(&'static str, &'static str, Vec<Vec<&'static str>>)> {
@@ -370,6 +380,21 @@ fn reads() -> Vec<(&'static str, &'static str, Vec<Vec<&'static str>>)> {
             ],
         ),
         (
+            "IC10",
+            "MATCH (origin:Person {id:1})-[:KNOWS*2..2]-(candidate:Person)-[:IS_LOCATED_IN]->(home:City)
+             WHERE candidate <> origin AND NOT (origin)-[:KNOWS]-(candidate)
+             WITH DISTINCT origin,candidate,home,datetime({epochMillis:candidate.birthday}) AS born
+             WHERE (born.month=12 AND born.day>=21) OR (born.month=1 AND born.day<22)
+             OPTIONAL MATCH (candidate)<-[:HAS_CREATOR]-(article:Post)
+             WITH origin,candidate,home,collect(article) AS authored
+             WITH candidate,home,size(authored) AS total,
+                size([item IN authored WHERE (item)-[:HAS_TAG]->()<-[:HAS_INTEREST]-(origin)]) AS common
+             RETURN candidate.id AS person,candidate.firstName AS first,candidate.lastName AS last,
+                2*common-total AS score,candidate.gender AS gender,home.name AS city
+             ORDER BY score DESC, person LIMIT 10",
+            vec![vec!["3", "'Ann'", "'Cole'", "1", "'female'", "'Berlin'"]],
+        ),
+        (
             "IC11",
             "MATCH (person:Person {id: 1})-[:KNOWS*1..2]-(friend:Person)
              WHERE NOT (person = friend)
@@ -494,6 +519,11 @@ fn reads() -> Vec<(&'static str, &'static str, Vec<Vec<&'static str>>)> {
                mod.firstName AS moderatorFirstName, mod.lastName AS moderatorLastName",
             vec![vec!["50", "'Group for Bach'", "1", "'Ann'", "'Abel'"]],
         ),
+        (
+            "IS7",
+            IS7,
+            vec![vec!["61", "'nice'", "1200", "3", "'Ann'", "'Cole'", "true"]],
+        ),
     ]
 }
 
@@ -577,7 +607,23 @@ fn snb_interactive_shapes_answer_from_the_graph() {
 
         // The eight updates, each checked by reading back what it made. IU1,
         // IU4, IU6 and IU7 MATCH between their writes.
-        for (name, text, check, expected) in updates() {
+        // Add tied replies after the eight updates to exercise both negative
+        // friendship cases without changing any earlier fixture or answer.
+        let tied_replies = (
+            "IS7 after self and stranger replies",
+            "MATCH (m:Post {id:60}), (s:Person {id:2}), (u:Person {id:4})
+             CREATE (x:Comment:Message {id:79,content:'self',creationDate:1300})-[:REPLY_OF]->(m),
+                    (x)-[:HAS_CREATOR]->(s),
+                    (y:Comment:Message {id:80,content:'stranger',creationDate:1300})-[:REPLY_OF]->(m),
+                    (y)-[:HAS_CREATOR]->(u)",
+            IS7.to_owned(),
+            vec![
+                vec!["79", "'self'", "1300", "2", "'Bob'", "'Bauer'", "false"],
+                vec!["80", "'stranger'", "1300", "4", "'Dan'", "'Diaz'", "false"],
+                vec!["61", "'nice'", "1200", "3", "'Ann'", "'Cole'", "true"],
+            ],
+        );
+        for (name, text, check, expected) in updates().into_iter().chain([tied_replies]) {
             db.query_write(
                 &txcx,
                 &cx,
