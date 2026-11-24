@@ -2678,6 +2678,242 @@ fn equality_of_open_columns_with_scalar_atoms_preserves_value_domains() {
     ));
 }
 
+/// Comprehension locals retain the same open value domain as UNWIND columns.
+/// The independently specified classes distinguish both full-width identities
+/// and identity domains; NULL is unknown even when compared with itself.
+#[test]
+fn equality_of_comprehension_locals_preserves_complete_value_domains() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::{CanonicalF64, EId};
+
+    let scalar = |value| GraphValue::Scalar(value);
+    let items = vec![
+        GraphValue::Vertex(VId(u128::MAX)),
+        GraphValue::Vertex(VId(u128::MAX)),
+        GraphValue::Vertex(VId(u128::from(u64::MAX))),
+        GraphValue::Edge(EId(u128::MAX)),
+        GraphValue::Edge(EId(u128::from(u64::MAX))),
+        scalar(CanonicalScalar::Int(1)),
+        scalar(CanonicalScalar::Float(CanonicalF64::from_i64_rounded(1))),
+        scalar(CanonicalScalar::Null),
+        GraphValue::List(vec![scalar(CanonicalScalar::Int(1))].into_boxed_slice()),
+        GraphValue::map(vec![("k".into(), scalar(CanonicalScalar::Int(1)))]).unwrap(),
+        scalar(CanonicalScalar::Bool(true)),
+        scalar(CanonicalScalar::ucs_basic_text("1").unwrap()),
+    ];
+    let classes = [0, 0, 2, 3, 4, 5, 5, 7, 8, 9, 10, 11];
+    let arguments = GqlParameters::new().with_list("items", items).unwrap();
+    let boolean =
+        |value: Option<bool>| scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Bool));
+    let bind = |text: &str| {
+        PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("items", fgdb_gql::GqlParameterType::List)],
+            symbols,
+        )
+        .expect(text)
+        .bind_parameters(&arguments)
+        .expect(text)
+    };
+    for operator in ["=", "<>", "!="] {
+        let expected: Vec<_> = (0..classes.len())
+            .map(|i| {
+                GraphValue::List(
+                    (0..classes.len())
+                        .map(|j| {
+                            boolean(if i == 7 || j == 7 {
+                                None
+                            } else {
+                                Some((classes[i] == classes[j]) == (operator == "="))
+                            })
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let text = format!(
+            "UNWIND [0] AS seed WITH $items AS items \
+             RETURN [x IN items | [y IN items | x {operator} y]] AS matrix"
+        );
+        let query = bind(&text);
+        assert_eq!(
+            run(&query, &[], wide(), &mut || Ok(())).unwrap().value,
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::List(
+                expected.clone().into_boxed_slice()
+            )])],
+            "{text}"
+        );
+        // A local and an Any-typed row column take the same value path in
+        // either order, including inside a quantified predicate.
+        let text = format!(
+            "UNWIND [0] AS seed WITH $items AS items \
+             UNWIND range(0,11) AS i WITH i,items,items[i] AS y \
+             RETURN i,[x IN items | x {operator} y] AS local_left,\
+             [x IN items | y {operator} x] AS local_right,\
+             any(x IN items WHERE x {operator} y) AS found ORDER BY i"
+        );
+        let query = bind(&text);
+        let rows = run(&query, &[], wide(), &mut || Ok(())).unwrap().value;
+        assert_eq!(rows.len(), classes.len());
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.values(),
+                &[
+                    scalar(CanonicalScalar::Int(i as i64)),
+                    expected[i].clone(),
+                    expected[i].clone(),
+                    boolean((i != 7).then_some(true)),
+                ],
+                "value {i}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn local_equality_keeps_scalar_peers_shadowing_and_governed_limits() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::EId;
+
+    let boolean = |value: Option<bool>| {
+        GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
+    };
+    let arguments = GqlParameters::new()
+        .with_list(
+            "items",
+            vec![
+                GraphValue::Vertex(VId(u128::MAX)),
+                GraphValue::Edge(EId(u128::MAX)),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ],
+        )
+        .unwrap()
+        .with_int64("needle", 1)
+        .unwrap();
+    let bind = |text: &str| {
+        PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("items", fgdb_gql::GqlParameterType::List)],
+            symbols,
+        )
+        .expect(text)
+        .bind_parameters(&arguments)
+        .expect(text)
+    };
+    for (peer, matches_integer) in [
+        ("1", true),
+        ("1.0", true),
+        ("$needle", true),
+        ("-1", false),
+        ("'1'", false),
+        ("true", false),
+        ("NULL", false),
+    ] {
+        for operator in ["=", "<>", "!="] {
+            let text = format!(
+                "UNWIND [0] AS seed WITH $items AS items \
+                 RETURN [x IN items | x {operator} {peer}] AS local_left,\
+                 [x IN items | {peer} {operator} x] AS local_right"
+            );
+            let expected = GraphValue::List(
+                (0..4)
+                    .map(|i| {
+                        boolean(if i == 3 || peer == "NULL" {
+                            None
+                        } else {
+                            Some((i == 2 && matches_integer) == (operator == "="))
+                        })
+                    })
+                    .collect(),
+            );
+            assert_eq!(
+                run(&bind(&text), &[], wide(), &mut || Ok(()))
+                    .unwrap()
+                    .value,
+                vec![GraphValueRow::from_owned_values(vec![
+                    expected.clone(),
+                    expected,
+                ])],
+                "{text}"
+            );
+        }
+    }
+    let shadowed = bind(
+        "UNWIND [0] AS x WITH x,$items AS items \
+         RETURN [x IN items | [x IN [1] | x = 1]] AS shadowed",
+    );
+    assert_eq!(
+        run(&shadowed, &[], wide(), &mut || Ok(())).unwrap().value,
+        vec![GraphValueRow::from_owned_values(vec![GraphValue::List(
+            vec![GraphValue::List(vec![boolean(Some(true))].into_boxed_slice()); 4]
+                .into_boxed_slice()
+        )])]
+    );
+    let arithmetic = prepare(
+        "UNWIND [0] AS seed RETURN [x IN [1,2] | x = 1+1] AS right,\
+         [x IN [1,2] | 1+1 = x] AS left",
+    );
+    let expected =
+        GraphValue::List(vec![boolean(Some(false)), boolean(Some(true))].into_boxed_slice());
+    assert_eq!(
+        run(&arithmetic, &[], wide(), &mut || Ok(())).unwrap().value,
+        vec![GraphValueRow::from_owned_values(vec![
+            expected.clone(),
+            expected
+        ])]
+    );
+    let invalid =
+        bind("UNWIND [0] AS seed WITH $items AS items RETURN [x IN items | x+1 = 2] AS values");
+    assert!(run(&invalid, &[], wide(), &mut || Ok(())).is_err());
+
+    let query = bind(
+        "UNWIND [0] AS seed WITH $items AS items \
+         RETURN [x IN items | [y IN items | x = y]] AS matrix",
+    );
+    let calls = Cell::new(0);
+    let measured = run(&query, &[], wide(), &mut || {
+        calls.set(calls.get() + 1);
+        Ok(())
+    })
+    .unwrap();
+    let work = measured.evaluator.work_units;
+    let scratch = measured.evaluator.scratch_entries;
+    assert!(work > 0 && scratch > 0 && calls.get() >= 3);
+    assert_eq!(
+        run(
+            &query,
+            &[],
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, work, scratch),
+            &mut || Ok(())
+        )
+        .unwrap(),
+        measured
+    );
+    for (work, scratch) in [(work - 1, scratch), (work, scratch - 1)] {
+        assert!(
+            run(
+                &query,
+                &[],
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, work, scratch),
+                &mut || Ok(())
+            )
+            .is_err()
+        );
+    }
+    for stop in [1, calls.get() / 2, calls.get()] {
+        let mut at = 0;
+        assert!(matches!(
+            run(&query, &[], wide(), &mut || {
+                at += 1;
+                if at == stop { Err(stop) } else { Ok(()) }
+            }),
+            Err(GqlQueryError::Interrupted(value)) if value == stop
+        ));
+        assert_eq!(at, stop);
+    }
+}
+
 /// The later MATCH owns q, while the comprehension owns x and reads ps from
 /// the incoming row. Neither comparison operand is a scalar projection.
 #[test]

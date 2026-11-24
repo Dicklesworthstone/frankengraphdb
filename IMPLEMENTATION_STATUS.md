@@ -12,6 +12,24 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Equality inside nested list comprehensions — qualification pending
+
+Bare comprehension locals now use the existing governed value-equality path
+when compared with another local, an open row column, a scalar atom or a
+parameter. The local retains its complete runtime value domain, including
+vertex and edge identities, lists and maps; its name still shadows an outer
+column. Equality and both inequality spellings preserve full-width identity,
+identity-domain separation, numeric equivalence and NULL's three-valued result.
+Arithmetic keeps its existing scalar checks and precedence.
+
+Two native regression sources cover nested-local matrices, duplicate and
+distinct 128-bit identities, mixed value domains, quantified predicates,
+parameter peers, shadowing, exact and one-short work/scratch allowances, and
+cancellation during evaluation. These reuse the canonical evaluator rather
+than introducing another comparison implementation. Native compilation and
+runtime qualification remain pending under `fgdb-hj2nw` and
+`fgdb-qualify-integrated-nov22-maz0p`; this entry is not a passing gate verdict.
+
 ### Cold carried-element selected properties — qualification pending
 
 Authorized cold ordered stages now read selected properties from carried vertex

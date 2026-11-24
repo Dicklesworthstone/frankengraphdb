@@ -2709,9 +2709,9 @@ impl<'a> Parser<'a> {
         Ok(!tighter_than_comparison(&mut lexer)?)
     }
 
-    /// Whether an open (Any) row column is compared with another bare column,
-    /// literal or parameter using `=`, `<>` or `!=`, in either order. The
-    /// open value may hold a graph identity, list or map even when the other
+    /// Whether an open (Any) row column or bare comprehension local is compared
+    /// with another bare value, literal or parameter using `=`, `<>` or `!=`.
+    /// An open value may hold a graph identity, list or map even when the other
     /// operand is scalar, so equality must use the value language (fgdb-hj2nw).
     /// A list-local
     /// predicate's correlated Apply binds `p` of `[p IN posts WHERE NOT p =
@@ -2733,14 +2733,18 @@ impl<'a> Parser<'a> {
          -> Result<Option<bool>, GraphPatternTextError> {
             let kind = if let TokenKind::Word(word) = token.kind {
                 if self.elements.contains(&word) {
-                    return Ok(None);
+                    // Locals have the full value domain too. In particular,
+                    // two nested locals can both hold graph identities. Their
+                    // names shadow every row column, regardless of its type.
+                    Some(GraphSetColumnType::Any)
+                } else {
+                    route.row.and_then(|schema| {
+                        schema[..self.visible_width(schema)]
+                            .iter()
+                            .find(|(name, _)| name.text == word)
+                            .map(|(_, kind)| *kind)
+                    })
                 }
-                route.row.and_then(|schema| {
-                    schema[..self.visible_width(schema)]
-                        .iter()
-                        .find(|(name, _)| name.text == word)
-                        .map(|(_, kind)| *kind)
-                })
             } else {
                 None
             };
