@@ -213,6 +213,17 @@ pub enum GraphElementKey {
     Property(PropertyKeyId),
 }
 
+impl GraphSetColumnType {
+    /// Element fields read canonical stored values. An ordinary map entry
+    /// can contain any graph value, including a vertex or relationship.
+    pub(crate) fn field_domain(self) -> Self {
+        match self {
+            Self::Vertex | Self::Edge => Self::Stored,
+            _ => Self::Any,
+        }
+    }
+}
+
 /// Metadata and stored endpoints requested from an element value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphElementMetadata {
@@ -1359,12 +1370,7 @@ fn admit(
             GraphSetColumnType::Any
         }
         GraphSetValue::MapGet { map, .. } => {
-            match admit(map, types, column, depth + 1, nodes, locals)? {
-                // An element lookup reads a canonical stored property, including
-                // NULL for a missing key. A query-created map can hold graph values.
-                GraphSetColumnType::Vertex | GraphSetColumnType::Edge => GraphSetColumnType::Stored,
-                _ => GraphSetColumnType::Any,
-            }
+            admit(map, types, column, depth + 1, nodes, locals)?.field_domain()
         }
         GraphSetValue::Keys(map) => {
             admit(map, types, column, depth + 1, nodes, locals)?;

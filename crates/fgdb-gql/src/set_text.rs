@@ -516,8 +516,8 @@ impl ReadValueTemplate {
             Self::Reduce { .. }
             | Self::MapLiteral { .. }
             | Self::MapOverlay { .. }
-            | Self::MapGet { .. }
             | Self::Temporal { .. } => GraphSetColumnType::Any,
+            Self::MapGet { map, .. } => map.column_type(input, parameters).field_domain(),
             Self::Keys(_) => GraphSetColumnType::List,
             Self::ElementMetadata { kind, .. } => match kind {
                 crate::GraphElementMetadata::Labels | crate::GraphElementMetadata::Keys => {
