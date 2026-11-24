@@ -27,6 +27,7 @@ use crate::tiered::buffer::{
     PreparedExtent, extent_checksum,
 };
 use crate::tiered::memory::{MemoryCharge, MemoryError, MemoryPool};
+use crate::tiered::sealed::{AdjRunError, SealedError};
 use crate::vertex::{VertexPatchRows, VertexRow};
 use crate::{AdjacencyEntry, PartitionRootVersion};
 use asupersync::fs::Vfs;
@@ -172,13 +173,20 @@ impl From<StoreError> for BufferedReadError {
     fn from(error: StoreError) -> Self {
         match error {
             StoreError::Extent(ExtentError::Memory(error)) => Self::Memory(error),
+            StoreError::MalformedAdjRun(run) => match *run {
+                AdjRunError::Sealed(SealedError::Interrupted(error)) => Self::Interrupted(error),
+                _ => Self::Store(Box::new(StoreError::MalformedAdjRun(run))),
+            },
             other => Self::Store(Box::new(other)),
         }
     }
 }
 impl From<BufferError> for BufferedReadError {
     fn from(error: BufferError) -> Self {
-        Self::Buffer(error)
+        match error {
+            BufferError::Cancelled(error) => Self::Interrupted(error),
+            other => Self::Buffer(other),
+        }
     }
 }
 impl From<MemoryError> for BufferedReadError {
@@ -1859,7 +1867,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
             .partition
             .buffer
             .reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)
-            .map_err(BufferedReadError::Buffer)?;
+            .map_err(BufferedReadError::from)?;
         let bytes = self
             .partition
             .pin(
@@ -2019,7 +2027,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
                             .partition
                             .buffer
                             .reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)
-                            .map_err(BufferedReadError::Buffer)?;
+                            .map_err(BufferedReadError::from)?;
                         winning_row = Some(BufferedValue {
                             value: properties.copy_row(row),
                             _charge: charge,

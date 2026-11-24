@@ -12,14 +12,20 @@ fn roots() -> [VId; 5] {
     [IDS[2], IDS[0], IDS[2], IDS[1], VId(13)]
 }
 
-fn parameters() -> GqlParameters {
+fn wanted_values() -> Vec<GraphValue> {
     let mut values: Vec<_> = roots().into_iter().map(GraphValue::Vertex).collect();
     values.extend([
         GraphValue::Vertex(VId(7)),
         GraphValue::Scalar(CanonicalScalar::Null),
         GraphValue::Scalar(CanonicalScalar::Int(42)),
     ]);
-    GqlParameters::new().with_list("ids", values).unwrap()
+    values
+}
+
+fn parameters() -> GqlParameters {
+    GqlParameters::new()
+        .with_list("ids", wanted_values())
+        .unwrap()
 }
 
 async fn fixture(contexts: &PurposeContexts, vfs: &MemVfs) -> Database<MemVfs> {
@@ -51,8 +57,20 @@ fn value(vid: VId, cut: u64) -> GraphValue {
 }
 
 fn oracle(mode: &str, direction: usize, cut: u64) -> Vec<Vec<u8>> {
+    let starts = roots()
+        .into_iter()
+        .map(|root| (GraphValue::Vertex(root), root));
+    path_oracle(mode, direction, cut, starts)
+}
+
+fn path_oracle(
+    mode: &str,
+    direction: usize,
+    cut: u64,
+    starts: impl IntoIterator<Item = (GraphValue, VId)>,
+) -> Vec<Vec<u8>> {
     let mut rows = Vec::new();
-    for root in roots() {
+    for (wanted, root) in starts {
         if cut == 3 && (root == VId(13) || root == IDS[1]) {
             continue;
         }
@@ -121,7 +139,7 @@ fn oracle(mode: &str, direction: usize, cut: u64) -> Vec<Vec<u8>> {
         for path in paths {
             let endpoint = path.steps().last().map_or(root, |step| step.1);
             rows.push(vec![
-                GraphValue::Vertex(root),
+                wanted.clone(),
                 GraphValue::Vertex(root),
                 GraphValue::Vertex(endpoint),
                 GraphValue::Path(path),
@@ -130,7 +148,12 @@ fn oracle(mode: &str, direction: usize, cut: u64) -> Vec<Vec<u8>> {
             ]);
         }
     }
-    rows.sort();
+    // ORDER BY wanted,a,b,path puts vertex imports before numbers and NULL last.
+    rows.sort_by(|left, right| {
+        left[0]
+            .compare_orderability(&right[0])
+            .then_with(|| left[1..].cmp(&right[1..]))
+    });
     rows.into_iter()
         .map(|row| {
             GraphValueRow::from_owned_values(row)
@@ -288,28 +311,53 @@ fn seeded_external_shortest_apply_keeps_occurrences_and_the_complete_left_barrie
                         fgdb_gql::GraphSetTextErrorKind::Pattern(
                             fgdb_gql::GraphPatternTextErrorKind::Expected("(")))))));
         assert_eq!(view.buffer_stats(), before);
-        // Only an explicitly imported, necessary AND equality can feed the
-        // native correlation owner. No alternate Boolean branch may narrow
-        // the path source, and an outer name is not an implicit CALL import.
-        for refused in [
-            text.replacen("CALL (wanted)", "CALL ()", 1),
-            text.replacen("WHERE a=wanted AND", "WHERE a=wanted OR", 1),
-            text.replacen("WHERE a=wanted", "WHERE NOT a=wanted", 1),
+        let unimported = text.replacen("CALL (wanted)", "CALL ()", 1);
+        let mut resolutions = 0;
+        let error = PreparedNativeRead::prepare(&unimported, &parameters, |kind, name: &str| {
+            resolutions += 1;
+            resolve(kind, name)
+        })
+        .err()
+        .expect("CALL () has no binding for wanted");
+        assert!(matches!(error, fgdb::QueryError::Refused { source, .. }
+            if matches!(source.as_ref(), fgdb::QueryError::PipelineText(error)
+                if matches!(error.kind, fgdb_gql::GraphPipelineAggregateTextErrorKind::Input(
+                    fgdb_gql::GraphSetTextErrorKind::Pattern(
+                        fgdb_gql::GraphPatternTextErrorKind::UnknownVariable))))));
+        assert_eq!(resolutions, 0);
+        assert_eq!(view.buffer_stats(), before);
+
+        for (query, negated) in [
+            (
+                text.replacen("WHERE a=wanted AND", "WHERE a=wanted OR", 1),
+                false,
+            ),
+            (
+                text.replacen("WHERE a=wanted", "WHERE NOT a=wanted", 1),
+                true,
+            ),
         ] {
-            let mut resolutions = 0;
-            let error = PreparedNativeRead::prepare(
-                &refused,
-                &parameters,
-                |kind: fgdb_gql::GraphSymbolKind, name: &str| {
-                    resolutions += 1;
-                    resolve(kind, name)
-                },
-            )
-            .err()
-            .expect("an unowned or non-conjunctive path correlation must refuse");
-            assert!(matches!(error, fgdb::QueryError::Refused { .. }));
-            assert_eq!(resolutions, 0, "{refused}");
-            assert_eq!(view.buffer_stats(), before);
+            // All four labelled roots pass a.p>=1. OR admits each one for
+            // every import; NOT drops equal vertices and unknown NULL comparisons.
+            let mut starts = Vec::new();
+            for wanted in wanted_values() {
+                for root in [IDS[0], IDS[1], IDS[2], VId(13)] {
+                    if negated
+                        && (wanted == GraphValue::Vertex(root)
+                            || matches!(wanted, GraphValue::Scalar(CanonicalScalar::Null)))
+                    {
+                        continue;
+                    }
+                    starts.push((wanted.clone(), root));
+                }
+            }
+            let expected = path_oracle("ANY SHORTEST WALK", 0, 2, starts);
+            let (rows, cut, _) =
+                ordered_parameters(&mut view, &cx, &query, &parameters, policy(), 8)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, expected, "{query}");
+            assert_eq!(cut, CommitSeq(2));
         }
         let (rows, snapshot, stats) = ordered_parameters(
             &mut view,

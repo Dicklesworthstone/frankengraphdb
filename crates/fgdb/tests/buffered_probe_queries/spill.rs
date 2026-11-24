@@ -385,32 +385,43 @@ fn external_scalar_identity_roots_narrow_id_and_element_id_correlations_across_c
             AsyncSpillSetSourcePlan::RowJoin(plan) if plan.identity_seed_column() == Some((0, true))
         ));
 
+        // The cross consumes UNWIND occurrences in order. WITH creates a row
+        // join whose final projection orders these rows by their vertex ID.
+        let expected_orders = |mut occurrences: Vec<(VId, i64)>| {
+            let encode = |pairs: &[(VId, i64)]| {
+                pairs
+                    .iter()
+                    .map(|&(id, val)| {
+                        GraphValueRow::from_owned_values(vec![
+                            GraphValue::Vertex(id),
+                            GraphValue::Scalar(CanonicalScalar::Int(val)),
+                        ])
+                        .canonical_bytes()
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let cross = encode(&occurrences);
+            occurrences.sort_by_key(|&(id, _)| id);
+            [cross, encode(&occurrences)]
+        };
         for cut in [2, 3] {
             let expected_ids = if cut == 2 {
                 vec![(IDS[0], 1_i64), (VId(13), 13), (IDS[0], 1)]
             } else {
                 vec![(IDS[0], 1_i64), (IDS[0], 1)]
             };
-            let expected_id_rows: Vec<_> = expected_ids
-                .iter()
-                .map(|&(id, val)| {
-                    GraphValueRow::from_owned_values(vec![
-                        GraphValue::Vertex(id),
-                        GraphValue::Scalar(CanonicalScalar::Int(val)),
-                    ])
-                    .canonical_bytes()
-                    .unwrap()
-                })
-                .collect();
-
-            for shape in [
+            for (shape, expected_id_rows) in [
                 format!(
                     "UNWIND $ids AS id MATCH (n) WHERE id(n)=id FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value"
                 ),
                 format!(
                     "UNWIND $ids AS id WITH id MATCH (n) WHERE id=id(n) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value"
                 ),
-            ] {
+            ]
+            .into_iter()
+            .zip(expected_orders(expected_ids))
+            {
                 let (rows, snapshot, stats) = ordered_parameters(
                     &mut view,
                     &cx,
@@ -434,26 +445,17 @@ fn external_scalar_identity_roots_narrow_id_and_element_id_correlations_across_c
             } else {
                 vec![(IDS[2], 33_i64), (IDS[0], 1), (IDS[2], 33)]
             };
-            let expected_eid_rows: Vec<_> = expected_eids
-                .iter()
-                .map(|&(id, val)| {
-                    GraphValueRow::from_owned_values(vec![
-                        GraphValue::Vertex(id),
-                        GraphValue::Scalar(CanonicalScalar::Int(val)),
-                    ])
-                    .canonical_bytes()
-                    .unwrap()
-                })
-                .collect();
-
-            for shape in [
+            for (shape, expected_eid_rows) in [
                 format!(
                     "UNWIND $eids AS eid MATCH (n) WHERE elementId(n)=eid FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value"
                 ),
                 format!(
                     "UNWIND $eids AS eid WITH eid MATCH (n) WHERE eid=elementId(n) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value"
                 ),
-            ] {
+            ]
+            .into_iter()
+            .zip(expected_orders(expected_eids))
+            {
                 let (rows, snapshot, stats) = ordered_parameters(
                     &mut view,
                     &cx,
@@ -1068,19 +1070,37 @@ fn selected_vertex_fields_reach_external_sort_seeded_inputs_and_aggregates() {
         let occupied = source_pool
             .reserve(&cx, source_pool.available() - 4 * 1024 * 1024)
             .unwrap();
-        let columns = (0..96)
+        const OUTPUT_COLUMNS: usize = 65;
+        let all_columns = (0..96)
             .map(|at| {
                 let field = if at % 2 == 0 { "p" } else { "q" };
                 format!("n.{field} AS cell_{at}")
             })
-            .collect::<Vec<_>>()
-            .join(",");
+            .collect::<Vec<_>>();
+        let wide = format!(
+            "MATCH (n) RETURN {} ORDER BY cell_1 DESC",
+            all_columns.join(",")
+        );
+        let before = view.buffer_stats();
+        let error = PreparedNativeRead::prepare(&wide, &GqlParameters::new(), resolve)
+            .err()
+            .expect("the original 96-column projection exceeds the pattern bound");
+        assert!(matches!(error, fgdb::QueryError::Refused { source, .. }
+        if matches!(source.as_ref(), fgdb::QueryError::PatternText(error)
+            if matches!(error.kind, fgdb_gql::GraphPatternTextErrorKind::Build(
+                fgdb_gql::algebra::PatternBuildError::LimitExceeded {
+                    dimension: fgdb_gql::algebra::PatternLimitDimension::Columns,
+                    limit: OUTPUT_COLUMNS,
+                    observed: 66,
+                })))));
+        assert_eq!(view.buffer_stats(), before);
+        let columns = all_columns[..OUTPUT_COLUMNS].join(",");
         let expected = |values: &[i64]| {
             values
                 .iter()
                 .map(|value| {
                     GraphValueRow::from_owned_values(
-                        (0..96)
+                        (0..OUTPUT_COLUMNS)
                             .map(|at| {
                                 GraphValue::Scalar(CanonicalScalar::Int(if at % 2 == 0 {
                                     *value
