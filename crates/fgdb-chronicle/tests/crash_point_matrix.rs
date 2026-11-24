@@ -494,6 +494,110 @@ fn a_committed_capsule_is_never_an_orphan() {
     });
 }
 
+/// A failed acknowledgement is not proof that its capsule is unreferenced.
+/// Both possible resolutions stay protected until an independent reopen has
+/// admitted the actual log; known older orphans cannot justify a partial list.
+#[test]
+fn orphan_discovery_refuses_uncertain_markers_until_recovery_resolves_them() {
+    let cases = [
+        (CrashPoint::AfterMarkerBeforeD2, false),
+        (CrashPoint::AfterMarkerBeforeD2, true),
+        (CrashPoint::AfterMarkerFileSyncBeforeDirectorySync, false),
+    ];
+    for (index, (point, torn)) in cases.into_iter().enumerate() {
+        let dir = scratch_dir(&format!("orphan-uncertain-{index}-{torn}"));
+        under_lab(0x0f00 + index as u64, move |cx| async move {
+            let cx = &cx;
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("open");
+            commit_ok(&mut coordinator, cx, 1).await;
+
+            // An unrelated D1 residue really is an orphan. Pre-marker
+            // failure keeps this owner usable and its absence proof valid.
+            let chain_snapshot = coordinator.chain().clone();
+            let before_marker = coordinator
+                .commit_with_crash(
+                    cx,
+                    &capsule_bytes(3),
+                    |seq, oid| marker_for(seq, oid, &chain_snapshot),
+                    Some(CrashPoint::AfterD1),
+                )
+                .await;
+            assert!(before_marker.is_err());
+            assert!(!coordinator.is_poisoned());
+            assert_eq!(
+                coordinator
+                    .orphan_capsules(cx)
+                    .await
+                    .expect("pre-marker scan"),
+                vec![capsule_oid(3)]
+            );
+
+            let interrupted = coordinator
+                .commit_with_crash(
+                    cx,
+                    &capsule_bytes(2),
+                    |seq, oid| marker_for(seq, oid, &chain_snapshot),
+                    Some(point),
+                )
+                .await;
+            assert!(interrupted.is_err(), "{point:?}");
+            assert!(coordinator.is_poisoned());
+            assert_eq!(coordinator.chain().len(), 1);
+            assert_eq!(capsule_file_count(&dir), 3);
+            let uncertain_log = log_bytes(&dir);
+            assert!(matches!(
+                coordinator.orphan_capsules(cx).await,
+                Err(CommitError::Poisoned)
+            ));
+            assert_eq!(log_bytes(&dir), uncertain_log);
+            assert_eq!(capsule_file_count(&dir), 3);
+            assert!(coordinator.is_poisoned());
+            drop(coordinator);
+
+            if torn {
+                CommitCoordinator::<UnixVfs>::tear_log_tail_for_test(&dir, 17)
+                    .expect("model the lost marker suffix");
+            }
+            let mut recovered = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("independent recovery");
+            assert!(!recovered.is_poisoned());
+            assert_eq!(recovered.chain().len(), if torn { 1 } else { 2 });
+            assert_eq!(recovered.chain().verify(), Ok(()));
+            let mut expected = vec![capsule_oid(3)];
+            if torn {
+                assert!(recovered.discarded_tail_bytes() > 0);
+                expected.push(capsule_oid(2));
+            } else {
+                assert_eq!(recovered.discarded_tail_bytes(), 0);
+                assert_eq!(
+                    recovered
+                        .read_capsule(cx, capsule_oid(2), &mut Vec::new())
+                        .await
+                        .expect("retained committed payload"),
+                    capsule_bytes(2)
+                );
+            }
+            expected.sort_by_key(|oid| oid.0);
+            assert_eq!(
+                recovered.orphan_capsules(cx).await.expect("resolved scan"),
+                expected
+            );
+            if torn {
+                commit_ok(&mut recovered, cx, 2).await;
+            }
+            assert_eq!(recovered.chain().len(), 2);
+            assert_eq!(
+                recovered.orphan_capsules(cx).await.expect("final scan"),
+                vec![capsule_oid(3)],
+                "only the genuinely unreferenced D1 residue remains"
+            );
+        });
+    }
+}
+
 /// A content-addressed path is immutable even when its current bytes are
 /// corrupt. Rewriting it in place is especially dangerous: an earlier durable
 /// marker may already name that object, so a short rewrite or crash can destroy
