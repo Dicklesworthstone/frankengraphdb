@@ -1033,13 +1033,37 @@ mod tests {
                 None
             );
             assert_eq!(pinned.symbol_catalog().len(), 3);
-            let manifest = db.manifest().unwrap();
+            let published = db.pinned_read_view().unwrap();
+            let catalog = db.snapshot.schema.reference.unwrap();
             drop(db);
+            let checkpoint = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(checkpoint.manifest().unwrap(), published.manifest());
+            drop(checkpoint);
             let rebuilt = Database::bind_with_vfs(&cx, vfs, &path, keys(), true)
                 .await
                 .unwrap();
+            // A full replay can choose a different block layout after compaction.
+            // The catalog object and every committed graph version are durable.
+            assert_eq!(rebuilt.snapshot.schema.reference, Some(catalog));
             assert_eq!(rebuilt.symbol_catalog().unwrap(), &expected);
-            assert_eq!(rebuilt.manifest().unwrap(), manifest);
+            assert_eq!(rebuilt.frontier().unwrap(), published.frontier());
+            for seq in 0..=published.frontier().0 {
+                let cut = CommitSeq(seq);
+                assert_eq!(
+                    rebuilt.symbol_catalog_at(cut).unwrap(),
+                    published.symbol_catalog_at(cut).unwrap()
+                );
+                assert_eq!(
+                    rebuilt.vertices_at(cut).unwrap(),
+                    published.vertices_at(cut).unwrap()
+                );
+                assert_eq!(
+                    rebuilt.edges_at(cut).unwrap(),
+                    published.edges_at(cut).unwrap()
+                );
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
