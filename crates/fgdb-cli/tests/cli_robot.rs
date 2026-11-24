@@ -1283,6 +1283,27 @@ fn lifecycle_across_processes_has_exact_query_and_history_ndjson() {
 }
 
 #[test]
+fn streamed_read_patterns_bind_map_fields_for_rows_and_aggregates() {
+    let db = TestDb::new("stream-map-fields");
+    db.create();
+    db.write(&["INSERT (:Person {name:'Ada'}), (:Person {name:'Grace'})"]);
+    for (argument, literal) in [
+        (r#"m=json:{"name":"Ada"}"#, "'Ada'"),
+        (r#"m=json:{"name":"Grace"}"#, "'Grace'"),
+        ("m=json:{}", "'Absent'"),
+    ] {
+        for projection in ["n AS person, n.name AS name", "count(n) AS total"] {
+            let text = format!("MATCH (n:Person {{name:$m.name}}) RETURN {projection}");
+            let expected = db.command("query", &["--stream", &text.replace("$m.name", literal)]);
+            expected.success();
+            let result = db.command("query", &["--stream", "--param", argument, &text]);
+            result.success();
+            assert_eq!(result.events, expected.events, "{argument} {text}");
+        }
+    }
+}
+
+#[test]
 fn historical_rows_and_sequence_agree_across_robot_delivery_modes() {
     let db = TestDb::new("historical-delivery");
     db.create();

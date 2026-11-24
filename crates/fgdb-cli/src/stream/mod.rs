@@ -27,8 +27,12 @@ pub(super) fn run(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
-    let prepared = PreparedNativeRead::prepare(&options.text, &options.params, options)
-        .map_err(execution_failure)?;
+    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&options.text, &options.params);
+    let (text, params) = lowered.as_ref().map_or(
+        (options.text.as_str(), &options.params),
+        |(lowered, derived)| (lowered.text(), derived),
+    );
+    let prepared = PreparedNativeRead::prepare(text, params, options).map_err(execution_failure)?;
     // Native classification chooses the output domain, not a second parser or
     // a retry after a failed row plan. The aggregate compiler must admit the
     // entire bound definition before any header or source demand can escape.
@@ -39,7 +43,7 @@ pub(super) fn run(
             | PreparedNativeRead::PipelineAggregate(_)
     ) {
         let mut cursor = prepared
-            .stream_aggregate_in_view(view, cx, &options.params, options.budget.policy())
+            .stream_aggregate_in_view(view, cx, params, options.budget.policy())
             .map_err(execution_failure)?;
         let columns = cursor.columns().to_vec();
         let slots = cursor.output_slots().to_vec();
@@ -58,7 +62,7 @@ pub(super) fn run(
         return result;
     }
     let (columns, mut cursor) = prepared
-        .stream_in_view(view, cx, &options.params, options.budget.policy())
+        .stream_in_view(view, cx, params, options.budget.policy())
         .map_err(execution_failure)?;
     // In particular, a temporal stream names its actual retained cut, not the
     // live writer's later frontier. No second database read supplies metadata.
