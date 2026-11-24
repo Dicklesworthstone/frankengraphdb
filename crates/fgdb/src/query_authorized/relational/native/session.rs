@@ -362,6 +362,52 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64, B> AuthorizedReadSession<'_, R, 
             terminal,
         )
     }
+
+    // Only trusted database/publication constructors can attach an immutable
+    // host template. A narrowed session still exposes only its own prepare.
+    fn attach_prepared(
+        &mut self,
+        cx: &QueryCx,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+        lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
+    ) -> Result<AuthorizedPreparedRead, QueryError> {
+        let owner = Arc::clone(&self.owner);
+        self.run_scoped_with_backend(
+            cx,
+            None,
+            |_, _, _, _, _, _| {
+                if crate::query::explain::without_terminator(selector.statement())
+                    != native.statement()
+                    || lowered
+                        .as_ref()
+                        .is_some_and(|lowered| lowered.text() != selector.source())
+                {
+                    return Err(QueryError::Authorization(
+                        AuthorizationError::WrongAuthority,
+                    ));
+                }
+                refuse_element_identity(selector.statement())?;
+                let parameter_schema = lowered.as_ref().map(|lowered| {
+                    lowered
+                        .field_parameter_schema(native.parameter_schema())
+                        .into_boxed_slice()
+                });
+                Ok((
+                    AuthorizedPreparedRead {
+                        owner,
+                        selector,
+                        native,
+                        lowered,
+                        parameter_schema,
+                    },
+                    0,
+                ))
+            },
+            |error| error,
+            terminal,
+        )
+    }
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
@@ -525,43 +571,6 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             )
         })
     }
-
-    fn attach_prepared(
-        &mut self,
-        cx: &QueryCx,
-        selector: Arc<PreparedGraphBranchText>,
-        native: Arc<PreparedNativeRead>,
-        lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
-    ) -> Result<AuthorizedPreparedRead, QueryError> {
-        let owner = Arc::clone(&self.owner);
-        self.run(cx, |_, _, _, _, _, _| {
-            if crate::query::explain::without_terminator(selector.statement()) != native.statement()
-                || lowered
-                    .as_ref()
-                    .is_some_and(|lowered| lowered.text() != selector.source())
-            {
-                return Err(QueryError::Authorization(
-                    AuthorizationError::WrongAuthority,
-                ));
-            }
-            refuse_element_identity(selector.statement())?;
-            let parameter_schema = lowered.as_ref().map(|lowered| {
-                lowered
-                    .field_parameter_schema(native.parameter_schema())
-                    .into_boxed_slice()
-            });
-            Ok((
-                AuthorizedPreparedRead {
-                    owner,
-                    selector,
-                    native,
-                    lowered,
-                    parameter_schema,
-                },
-                0,
-            ))
-        })
-    }
 }
 
 // Single statements and batches use exactly the same selector, classification,
@@ -691,8 +700,8 @@ impl<R, C, B> AuthorizedReadSession<'_, R, C, B> {
 impl<V: Vfs + Clone> Database<V> {
     /// Bind a retained host-prepared template to a fresh authorized read pin.
     /// The immutable selector and native template are shared without parsing
-    /// or catalog callbacks. This privileged Database constructor is the only
-    /// attachment seam; the narrowed session cannot accept an arbitrary plan.
+    /// or catalog callbacks. Only trusted database/publication constructors
+    /// expose attachment; the narrowed session cannot accept an arbitrary plan.
     /// Its returned handle remains bound to this exact session.
     /// A supplied map-field recipe is retained without argument values and
     /// must name exactly the selector's source. Execution accepts the caller's

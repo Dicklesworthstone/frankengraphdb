@@ -31,6 +31,8 @@ pub enum AuthorizedBufferedError {
     Query(QueryError),
     Open(BufferedOpenError),
     Catalog(SymbolCatalogError),
+    /// The trusted host refused to bind this publication's exact-cut catalog.
+    CatalogBinding(String),
     Read(BufferedReadError),
     /// This initial source profile binds its catalog and graph to one cut.
     DifferentCut {
@@ -45,6 +47,7 @@ impl core::fmt::Display for AuthorizedBufferedError {
             Self::Query(error) => error.fmt(f),
             Self::Open(error) => error.fmt(f),
             Self::Catalog(error) => error.fmt(f),
+            Self::CatalogBinding(error) => write!(f, "buffered catalog binding refused: {error}"),
             Self::Read(error) => error.fmt(f),
             Self::DifferentCut { requested, bound } => write!(
                 f,
@@ -62,7 +65,7 @@ impl core::error::Error for AuthorizedBufferedError {
             Self::Open(error) => Some(error),
             Self::Catalog(error) => Some(error),
             Self::Read(error) => Some(error),
-            Self::DifferentCut { .. } => None,
+            Self::CatalogBinding(_) | Self::DifferentCut { .. } => None,
         }
     }
 }
@@ -149,7 +152,7 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
         branch: &str,
         at: CommitSeq,
         policy: GqlQueryPolicy,
-        mut clock: C,
+        clock: C,
     ) -> Result<
         AuthorizedReadSession<
             'a,
@@ -157,6 +160,48 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
             C,
             AuthorizedBufferedReadSource<V>,
         >,
+        AuthorizedBufferedError,
+    > {
+        self.into_authorized_read_session_with_resolver(
+            commit_cx,
+            cx,
+            authority,
+            token,
+            branch,
+            at,
+            policy,
+            clock,
+            |catalog| Ok(Catalog(catalog)),
+        )
+        .await
+    }
+
+    /// Bind a trusted host resolver to the authenticated catalog at `at`.
+    /// The callback runs once, after read authorization and catalog decoding,
+    /// before graph admission. It can preserve host aliases or refuse a stale
+    /// prepared catalog. It cannot select another graph cut or replace the
+    /// capability. Fresh validity is checked even when the callback refuses.
+    ///
+    /// Like the default constructor, this is a trusted publication-opening
+    /// boundary. A narrowed session never exposes a resolver-replacement seam.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn into_authorized_read_session_with_resolver<
+        'a,
+        R: GraphSymbolResolver,
+        C: FnMut() -> u64,
+    >(
+        self,
+        commit_cx: &CommitCx,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        at: CommitSeq,
+        policy: GqlQueryPolicy,
+        mut clock: C,
+        bind_catalog: impl FnOnce(SymbolCatalog) -> Result<R, String>,
+    ) -> Result<
+        AuthorizedReadSession<'a, R, C, AuthorizedBufferedReadSource<V>>,
         AuthorizedBufferedError,
     > {
         if authority.namespace() != self.security_namespace() {
@@ -167,7 +212,7 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
             .verify_at(token, branch, now)
             .map_err(QueryError::Authorization)?;
         let mut last_now_ms = now;
-        let (view, catalog) = {
+        let (view, resolver) = {
             let permit = capability
                 .begin_read_at(branch, now)
                 .map_err(QueryError::Authorization)?;
@@ -192,19 +237,22 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
                 .symbol_catalog_at(at)
                 .map_err(AuthorizedBufferedError::Catalog)?;
             execution.checkpoint()?;
+            let resolver_result = cx.with_restriction(|| bind_catalog(catalog));
+            execution.poll_fresh()?;
+            let resolver = resolver_result.map_err(AuthorizedBufferedError::CatalogBinding)?;
             let view_result = self.into_read_view(commit_cx).await;
             // A failed catalog/storage callback cannot hide late credentials.
             execution.poll_fresh()?;
             let view = view_result.map_err(AuthorizedBufferedError::Open)?;
             execution.deliver(0)?;
-            (view, catalog)
+            (view, resolver)
         };
         Ok(AuthorizedReadSession {
             state: Some(State {
                 view: Some(AuthorizedBufferedReadSource { view, at }),
                 capability,
                 branch: branch.to_owned(),
-                resolver: Catalog(catalog),
+                resolver,
                 policy,
                 clock,
                 last_now_ms,
@@ -212,6 +260,54 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
             }),
             owner: Arc::new(()),
         })
+    }
+
+    /// Reattach a trusted host's immutable prepared template to a freshly
+    /// authorized buffered publication. `bind_catalog` must verify the frozen
+    /// symbol bindings against the catalog at `at`; refusal precedes graph I/O.
+    /// Map-field lowering and temporal binding retain their canonical owners.
+    /// The returned handle belongs only to the returned session.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn into_authorized_prepared_read_session_with_resolver<
+        'a,
+        R: GraphSymbolResolver,
+        C: FnMut() -> u64,
+    >(
+        self,
+        commit_cx: &CommitCx,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        at: CommitSeq,
+        policy: GqlQueryPolicy,
+        clock: C,
+        bind_catalog: impl FnOnce(SymbolCatalog) -> Result<R, String>,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+        lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
+    ) -> Result<
+        (
+            AuthorizedReadSession<'a, R, C, AuthorizedBufferedReadSource<V>>,
+            AuthorizedPreparedRead,
+        ),
+        AuthorizedBufferedError,
+    > {
+        let mut session = self
+            .into_authorized_read_session_with_resolver(
+                commit_cx,
+                cx,
+                authority,
+                token,
+                branch,
+                at,
+                policy,
+                clock,
+                bind_catalog,
+            )
+            .await?;
+        let prepared = session.attach_prepared(cx, selector, native, lowered)?;
+        Ok((session, prepared))
     }
 }
 

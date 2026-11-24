@@ -9,13 +9,17 @@ use asupersync::security::key::AuthKey;
 use fgdb::{
     AuthorizedBufferedError, AuthorizedBufferedReadSource, AuthorizedReadSession, BufferLimits,
     BufferedOpenError, BufferedReadLimits, Database, DatabaseKeys, DerivedPublicationStage, MemVfs,
-    MemVfsFile, MemoryPool, QueryError, WriteBatch,
+    MemVfsFile, MemoryPool, PreparedNativeRead, QueryError, WriteBatch,
 };
 use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::stream::VertexScanState;
-use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbolResolver};
+use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
+use fgdb_gql::{
+    GqlMapArgumentText, GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
+    GraphSymbolResolver, PreparedGraphBranchText, ReverseSymbolCatalog,
+};
 use fgdb_strata::store::BlockStore;
 use fgdb_types::{
     CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts,
@@ -77,6 +81,34 @@ fn limits() -> BufferedReadLimits {
 }
 fn memory() -> MemoryPool {
     MemoryPool::new(16 * 1024 * 1024, 0).unwrap()
+}
+
+struct HostCatalog {
+    catalog: SymbolCatalog,
+    lookups: Arc<AtomicUsize>,
+}
+impl GraphSymbolResolver for HostCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        let name = if kind == GraphSymbolKind::Label && name == "Visible" {
+            "L"
+        } else {
+            name
+        };
+        CatalogSymbolResolver::new(&self.catalog).resolve_symbol(kind, name)
+    }
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        CatalogSymbolResolver::new(&self.catalog).time_zones()
+    }
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        CatalogSymbolResolver::new(&self.catalog).reverse_catalog()
+    }
+    fn reverse_label(&self, id: LabelId) -> Option<String> {
+        CatalogSymbolResolver::new(&self.catalog).reverse_label(id)
+    }
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        CatalogSymbolResolver::new(&self.catalog).reverse_relation(id)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -301,6 +333,313 @@ async fn collect<R: GraphSymbolResolver, C: FnMut() -> u64 + Send>(
     assert_eq!(cursor.state(), VertexScanState::Exhausted);
     assert!(cursor.next().await.is_none());
     rows
+}
+
+#[test]
+fn trusted_catalog_binding_uses_the_selected_cut_and_retains_host_names() {
+    let ((), report) = run_async_under_lab(0xa6_0110, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (_, mut db, old, _) = fixture(&commit, true).await;
+        let old_catalog = db.symbol_catalog_at(old).unwrap();
+        let mut later = SymbolCatalog::default();
+        later
+            .bind_all([("later", CatalogSymbol::Property(PropertyKeyId(3)))])
+            .unwrap();
+        db.register_symbols(&commit, &later).await.unwrap();
+        let authority = issuer();
+        let token = authority.issue_at(&grant(2), 100).unwrap();
+        let pool = memory();
+        let bindings = AtomicUsize::new(0);
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let mut session = db
+            .buffered_read_publication(&cx, pool.clone(), limits())
+            .unwrap()
+            .into_authorized_read_session_with_resolver(
+                &commit,
+                &cx,
+                &authority,
+                &token,
+                "main",
+                old,
+                policy(),
+                || 100,
+                |catalog| {
+                    bindings.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(catalog, old_catalog);
+                    Ok(HostCatalog {
+                        catalog,
+                        lookups: lookups.clone(),
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(bindings.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            collect(
+                &mut session,
+                &cx,
+                "MATCH (n:Visible) RETURN n,n.score ORDER BY n",
+            )
+            .await,
+            [1, 2]
+                .into_iter()
+                .map(|id| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    GraphValue::Scalar(CanonicalScalar::Int(id as i64)),
+                ]))
+                .collect::<Vec<_>>()
+        );
+        assert!(lookups.load(Ordering::SeqCst) > 0);
+        assert!(
+            session
+                .prepare(&cx, "MATCH (n) RETURN n,n.later", &GqlParameters::new())
+                .is_err()
+        );
+        assert_eq!(bindings.load(Ordering::SeqCst), 1);
+        drop(session);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn catalog_callbacks_follow_authorization_and_cannot_hide_late_expiry() {
+    let ((), report) = run_async_under_lab(0xa6_0111, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts
+            .query()
+            .with_host_clock_interval(std::num::NonZeroU32::new(1024).unwrap());
+        let (vfs, db, _, at) = fixture(&commit, false).await;
+        let authority = issuer();
+        let pool = memory();
+        for denied in [true, false] {
+            let mut allowed = grant(2);
+            if denied {
+                allowed.rights = fgdb_warden::Rights::None;
+            }
+            let token = authority.issue_at(&allowed, 100).unwrap();
+            let calls = AtomicUsize::new(0);
+            vfs.reset();
+            vfs.refuse.store(true, Ordering::SeqCst);
+            let result = db
+                .buffered_read_publication(&cx, pool.clone(), limits())
+                .unwrap()
+                .into_authorized_read_session_with_resolver(
+                    &commit,
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    at,
+                    policy(),
+                    || 100,
+                    |_| -> Result<HostCatalog, String> {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Err("host rejected stale names".into())
+                    },
+                )
+                .await;
+            if denied {
+                assert!(matches!(
+                    result,
+                    Err(AuthorizedBufferedError::Query(QueryError::Authorization(
+                        Error::PermissionDenied
+                    )))
+                ));
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(AuthorizedBufferedError::CatalogBinding(_))
+                ));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+            assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.used(), 0);
+        }
+        let token = authority.issue_at(&grant(2), 100).unwrap();
+        let now = AtomicUsize::new(100);
+        let result = db
+            .buffered_read_publication(&cx, pool.clone(), limits())
+            .unwrap()
+            .into_authorized_read_session_with_resolver(
+                &commit,
+                &cx,
+                &authority,
+                &token,
+                "main",
+                at,
+                policy(),
+                || now.load(Ordering::SeqCst) as u64,
+                |_| -> Result<HostCatalog, String> {
+                    now.store(1001, Ordering::SeqCst);
+                    Err("expiry must take precedence".into())
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AuthorizedBufferedError::Query(QueryError::Authorization(
+                Error::Expired
+            )))
+        ));
+        assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.used(), 0);
+        vfs.refuse.store(false, Ordering::SeqCst);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn host_prepared_buffered_reads_rebind_maps_and_history_without_reparsing() {
+    let ((), report) = run_async_under_lab(0xa6_0112, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, db, old, current) = fixture(&commit, true).await;
+        let authority = issuer();
+        let token = authority.issue_at(&grant(2), 100).unwrap();
+        let pool = memory();
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let catalog = db.symbol_catalog_at(old).unwrap();
+        let arguments = |cut: CommitSeq, score| {
+            GqlParameters::new()
+                .with_text("route", "main")
+                .unwrap()
+                .with_uint64("cut", cut.0)
+                .unwrap()
+                .with_map(
+                    "record",
+                    vec![(
+                        "score".into(),
+                        GraphValue::Scalar(CanonicalScalar::Int(score)),
+                    )],
+                )
+                .unwrap()
+        };
+        let text = "AT BRANCH $route MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut \
+                    WHERE n.score = $record.score RETURN n,n.score ORDER BY n";
+        let (lowered, derived) =
+            GqlMapArgumentText::lower_fields(text, &arguments(old, 1)).unwrap();
+        let selector = Arc::new(PreparedGraphBranchText::prepare(lowered.text()).unwrap());
+        let native = {
+            let selected = selector.bind_parameters(&derived).unwrap();
+            Arc::new(
+                PreparedNativeRead::prepare(
+                    selected.statement(),
+                    selected.parameters(),
+                    HostCatalog {
+                        catalog: catalog.clone(),
+                        lookups: lookups.clone(),
+                    },
+                )
+                .unwrap(),
+            )
+        };
+        let lowered = Arc::new(lowered);
+        let prepared_lookups = lookups.load(Ordering::SeqCst);
+        assert!(prepared_lookups > 0);
+        let mut foreign = None;
+        for (at, score) in [(old, 1), (current, 11), (old, 1)] {
+            let args = arguments(at, score);
+            let (mut session, prepared) = db
+                .buffered_read_publication(&cx, pool.clone(), limits())
+                .unwrap()
+                .into_authorized_prepared_read_session_with_resolver(
+                    &commit,
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    at,
+                    policy(),
+                    || 100,
+                    |selected| {
+                        if selected != catalog {
+                            return Err("prepared symbol catalog changed".into());
+                        }
+                        Ok(HostCatalog {
+                            catalog: selected,
+                            lookups: lookups.clone(),
+                        })
+                    },
+                    selector.clone(),
+                    native.clone(),
+                    Some(lowered.clone()),
+                )
+                .await
+                .unwrap();
+            if let Some(foreign) = &foreign {
+                assert!(matches!(
+                    session.stream(&cx, foreign, &args),
+                    Err(AuthorizedBufferedError::Query(QueryError::Authorization(
+                        Error::WrongAuthority
+                    )))
+                ));
+                assert!(!session.is_closed());
+            }
+            let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+            assert_eq!(cursor.snapshot_seq(), at);
+            assert_eq!(
+                cursor.next().await.unwrap().unwrap().as_ref(),
+                &GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(score)),
+                ])
+            );
+            assert!(cursor.next().await.is_none());
+            drop(cursor);
+            assert_eq!(lookups.load(Ordering::SeqCst), prepared_lookups);
+            vfs.reset();
+            vfs.refuse.store(true, Ordering::SeqCst);
+            let different = if at == old { current } else { old };
+            assert!(matches!(
+                session.stream(&cx, &prepared, &arguments(different, score)),
+                Err(AuthorizedBufferedError::DifferentCut { requested, bound })
+                    if requested == different && bound == at
+            ));
+            assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+            vfs.refuse.store(false, Ordering::SeqCst);
+            drop(session);
+            assert_eq!(
+                pool.used(),
+                0,
+                "a retained template never pins graph storage"
+            );
+            foreign = Some(prepared);
+        }
+        let mismatched = Arc::new(PreparedGraphBranchText::prepare("MATCH (n) RETURN n").unwrap());
+        let result = db
+            .buffered_read_publication(&cx, pool.clone(), limits())
+            .unwrap()
+            .into_authorized_prepared_read_session_with_resolver(
+                &commit,
+                &cx,
+                &authority,
+                &token,
+                "main",
+                old,
+                policy(),
+                || 100,
+                |catalog| Ok(HostCatalog { catalog, lookups }),
+                mismatched,
+                native,
+                Some(lowered),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AuthorizedBufferedError::Query(QueryError::Authorization(
+                Error::WrongAuthority
+            )))
+        ));
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
