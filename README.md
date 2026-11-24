@@ -30,7 +30,7 @@ The CLI and server can write a graph, query the new state, and recover it after 
 
 **The problem.** Every graph database on the market is a compromise fossilized around one old decision. Neo4j chose pointer-chasing on the JVM (great ergonomics, painful memory, a runtime that took 15 years to vectorize). TigerGraph chose MPP with a proprietary language and a platform-sized footprint. Kùzu got the *query* story right (columnar CSR + vectorization + factorization + worst-case-optimal joins), and then it left the commons: Apple acquired Kùzu Inc. (agreed October 2025, disclosed February 2026 via Apple's EU DMA filing) and the upstream repository was archived read-only — community forks carry the architecture forward while inheriting its gaps, and no engine in the space has the durability, temporal, multi-writer, or verification story. Memgraph/FalkorDB are fast in-memory engines with thin durability. JanusGraph/NebulaGraph pay a permanent impedance tax on a generic KV underlay. The academic frontier has solved essentially every hard subproblem *in isolation*, yet **no shipping system has ever composed them**.
 
-**The solution.** `frankengraphdb` composes them. One codebase, three postures: an embedded library (`fgdb`), a server (`fgdbd`), and a CLI (`fgdb`), all speaking **GQL** (ISO/IEC 39075:2024) with an openCypher on-ramp. Larger-than-memory is first-class everywhere. It is, in a precise sense, *a database written in the asupersync programming model*, the way FoundationDB is a database written in Flow: structured concurrency, capability contexts, fountain coding, and a deterministic lab runtime are the substrate, not add-ons.
+**The solution.** `frankengraphdb` composes them in an embedded library (`fgdb`), a server (`fgdbd`) and a CLI (`fgdb`). They share a GQL engine with an openCypher compatibility surface. The project targets larger-than-memory operation in all three. Today, local `query --buffered` can stream supported scans from disk under a memory limit. Ordinary database open still materializes the snapshot. Structured concurrency, capability contexts, fountain coding and a deterministic lab runtime come from asupersync.
 
 **Why `frankengraphdb`:**
 
@@ -54,7 +54,7 @@ The CLI and server can write a graph, query the new state, and recover it after 
 ## Quick example
 
 ```gql
--- Create a graph and write some data (serializable by default)
+-- Create a graph and write some data
 CREATE GRAPH social;
 
 INSERT (:Person {name: 'Ada',  born: 1815})
@@ -92,7 +92,11 @@ CALL hybrid.search(
 EXPLAIN (CERTIFICATE) MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*);
 ```
 
-> **Target state.** Checked 2026-09-28, 2026-10-05 and 2026-10-17 by running each statement through the `fgdb` CLI on a fresh database: 6 of these 11 statements run as written: the `INSERT`, the `SHORTEST` quantified-path match, `FOR SYSTEM_TIME AS OF SEQ` (given a sequence number the database has retained), `EXPLAIN (CERTIFICATE)`, `CALL hybrid.search` (named arguments; the corpus is the projection the arguments name, resolved at the read's snapshot, and `$ada` is a list of seed vertices) and `SUBSCRIBE TO` (served by `fgdbd` and streamed by `fgdb remote subscribe`, or registered in process with `Database::subscribe_native`; a read with no `RETURN` subscribes to its bound variables). `CALL fnx.pagerank() YIELD node, score ...` also runs without the `GRAPH social` argument. Not yet: `CREATE GRAPH` (there is no graph catalog), the three branch statements (there is no branch catalog, fork, merge or branch write; `AT BRANCH` works on reads only, against a pinned snapshot the host resolves through `Database::query_with_branch_resolver`), and naming a graph in `CALL` (fgdb-luq0b). **Isolation today** (checked 2026-10-19 in `crates/fgdb/src/write_txn_parts/finish.rs`): a write transaction (`Database::begin` -> `WriteTxn`) commits under first-committer-wins backward validation. Every element, point lookup and scan it read is checked against every delta committed since its basis snapshot, and any overlap aborts it; reads run against one pinned generation. The plan's SSI engine (rw-antidependency tracking, FG-INV-05) is not live, so "serializable by default" names the 1.0 contract, not the delivered mechanism, which aborts more transactions than SSI would.
+> **Available today.** On November 24, 2026, six of the eleven examples ran against a fresh database. The insert committed, the shortest path returned Charles at one hop, and the historical query returned both names at retained sequence 2. The hybrid query ranked Ada with supplied parameters and searchable properties. `EXPLAIN (CERTIFICATE)` returned the plan and digest. The server delivered the subscription baseline through `fgdb remote subscribe`. Embedded callers can use `Database::subscribe_native`.
+>
+> Graph creation by name, the three branch mutations, and a named `GRAPH social` argument to PageRank remain design examples. Use `CALL fnx.pagerank() YIELD node, score` on the current graph. Embedded hosts can resolve a read-only `AT BRANCH` selector to a pinned snapshot through `Database::query_with_branch_resolver`.
+>
+> **Isolation today.** Reads pin one generation. A writer validates its recorded reads and writes against changes committed since its basis. Conflicting transactions can abort at commit. The plan tracks graph SSI and its rw-antidependency checks under FG-INV-05. See the [runnable quick start](#quick-start).
 
 ---
 
@@ -521,6 +525,7 @@ Honest framing. `frankengraphdb` is the only one of these that composes durabili
 
 ```bash
 # Create a database directory under an explicit key file
+fgdbd keygen --database fgdb.keys
 fgdb create --db mydb.fgdbdir --key-file fgdb.keys
 
 # Run a GQL query (human output; --robot for versioned NDJSON)
@@ -721,6 +726,10 @@ fgdb remote --addr 127.0.0.1:7687 --token-file token --database social query "MA
 # One prepared read, many argument sets: a JSON array of typed objects, or CSV with --csv-types
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
   --rows-file names.json query 'MATCH (p:Person {name: $name}) RETURN p.name'
+
+# Write a CSV batch in one commit. names.csv has a name header and one name per row.
+fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
+  --rows-file names.csv --csv-types name=text write 'CREATE (:Person {name: $name})'
 
 # Different reads in one pinned session, each with its own parameters and columns
 fgdb --robot remote --addr 127.0.0.1:7687 --token-file token --database social \
@@ -1017,7 +1026,7 @@ Native `CREATE`/`INSERT`, matched mutations and vertex `MERGE` also support aggr
 
 FGP also supports reusable native read templates through `Client::prepare_read`, `execute_prepared`/`execute_prepared_streaming`, and `release_prepared`. Preparation binds syntax and operand types without executing or pinning a snapshot; each execution supplies its parameters again and opens a fresh authorized read. Handles belong to one connection, are invalidated by authority refresh or database recovery, and cannot be used to execute writes. Each connection retains at most 64 templates and 4 MiB of original query text. Both schema and row callbacks return `Result<(), ClientError>`; a callback error cancels and drains its result before the client can execute another request.
 
-Remote queries select their execution path with `--read-mode buffered|source|ordered`. The default `buffered` mode collects the ordinary eager answer. `source` uses the authorized native row or aggregate cursor with transport credit driving source demand. Its row profile is identity-leading: a vertex scan's rows begin with the scanned vertex and a fixed-edge scan's with the captured edge, so `MATCH (p:Person) RETURN p.name` refuses in `source` mode (re-measured 2026-10-17) while `buffered` answers it; [Native source streams](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) gives the exact profile. `ordered` uses the server's private external sorter for property-only vertex and fixed-edge/join projections, hidden sort keys, DISTINCT and SKIP/LIMIT. It also accepts terminal `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` and `COLLECT` over admitted graph and complete relational inputs, including prepared historical reads. Groups spill through the existing bounded reducer; exact counts, wide sums and rational averages retain their native wire types, and collections retain native occurrence order. Both native modes flush the schema and each row without collecting the complete result in the CLI. Unsupported source profiles and terminal aggregate expressions that require an additional graph-element lookup refuse before execution. New external aggregate regressions have source and formatting review; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
+Remote queries select their execution path with `--read-mode buffered|source|ordered`. The default `buffered` mode collects the ordinary eager answer. `source` uses the authorized native row or aggregate cursor with transport credit driving source demand. Its row profile is identity-leading: a vertex scan's rows begin with the scanned vertex and a fixed-edge scan's with the captured edge, so `MATCH (p:Person) RETURN p.name` refuses in `source` mode (re-measured 2026-11-24) while `buffered` answers it; [Native source streams](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) gives the exact profile. `ordered` uses the server's private external sorter for property-only vertex and fixed-edge/join projections, hidden sort keys, DISTINCT and SKIP/LIMIT. It also accepts terminal `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` and `COLLECT` over admitted graph and complete relational inputs, including prepared historical reads. Groups spill through the existing bounded reducer; exact counts, wide sums and rational averages retain their native wire types, and collections retain native occurrence order. Both native modes flush the schema and each row without collecting the complete result in the CLI. Unsupported source profiles and terminal aggregate expressions that require an additional graph-element lookup refuse before execution. New external aggregate regressions have source and formatting review; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
 
 Enable external ordered reads by adding `--query-scratch-dir /existing/private/scratch` to the database's `fgdbd serve` options, after its `--database` argument. This is an operator path; clients cannot choose files or physical limits. Defaults bound the database's shared tracked spill buffers to 64 MiB and concurrent ordered sessions to four, with three private files of at most 512 MiB each per session and at most 100,000 input rows. The complete sort-work ceiling is reserved from the same signed allowance that pays for source work and final delivery. The server announces the stream before sorting, handles controls while setup or sort I/O is pending, and streams only the completed final rows under credit. Aggregate inputs and completed-group expressions finish even when `LIMIT 0` suppresses output; only delivered groups spend the signed result-row allowance. Each collection must fit the per-value memory and encoded-row limits. On Unix, scratch files are exclusive and unlinked before query data is written. The source graph remains resident. [Ordered stream details and limits](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) describe the supported profile and ownership boundaries.
 
@@ -1066,7 +1075,7 @@ cargo build --release                        # builds the library workspace
 cargo run -p fgdb --example open_a_database  # a real main(): create, commit, reopen, verify
 ```
 
-A `fgdb` CLI binary is produced today (`cargo build -p fgdb-cli`; [The `fgdb` CLI](#the-fgdb-cli) lists the commands it runs), and so is the `fgdbd` server binary (`cargo build -p fgdb-server`), which serves the FGP subset described above.
+Build both command-line programs with `cargo build --locked -p fgdb-cli -p fgdb-server`. The server accepts FGP connections and offers HTTP/1.1 JSON and Bolt listeners. Its HTTP listener serves the read-only browser workspace at `/studio/`. See [the CLI](#the-fgdb-cli) and [FrankenGraph Studio](docs/STUDIO.md).
 
 **3. Embedded, as a Rust library:**
 
@@ -1184,34 +1193,23 @@ for row in db.query("MATCH (p:Person) RETURN p.name LIMIT 5"):
 
 ## Quick start
 
-> **Target state.** The workflow below shows the 1.0 shape. The `fgdb` binary is real today for `create`/`query`/`write`/`diff`/`transaction`/`import-csv`/`load`/`compact`/`scrub`/`search`/`replay` and `fgdb robot schema` (see [The `fgdb` CLI](#the-fgdb-cli)); the `--branch` step and `fgdbd`'s TOML config await W10 composition (`fgdbd serve` itself runs today with flags, serving FGP, the HTTP/JSON adapter and, with `--bolt-listen`, the Bolt-compat subset; `fgdb remote subscribe` streams a changefeed from it). The minimal runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
+Build the CLI and server as described in [Installation](#installation), put both binaries on your `PATH`, and run these commands in a new directory. Keep the generated key for subsequent opens. The create command persists the bindings for every process that uses this database.
 
 ```bash
-# 1. Create a database directory and bulk-load a graph
-fgdb load city.fgdbdir --edges roads.csv --vertices intersections.csv --format csv
-
-# 2. Ask a question
-fgdb query city.fgdbdir \
-  "MATCH p = SHORTEST (a:Intersection {id: 42})-[:ROAD]->{1,20}(b:Intersection {id: 9001})
-   RETURN path_length(p) AS hops"
-
-# 3. Run an in-database analytic over the live snapshot (zero-copy fnx)
-fgdb query city.fgdbdir \
-  "CALL fnx.betweenness_centrality(GRAPH city) YIELD node, score
-   RETURN node.id, score ORDER BY score DESC LIMIT 20"
-
-# 4. Fork a branch, mutate it, compare, and throw it away; O(1), zero-copy
-fgdb branch city.fgdbdir create roadworks --from trunk
-fgdb query city.fgdbdir --branch roadworks \
-  "MATCH (:Intersection {id: 42})-[r:ROAD]->(:Intersection {id: 77}) DELETE r"
-
-# 5. Serve it and connect a Neo4j driver over the Bolt-compat subset
-fgdbd --data ./city.fgdbdir --listen 127.0.0.1:7687 --protocols fgp,bolt
+fgdbd keygen --database social.keys
+fgdb create --db social.fgdbdir --key-file social.keys --persist-bindings \
+  --label Person=1 --relation KNOWS=1 --property name=1
+fgdb write --db social.fgdbdir --key-file social.keys \
+  "CREATE (:Person {name: 'Ada'})-[:KNOWS]->(:Person {name: 'Charles'})"
+fgdb query --db social.fgdbdir --key-file social.keys \
+  "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS source, b.name AS target"
 ```
+
+The write commits at sequence 2. The final command reopens the database and returns one row with `Ada` under `source` and `Charles` under `target`. For the embedded equivalent, run `cargo run -p fgdb --example open_a_database`. For a server connection, follow the [FGP and HTTP examples](#the-fgdb-cli) or [open the same database in Studio](docs/STUDIO.md).
 
 ## Configuration
 
-`fgdbd` reads a TOML config; every value has a safe default and can be overridden per environment. The commit stream and retention tiers make most "tuning" a matter of *policy*, not knobs.
+`fgdbd serve` takes command-line flags. Run `fgdbd help` for listener, database, authentication and resource options. The following TOML illustrates the planned 1.0 configuration format.
 
 ```toml
 # fgdb.toml
@@ -1249,7 +1247,11 @@ role   = "leader"                  # leader | follower
 peers  = ["10.0.0.2:7688", "10.0.0.3:7688"]
 ```
 
-> **Target state.** Nothing reads this file today (re-checked 2026-11-11): `fgdbd serve` and the `fgdb` CLI take flags (`fgdbd --help`, [The `fgdb` CLI](#the-fgdb-cli)). There is no isolation knob: every write transaction uses first-committer-wins backward validation (with automatic `MergeEvalCx` intent rebase on non-conflicting concurrent commits), as described under the Quick example. At-rest encryption today authenticates and encrypts Chronicle commit capsules (`XChaCha20-Poly1305` encrypt-then-RaptorQ-code) from the raw 3-line hex `--key-file`; Argon2id passphrase derivation, KEK→DEK envelope rotation, and Strata extent/run encryption remain target-state work. Replication is not served: `crates/fgdb-repl` holds the replica catch-up state machine, and no `fgdbd` path uses it yet.
+The TOML above describes the proposed configuration. The server and CLI currently take command-line flags. Write transactions use first-committer-wins backward validation and can rebase compatible intents.
+
+For a passphrase-protected database key, create an owner-only passphrase file and run `fgdbd keygen --database graph.keys --passphrase-file pass`. Supply `--key-file graph.keys --kek-passphrase-file pass` when creating and reopening the database. The Argon2id-wrapped key enables protected Strata storage. A raw three-line key also protects Chronicle commit capsules. To enable protected Strata storage with that key, supply `--strata-ecs` on creation and subsequent opens.
+
+The server has an in-memory replica coordinator. Durable distributed replication and an operator workflow for key rotation remain open.
 
 ## Performance
 
