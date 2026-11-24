@@ -4709,7 +4709,7 @@ impl<V: Vfs> BlockStore<V> {
                 |_, reference, read| Some((*reference, read)),
                 &mut |_| Ok::<(), StoreError>(()),
                 OPEN_READS_IN_FLIGHT,
-                |at, rows, _| walk.vertex_history.observe_patch(at, rows),
+                |_, rows, _| walk.vertex_history.observe_published_patch(rows),
             )
             .await?;
         let mut patches = Vec::with_capacity(read.len());
@@ -5023,10 +5023,12 @@ impl RootAdmission {
         )
     }
 
-    pub(crate) fn live_vertices(&self) -> Vec<crate::vertex::VertexRow> {
+    pub(crate) fn live_vertices(&self) -> Vec<crate::root::AdmittedVertexRow> {
         self.walk
             .vertex_history
-            .live_rows(self.binding.published_at)
+            .live_statements(self.binding.published_at)
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn edge_identities(&self) -> impl ExactSizeIterator<Item = fgdb_types::EId> + '_ {

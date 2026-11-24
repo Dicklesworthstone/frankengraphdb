@@ -32,7 +32,9 @@ use crate::edge_props::{
     admitted_row_bytes, encode_property_patch, property_patch_id,
 };
 use crate::id_map::{IdMap, IdSet};
-use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
+use crate::root::{
+    AdmittedVertexRow, BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root,
+};
 use crate::vertex::{
     VertexPatchError, VertexPatchRows, VertexRow, encode_patch, span_of_rows, vertex_patch_id,
 };
@@ -129,14 +131,14 @@ impl IncidentLinks {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LiveVertex {
-    row: VertexRow,
+    statement: AdmittedVertexRow,
     incident_head: u32,
 }
 
 impl LiveVertex {
-    fn new(row: VertexRow) -> Self {
+    fn new(statement: AdmittedVertexRow) -> Self {
         Self {
-            row,
+            statement,
             incident_head: NO_INCIDENT_EDGE,
         }
     }
@@ -520,20 +522,23 @@ impl BlockWriter {
             None => blocks.iter().flatten().map(|entry| entry.eid).collect(),
         };
         let mut sealed_live_vertices = BTreeSet::new();
-        // Defer cloning live vertex payloads until the edge map has consumed
-        // its row vector, keeping the same allocation order as reconstruction
-        // from raw history. The admitted face already owns the canonical
-        // collapse, including permanently spent identities and retirements.
+        // A writable reopen and any retained preparation basis can share the
+        // admitted patch row. A content change installs an owned successor
+        // only in the fold being updated. Incidence links stay local and inline.
         let live_rows = match admission {
             Some(admission) => admission.live_vertices(),
-            None => crate::vertex::merge_all_vertices(patches, frontier),
+            None => crate::vertex::merge_all_vertices(patches, frontier)
+                .into_iter()
+                .map(AdmittedVertexRow::Owned)
+                .collect(),
         };
         let mut live_vertices = IdMap::with_capacity(live_rows.len());
         for row in live_rows {
-            if row.created_at == frontier {
-                sealed_live_vertices.insert((row.vid, row.created_at));
+            let vertex = row.row();
+            if vertex.created_at == frontier {
+                sealed_live_vertices.insert((vertex.vid, vertex.created_at));
             }
-            live_vertices.insert(row.vid, LiveVertex::new(row));
+            live_vertices.insert(vertex.vid, LiveVertex::new(row));
         }
         let spent_vertices: IdSet<VId> = match admission {
             Some(admission) => admission.vertex_identities().collect(),
@@ -687,7 +692,9 @@ impl BlockWriter {
     /// The full LIVE statement of `vid` — the row the statement-chain
     /// version transcript encodes (fgdb-ge6a v3).
     pub fn live_vertex_row(&self, vid: VId) -> Option<VertexRow> {
-        self.live_vertices.get(&vid).map(|live| live.row.clone())
+        self.live_vertices
+            .get(&vid)
+            .map(|live| live.statement.row().clone())
     }
 
     /// Borrow one live vertex's labels without copying its property payload.
@@ -695,7 +702,14 @@ impl BlockWriter {
     pub fn live_vertex_labels(&self, vid: VId) -> Option<&[LabelId]> {
         self.live_vertices
             .get(&vid)
-            .map(|live| live.row.labels.as_slice())
+            .map(|live| live.statement.row().labels.as_slice())
+    }
+
+    fn replace_live_vertex_row(&mut self, vid: VId, row: VertexRow) {
+        self.live_vertices
+            .get_mut(&vid)
+            .expect("live vertex")
+            .statement = AdmittedVertexRow::Owned(row);
     }
 
     /// The full LIVE statement of `eid` — topology, birth of the current
@@ -956,9 +970,7 @@ impl BlockWriter {
                 // fold cannot resolve means the stream is not being replayed
                 // from the beginning, exactly as for `UnknownEdge`.
                 let row = self
-                    .live_vertices
-                    .get(vid)
-                    .map(|live| live.row.clone())
+                    .live_vertex_row(*vid)
                     .ok_or(WriteError::UnknownVertex { vid: *vid })?;
                 // Verify the declared image against the live incident set,
                 // then retire THE DECLARED LIST. An undercount would leave
@@ -1121,7 +1133,8 @@ impl BlockWriter {
                     self.seal_vertices(keys)?;
                 }
                 self.pending_vertices.insert((*vid, seq), row.clone());
-                self.live_vertices.insert(*vid, LiveVertex::new(row));
+                self.live_vertices
+                    .insert(*vid, LiveVertex::new(AdmittedVertexRow::Owned(row)));
                 let was_fresh = Arc::make_mut(&mut self.spent_vertices).insert(*vid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }
@@ -1689,9 +1702,7 @@ impl BlockWriter {
         update: VertexContentUpdate,
     ) -> Result<(), WriteError> {
         let current = self
-            .live_vertices
-            .get(&vid)
-            .map(|live| live.row.clone())
+            .live_vertex_row(vid)
             .ok_or(WriteError::UnknownVertex { vid })?;
         let mut successor = current.clone();
         match update {
@@ -1732,7 +1743,7 @@ impl BlockWriter {
                 .is_some_and(|pending| pending.retired_at.is_none())
             {
                 self.pending_vertices.insert((vid, seq), successor.clone());
-                self.live_vertices.get_mut(&vid).expect("live vertex").row = successor;
+                self.replace_live_vertex_row(vid, successor);
                 return Ok(());
             }
             // Same-commit creation already sealed. Restate the live row
@@ -1748,7 +1759,7 @@ impl BlockWriter {
                 self.seal_vertices(keys)?;
             }
             self.pending_vertices.insert((vid, seq), successor.clone());
-            self.live_vertices.get_mut(&vid).expect("live vertex").row = successor;
+            self.replace_live_vertex_row(vid, successor);
             return Ok(());
         }
         let mut tombstone = current;
@@ -1770,7 +1781,7 @@ impl BlockWriter {
         self.pending_vertices.insert(tombstone_key, tombstone);
         self.pending_vertices
             .insert(successor_key, successor.clone());
-        self.live_vertices.get_mut(&vid).expect("live vertex").row = successor;
+        self.replace_live_vertex_row(vid, successor);
         Ok(())
     }
 

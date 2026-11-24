@@ -2733,7 +2733,39 @@ pub(crate) fn resolve_patch_ref(
 /// discipline at the identity level.
 #[derive(Debug, Default)]
 pub(crate) struct VertexHistoryValidator {
-    rows: std::collections::BTreeMap<(VId, CommitSeq), crate::vertex::VertexRow>,
+    rows: std::collections::BTreeMap<(VId, CommitSeq), AdmittedVertexRow>,
+}
+
+/// A writable reopen keeps the decoded patch in the snapshot already. Hold its
+/// immutable row in the publication receipt too. Streaming admissions that
+/// release their input keep just the individual statement they need.
+#[derive(Clone)]
+pub(crate) enum AdmittedVertexRow {
+    Owned(crate::vertex::VertexRow),
+    Published(crate::vertex::VertexPatchRows, usize),
+}
+
+impl AdmittedVertexRow {
+    pub(crate) fn row(&self) -> &crate::vertex::VertexRow {
+        match self {
+            Self::Owned(row) => row,
+            Self::Published(patch, index) => &patch[*index],
+        }
+    }
+}
+
+impl PartialEq for AdmittedVertexRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.row() == other.row()
+    }
+}
+
+impl Eq for AdmittedVertexRow {}
+
+impl std::fmt::Debug for AdmittedVertexRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.row().fmt(f)
+    }
 }
 
 /// One exact statement may be repeated, or gain its one retirement. Reuse this
@@ -2836,17 +2868,25 @@ impl VertexHistoryValidator {
     pub(crate) fn statements(
         &self,
     ) -> impl ExactSizeIterator<Item = &crate::vertex::VertexRow> + '_ {
-        self.rows.values()
+        self.rows.values().map(AdmittedVertexRow::row)
     }
 
     /// The already admitted collapse, in canonical identity order. Reusing it
     /// avoids rebuilding a second map from every published vertex restatement
     /// solely to recover the current writer's live rows.
-    pub(crate) fn live_rows(&self, frontier: CommitSeq) -> Vec<crate::vertex::VertexRow> {
+    pub(crate) fn live_statements(
+        &self,
+        frontier: CommitSeq,
+    ) -> impl Iterator<Item = &AdmittedVertexRow> {
         self.rows
             .values()
-            .filter(|row| row.visible_at(frontier))
-            .cloned()
+            .filter(move |source| source.row().visible_at(frontier))
+    }
+
+    #[cfg(test)]
+    fn live_rows(&self, frontier: CommitSeq) -> Vec<crate::vertex::VertexRow> {
+        self.live_statements(frontier)
+            .map(|source| source.row().clone())
             .collect()
     }
 
@@ -2863,24 +2903,43 @@ impl VertexHistoryValidator {
     /// Admit one patch at its publication position.
     pub(crate) fn observe_patch(
         &mut self,
-        patch_at: usize,
+        _patch_at: usize,
         rows: &[crate::vertex::VertexRow],
     ) -> Result<(), RootError> {
         for row in rows {
-            let key = (row.vid, row.created_at);
-            if let Some(existing) = self.rows.get_mut(&key) {
-                validate_vertex_restatement(existing, row)?;
-                // Keep the already admitted birth allocations. Replacing the
-                // entire row would deep-clone the same immutable values again.
-                existing.retired_at = row.retired_at;
-                continue;
-            }
-            validate_vertex_neighbors(&self.rows, row, |existing| existing)?;
-            self.rows.insert(key, row.clone());
+            self.admit(row, || AdmittedVertexRow::Owned(row.clone()))?;
         }
-        // `patch_at` names the publication position for future diagnostics;
-        // the per-patch structural laws were already proven by decode.
-        let _ = patch_at;
+        Ok(())
+    }
+
+    pub(crate) fn observe_published_patch(
+        &mut self,
+        patch: &crate::vertex::VertexPatchRows,
+    ) -> Result<(), RootError> {
+        for (index, row) in patch.iter().enumerate() {
+            self.admit(row, || AdmittedVertexRow::Published(patch.clone(), index))?;
+        }
+        Ok(())
+    }
+
+    fn admit(
+        &mut self,
+        row: &crate::vertex::VertexRow,
+        retain: impl FnOnce() -> AdmittedVertexRow,
+    ) -> Result<(), RootError> {
+        let key = (row.vid, row.created_at);
+        if let Some(existing) = self.rows.get_mut(&key) {
+            validate_vertex_restatement(existing.row(), row)?;
+            if existing.row().retired_at != row.retired_at {
+                match existing {
+                    AdmittedVertexRow::Owned(birth) => birth.retired_at = row.retired_at,
+                    AdmittedVertexRow::Published(..) => *existing = retain(),
+                }
+            }
+        } else {
+            validate_vertex_neighbors(&self.rows, row, AdmittedVertexRow::row)?;
+            self.rows.insert(key, retain());
+        }
         Ok(())
     }
 }
@@ -2948,8 +3007,8 @@ mod vertex_history_tests {
         history
             .observe_patch(0, core::slice::from_ref(&row))
             .unwrap();
-        let labels = history.rows[&key].labels.as_ptr();
-        let props = history.rows[&key].props.as_ptr();
+        let labels = history.rows[&key].row().labels.as_ptr();
+        let props = history.rows[&key].row().props.as_ptr();
         assert_ne!(labels, row.labels.as_ptr());
         assert_ne!(props, row.props.as_ptr());
 
@@ -2960,7 +3019,7 @@ mod vertex_history_tests {
             history
                 .observe_patch(patch, core::slice::from_ref(&row))
                 .unwrap();
-            let admitted = &history.rows[&key];
+            let admitted = history.rows[&key].row();
             assert_eq!(admitted, &row);
             assert_eq!(admitted.labels.as_ptr(), labels);
             assert_eq!(admitted.props.as_ptr(), props);
@@ -2969,9 +3028,58 @@ mod vertex_history_tests {
         row.labels.clear();
         row.props.clear();
         assert_eq!(
-            history.rows[&key], accepted,
+            history.rows[&key].row(),
+            &accepted,
             "input stays independently owned"
         );
+    }
+
+    #[test]
+    fn published_history_shares_rows_and_admits_a_later_retirement() {
+        let first = crate::vertex::pack_rows(vec![birth()])
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut history = VertexHistoryValidator::default();
+        history.observe_published_patch(&first).unwrap();
+        assert!(std::ptr::eq(
+            history.statements().next().unwrap(),
+            &first[0]
+        ));
+
+        let mut changed = first[0].clone();
+        changed.props.clear();
+        assert!(matches!(
+            history.observe_patch(1, &[changed]),
+            Err(RootError::VertexIdentityMismatch { .. })
+        ));
+        assert!(std::ptr::eq(
+            history.statements().next().unwrap(),
+            &first[0]
+        ));
+
+        let mut retirement = first[0].clone();
+        retirement.retired_at = Some(CommitSeq(9));
+        let last = crate::vertex::pack_rows(vec![retirement.clone()])
+            .unwrap()
+            .pop()
+            .unwrap();
+        history.observe_published_patch(&last).unwrap();
+        assert!(std::ptr::eq(history.statements().next().unwrap(), &last[0]));
+        assert_eq!(first[0].retired_at, None);
+        assert!(matches!(
+            history.observe_published_patch(&first),
+            Err(RootError::VertexRetirementMismatch { .. })
+        ));
+
+        let mut mixed = VertexHistoryValidator::default();
+        mixed.observe_published_patch(&first).unwrap();
+        mixed
+            .observe_patch(1, std::slice::from_ref(&retirement))
+            .unwrap();
+        assert_eq!(mixed.statements().next(), Some(&retirement));
+        assert_eq!(mixed.live_rows(CommitSeq(8)), [retirement]);
+        assert!(mixed.live_rows(CommitSeq(9)).is_empty());
     }
 
     #[test]
@@ -2996,8 +3104,7 @@ mod vertex_history_tests {
             mutate(&mut malformed);
             let mut prefix = birth();
             prefix.vid = VId(retired.vid.0 + 1);
-            let mut expected = history.rows.clone();
-            expected.insert((prefix.vid, prefix.created_at), prefix.clone());
+            let expected = [retired.clone(), prefix.clone()];
             assert_eq!(
                 history.observe_patch(1, &[prefix, malformed.clone()]),
                 Err(RootError::VertexIdentityMismatch {
@@ -3005,7 +3112,7 @@ mod vertex_history_tests {
                     conflict: Box::new((retired.clone(), malformed)),
                 }),
             );
-            assert_eq!(history.rows, expected);
+            assert!(history.statements().eq(expected.iter()));
         }
 
         for retirement in [None, Some(CommitSeq(10))] {
@@ -3013,7 +3120,7 @@ mod vertex_history_tests {
             history
                 .observe_patch(0, core::slice::from_ref(&retired))
                 .unwrap();
-            let expected = history.rows.clone();
+            let expected = history.statements().cloned().collect::<Vec<_>>();
             let mut malformed = retired.clone();
             malformed.retired_at = retirement;
             assert_eq!(
@@ -3024,7 +3131,7 @@ mod vertex_history_tests {
                     found: retirement,
                 }),
             );
-            assert_eq!(history.rows, expected);
+            assert!(history.statements().eq(expected.iter()));
         }
     }
 
@@ -3055,12 +3162,7 @@ mod vertex_history_tests {
                     .observe_patch(3, core::slice::from_ref(row))
                     .unwrap();
             }
-            assert_eq!(
-                history.rows,
-                rows.iter()
-                    .map(|row| ((row.vid, row.created_at), row.clone()))
-                    .collect(),
-            );
+            assert!(history.statements().eq(rows.iter()));
         }
     }
 

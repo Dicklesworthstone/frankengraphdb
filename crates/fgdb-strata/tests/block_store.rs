@@ -1160,7 +1160,7 @@ fn a_prefetching_reopen_reports_the_first_damaged_block_in_root_order() {
 /// never ran, is caught.
 #[test]
 fn a_prefetching_reopen_proves_hosted_patches_as_the_serial_walk_does() {
-    use fgdb_delta_types::{DeltaRow, PropertyKeyId};
+    use fgdb_delta_types::{DeltaRow, LabelId, PropertyKeyId};
     use fgdb_strata::edge_props::EdgePropertyPatchError;
     use fgdb_strata::store::{OPEN_READS_IN_FLIGHT, RootReadError, RootReadLimits};
     use fgdb_types::CanonicalScalar;
@@ -1173,6 +1173,21 @@ fn a_prefetching_reopen_proves_hosted_patches_as_the_serial_walk_does() {
         seed_triangle(&mut writer, keys);
         // One source vertex per edge, so every edge is its own block family,
         // and every edge carries a property, so every block hosts a patch.
+        let label = LabelId(7);
+        for vid in [VId(1), VId(2)] {
+            writer
+                .apply(
+                    keys,
+                    CommitSeq(1),
+                    &DeltaRow::LabelMembership {
+                        vid,
+                        label,
+                        before: false,
+                        after: true,
+                    },
+                )
+                .expect("two nonempty published label slices");
+        }
         for i in 0..40u128 {
             writer
                 .apply(keys, CommitSeq(1), &create_vertex(1_000 + i))
@@ -1280,6 +1295,39 @@ fn a_prefetching_reopen_proves_hosted_patches_as_the_serial_walk_does() {
         )
         .expect("independently revalidates the full history");
         assert_eq!(format!("{from_walk:?}"), format!("{revalidated:?}"));
+        let mut changed = from_walk.clone();
+        changed
+            .apply(
+                keys,
+                CommitSeq(2),
+                &DeltaRow::LabelMembership {
+                    vid: VId(1),
+                    label,
+                    before: true,
+                    after: false,
+                },
+            )
+            .unwrap();
+        for vid in [VId(1), VId(2)] {
+            let published = sealed
+                .patches
+                .iter()
+                .flatten()
+                .find(|row| row.vid == vid)
+                .unwrap();
+            assert_eq!(published.labels, [label]);
+            assert!(std::ptr::eq(
+                from_walk.live_vertex_labels(vid).unwrap(),
+                published.labels.as_slice()
+            ));
+            if vid == VId(2) {
+                assert!(std::ptr::eq(
+                    changed.live_vertex_labels(vid).unwrap(),
+                    published.labels.as_slice()
+                ));
+            }
+        }
+        assert!(changed.live_vertex_labels(VId(1)).unwrap().is_empty());
         for recovered in [&mut from_walk, &mut revalidated] {
             recovered
                 .apply(keys, CommitSeq(2), &create_vertex(2_000))
