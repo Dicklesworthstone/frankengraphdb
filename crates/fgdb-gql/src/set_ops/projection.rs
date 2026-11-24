@@ -2054,6 +2054,30 @@ impl UnwindRows {
         }
     }
 
+    pub(super) fn page_admitted_range(
+        &mut self,
+        offset: u64,
+        count: u64,
+        max_input_rows: u64,
+    ) -> u64 {
+        let UnwindMembers::Range { remaining, .. } = &self.members else {
+            return 0;
+        };
+        let Ok(length) = u64::try_from(*remaining) else {
+            return 0;
+        };
+        if length > max_input_rows || count == 0 {
+            return 0;
+        }
+        // Keep a real fixed-width row for the host's byte checks even when
+        // SKIP consumes the whole range. Its residual window drops that row.
+        let skipped = offset.min(length.saturating_sub(1));
+        let retained = count.saturating_add(offset - skipped);
+        let mut seek = skipped;
+        self.page_range(&mut seek, Some(retained));
+        skipped
+    }
+
     pub(super) fn visit_retained_values<E>(
         &self,
         visitor: &mut impl FnMut(&[GraphValue], usize) -> Result<(), E>,

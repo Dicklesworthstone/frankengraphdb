@@ -744,21 +744,26 @@ impl Window for ScanSortTail {
     }
 }
 
-impl Window for fgdb_gql::spill_set::SpillSetStage {
+struct StageWindow<'a> {
+    stage: &'a fgdb_gql::spill_set::SpillSetStage,
+    remaining_offset: u64,
+}
+
+impl Window for StageWindow<'_> {
     fn evaluation_width(&self) -> usize {
-        self.columns().len()
+        self.stage.columns().len()
     }
     fn visible_width(&self) -> usize {
-        self.columns().len()
+        self.stage.columns().len()
     }
     fn distinct(&self) -> bool {
-        fgdb_gql::spill_set::SpillSetStage::distinct(self)
+        self.stage.distinct()
     }
     fn offset(&self) -> u64 {
-        fgdb_gql::spill_set::SpillSetStage::offset(self)
+        self.remaining_offset
     }
     fn count(&self) -> Option<u64> {
-        fgdb_gql::spill_set::SpillSetStage::count(self)
+        self.stage.count()
     }
 }
 

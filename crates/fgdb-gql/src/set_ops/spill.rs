@@ -997,6 +997,42 @@ impl SpillSetStage {
         self.count
     }
 
+    /// The finite occurrence window of a singleton range or its immediately
+    /// following identity projection. Neither stage may reorder the members.
+    pub fn singleton_range_page(&self, next: Option<&Self>) -> Option<(u64, u64)> {
+        if self.order.is_some()
+            || self.distinct
+            || !matches!(
+                self.operation,
+                Operation::Unwind {
+                    value: GraphSetValue::Range { .. },
+                    ..
+                }
+            )
+        {
+            return None;
+        }
+        let page = if self.count.is_some() || self.offset != 0 {
+            self
+        } else {
+            let next = next?;
+            if next.order.is_some() || next.distinct {
+                return None;
+            }
+            match &next.operation {
+                Operation::Identity => {}
+                Operation::Project { projection, .. }
+                    if projection.len() == self.columns.len()
+                        && projection.iter().enumerate().all(|(index, item)| {
+                            matches!(item.value(), GraphSetValue::Column(column) if *column == index)
+                        }) => {}
+                _ => return None,
+            }
+            next
+        };
+        Some((page.offset, page.count.filter(|&count| count > 0)?))
+    }
+
     /// Start one admitted input occurrence using the existing native kernel.
     /// This never sorts, deduplicates, windows, reads storage or charges a final
     /// ResultRow. row_index is its position in this stage's complete input,
@@ -1216,6 +1252,16 @@ pub struct SpillSetRows {
 }
 
 impl SpillSetRows {
+    /// Seek after bounds and input validation. Return the offset already
+    /// consumed, which the owning window subtracts from its SKIP. A range
+    /// above the original pre-page ceiling follows the complete failure path.
+    pub fn page_admitted_range(&mut self, offset: u64, count: u64, max_input_rows: u64) -> u64 {
+        if let StageRows::Unwind(rows) = &mut self.state {
+            return rows.page_admitted_range(offset, count, max_input_rows);
+        }
+        0
+    }
+
     /// Inspect retained values and their backing capacities without allocating
     /// or charging native evaluator events. Capacity is in [`GraphValue`] cells.
     /// Each callback names one owned allocation: a boxed row has capacity equal

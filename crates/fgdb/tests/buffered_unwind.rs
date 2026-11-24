@@ -2104,6 +2104,139 @@ fn complete_unwind_errors_precede_parent_expressions_and_final_zero_limits() {
 }
 
 #[test]
+fn a_paged_single_range_keeps_its_private_row_ceiling_and_order() {
+    let ((), report) = run_async_under_lab(0xc01d_4211, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        for (text, input_cap, expected) in [
+            (
+                "UNWIND range(1,100000) AS i WITH i LIMIT 3 RETURN i",
+                100000,
+                Some(vec![1, 2, 3]),
+            ),
+            (
+                "UNWIND range(3,-99996,-1) AS i WITH i SKIP 2 LIMIT 3 RETURN i",
+                100000,
+                Some(vec![1, 0, -1]),
+            ),
+            (
+                "UNWIND range(1,100000) AS i WITH i SKIP 99990 LIMIT 3 RETURN i",
+                100000,
+                Some(vec![99991, 99992, 99993]),
+            ),
+            (
+                "UNWIND range(100000,1,-1) AS i WITH i SKIP 99998 LIMIT 3 RETURN i",
+                100000,
+                Some(vec![2, 1]),
+            ),
+            (
+                "UNWIND range(1,100000) AS i WITH i SKIP 100001 LIMIT 3 RETURN i",
+                100000,
+                Some(vec![]),
+            ),
+            (
+                "UNWIND range(2,1) AS i WITH i SKIP 1 LIMIT 3 RETURN i",
+                100000,
+                Some(vec![]),
+            ),
+            (
+                "UNWIND range(1,8) AS i WITH i ORDER BY i DESC LIMIT 3 RETURN i",
+                8,
+                Some(vec![8, 7, 6]),
+            ),
+            ("UNWIND range(1,8) AS i WITH i LIMIT 3 RETURN i", 7, None),
+        ] {
+            let prepared = prepare(text, &GqlParameters::new());
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+            let result = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(0, 3, 2048, 2048),
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    1,
+                    512,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    input_cap,
+                    WORK,
+                )
+                .await;
+            if let Some(expected) = expected {
+                let (spool, _) = result.unwrap();
+                assert_eq!(
+                    contents(&spool, &mut destination, &cx).await,
+                    expected
+                        .into_iter()
+                        .map(|i| vec![scalar(i)])
+                        .collect::<Vec<_>>(),
+                    "{text}"
+                );
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    matches!(error, NativeSpoolError::BufferedExecute(ref inner) if matches!(**inner, GqlQueryError::Rows(_))),
+                    "{error:?}"
+                );
+            }
+        }
+        // Even an empty page must reject an oversized generated row. The
+        // zero-column source fits, while a single integer row does not.
+        let empty_width = GraphValueRow::from_owned_values(vec![])
+            .canonical_bytes()
+            .unwrap()
+            .len();
+        let member_width = GraphValueRow::from_owned_values(vec![scalar(1)])
+            .canonical_bytes()
+            .unwrap()
+            .len();
+        let prepared = prepare(
+            "UNWIND range(1,100000) AS i WITH i SKIP 100000 LIMIT 1 RETURN i",
+            &GqlParameters::new(),
+        );
+        let (mut scratch, _) = file(&cx, &spill_pool).await;
+        let (mut destination, _) = file(&cx, &spill_pool).await;
+        let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+        let error = prepared
+            .spool_in_view(
+                &mut view,
+                &cx,
+                GqlQueryPolicy::new(0, 1, 2048, 2048),
+                &mut scratch,
+                &mut destination,
+                &mut auxiliary,
+                1,
+                512,
+                1,
+                512,
+                1024,
+                empty_width,
+                100000,
+                WORK,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, NativeSpoolError::RowTooLarge { bytes, limit }
+            if bytes == member_width && limit == empty_width),
+            "{error:?}"
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn expanded_input_quota_and_native_work_are_independent_of_the_final_page() {
     let ((), report) = run_async_under_lab(0xc01d_4104, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

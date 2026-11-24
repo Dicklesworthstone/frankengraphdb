@@ -196,6 +196,7 @@ struct Limits {
     page_bytes: usize,
     max_row_bytes: usize,
     max_input_rows: u64,
+    range_page: Option<(u64, u64)>,
 }
 
 // Continue the original source's native allowance. Physical decode/encoding,
@@ -395,13 +396,6 @@ where
     if plan.stages().is_empty() || input.columns() != plan.source_columns() {
         return Err(SpillError::InvalidRun.into());
     }
-    let limits = Limits {
-        run_rows,
-        max_runs,
-        page_bytes,
-        max_row_bytes,
-        max_input_rows,
-    };
     let mut work = Work {
         cx,
         used: prior_work,
@@ -409,16 +403,30 @@ where
     };
     let mut evaluator = input.evaluator_stats();
     let mut in_destination = true;
+    let mut skipped_for_stage = 0;
     for (ordinal, stage) in plan.stages().iter().enumerate() {
+        let limits = Limits {
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_row_bytes,
+            max_input_rows,
+            range_page: if input.row_count() == 1 {
+                stage.singleton_range_page(plan.stages().get(ordinal + 1))
+            } else {
+                None
+            },
+        };
         let budget = if ordinal + 1 == plan.stages().len() {
             policy.rows
         } else {
             GqlExecutionBudget::result_rows(max_input_rows)
         };
-        input = if in_destination {
+        (input, skipped_for_stage) = if in_destination {
             run_stage(
                 input,
                 stage,
+                skipped_for_stage,
                 destination,
                 scratch,
                 limits,
@@ -435,6 +443,7 @@ where
             run_stage(
                 input,
                 stage,
+                skipped_for_stage,
                 scratch,
                 destination,
                 limits,
@@ -453,7 +462,7 @@ where
     if !in_destination {
         input = copy(&input, scratch, destination, page_bytes, &mut work).await?;
     }
-    if input.columns() != plan.columns() {
+    if input.columns() != plan.columns() || skipped_for_stage != 0 {
         return Err(SpillError::InvalidRun.into());
     }
     input.evaluator = evaluator;
@@ -466,6 +475,7 @@ where
 async fn run_stage<A, B, S>(
     input: NativeResultSpool,
     stage: &SpillSetStage,
+    prior_skip: u64,
     source: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
     limits: Limits,
@@ -476,13 +486,13 @@ async fn run_stage<A, B, S>(
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
     elements: &mut S,
     checkpoint: &mut (dyn FnMut() -> Result<()> + Send),
-) -> Result<NativeResultSpool>
+) -> Result<(NativeResultSpool, u64)>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     S: AsyncSpillElementSource<Error = NativeSpoolError>,
 {
-    let transformed = transform(
+    let (transformed, range_skip) = transform(
         &input,
         stage,
         source,
@@ -496,7 +506,26 @@ where
         checkpoint,
     )
     .await?;
-    if let Some(requested) = stage.order()
+    // An UNWIND can seek for its own window or for the immediately
+    // following identity projection. Each skipped member is counted once.
+    let (skipped, skip_for_next) = if stage.count().is_some() {
+        (
+            prior_skip
+                .checked_add(range_skip)
+                .ok_or(SpillError::SizeOverflow)?,
+            0,
+        )
+    } else {
+        (prior_skip, range_skip)
+    };
+    let page = StageWindow {
+        stage,
+        remaining_offset: stage
+            .offset()
+            .checked_sub(skipped)
+            .ok_or(SpillError::InvalidRun)?,
+    };
+    let result = if let Some(requested) = stage.order()
         && !stage.columns().is_empty()
     {
         // Empty requested order is native canonical tuple order. Explicit
@@ -534,7 +563,7 @@ where
                 source,
                 &order.0,
                 !requested.is_empty(),
-                bounded_prefix(stage, limits.run_rows),
+                bounded_prefix(&page, limits.run_rows),
                 limits.run_rows,
                 limits.max_runs,
                 limits.page_bytes,
@@ -548,7 +577,7 @@ where
             &sorted,
             source,
             destination,
-            stage,
+            &page,
             budget,
             limits.page_bytes,
             work,
@@ -565,14 +594,15 @@ where
             &transformed,
             destination,
             source,
-            stage,
+            &page,
             budget,
             limits.page_bytes,
             work,
         )
         .await?;
         copy(&selected, source, destination, limits.page_bytes, work).await
-    }
+    }?;
+    Ok((result, skip_for_next))
 }
 
 // Keep the evaluator's future separate from orchestration and sorting Send
@@ -591,7 +621,7 @@ fn transform<'q, A, B, S>(
     resolver: Option<&'q (dyn CanonicalScalarResolver + Send + Sync)>,
     elements: &'q mut S,
     checkpoint: &'q mut (dyn FnMut() -> Result<()> + Send),
-) -> crate::SendFuture<'q, Result<NativeResultSpool>>
+) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
@@ -607,6 +637,7 @@ where
         let mut rows = 0_u64;
         let mut row_index = 0_usize;
         let mut largest = 0_usize;
+        let mut range_skip = 0;
         while let Some(bytes) = reader.next_row(work.cx).await? {
             work.charge(bytes.len())?;
             let reserved = codec::decoded(bytes.as_ref(), work.cx)?;
@@ -623,7 +654,7 @@ where
             drop(bytes);
             let retained = codec::row_memory(&row, work)?;
             codec::retain_reservation(&mut charge, retained, work.cx)?;
-            let cursor = stage
+            let mut cursor = stage
                 .start_with_async_elements(
                     row,
                     row_index,
@@ -655,6 +686,9 @@ where
             // it covers the original iterator allocation AND payloads moved into
             // outputs, including asynchronous appends. Native work/scratch counts
             // stay cumulative; only no-longer-resident byte admission is refunded.
+            if let Some((offset, count)) = limits.range_page {
+                range_skip = cursor.page_admitted_range(offset, count, limits.max_input_rows);
+            }
             let retained = codec::cursor_memory(&cursor, work)?;
             codec::retain_reservation(&mut charge, retained, work.cx)?;
             // The cursor's payloads are dropped before its affine charge.
@@ -716,19 +750,22 @@ where
         drop(reader);
         work.charge(1)?;
         let run = writer.finish(work.cx).await?;
-        Ok(NativeResultSpool {
-            columns: stage.columns().to_vec().into(),
-            encoded_columns: stage.columns().len(),
-            snapshot: input.snapshot,
-            kind: input.kind,
-            rows: GqlExecutionStats {
-                snapshot_records: input.rows.snapshot_records,
-                result_rows: rows,
+        Ok((
+            NativeResultSpool {
+                columns: stage.columns().to_vec().into(),
+                encoded_columns: stage.columns().len(),
+                snapshot: input.snapshot,
+                kind: input.kind,
+                rows: GqlExecutionStats {
+                    snapshot_records: input.rows.snapshot_records,
+                    result_rows: rows,
+                },
+                evaluator: *evaluator,
+                max_row_bytes: largest,
+                run,
             },
-            evaluator: *evaluator,
-            max_row_bytes: largest,
-            run,
-        })
+            range_skip,
+        ))
     })
 }
 
