@@ -701,7 +701,7 @@ impl GraphValue {
     /// graph element at any depth is not one. This allocates nothing; use
     /// [`Self::to_property_value`] for the stored value itself.
     #[must_use]
-    pub(crate) fn is_stored_value(&self) -> bool {
+    pub fn is_stored_value(&self) -> bool {
         fn visit(value: &GraphValue, depth: usize) -> bool {
             if depth > GraphValue::MAX_LIST_DEPTH {
                 return false;

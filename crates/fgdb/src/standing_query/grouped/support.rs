@@ -28,6 +28,9 @@ pub(super) fn value_units(value: &GraphValue) -> Result<usize, StandingQueryFail
     match value {
         GraphValue::Scalar(value) => Ok(scalar_units(value)),
         GraphValue::Vertex(_) | GraphValue::Edge(_) => Ok(1),
+        GraphValue::List(_) | GraphValue::Map { .. } if value.is_stored_value() => {
+            Ok(value.payload_units())
+        }
         _ => Err(StandingQueryFailure::InvalidDelta),
     }
 }
@@ -177,6 +180,35 @@ mod tests {
 
     fn policy() -> GqlQueryPolicy {
         GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
+    }
+
+    #[test]
+    fn copying_a_stored_group_key_charges_nested_cells_and_key_bytes() {
+        let children = vec![
+            GraphValue::Scalar(CanonicalScalar::Int(2)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+        ];
+        let key = [GraphValue::map(vec![(
+            "k".repeat(65).into_boxed_str(),
+            GraphValue::List(children.into_boxed_slice()),
+        )])
+        .unwrap()];
+        let copy = |scratch| {
+            let mut meter = Meter {
+                policy: GqlQueryPolicy::new(0, 0, 1, scratch),
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut || Ok(()),
+            };
+            copied_key(&key, &mut meter)
+        };
+        // One output row, four value nodes, and two key-byte quanta.
+        assert_eq!(copy(6), Err(StandingQueryFailure::ScratchBudget));
+        assert_eq!(copy(7).unwrap(), key);
+        let elements = GraphValue::List(vec![GraphValue::Vertex(VId(1))].into_boxed_slice());
+        assert_eq!(
+            value_units(&elements),
+            Err(StandingQueryFailure::InvalidDelta)
+        );
     }
 
     fn definition(grouped: bool, numeric: bool) -> PreparedGraphAggregate {
