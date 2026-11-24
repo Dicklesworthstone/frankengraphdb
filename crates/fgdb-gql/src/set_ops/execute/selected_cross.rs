@@ -137,7 +137,7 @@ fn requires_atom<E>(
         control(GlaExecutionEvent::Work)?;
         match op {
             GraphSetPredicateOp::Not => stack[depth - 1] = false,
-            GraphSetPredicateOp::And | GraphSetPredicateOp::Or => {
+            GraphSetPredicateOp::And | GraphSetPredicateOp::Or | GraphSetPredicateOp::Xor => {
                 let right = stack[depth - 1];
                 depth -= 1;
                 let left = &mut stack[depth - 1];

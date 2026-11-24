@@ -1063,7 +1063,18 @@ fn collected_lazy_arms_preserve_exact_output_having_and_order() {
         let actual = execute(&conditional, &values, policy(), || Ok::<_, ()>(()))
             .unwrap()
             .value;
-        assert_eq!(actual, expected, "threshold {threshold}");
+        // Plain grouping exposes k in keys(); computed RETURN emits all four
+        // columns in values(). Compare every visible cell in order.
+        assert_eq!(actual.len(), expected.len(), "threshold {threshold}");
+        for (projected, plain) in actual.iter().zip(&expected) {
+            assert!(projected.keys().is_empty());
+            let [key] = plain.keys() else {
+                panic!("expected one plain grouping key");
+            };
+            let (bucket, summaries) = projected.values().split_first().unwrap();
+            assert_eq!(bucket.as_value(), Some(key), "threshold {threshold}");
+            assert_eq!(summaries, plain.values(), "threshold {threshold}");
+        }
         assert_eq!(bucket(&actual[0], 0), 2);
         assert_eq!(actual.len(), if threshold == 0 { 2 } else { 1 });
         assert_eq!(actual[0].values()[1].as_count(), Some(2));

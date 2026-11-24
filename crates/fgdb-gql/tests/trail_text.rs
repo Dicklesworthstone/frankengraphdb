@@ -769,7 +769,7 @@ fn projected_reachability_retracts_only_the_last_endpoint_witness() {
     }
 }
 
-fn property_pattern(text: &str) -> PreparedGraphPattern<GraphValueRow> {
+fn property_template(text: &str) -> PreparedGraphText {
     use fgdb_delta_types::LabelId;
 
     PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
@@ -778,12 +778,15 @@ fn property_pattern(text: &str) -> PreparedGraphPattern<GraphValueRow> {
         _ => symbols(kind, name),
     })
     .unwrap_or_else(|error| panic!("{text}: {error:?}"))
-    .bind_parameters(&GqlParameters::new().with_int64("start", 1).unwrap())
-    .unwrap()
 }
 
-fn property_closure(text: &str) -> fgdb_gql::algebra::IncrementalClosureDefinition {
-    property_pattern(text)
+fn property_closure(
+    text: &str,
+    arguments: &GqlParameters,
+) -> fgdb_gql::algebra::IncrementalClosureDefinition {
+    property_template(text)
+        .bind_parameters(arguments)
+        .unwrap()
         .incremental_closure_definition()
         .unwrap_or_else(|| panic!("property endpoint closure: {text}"))
 }
@@ -795,9 +798,12 @@ fn closure_endpoint_properties_keep_predicates_and_exact_inner_join_layout() {
     use fgdb_gql::GraphSetQuantifier;
     use fgdb_gql::row_projection::IncrementalRowProjection;
 
+    let start = GqlParameters::new().with_int64("start", 1).unwrap();
+    let empty = GqlParameters::new();
     let definition = property_closure(
         "MATCH (a:L {p:$start})-[:R*]->(b) WHERE b.q IS NOT NULL \
          RETURN DISTINCT b.q AS target,a.p AS origin,b.q AS repeated,a,b",
+        &start,
     );
     assert_eq!(
         definition.projection().quantifier(),
@@ -896,16 +902,34 @@ fn closure_endpoint_properties_keep_predicates_and_exact_inner_join_layout() {
             GraphValue::Vertex(VId(3)),
         ]]
     );
-    for text in [
-        "MATCH (a)-[:R*]->(b) WHERE b.p=1 RETURN DISTINCT a,b",
-        "MATCH (a:L)-[:R*]->(b) WHERE a.p>=1 RETURN DISTINCT b",
-        "MATCH (a {p:$start})-[:R*]->(b) RETURN DISTINCT b.p AS value",
-        "MATCH (a)-[:R*]->(b) WHERE a.p IS NULL RETURN DISTINCT b.p AS value",
-        "MATCH (a)<-[:R*0..]-(b) WHERE b.p='name' RETURN DISTINCT a.p AS value",
-        "MATCH (a)-[:R*0..]-(b) WHERE b.p IS NOT NULL RETURN DISTINCT a.p AS value",
+    for (text, arguments) in [
+        (
+            "MATCH (a)-[:R*]->(b) WHERE b.p=1 RETURN DISTINCT a,b",
+            &empty,
+        ),
+        (
+            "MATCH (a:L)-[:R*]->(b) WHERE a.p>=1 RETURN DISTINCT b",
+            &empty,
+        ),
+        (
+            "MATCH (a {p:$start})-[:R*]->(b) RETURN DISTINCT b.p AS value",
+            &start,
+        ),
+        (
+            "MATCH (a)-[:R*]->(b) WHERE a.p IS NULL RETURN DISTINCT b.p AS value",
+            &empty,
+        ),
+        (
+            "MATCH (a)<-[:R*0..]-(b) WHERE b.p='name' RETURN DISTINCT a.p AS value",
+            &empty,
+        ),
+        (
+            "MATCH (a)-[:R*0..]-(b) WHERE b.p IS NOT NULL RETURN DISTINCT a.p AS value",
+            &empty,
+        ),
     ] {
         assert!(
-            property_closure(text)
+            property_closure(text, arguments)
                 .endpoint_sources()
                 .iter()
                 .any(Option::is_some)
@@ -941,6 +965,7 @@ fn closure_property_projection_keeps_colliding_payloads_until_the_last_pair() {
         let definition = property_closure(
             "MATCH (a)-[:R*]->(b) \
              RETURN DISTINCT b.q AS first,b.p AS second,b.q AS again",
+            &GqlParameters::new(),
         );
         assert!(definition.endpoint_sources()[0].is_none());
         assert_eq!(
@@ -1112,6 +1137,7 @@ fn bounded_walk_properties_share_endpoint_enrichment_and_keep_owner_limits() {
     use fgdb_gql::GraphSetColumnType::{Stored, Vertex};
     use fgdb_gql::GraphSetQuantifier;
 
+    let start = GqlParameters::new().with_int64("start", 1).unwrap();
     for (text, minimum, maximum, nodes) in [
         (
             "MATCH REPEATABLE ELEMENTS WALK (a {p:$start})-[:R*0]->(b) \
@@ -1142,7 +1168,7 @@ fn bounded_walk_properties_share_endpoint_enrichment_and_keep_owner_limits() {
             12,
         ),
     ] {
-        let pattern = property_pattern(text);
+        let pattern = property_template(text).bind_parameters(&start).unwrap();
         assert!(pattern.incremental_closure_definition().is_none());
         let definition = pattern.incremental_bounded_walk_definition().unwrap();
         assert_eq!(definition.bounds().minimum(), minimum, "{text}");
@@ -1169,12 +1195,23 @@ fn bounded_walk_properties_share_endpoint_enrichment_and_keep_owner_limits() {
             GraphSetQuantifier::Distinct
         );
     }
-    let within =
-        property_pattern("MATCH REPEATABLE ELEMENTS WALK (a)-[:R*30]->(b) RETURN DISTINCT b.p")
-            .incremental_bounded_walk_definition()
-            .unwrap();
+    let text = "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*30]->(b) RETURN DISTINCT b.p";
+    let template = property_template(text);
+    let extra = template.bind_parameters(&start).unwrap_err();
+    assert_eq!(
+        extra.kind,
+        fgdb_gql::GraphPatternTextErrorKind::UnexpectedArguments
+    );
+    assert_eq!(extra.offset, text.len());
+    let within = template
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .incremental_bounded_walk_definition()
+        .unwrap();
     assert_eq!(within.circuit_nodes(), 63);
     let too_many =
-        property_pattern("MATCH REPEATABLE ELEMENTS WALK (a)-[:R*31]->(b) RETURN DISTINCT b.p");
+        property_template("MATCH REPEATABLE ELEMENTS WALK (a)-[:R*31]->(b) RETURN DISTINCT b.p")
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
     assert!(too_many.incremental_bounded_walk_definition().is_none());
 }

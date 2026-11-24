@@ -713,16 +713,48 @@ pub(in crate::graph_text) fn resolve_operand(
         if inline_scalar_aliases(&mut value, &columns, key_width, &alias)? {
             return Ok(Operand::Expression { value, column });
         }
-        // A composite alias needs a private resolved row. Until that row
-        // supports deferred cells, refuse conditional uses explicitly;
-        // never turn an unevaluated branch into an eager alias error.
+        // A value CASE or COALESCE can carry exact summary cells as well as
+        // scalar VM programs. Substitute scalar aliases at their use site so
+        // only the branch selected by the value evaluator can run them.
         if has_deferred_values(&value) {
-            return Err(error(
-                parser.current.at,
-                GraphPatternTextErrorKind::Expected(
-                    "scalar computed aliases in conditional HAVING operands",
-                ),
-            ));
+            let unsupported = || {
+                error(
+                    parser.current.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "scalar computed aliases in conditional HAVING operands",
+                    ),
+                )
+            };
+            super::visit_output_leaves(&mut value, &mut |leaf| {
+                if let ReadValueTemplate::Column(index) = leaf {
+                    *leaf = match columns[*index] {
+                        ResultOrderColumn::Evaluation(column) => {
+                            ReadValueTemplate::Column(evaluation_column(column))
+                        }
+                        ResultOrderColumn::Projected(index) => match alias(index) {
+                            value @ (ReadValueTemplate::Column(_)
+                            | ReadValueTemplate::Integer { .. }
+                            | ReadValueTemplate::Literal(_)) => value,
+                            value @ ReadValueTemplate::Parameter { index, .. }
+                                if !matches!(
+                                    parser.syntax.parameters[index].parameter_type,
+                                    GqlParameterType::List | GqlParameterType::Map
+                                ) =>
+                            {
+                                value
+                            }
+                            _ => return Err(unsupported()),
+                        },
+                        ResultOrderColumn::Computed(_) => {
+                            unreachable!("resolved leaves are not order ranks")
+                        }
+                    };
+                } else if !inline_scalar_aliases(leaf, &columns, key_width, &alias)? {
+                    return Err(unsupported());
+                }
+                Ok(())
+            })?;
+            return Ok(Operand::Expression { value, column });
         }
         // A private operand row contains only its referenced inputs. Alias
         // values evaluate once per distinct reference, over the frozen

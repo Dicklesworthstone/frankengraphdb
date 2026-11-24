@@ -4785,9 +4785,10 @@ impl<'a> Parser<'a> {
         let visible = head.outputs.len();
         if (!implicit_star || self.write_prefix && !self.call_body) && !implicit_end {
             // A write after this part reads its carried row identities'
-            // preimages, as the leading-row heads do (fgdb-cpny9); a read
-            // keeps its own templates.
-            let imports: &[_] = if self.write_prefix && !self.call_body {
+            // preimages, as the leading-row heads do (fgdb-cpny9). Inside an
+            // optional Apply, its predicate can read metadata on the incoming
+            // row before the child decides whether to emit a null extension.
+            let imports: &[_] = if optional_body || self.write_prefix && !self.call_body {
                 incoming
             } else {
                 &[]

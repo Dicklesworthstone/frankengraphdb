@@ -1276,105 +1276,121 @@ pub(in crate::graph_text) fn remap_output_columns(
     value: &mut ReadValueTemplate,
     columns: &[usize],
 ) {
+    let result: Result<(), core::convert::Infallible> = visit_output_leaves(value, &mut |leaf| {
+        match leaf {
+            ReadValueTemplate::Column(index) => *index = columns[*index],
+            ReadValueTemplate::Integer { program, .. } => {
+                for op in program {
+                    if let crate::mutation_text::MutationIntegerTemplateOp::Bound(
+                        crate::GraphIntegerOp::Column(index)
+                        | crate::GraphIntegerOp::ScalarColumn(index)
+                        | crate::GraphIntegerOp::IdentityColumn { column: index, .. }
+                        | crate::GraphIntegerOp::PresenceColumn(index),
+                    ) = op
+                    {
+                        *index = columns[*index];
+                    }
+                }
+            }
+            _ => unreachable!("only column-bearing leaves are visited"),
+        }
+        Ok(())
+    });
+    result.unwrap_or_else(|never| match never {});
+}
+
+/// Visit column references at their original evaluation sites, including
+/// inside lazy branches. Inserted leaf programs already own their columns.
+fn visit_output_leaves<E>(
+    value: &mut ReadValueTemplate,
+    visit: &mut impl FnMut(&mut ReadValueTemplate) -> Result<(), E>,
+) -> Result<(), E> {
     match value {
-        ReadValueTemplate::Column(index) => *index = columns[*index],
+        ReadValueTemplate::Column(_) | ReadValueTemplate::Integer { .. } => visit(value)?,
         ReadValueTemplate::List(items) => {
             for item in items {
-                remap_output_columns(item, columns);
+                visit_output_leaves(item, visit)?;
             }
         }
         ReadValueTemplate::Index { list, index } => {
-            remap_output_columns(list, columns);
-            remap_output_columns(index, columns);
+            visit_output_leaves(list, visit)?;
+            visit_output_leaves(index, visit)?;
         }
-        ReadValueTemplate::Size(inner) => remap_output_columns(inner, columns),
+        ReadValueTemplate::Size(inner) => visit_output_leaves(inner, visit)?,
         ReadValueTemplate::In { value, list } => {
-            remap_output_columns(value, columns);
-            remap_output_columns(list, columns);
+            visit_output_leaves(value, visit)?;
+            visit_output_leaves(list, visit)?;
         }
         ReadValueTemplate::Equal { left, right }
         | ReadValueTemplate::Ordered { left, right, .. } => {
-            remap_output_columns(left, columns);
-            remap_output_columns(right, columns);
+            visit_output_leaves(left, visit)?;
+            visit_output_leaves(right, visit)?;
         }
         ReadValueTemplate::Temporal { argument, .. }
         | ReadValueTemplate::Function { argument, .. }
         | ReadValueTemplate::ElementMetadata {
             value: argument, ..
-        } => remap_output_columns(argument, columns),
-        ReadValueTemplate::Integer { program, .. } => {
-            for op in program {
-                if let crate::mutation_text::MutationIntegerTemplateOp::Bound(
-                    crate::GraphIntegerOp::Column(index)
-                    | crate::GraphIntegerOp::ScalarColumn(index)
-                    | crate::GraphIntegerOp::IdentityColumn { column: index, .. }
-                    | crate::GraphIntegerOp::PresenceColumn(index),
-                ) = op
-                {
-                    *index = columns[*index];
-                }
-            }
-        }
+        } => visit_output_leaves(argument, visit)?,
         ReadValueTemplate::Comprehension { list, filter, map } => {
-            remap_output_columns(list, columns);
+            visit_output_leaves(list, visit)?;
             for part in [filter, map].into_iter().flatten() {
-                remap_output_columns(part, columns);
+                visit_output_leaves(part, visit)?;
             }
         }
         ReadValueTemplate::Quantifier {
             list, predicate, ..
         } => {
-            remap_output_columns(list, columns);
-            remap_output_columns(predicate, columns);
+            visit_output_leaves(list, visit)?;
+            visit_output_leaves(predicate, visit)?;
         }
         ReadValueTemplate::Slice { list, from, to } => {
-            remap_output_columns(list, columns);
+            visit_output_leaves(list, visit)?;
             for bound in [from, to].into_iter().flatten() {
-                remap_output_columns(bound, columns);
+                visit_output_leaves(bound, visit)?;
             }
         }
         ReadValueTemplate::Range { start, end, step } => {
-            remap_output_columns(start, columns);
-            remap_output_columns(end, columns);
+            visit_output_leaves(start, visit)?;
+            visit_output_leaves(end, visit)?;
             if let Some(step) = step {
-                remap_output_columns(step, columns);
+                visit_output_leaves(step, visit)?;
             }
         }
         ReadValueTemplate::Reduce { init, list, expr } => {
             for part in [init, list, expr] {
-                remap_output_columns(part, columns);
+                visit_output_leaves(part, visit)?;
             }
         }
         ReadValueTemplate::MapLiteral { values, guard, .. } => {
             for value in values {
-                remap_output_columns(value, columns);
+                visit_output_leaves(value, visit)?;
             }
             if let Some(guard) = guard {
-                remap_output_columns(guard, columns);
+                visit_output_leaves(guard, visit)?;
             }
         }
         ReadValueTemplate::MapGet { map, .. } | ReadValueTemplate::Keys(map) => {
-            remap_output_columns(map, columns);
+            visit_output_leaves(map, visit)?;
         }
         ReadValueTemplate::MapOverlay { base, values, .. } => {
-            remap_output_columns(base, columns);
+            visit_output_leaves(base, visit)?;
             for value in values {
-                remap_output_columns(value, columns);
+                visit_output_leaves(value, visit)?;
             }
         }
         ReadValueTemplate::Let { values, body } => {
             for value in values {
-                remap_output_columns(value, columns);
+                visit_output_leaves(value, visit)?;
             }
-            remap_output_columns(body, columns);
+            visit_output_leaves(body, visit)?;
         }
         ReadValueTemplate::Case { arms, otherwise } => {
             for (condition, value) in arms {
-                remap_output_columns(condition, columns);
-                remap_output_columns(value, columns);
+                visit_output_leaves(condition, visit)?;
+                visit_output_leaves(value, visit)?;
             }
             if let Some(otherwise) = otherwise {
-                remap_output_columns(otherwise, columns);
+                visit_output_leaves(otherwise, visit)?;
             }
         }
         ReadValueTemplate::Literal(_)
@@ -1382,6 +1398,7 @@ pub(in crate::graph_text) fn remap_output_columns(
         | ReadValueTemplate::Local(_)
         | ReadValueTemplate::Random { .. } => {}
     }
+    Ok(())
 }
 
 impl<'a> Parser<'a> {

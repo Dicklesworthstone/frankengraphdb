@@ -51,6 +51,7 @@ pub enum GraphHavingOp {
     Truth(Option<bool>),
     And,
     Or,
+    Xor,
     Not,
 }
 
@@ -195,7 +196,9 @@ impl GraphHavingExpression {
         let mut leaves = 0;
         for (at, op) in program.iter().enumerate() {
             match op {
-                GraphHavingOp::And | GraphHavingOp::Or if depth >= 2 => depth -= 1,
+                GraphHavingOp::And | GraphHavingOp::Or | GraphHavingOp::Xor if depth >= 2 => {
+                    depth -= 1
+                }
                 GraphHavingOp::Not if depth >= 1 => {}
                 GraphHavingOp::Compare { .. }
                 | GraphHavingOp::IsNull { .. }
@@ -355,11 +358,12 @@ impl GraphHavingExpression {
                     stack[depth - 1] = stack[depth - 1].map(|value| !value);
                     continue;
                 }
-                GraphHavingOp::And | GraphHavingOp::Or => {
+                GraphHavingOp::And | GraphHavingOp::Or | GraphHavingOp::Xor => {
                     let right = stack[depth - 1];
                     depth -= 1;
                     let left = stack[depth - 1];
                     stack[depth - 1] = match (op, left, right) {
+                        (GraphHavingOp::Xor, left, right) => left.zip(right).map(|(a, b)| a ^ b),
                         (GraphHavingOp::And, Some(false), _)
                         | (GraphHavingOp::And, _, Some(false)) => Some(false),
                         (GraphHavingOp::Or, Some(true), _) | (GraphHavingOp::Or, _, Some(true)) => {
@@ -420,6 +424,7 @@ impl GraphHavingExpression {
                 GraphHavingOp::And => bytes.push(3),
                 GraphHavingOp::Or => bytes.push(4),
                 GraphHavingOp::Not => bytes.push(5),
+                GraphHavingOp::Xor => bytes.push(6),
             }
         }
     }
@@ -790,13 +795,18 @@ mod tests {
         let values = [Some(false), None, Some(true)];
         let and = [[0, 0, 0], [0, 1, 1], [0, 1, 2]];
         let or = [[0, 1, 2], [1, 1, 2], [2, 2, 2]];
+        let xor = [[0, 1, 2], [1, 1, 1], [2, 1, 0]];
         for (i, left) in values.iter().copied().enumerate() {
             assert_eq!(
                 evaluate(&[Op::Truth(left), Op::Not], group),
                 left == Some(false)
             );
             for (j, right) in values.iter().copied().enumerate() {
-                for (op, expected) in [(Op::And, values[and[i][j]]), (Op::Or, values[or[i][j]])] {
+                for (op, expected) in [
+                    (Op::And, values[and[i][j]]),
+                    (Op::Or, values[or[i][j]]),
+                    (Op::Xor, values[xor[i][j]]),
+                ] {
                     assert_eq!(
                         evaluate(&[Op::Truth(left), Op::Truth(right), op.clone()], group),
                         expected == Some(true)

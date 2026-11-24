@@ -2032,6 +2032,26 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The actual visible binding, with local element names taking precedence.
+    fn parameter_alias(&self, schema: &[(Name<'a>, GraphSetColumnType)]) -> Option<&str> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return None;
+        };
+        if self.elements.contains(&word) {
+            return None;
+        }
+        let schema = if schema.is_empty() {
+            self.resolved_row.as_deref().unwrap_or(schema)
+        } else {
+            schema
+        };
+        schema
+            .iter()
+            .find(|(name, _)| name.text == word)
+            .and_then(|(name, _)| self.parameter_aliases.get(&name.at))
+            .map(String::as_str)
+    }
+
     /// A collection-only use of an actual row binding constrains its bare
     /// parameter origin. Explicit declarations keep their existing binding and
     /// NULL semantics. Inferred contracts must agree at every use: dynamic value
@@ -2041,22 +2061,7 @@ impl<'a> Parser<'a> {
         kind: GqlParameterType,
         schema: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<(), GraphPatternTextError> {
-        let TokenKind::Word(word) = self.current.kind else {
-            return Ok(());
-        };
-        if self.elements.contains(&word) {
-            return Ok(());
-        }
-        let schema = if schema.is_empty() {
-            self.resolved_row.as_deref().unwrap_or(schema)
-        } else {
-            schema
-        };
-        let Some(parameter) = schema
-            .iter()
-            .find(|(name, _)| name.text == word)
-            .and_then(|(name, _)| self.parameter_aliases.get(&name.at))
-        else {
+        let Some(parameter) = self.parameter_alias(schema) else {
             return Ok(());
         };
         self.check_inferred_collection_parameter(parameter, kind, self.current.at)?;
@@ -2066,7 +2071,7 @@ impl<'a> Parser<'a> {
         if let Some(inference) = &self.parameter_inference {
             inference
                 .borrow_mut()
-                .entry(parameter.clone())
+                .entry(parameter.to_owned())
                 .or_insert(kind);
             // The owner observes the new monotone constraint and reparses;
             // this provisional type error never escapes as a final verdict.
@@ -3449,7 +3454,75 @@ impl<'a> Parser<'a> {
             // reader; MERGE may already have consumed it as a native field.
             graph_map = endpoint && self.is_punct(b'.');
             ReadValueTemplate::Column(column)
-        } else if let Some(kind) = self.value_metadata_call(inputs.is_some(), schema)? {
+        } else if let Some((value, graph)) =
+            self.read_builtin_value(inputs.as_deref_mut(), schema, resolve, depth, at)?
+        {
+            graph_map = graph;
+            value
+        } else if let Some(parentheses) = self.parenthesized_name()? {
+            // `(n)`, `((n))`: parentheses around a lone name that no operator
+            // follows group nothing, so the name is read as it would be bare
+            // (a vertex is an element, not a scalar operand; a grouped name
+            // still resolves as a key).
+            for _ in 0..parentheses {
+                self.advance()?;
+            }
+            let inner = self.read_value_inner(
+                inputs.as_deref_mut(),
+                schema,
+                resolve,
+                depth + 1,
+                operators,
+            )?;
+            for _ in 0..parentheses {
+                self.punct(b')', ")")?;
+            }
+            inner
+        } else if self.parenthesized_postfix_value()? {
+            // `(list[1]).key`, `([1, 2])[0]`: a parenthesized value that a
+            // map read or subscript follows is one value, read whole; the
+            // postfix loop below applies (TCK Graph6 [4], [8], Map1 [3]).
+            self.advance()?;
+            let inner =
+                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            self.punct(b')', ")")?;
+            inner
+        } else if matches!(self.current.kind, TokenKind::Word(word)
+                if !self.elements.contains(&word)
+                    && (self.syntax.variables.iter().any(|name| name.text == word)
+                        || self.syntax.visible_edge(word).is_some_and(|(edge, _)| edge.walk.is_none())
+                        || schema.iter().any(|(name, _)| name.text == word)
+                        || resolve.is_some()))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
+        {
+            self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
+        } else if resolve.is_some() && self.collected_aggregate_call()? {
+            self.read_collected_function(inputs.as_deref_mut(), schema, resolve, depth, at)?
+        } else if let Some(resolve) = resolve.as_mut() {
+            // Element and map entries (`x.p` of a comprehension element over
+            // COLLECT, an imported `row.key`) take let slots, as the element
+            // filter's do (fgdb-1c29d, fgdb-694ga, fgdb-0s2pq).
+            self.resolved_scalar_value(resolve, depth, at)?
+        } else if let Some(columns) = inputs.as_deref_mut() {
+            self.read_graph_leaf(columns, schema, at, depth, membership_list)?
+        } else {
+            self.read_scalar_value(None, schema, at, depth, membership_list)?
+        };
+        self.read_value_postfix(inputs, schema, resolve, depth, value, graph_map)
+    }
+
+    // Keep function-call temporaries off the recursive path through nested
+    // list literals, map literals and map projections.
+    #[inline(never)]
+    fn read_builtin_value(
+        &mut self,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+        at: usize,
+    ) -> Result<Option<(ReadValueTemplate, bool)>, GraphSetTextError> {
+        let value = if let Some(kind) = self.value_metadata_call(inputs.is_some(), schema)? {
             self.advance()?;
             self.punct(b'(', "(")?;
             let value =
@@ -3471,10 +3544,9 @@ impl<'a> Parser<'a> {
         } else if (self.is_word("KEYS") || self.is_word("PROPERTIES"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
-            let (value, graph) =
-                self.read_map_function(inputs.as_deref_mut(), schema, resolve, depth)?;
-            graph_map = graph;
-            value
+            return self
+                .read_map_function(inputs, schema, resolve, depth)
+                .map(Some);
         } else if let Some(function) = self.list_function()? {
             // head/last/tail/range/reduce (fgdb-20foe).
             self.advance()?;
@@ -3534,57 +3606,11 @@ impl<'a> Parser<'a> {
             self.punct(b')', ")")?;
             ReadValueTemplate::Size(Box::new(inner))
         } else if let Some(call) = self.temporal_call()? {
-            self.read_temporal_constructor(call, inputs.as_deref_mut(), schema, resolve, depth)?
-        } else if let Some(parentheses) = self.parenthesized_name()? {
-            // `(n)`, `((n))`: parentheses around a lone name that no operator
-            // follows group nothing, so the name is read as it would be bare
-            // (a vertex is an element, not a scalar operand; a grouped name
-            // still resolves as a key).
-            for _ in 0..parentheses {
-                self.advance()?;
-            }
-            let inner = self.read_value_inner(
-                inputs.as_deref_mut(),
-                schema,
-                resolve,
-                depth + 1,
-                operators,
-            )?;
-            for _ in 0..parentheses {
-                self.punct(b')', ")")?;
-            }
-            inner
-        } else if self.parenthesized_postfix_value()? {
-            // `(list[1]).key`, `([1, 2])[0]`: a parenthesized value that a
-            // map read or subscript follows is one value, read whole; the
-            // postfix loop below applies (TCK Graph6 [4], [8], Map1 [3]).
-            self.advance()?;
-            let inner =
-                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
-            self.punct(b')', ")")?;
-            inner
-        } else if matches!(self.current.kind, TokenKind::Word(word)
-                if !self.elements.contains(&word)
-                    && (self.syntax.variables.iter().any(|name| name.text == word)
-                        || self.syntax.visible_edge(word).is_some_and(|(edge, _)| edge.walk.is_none())
-                        || schema.iter().any(|(name, _)| name.text == word)
-                        || resolve.is_some()))
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
-        {
-            self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
-        } else if resolve.is_some() && self.collected_aggregate_call()? {
-            self.read_collected_function(inputs.as_deref_mut(), schema, resolve, depth, at)?
-        } else if let Some(resolve) = resolve.as_mut() {
-            // Element and map entries (`x.p` of a comprehension element over
-            // COLLECT, an imported `row.key`) take let slots, as the element
-            // filter's do (fgdb-1c29d, fgdb-694ga, fgdb-0s2pq).
-            self.resolved_scalar_value(resolve, depth, at)?
-        } else if let Some(columns) = inputs.as_deref_mut() {
-            self.read_graph_leaf(columns, schema, at, depth, membership_list)?
+            self.read_temporal_constructor(call, inputs, schema, resolve, depth)?
         } else {
-            self.read_scalar_value(None, schema, at, depth, membership_list)?
+            return Ok(None);
         };
-        self.read_value_postfix(inputs, schema, resolve, depth, value, graph_map)
+        Ok(Some((value, false)))
     }
 
     #[inline(never)]
@@ -3909,6 +3935,7 @@ impl<'a> Parser<'a> {
     ) -> Result<(ReadValueTemplate, bool), GraphSetTextError> {
         let keys = self.is_word("KEYS");
         let resolved = self.resolved_map_leaf(inputs.is_none() && schema.is_empty(), resolve)?;
+        let mut stored_map = false;
         let (map, graph) = if let Some(column) = resolved {
             (ReadValueTemplate::Column(column), true)
         } else {
@@ -3927,6 +3954,12 @@ impl<'a> Parser<'a> {
                 }
                 _ => None,
             };
+            // A bare alias of a Map parameter is already materialized. Its
+            // schema may be Any, but keys()/properties() need no element read.
+            stored_map = source.is_some()
+                && self.parameter_alias(schema).is_some_and(|name| {
+                    self.parameter_types.get(name) == Some(&GqlParameterType::Map)
+                });
             let column = if let Some(source) = source {
                 if let Some(columns) = inputs.as_deref_mut()
                     && (self
@@ -3955,7 +3988,7 @@ impl<'a> Parser<'a> {
             self.punct(b')', ")")?;
             (map, graph)
         };
-        let value = if graph {
+        let value = if graph || stored_map {
             if keys {
                 ReadValueTemplate::Keys(Box::new(map))
             } else {

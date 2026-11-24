@@ -113,6 +113,7 @@ fn bind_having(
             GraphSetPredicateOp::Truth(value) => GraphHavingOp::Truth(value),
             GraphSetPredicateOp::And => GraphHavingOp::And,
             GraphSetPredicateOp::Or => GraphHavingOp::Or,
+            GraphSetPredicateOp::Xor => GraphHavingOp::Xor,
             GraphSetPredicateOp::Not => GraphHavingOp::Not,
         })
         .collect::<Vec<_>>();

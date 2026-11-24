@@ -33,7 +33,7 @@ impl core::fmt::Debug for GraphSetOperand {
 }
 
 /// Checked postfix Boolean IR. Every comparison and null test pushes one
-/// Boolean; NOT consumes one and AND/OR consume two. Truth(None) is UNKNOWN.
+/// Boolean; NOT consumes one and AND/OR/XOR consume two. Truth(None) is UNKNOWN.
 /// Aliases and parameter names are resolved during preparation, not execution.
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphSetPredicateOp {
@@ -50,6 +50,7 @@ pub enum GraphSetPredicateOp {
     Not,
     And,
     Or,
+    Xor,
 }
 impl core::fmt::Debug for GraphSetPredicateOp {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -141,11 +142,13 @@ impl GraphSetPredicateOp {
                     stack[depth - 1] = stack[depth - 1].map(|value| !value);
                     continue;
                 }
-                GraphSetPredicateOp::And | GraphSetPredicateOp::Or => {
+                GraphSetPredicateOp::And | GraphSetPredicateOp::Or | GraphSetPredicateOp::Xor => {
                     let right = stack[depth - 1];
                     depth -= 1;
                     let left = stack[depth - 1];
-                    stack[depth - 1] = if matches!(op, GraphSetPredicateOp::And) {
+                    stack[depth - 1] = if matches!(op, GraphSetPredicateOp::Xor) {
+                        left.zip(right).map(|(a, b)| a ^ b)
+                    } else if matches!(op, GraphSetPredicateOp::And) {
                         if left == Some(false) || right == Some(false) {
                             Some(false)
                         } else {
@@ -258,7 +261,9 @@ impl RowPredicate {
             };
             match op {
                 GraphSetPredicateOp::Not if depth >= 1 => continue,
-                GraphSetPredicateOp::And | GraphSetPredicateOp::Or if depth >= 2 => {
+                GraphSetPredicateOp::And | GraphSetPredicateOp::Or | GraphSetPredicateOp::Xor
+                    if depth >= 2 =>
+                {
                     depth -= 1;
                     continue;
                 }
@@ -375,6 +380,7 @@ impl RowPredicate {
                 GraphSetPredicateOp::Not => bytes.push(3),
                 GraphSetPredicateOp::And => bytes.push(4),
                 GraphSetPredicateOp::Or => bytes.push(5),
+                GraphSetPredicateOp::Xor => bytes.push(6),
             }
         }
     }

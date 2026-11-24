@@ -1355,6 +1355,10 @@ mod carried_metadata {
             ("NOT b:Unknown", [true, true, true, true]),
             ("NOT (b:L:Unknown)", [true, true, true, true]),
             ("b:L XOR b:Unknown", [true, true, true, true]),
+            ("b:L XOR a:L", [false; EDGES.len()]),
+            ("b:L XOR (b.score = NULL)", [false; EDGES.len()]),
+            ("b:L OR b:Unknown XOR b:L", [true; EDGES.len()]),
+            ("b:L XOR b:L AND b:Unknown", [true; EDGES.len()]),
             ("b:Unknown OR a.score = 10", [true, true, false, false]),
             ("b:Unknown OR b.score = NULL", [false; EDGES.len()]),
         ] {

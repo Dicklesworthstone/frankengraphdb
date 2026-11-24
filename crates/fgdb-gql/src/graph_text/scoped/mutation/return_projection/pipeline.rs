@@ -1031,7 +1031,7 @@ impl<'a> Parser<'a> {
                             .into_iter()
                             .find(|&function| {
                                 carried_alias(carried.as_deref(), word).is_some_and(|alias| {
-                                    boundary_metadata_binding(head, offset, alias, function)
+                                    boundary_metadata_source(head, offset, imports, alias, function)
                                         .is_some()
                                 })
                             })
@@ -3223,12 +3223,27 @@ impl<'a> Parser<'a> {
         depth: usize,
         code: &mut Vec<ReadFilterOp>,
     ) -> Result<(), GraphSetTextError> {
-        self.row_conjunction(schema, depth, code)?;
+        self.row_exclusive(schema, depth, code)?;
         while self.is_word("OR") {
             let at = self.current.at;
             self.advance()?;
-            self.row_conjunction(schema, depth, code)?;
+            self.row_exclusive(schema, depth, code)?;
             emit(code, ReadFilterOp::Or, at)?;
+        }
+        Ok(())
+    }
+    fn row_exclusive(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        depth: usize,
+        code: &mut Vec<ReadFilterOp>,
+    ) -> Result<(), GraphSetTextError> {
+        self.row_conjunction(schema, depth, code)?;
+        while self.is_word("XOR") {
+            let at = self.current.at;
+            self.advance()?;
+            self.row_conjunction(schema, depth, code)?;
+            emit(code, ReadFilterOp::Xor, at)?;
         }
         Ok(())
     }
@@ -3384,6 +3399,7 @@ pub(super) fn bind_filter(
                 ReadFilterOp::Not => GraphSetPredicateOp::Not,
                 ReadFilterOp::And => GraphSetPredicateOp::And,
                 ReadFilterOp::Or => GraphSetPredicateOp::Or,
+                ReadFilterOp::Xor => GraphSetPredicateOp::Xor,
             })
         })
         .collect()

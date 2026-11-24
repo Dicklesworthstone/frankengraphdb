@@ -171,6 +171,17 @@ fn computed_having_preserves_full_width_parameters_and_exact_averages() {
 
 #[test]
 fn having_scalar_aliases_remain_lazy_but_boolean_leaves_and_input_errors_remain_eager() {
+    for (right, expected) in [(3, 1), (2, 0)] {
+        let statement = format!(
+            "UNWIND [1] AS x RETURN count(*)+2 AS adjusted \
+             HAVING CASE WHEN count(*)=1 THEN coalesce(NULL,adjusted) ELSE 1/0 END = {right}"
+        );
+        let rows = run(&prepare(&statement)).value;
+        assert_eq!(rows.len(), expected);
+        if let Some(row) = rows.first() {
+            assert_eq!(row.values()[0].as_integer(), Some(3));
+        }
+    }
     for predicate in [
         "CASE WHEN count(*)=0 THEN 0 ELSE broken END > 0",
         "coalesce(0,broken) > 0",

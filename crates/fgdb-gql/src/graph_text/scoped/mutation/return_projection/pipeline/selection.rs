@@ -241,12 +241,28 @@ impl<'a> Parser<'a> {
         depth: usize,
         selection: &mut Selection,
     ) -> Result<(), GraphSetTextError> {
-        self.selection_and(schema, depth, selection)?;
+        self.selection_xor(schema, depth, selection)?;
         while self.is_word("OR") {
             let at = self.current.at;
             self.advance()?;
-            self.selection_and(schema, depth, selection)?;
+            self.selection_xor(schema, depth, selection)?;
             emit(&mut selection.code, ReadFilterOp::Or, at)?;
+        }
+        Ok(())
+    }
+
+    fn selection_xor(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        depth: usize,
+        selection: &mut Selection,
+    ) -> Result<(), GraphSetTextError> {
+        self.selection_and(schema, depth, selection)?;
+        while self.is_word("XOR") {
+            let at = self.current.at;
+            self.advance()?;
+            self.selection_and(schema, depth, selection)?;
+            emit(&mut selection.code, ReadFilterOp::Xor, at)?;
         }
         Ok(())
     }

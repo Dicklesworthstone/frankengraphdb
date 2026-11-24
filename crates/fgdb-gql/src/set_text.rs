@@ -905,6 +905,7 @@ impl ReadFilterOp {
             Self::Not => bytes.push(3),
             Self::And => bytes.push(4),
             Self::Or => bytes.push(5),
+            Self::Xor => bytes.push(6),
         }
     }
 }
@@ -1213,6 +1214,7 @@ pub(crate) enum ReadFilterOp {
     Not,
     And,
     Or,
+    Xor,
 }
 #[derive(Clone)]
 pub(crate) enum ReadStageTemplate {

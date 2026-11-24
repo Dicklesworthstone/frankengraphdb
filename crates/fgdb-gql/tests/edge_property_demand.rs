@@ -262,6 +262,17 @@ fn joined_and_probed_edge_plans_keep_complete_property_demand() {
 fn selected_edge_demand_unifies_all_local_uses_without_aliasing_keys() {
     use EdgeScanPropertyDemand::{Complete, Properties, Topology};
     use fgdb_delta_types::PropertySelection;
+    use fgdb_gql::GraphPatternTextErrorKind;
+    use fgdb_gql::algebra::PatternBuildError;
+
+    let duplicate = "MATCH (a)-[r:R]->(b) RETURN r,r.p,r.p";
+    let error = PreparedGraphText::prepare(duplicate, symbols).unwrap_err();
+    assert_eq!(
+        error.kind,
+        GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection)
+    );
+    assert_eq!(error.offset, duplicate.rfind("r.p").unwrap());
+
     let p = Properties(PropertySelection::one(PropertyKeyId(1)));
     let q = Properties(PropertySelection::one(PropertyKeyId((1_u64 << 40) | 1)));
     let both = Properties(
@@ -274,7 +285,7 @@ fn selected_edge_demand_unifies_all_local_uses_without_aliasing_keys() {
         ("MATCH (a)<-[r:R]-(b) RETURN r,r.p", p),
         ("MATCH (a)-[r:R]-(b) RETURN r,a,r.p", p),
         ("MATCH (a)-[r:R]->(b) RETURN r,r.q", q),
-        ("MATCH (a)-[r:R]->(b) RETURN r,r.p,r.p", p),
+        ("MATCH (a)-[r:R]->(b) RETURN r,r.p,r.p AS again", p),
         ("MATCH (a)-[r:R]->(b) WHERE id(r)>=0 RETURN r,r.p", p),
         (
             "MATCH p=(a)-[r:R]->(b) WHERE r.p>0 RETURN r,r.p,length(p)",
