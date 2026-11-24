@@ -58,6 +58,18 @@ fn aggregate_footprint(
     })
 }
 
+fn closure_footprint(
+    cx: &QueryCx,
+    definition: &fgdb_gql::algebra::IncrementalClosureDefinition,
+    scoped: bool,
+) -> Result<Footprint, StandingQueryError> {
+    let mut footprint = circuit(cx, definition.input(), scoped)?.append(2)?;
+    for filter in definition.endpoint_filters().iter().flatten() {
+        footprint = footprint.combine(circuit(cx, filter, scoped)?, 1)?;
+    }
+    Ok(footprint)
+}
+
 fn pattern_width(
     pattern: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
 ) -> u64 {
@@ -91,8 +103,8 @@ fn circuit(
         return circuit(cx, &input, scoped)?.append(1);
     }
     if let Some(pattern) = query.incremental_pattern() {
-        if let Some((input, _)) = pattern.incremental_closure_definition() {
-            return circuit(cx, &input, scoped)?.append(2);
+        if let Some(definition) = pattern.incremental_closure_definition() {
+            return closure_footprint(cx, &definition, scoped);
         }
         return Ok(Footprint {
             nodes: 1,
@@ -294,8 +306,8 @@ impl PreparedNativeRead {
                 let bound = prepared
                     .bind_parameters(params)
                     .map_err(|error| prepare_error(QueryError::PatternText(error)))?;
-                if let Some((input, _)) = bound.incremental_closure_definition() {
-                    circuit(cx, &input, scoped)?.append(2)?
+                if let Some(definition) = bound.incremental_closure_definition() {
+                    closure_footprint(cx, &definition, scoped)?
                 } else {
                     Footprint {
                         nodes: 1,

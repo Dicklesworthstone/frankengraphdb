@@ -643,29 +643,49 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             )?;
             self.append(StandingQuery::Window(Box::new(state)))
         } else if let Some(pattern) = query.incremental_pattern() {
-            if let Some((input, projection)) = pattern.incremental_closure_definition() {
-                // Ordinary row sources own actual edge and optional zero-hop
-                // vertex lifetimes, masking them before recursion. Parallel
-                // and lifetime support is private input, not delivered
-                // reachable-pair cardinality.
-                let input = self.compile_group_input(
-                    cx,
-                    &input,
-                    group::input_policy(policy),
-                    checkpoint,
-                )?;
+            if let Some(definition) = pattern.incremental_closure_definition() {
+                let (input, endpoint_filters, projection) = definition.into_parts();
+                // Ordinary sources mask incidence and vertex lifetimes before
+                // recursion. The full closure and endpoint membership joins
+                // are private: only the final projected support spends the
+                // delivered-row allowance. Source/work/scratch limits remain.
+                let input_policy = group::input_policy(policy);
+                let input = self.compile_group_input(cx, &input, input_policy, checkpoint)?;
                 let closure = self.database.prepare_standing_closure(
                     cx,
                     input,
                     [0, 1],
-                    policy,
+                    input_policy,
                     self.database.standing_queries.len(),
                 )?;
-                let closure = self.append(StandingQuery::Closure(Box::new(closure)));
+                let mut selected = self.append_private(StandingQuery::Closure(Box::new(closure)));
                 checkpoint()?;
+                for (endpoint, filter) in endpoint_filters.into_iter().enumerate() {
+                    let Some(filter) = filter else {
+                        continue;
+                    };
+                    let vertices =
+                        self.compile_group_input(cx, &filter, input_policy, checkpoint)?;
+                    let spec = RowJoinSpec::new(
+                        &[GraphSetColumnType::Vertex, GraphSetColumnType::Vertex],
+                        &[GraphSetColumnType::Vertex],
+                        &[(endpoint, 0)],
+                    )
+                    .map_err(StandingQueryError::JoinSchema)?
+                    .with_kind(RowJoinKind::Semi);
+                    let state = self.database.prepare_standing_join_spec(
+                        cx,
+                        [selected, vertices],
+                        &spec,
+                        input_policy,
+                        self.database.standing_queries.len(),
+                    )?;
+                    selected = self.append_private(StandingQuery::Join(Box::new(state)));
+                    checkpoint()?;
+                }
                 let output = self.database.prepare_standing_projection(
                     cx,
-                    closure,
+                    selected,
                     projection,
                     policy,
                     self.database.standing_queries.len(),

@@ -18,7 +18,7 @@ pub use boolean::{
 };
 pub use existence::{GraphExistence, GraphMatchClause};
 pub(crate) use orderability::OrderableNumber;
-pub use ordering::{GraphOrderError, GraphValueOrder};
+pub use ordering::{GraphOrderError, GraphValueOrder, IncrementalClosureDefinition};
 pub use output::{GlaIdentityOutput, GlaOutput, GraphBindingRow};
 pub(crate) use pattern::valid_column_name;
 pub use pattern::{

@@ -154,6 +154,378 @@ fn reachable_pairs(
     .unwrap()
 }
 
+fn selected_reachable_rows(
+    db: &Database<MemVfs>,
+    relations: &[RelationId],
+    reflexive: bool,
+    endpoint_labels: [&[LabelId]; 2],
+    columns: &[usize],
+) -> ZSet<Vec<QueryValue>> {
+    let vertices: BTreeMap<_, _> = db
+        .vertices_at(db.frontier().unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|vertex| (vertex.vid, vertex.labels))
+        .collect();
+    let pairs = reachable_pairs(db, relations, GlaDirection::Forward, false, reflexive);
+    let rows: BTreeSet<_> = pairs
+        .iter()
+        .filter(|(row, _)| {
+            row.iter().zip(endpoint_labels).all(|(value, labels)| {
+                let QueryValue::Value(GraphValue::Vertex(vertex)) = value else {
+                    unreachable!("endpoint fixture")
+                };
+                labels.iter().all(|label| vertices[vertex].contains(label))
+            })
+        })
+        .map(|(row, _)| columns.iter().map(|&column| row[column].clone()).collect())
+        .collect();
+    ZSet::from_updates(
+        rows.into_iter().map(|row| (row, ZWeight::ONE)),
+        fgdb_delta_types::LimbLimit::new(4),
+        &mut |_| Ok::<_, ()>(()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn native_selected_endpoint_reachability_tracks_labels_witnesses_and_isolates() {
+    let ((), report) = run_async_under_lab(0x6e73_7c13, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for (id, labels) in [
+            (1, vec![LabelId(1)]),
+            (2, vec![LabelId(1)]),
+            (3, vec![]),
+            (4, vec![LabelId(2)]),
+            (5, vec![LabelId(1), LabelId(2)]),
+            (6, vec![]),
+        ] {
+            seed.create_vertex(VId(id), labels, vec![]);
+        }
+        for (id, a, b) in [(10, 1, 3), (11, 2, 3), (12, 3, 4)] {
+            seed.add_edge(EId(id), VId(a), VId(b), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let cases: [(&str, bool, [&[LabelId]; 2], &[usize], usize); 7] = [
+            (
+                "MATCH (a:L)-[:R*]->(b:R) RETURN DISTINCT b AS node",
+                false,
+                [&[LabelId(1)], &[LabelId(2)]],
+                &[1],
+                7,
+            ),
+            (
+                "MATCH (a:L)-[:R*]->(b:R) RETURN DISTINCT a,b",
+                false,
+                [&[LabelId(1)], &[LabelId(2)]],
+                &[0, 1],
+                7,
+            ),
+            (
+                "MATCH (a:L)-[:R*0..]->(b:R) RETURN DISTINCT a,b",
+                true,
+                [&[LabelId(1)], &[LabelId(2)]],
+                &[0, 1],
+                9,
+            ),
+            (
+                "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT b AS first,b AS second",
+                false,
+                [&[LabelId(1)], &[]],
+                &[1, 1],
+                5,
+            ),
+            (
+                "MATCH (a)-[:R*]->(b:R) RETURN DISTINCT a",
+                false,
+                [&[], &[LabelId(2)]],
+                &[0],
+                5,
+            ),
+            (
+                "MATCH (a:L:R)-[:R*0..]->(b:R) RETURN DISTINCT a",
+                true,
+                [&[LabelId(1), LabelId(2)], &[LabelId(2)]],
+                &[0],
+                9,
+            ),
+            (
+                "MATCH (a)-[:R*]->(b) RETURN DISTINCT b AS first,b AS second",
+                false,
+                [&[], &[]],
+                &[1, 1],
+                3,
+            ),
+        ];
+        let small = GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000);
+        let params = GqlParameters::new();
+        let mut handles = Vec::new();
+        for (index, (text, _, _, _, nodes)) in cases.iter().enumerate() {
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+            let (reserved, _) = prepared.subscription_footprint(&cx, &params).unwrap();
+            let allowance = if index == 0 { small } else { policy() };
+            let handle = prepared
+                .register_standing(&mut db, &cx, &params, allowance)
+                .unwrap();
+            assert_eq!(reserved, *nodes as u64, "{text}");
+            assert_eq!(
+                db.standing_query_node_stats(&cx, &handle).unwrap().count(),
+                *nodes,
+                "{text}"
+            );
+            handles.push(handle);
+        }
+        let literal = |rows: &[&[u128]]| {
+            ZSet::from_updates(
+                rows.iter().map(|row| {
+                    (
+                        row.iter()
+                            .map(|&vertex| QueryValue::Value(GraphValue::Vertex(VId(vertex))))
+                            .collect::<Vec<_>>(),
+                        ZWeight::ONE,
+                    )
+                }),
+                fgdb_delta_types::LimbLimit::new(4),
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap()
+        };
+        // Vertex 3 has neither endpoint label, yet the two-hop paths exist.
+        // The complete private closure has five pairs, while this delivered
+        // destination set fits a one-row allowance.
+        for (index, expected) in [
+            (0, literal(&[&[4]])),
+            (1, literal(&[&[1, 4], &[2, 4]])),
+            (2, literal(&[&[1, 4], &[2, 4], &[5, 5]])),
+            (5, literal(&[&[5]])),
+        ] {
+            assert_eq!(
+                db.standing_native_bag(&cx, &handles[index], policy())
+                    .unwrap()
+                    .1,
+                expected
+            );
+        }
+        let mut first_leaves = WriteBatch::new(RelationId(1));
+        first_leaves.set_vertex_label(VId(1), LabelId(1), false);
+        let mut last_leaves = WriteBatch::new(RelationId(1));
+        last_leaves.set_vertex_label(VId(2), LabelId(1), false);
+        let mut rejoin = WriteBatch::new(RelationId(1));
+        rejoin.set_vertex_label(VId(1), LabelId(1), true);
+        rejoin.set_vertex_label(VId(2), LabelId(1), true);
+        let mut destination_leaves = WriteBatch::new(RelationId(1));
+        destination_leaves.set_vertex_label(VId(4), LabelId(2), false);
+        let mut destination_rejoins = WriteBatch::new(RelationId(1));
+        destination_rejoins.set_vertex_label(VId(4), LabelId(2), true);
+        destination_rejoins.set_vertex_label(VId(3), LabelId(1), true);
+        let mut first_edge = WriteBatch::new(RelationId(1));
+        first_edge.set_vertex_label(VId(3), LabelId(1), false);
+        first_edge.delete_edge(EId(10));
+        let mut last_edge = WriteBatch::new(RelationId(1));
+        last_edge.delete_edge(EId(11));
+        let mut select_isolate = WriteBatch::new(RelationId(1));
+        select_isolate.set_vertex_label(VId(6), LabelId(1), true);
+        select_isolate.set_vertex_label(VId(6), LabelId(2), true);
+        let mut retire_isolate = WriteBatch::new(RelationId(1));
+        retire_isolate.delete_vertex(VId(5));
+        let mut restore_edges = WriteBatch::new(RelationId(1));
+        restore_edges.add_edge(EId(20), VId(1), VId(3), vec![]);
+        restore_edges.add_edge(EId(21), VId(2), VId(3), vec![]);
+        restore_edges.set_vertex_label(VId(1), LabelId(2), true);
+        let changes = [
+            first_leaves,
+            last_leaves,
+            rejoin,
+            destination_leaves,
+            destination_rejoins,
+            first_edge,
+            last_edge,
+            select_isolate,
+            retire_isolate,
+            restore_edges,
+        ];
+        let mut previous: Vec<_> = handles
+            .iter()
+            .map(|handle| db.standing_native_bag(&cx, handle, policy()).unwrap().1)
+            .collect();
+        for (tick, change) in changes.into_iter().enumerate() {
+            let from = db.frontier().unwrap();
+            db.write(&commit, change).await.unwrap();
+            for (index, ((text, reflexive, labels, columns, nodes), handle)) in
+                cases.iter().zip(&handles).enumerate()
+            {
+                let expected =
+                    selected_reachable_rows(&db, &[RelationId(1)], *reflexive, *labels, columns);
+                let (at, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
+                assert_eq!(at, db.frontier().unwrap());
+                assert_eq!(actual, expected, "full graph oracle, tick {tick}: {text}");
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                    db.query(&cx, text, &params, symbols, policy()).unwrap(),
+                    "ordinary execution, tick {tick}: {text}"
+                );
+                let (through, delta) = db
+                    .standing_native_delta(&cx, handle, from, policy())
+                    .unwrap();
+                assert_eq!(through, at);
+                if index == 0 && matches!(tick, 0 | 5) {
+                    assert!(
+                        delta.is_empty(),
+                        "another selected source still reaches vertex 4"
+                    );
+                }
+                previous[index]
+                    .integrate(&delta, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                assert_eq!(previous[index], expected, "delivered delta, tick {tick}");
+                if matches!(tick, 0 | 7 | 9) {
+                    db.rebuild_standing_query(
+                        &cx,
+                        handle,
+                        if index == 0 { small } else { policy() },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        db.standing_native_bag(&cx, handle, policy()).unwrap(),
+                        (at, expected)
+                    );
+                    assert_eq!(
+                        db.standing_query_node_stats(&cx, handle).unwrap().count(),
+                        *nodes
+                    );
+                }
+            }
+            if matches!(tick, 1 | 6) {
+                assert!(previous[0].is_empty(), "the last selected source has left");
+            }
+            if tick == 7 {
+                assert_eq!(previous[2], literal(&[&[5, 5], &[6, 6]]));
+            }
+            if tick == 9 {
+                assert_eq!(previous[2], literal(&[&[1, 1], &[1, 4], &[2, 4], &[6, 6]]));
+            }
+        }
+        // An endpoint label change can still exceed the FINAL row allowance.
+        // Private closure/joins must not disable the public projection's cap.
+        let mut overflow = WriteBatch::new(RelationId(1));
+        overflow.set_vertex_label(VId(3), LabelId(2), true);
+        db.write(&commit, overflow).await.unwrap();
+        assert!(matches!(
+            db.standing_native_bag(&cx, &handles[0], policy()),
+            Err(StandingQueryError::Unavailable {
+                reason: StandingQueryFailure::ResultBudget,
+                ..
+            })
+        ));
+        assert!(db.rebuild_standing_query(&cx, &handles[0], small).is_err());
+        db.rebuild_standing_query(&cx, &handles[0], policy()).unwrap();
+        assert_eq!(
+            db.standing_native_bag(&cx, &handles[0], policy()).unwrap().1,
+            literal(&[&[3], &[4]])
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_source_projection_waits_for_the_last_selected_destination() {
+    let ((), report) = run_async_under_lab(0x6e73_7c14, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for (id, labels) in [
+            (1, vec![LabelId(1)]),
+            (2, vec![LabelId(2)]),
+            (3, vec![LabelId(2)]),
+            (4, vec![]),
+            (5, vec![LabelId(1)]),
+        ] {
+            seed.create_vertex(VId(id), labels, vec![]);
+        }
+        for (id, a, b) in [(10, 1, 4), (11, 4, 2), (12, 4, 3)] {
+            seed.add_edge(EId(id), VId(a), VId(b), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let texts = [
+            "MATCH (a:L)-[:R*]->(b:R) RETURN DISTINCT a AS node",
+            "MATCH (a:L)-[:R*0..]->(b:R) RETURN DISTINCT a AS node",
+        ];
+        let small = GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000);
+        let params = GqlParameters::new();
+        let handles: Vec<_> = texts
+            .iter()
+            .map(|text| {
+                db.register_standing_native(&cx, text, &params, symbols, small)
+                    .unwrap()
+            })
+            .collect();
+        let result = |present: bool| QueryResult::Rows {
+            columns: vec!["node".into()],
+            rows: if present {
+                vec![vec![QueryValue::Value(GraphValue::Vertex(VId(1)))]]
+            } else {
+                vec![]
+            },
+        };
+        for handle in &handles {
+            assert_eq!(
+                db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                result(true)
+            );
+        }
+        for (tick, (vertex, label, present)) in [
+            (VId(2), LabelId(2), false),
+            (VId(3), LabelId(2), false),
+            (VId(1), LabelId(2), true),
+            (VId(1), LabelId(1), false),
+            (VId(1), LabelId(1), true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(RelationId(1));
+            change.set_vertex_label(vertex, label, present);
+            db.write(&commit, change).await.unwrap();
+            for (index, (text, handle)) in texts.iter().zip(&handles).enumerate() {
+                let present = tick == 0 || (index == 1 && matches!(tick, 2 | 4));
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                    result(present),
+                    "target label support, tick {tick}: {text}"
+                );
+                assert_eq!(
+                    db.query(&cx, text, &params, symbols, policy()).unwrap(),
+                    result(present)
+                );
+                if tick == 0 {
+                    assert!(
+                        db.standing_native_delta(&cx, handle, from, policy())
+                            .unwrap()
+                            .1
+                            .is_empty(),
+                        "the second selected destination still supports origin 1"
+                    );
+                }
+                db.rebuild_standing_query(&cx, handle, small).unwrap();
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                    result(present)
+                );
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit() {
     let ((), report) = run_async_under_lab(0x6e73_7c10, |root| async move {
@@ -461,15 +833,20 @@ fn native_reflexive_undirected_reachability_tracks_empty_graph_and_single_edge_l
 
 #[test]
 fn native_reachability_masks_hidden_bridges_before_recursive_subscription_state() {
-    native_reachability_authorized_updates(false);
+    native_reachability_authorized_updates(false, false);
 }
 
 #[test]
 fn native_reflexive_reachability_masks_hidden_vertices_and_maintains_visible_isolates() {
-    native_reachability_authorized_updates(true);
+    native_reachability_authorized_updates(true, false);
 }
 
-fn native_reachability_authorized_updates(reflexive: bool) {
+#[test]
+fn native_selected_reachability_masks_hidden_bridges_before_endpoint_filtering() {
+    native_reachability_authorized_updates(true, true);
+}
+
+fn native_reachability_authorized_updates(reflexive: bool, selected: bool) {
     use asupersync::security::key::AuthKey;
     use fgdb::{NativeSubscriptionSetup, SubscriptionError};
     use fgdb_delta_types::SchemaEpoch;
@@ -521,7 +898,9 @@ fn native_reachability_authorized_updates(reflexive: bool) {
         let token = issuer.issue_at(&grant, 0).unwrap();
         let authority = issuer.verify_at(&token, "main", 1).unwrap();
         let params = GqlParameters::new();
-        let text = if reflexive {
+        let text = if selected {
+            "MATCH (a:L)-[*0..]->(b:L) RETURN DISTINCT a,b"
+        } else if reflexive {
             "MATCH (a)-[*0..]->(b) RETURN DISTINCT a,b"
         } else {
             "MATCH (a)-[*]->(b) RETURN DISTINCT a,b"
@@ -636,7 +1015,17 @@ fn native_reachability_authorized_updates(reflexive: bool) {
             );
             assert_eq!(
                 db.standing_native_bag(&cx, &control, policy()).unwrap().1,
-                reachable_pairs(&db, &[], GlaDirection::Forward, false, reflexive),
+                selected_reachable_rows(
+                    &db,
+                    &[],
+                    reflexive,
+                    if selected {
+                        [&[LabelId(1)], &[LabelId(1)]]
+                    } else {
+                        [&[], &[]]
+                    },
+                    &[0, 1],
+                ),
                 "unscoped live control, tick {tick}"
             );
         }
@@ -644,12 +1033,12 @@ fn native_reachability_authorized_updates(reflexive: bool) {
             subscription
                 .close_and_release(&mut db, &cx, policy())
                 .unwrap(),
-            if reflexive { 7 } else { 5 },
+            (if reflexive { 7 } else { 5 }) + if selected { 4 } else { 0 },
             "mask, complete recursive circuit, replay"
         );
         assert_eq!(
             db.standing_query_node_stats(&cx, &control).unwrap().count(),
-            if reflexive { 5 } else { 3 }
+            (if reflexive { 5 } else { 3 }) + if selected { 4 } else { 0 }
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

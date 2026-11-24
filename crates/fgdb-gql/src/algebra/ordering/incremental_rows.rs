@@ -23,14 +23,57 @@ struct Output<'a> {
     count: Option<u64>,
 }
 
+/// Compiler-owned stages for DISTINCT endpoint reachability. The incidence
+/// input contains all authorized transit vertices. Optional endpoint membership
+/// sources must be semi-joined AFTER closure and BEFORE the final projection.
+#[derive(Clone, Debug)]
+pub struct IncrementalClosureDefinition {
+    input: crate::PreparedGraphSet,
+    endpoint_filters: [Option<crate::PreparedGraphSet>; 2],
+    projection: crate::row_projection::RowProjectionSpec,
+}
+
+impl IncrementalClosureDefinition {
+    #[must_use]
+    pub const fn input(&self) -> &crate::PreparedGraphSet {
+        &self.input
+    }
+
+    #[must_use]
+    pub const fn endpoint_filters(&self) -> &[Option<crate::PreparedGraphSet>; 2] {
+        &self.endpoint_filters
+    }
+
+    #[must_use]
+    pub const fn projection(&self) -> &crate::row_projection::RowProjectionSpec {
+        &self.projection
+    }
+
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        crate::PreparedGraphSet,
+        [Option<crate::PreparedGraphSet>; 2],
+        crate::row_projection::RowProjectionSpec,
+    ) {
+        (self.input, self.endpoint_filters, self.projection)
+    }
+}
+
 impl PreparedGraphPattern<GraphValueRow> {
-    /// Compile the support of one unbounded TRAIL into an edge/lifetime
-    /// relation and a lossless endpoint projection. The host must apply its
-    /// deletion-safe transitive-closure owner between these two stages.
+    /// Compile the support of one unbounded TRAIL into a counted edge/lifetime
+    /// relation, optional endpoint membership sources and an endpoint projection.
+    /// The host must apply deletion-safe closure, then the endpoint semi joins,
+    /// then the projection. Label selection never restricts transit vertices.
     ///
     /// DISTINCT is load-bearing: closure has one row per reachable pair, not
-    /// one row per path. The admitted interval is zero-or-more or one-or-more
-    /// hops, with both distinct endpoint columns and no predicates, captures,
+    /// one row per path. Endpoint-only output may retain either or both vertices,
+    /// with aliases and repetitions. Projecting away an endpoint thresholds the
+    /// remaining support so deleting one witness cannot retract another.
+    ///
+    /// The admitted interval is zero-or-more or one-or-more hops, with optional
+    /// endpoint label conjunctions and no captures, edge/property predicates,
     /// order or page. Zero-hop support adds one self pair per visible vertex,
     /// including isolates, through an ordinary UNION ALL source. Those lifetime
     /// rows and real self-loops retain independent counted support, so deleting
@@ -42,13 +85,10 @@ impl PreparedGraphPattern<GraphValueRow> {
     /// relation unions, wildcard types and source authorization before closure
     /// sees incidence or vertex lifetimes.
     #[must_use]
-    pub fn incremental_closure_definition(
-        &self,
-    ) -> Option<(
-        crate::PreparedGraphSet,
-        crate::row_projection::RowProjectionSpec,
-    )> {
-        use crate::algebra::{GlaDirection, GraphColumn, GraphPatternBuilder, GraphWalkSearch};
+    pub fn incremental_closure_definition(&self) -> Option<IncrementalClosureDefinition> {
+        use crate::algebra::{
+            GlaDirection, GraphColumn, GraphPatternBuilder, GraphWalkSearch, VertexPredicate,
+        };
         use crate::{
             GraphSetColumnType, GraphSetOperation, GraphSetProjection, GraphSetQuantifier,
             GraphSetValue, PreparedGraphSet,
@@ -62,28 +102,58 @@ impl PreparedGraphPattern<GraphValueRow> {
         {
             return None;
         }
-        let [
-            ValueProjection::Vertex { slot: left },
-            ValueProjection::Vertex { slot: right },
-        ] = output.columns
+        let slots = output
+            .columns
+            .iter()
+            .map(|column| match column {
+                ValueProjection::Vertex { slot } if slot.ordinal() < 2 => {
+                    Some(usize::from(slot.ordinal() == 1))
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let [GlaOperator::ScanVertices, remainder @ ..] =
+            &self.plan().operators()[..output.projection]
         else {
             return None;
         };
-        if !matches!((left.ordinal(), right.ordinal()), (0, 1) | (1, 0)) {
-            return None;
+        let mut expansion = None;
+        let mut different_edges = false;
+        let mut labels = [Vec::new(), Vec::new()];
+        for operator in remainder {
+            match operator {
+                GlaOperator::VarLengthExpand { .. } if expansion.is_none() => {
+                    expansion = Some(operator);
+                }
+                GlaOperator::Select { slot, predicates }
+                    if slot.ordinal() < 2 && (slot.ordinal() == 0 || expansion.is_some()) =>
+                {
+                    for predicate in predicates {
+                        let VertexPredicate::HasLabel(label) = predicate else {
+                            return None;
+                        };
+                        labels[usize::from(slot.ordinal() == 1)].push(*label);
+                    }
+                }
+                GlaOperator::DifferentEdges { segments }
+                    if expansion.is_some()
+                        && !different_edges
+                        && segments.len() == 1
+                        && segments[0].ordinal() == 1 =>
+                {
+                    different_edges = true;
+                }
+                _ => return None,
+            }
         }
-        let [
-            GlaOperator::ScanVertices,
-            GlaOperator::VarLengthExpand {
-                source,
-                relation,
-                direction,
-                bounds,
-                search,
-                edge_predicates,
-            },
-            remainder @ ..,
-        ] = &self.plan().operators()[..output.projection]
+        let GlaOperator::VarLengthExpand {
+            source,
+            relation,
+            direction,
+            bounds,
+            search,
+            edge_predicates,
+        } = expansion?
         else {
             return None;
         };
@@ -92,14 +162,7 @@ impl PreparedGraphPattern<GraphValueRow> {
             || bounds.is_bounded()
             || (*direction == GlaDirection::Undirected && bounds.minimum() != 0)
             || !edge_predicates.is_empty()
-        {
-            return None;
-        }
-        let different_edges = matches!(remainder,
-            [GlaOperator::DifferentEdges { segments }]
-                if segments.len() == 1 && segments[0].ordinal() == 1);
-        if !matches!(search, GraphWalkSearch::Trail | GraphWalkSearch::All)
-            || (!remainder.is_empty() && !different_edges)
+            || !matches!(search, GraphWalkSearch::Trail | GraphWalkSearch::All)
             || (*search == GraphWalkSearch::All && !different_edges)
         {
             return None;
@@ -144,24 +207,53 @@ impl PreparedGraphPattern<GraphValueRow> {
                 )
                 .ok()?;
         }
-        // Both endpoint columns occur exactly once, so this permutation
-        // preserves closure's DISTINCT support without another threshold.
+
+        let mut endpoint_filters = [None, None];
+        for (endpoint, mut labels) in labels.into_iter().enumerate() {
+            if labels.is_empty() {
+                continue;
+            }
+            labels.sort_unstable();
+            labels.dedup();
+            let mut vertices = GraphPatternBuilder::new();
+            vertices.vertex("vertex").ok()?;
+            for label in labels {
+                vertices
+                    .filter("vertex", VertexPredicate::HasLabel(label))
+                    .ok()?;
+            }
+            endpoint_filters[endpoint] = Some(
+                vertices
+                    .prepare_values(&[GraphColumn::vertex("vertex", "vertex")], 0, None)
+                    .ok()?
+                    .with_duplicates()
+                    .into(),
+            );
+        }
+        // Keeping both endpoint IDs is injective even with repeated columns.
+        // Otherwise several reachable pairs may support one projected row.
+        let quantifier = if slots.contains(&0) && slots.contains(&1) {
+            GraphSetQuantifier::All
+        } else {
+            GraphSetQuantifier::Distinct
+        };
         let projection = crate::row_projection::RowProjectionSpec::new(
             vec![GraphSetColumnType::Vertex; 2],
             self.columns()
                 .iter()
-                .zip([left, right])
+                .zip(slots)
                 .map(|(name, slot)| {
-                    GraphSetProjection::new(
-                        name.clone(),
-                        GraphSetValue::Column(usize::from(slot.ordinal() == 1)),
-                    )
+                    GraphSetProjection::new(name.clone(), GraphSetValue::Column(slot))
                 })
                 .collect(),
-            GraphSetQuantifier::All,
+            quantifier,
         )
         .ok()?;
-        Some((input, projection))
+        Some(IncrementalClosureDefinition {
+            input,
+            endpoint_filters,
+            projection,
+        })
     }
 
     fn incremental_rows_output(&self) -> Option<Output<'_>> {

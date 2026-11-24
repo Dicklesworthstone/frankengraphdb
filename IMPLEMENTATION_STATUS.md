@@ -12,6 +12,65 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Maintained reflexive and label-selected reachability — qualification pending
+
+Native maintained endpoint queries now admit zero-or-more hops, including
+isolated visible vertices and directed, reversed or undirected relationships.
+The compiler supplies independently counted edge and vertex-lifetime rows to
+the existing deletion-safe closure. Removing a real self-loop therefore cannot
+remove the empty path of a surviving vertex. Nonempty undirected TRAIL closure
+continues to refuse because walking one physical edge in both directions cannot
+establish a legal nonempty cycle.
+
+Endpoint label conjunctions are maintained as separate vertex sources and
+applied after full reachability. Differently labeled intermediate vertices stay
+in the traversal. Endpoint-only DISTINCT projections can return a source, a
+destination, both, or repeated endpoint columns; lossy projections retain
+counted support until the last contributing reachable pair disappears.
+
+Examples of the admitted forms:
+
+```gql
+MATCH (a)-[:R*0..]-(b) RETURN DISTINCT a,b
+MATCH (a:Start)-[:R*0..]->(b:Goal) RETURN DISTINCT b
+MATCH (a:Start)-[:R*]->(b) RETURN DISTINCT a
+```
+
+All source observations retain capability masking. Registration reserves the
+complete owned circuit; private intermediate rows retain work and scratch
+admission, and the final projection enforces the public row allowance.
+Cancellation and failed rebuilds preserve existing registered state.
+This remains an exact, DISTINCT, endpoint-only subset of unbounded reachability;
+it does not admit bounded-hop or path-enumeration subscriptions.
+
+Regression sources cover isolated-vertex lifetimes, all admitted directions,
+parallel/self-loop support, cycles, label changes, collapsed endpoint support,
+hidden topology, exact deltas, rebuild and staged-registration rollback.
+A supplemental independent model compared the first rewrite with explicit
+edge-identity TRAIL enumeration across 1,088 three-vertex graph/profile
+combinations. That model is not execution of the Rust implementation.
+
+Qualification remains open under `fgdb-w6-recursion-x78`,
+`fgdb-w6-zset-circuits-kjv` and `fgdb-qualify-integrated-nov22-maz0p`.
+Independent source reviews found no blocking issue in either change. A pinned
+Rustfmt invocation processed the eight changed Rust files in a local candidate,
+but the executor became unavailable before final-tree checks. A limited UBS
+scan of the first feature's six Rust files exited 0 with no critical findings,
+267 warnings (mostly test-assertion notices) and 13 informational findings;
+its Cargo and AST rule-pack phases were unavailable. It is not a full scanner
+verdict for the second feature.
+
+The pinned dependency fetch succeeded. The subsequent Cargo check exited 101
+after rustc compiling libc was killed, before project compilation; the executor
+subsequently became unavailable. Project compilation, Rust tests, Clippy, final
+format/scanner checks, `scripts/check.sh` and complete exact-tree proof remain
+UNRUN. The required `scripts/br_sync.sh` export could not be executed after
+the environment loss; no manually edited Beads export is included. Combined
+native reverse/undirected label-update tests remain a coverage gap (direction
+recognition and unselected direction lifecycles are covered by test sources).
+No measured speedup or broader recursion claim is made.
+
+
 ### Authorized mixed demand retrieval — qualification pending
 
 Authenticated native CALLs can now join demand-driven graph traversal to

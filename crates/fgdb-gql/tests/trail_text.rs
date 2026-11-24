@@ -308,7 +308,7 @@ fn native_aggregate_with_and_compound_set_consumers_keep_the_identified_source()
 }
 
 #[test]
-fn closure_recipe_admits_only_distinct_directed_unbounded_endpoint_support() {
+fn closure_recipe_admits_only_distinct_unbounded_endpoint_support() {
     use fgdb_delta_types::LabelId;
 
     let symbols = |kind, name: &str| match (kind, name) {
@@ -332,10 +332,15 @@ fn closure_recipe_admits_only_distinct_directed_unbounded_endpoint_support() {
         "MATCH (a)-[*]->(b) RETURN DISTINCT a AS origin,b AS target",
     ] {
         let pattern = prepare(text);
-        let (source, output) = pattern
+        let definition = pattern
             .incremental_closure_definition()
             .unwrap_or_else(|| panic!("eligible endpoint closure: {text}"));
-        let source = source.incremental_pattern().expect("one-hop support leaf");
+        assert!(definition.endpoint_filters().iter().all(Option::is_none));
+        let output = definition.projection();
+        let source = definition
+            .input()
+            .incremental_pattern()
+            .expect("one-hop support leaf");
         assert!(source.preserves_duplicates(), "parallel support: {text}");
         assert!(source.plan().scans_edges());
         assert_eq!(
@@ -362,10 +367,13 @@ fn closure_recipe_admits_only_distinct_directed_unbounded_endpoint_support() {
         "MATCH (a)-[:R*0..]-(b) RETURN DISTINCT a,b",
     ] {
         let pattern = prepare(text);
-        let (source, output) = pattern
+        let definition = pattern
             .incremental_closure_definition()
             .unwrap_or_else(|| panic!("eligible reflexive closure: {text}"));
-        let (operation, quantifier, edges, lifetimes) = source.incremental_binary().unwrap();
+        assert!(definition.endpoint_filters().iter().all(Option::is_none));
+        let output = definition.projection();
+        let (operation, quantifier, edges, lifetimes) =
+            definition.input().incremental_binary().unwrap();
         assert_eq!(operation, fgdb_gql::GraphSetOperation::Union);
         assert_eq!(quantifier, fgdb_gql::GraphSetQuantifier::All);
         let edges = edges.incremental_pattern().unwrap();
@@ -374,7 +382,10 @@ fn closure_recipe_admits_only_distinct_directed_unbounded_endpoint_support() {
         assert!(lifetimes.preserves_duplicates());
         assert!(edges.plan().scans_edges());
         assert!(!lifetimes.plan().scans_edges());
-        assert_eq!(edges.plan().edge_relations(), pattern.plan().edge_relations());
+        assert_eq!(
+            edges.plan().edge_relations(),
+            pattern.plan().edge_relations()
+        );
         assert_eq!(
             output.columns().collect::<Vec<_>>(),
             pattern
@@ -406,10 +417,11 @@ fn closure_recipe_admits_only_distinct_directed_unbounded_endpoint_support() {
         "MATCH (a)-[:R*]-(b) RETURN DISTINCT a,b",
         "MATCH ACYCLIC (a)-[:R*]->(b) RETURN DISTINCT a,b",
         "MATCH p = (a)-[:R*]->(b) RETURN DISTINCT a,b,p",
-        "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT a,b",
         "MATCH (a)-[:R*]->(b) WHERE b.p=1 RETURN DISTINCT a,b",
-        "MATCH (a)-[:R*]->(b) RETURN DISTINCT a",
-        "MATCH (a)-[:R*]->(b) RETURN DISTINCT a AS first,a AS second",
+        "MATCH (a)-[:R*]->(a) RETURN DISTINCT a",
+        "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT b.p AS value",
+        "MATCH (a:L)-[:R*]->(b) WHERE a.p=1 RETURN DISTINCT b",
+        "MATCH (a:L)-[:R*]-(b) RETURN DISTINCT b",
         "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b ORDER BY b",
         "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b LIMIT 0",
         "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b SKIP 1",
@@ -441,5 +453,185 @@ fn undirected_zero_hop_support_includes_isolates_without_admitting_nonempty_fals
             .map(|(a, b)| vec![GraphValue::Vertex(VId(a)), GraphValue::Vertex(VId(b))])
             .collect();
         assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn closure_endpoint_labels_select_membership_after_unrestricted_transit() {
+    use fgdb_delta_types::LabelId;
+    use fgdb_gql::GraphSetQuantifier;
+
+    let prepare = |text| {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Label, "S") => Some(GraphSymbol::Label(LabelId(2))),
+            _ => symbols(kind, name),
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    };
+    for (text, filters, quantifier, incidence_rows) in [
+        (
+            "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT b AS node",
+            [true, false],
+            GraphSetQuantifier::Distinct,
+            2,
+        ),
+        (
+            "MATCH (a)-[:R*]->(b:L) RETURN DISTINCT a AS node",
+            [false, true],
+            GraphSetQuantifier::Distinct,
+            2,
+        ),
+        (
+            "MATCH (a:L)-[:R*]->(b:S) RETURN DISTINCT a AS origin,b AS target,a AS again",
+            [true, true],
+            GraphSetQuantifier::All,
+            2,
+        ),
+        (
+            "MATCH (a:L:S)-[:R*0..]->(b) RETURN DISTINCT a,b",
+            [true, false],
+            GraphSetQuantifier::All,
+            2,
+        ),
+        (
+            "MATCH (a:L)<-[:R*0..]-(b:S) RETURN DISTINCT b AS first,b AS second",
+            [true, true],
+            GraphSetQuantifier::Distinct,
+            2,
+        ),
+        (
+            "MATCH (a:L)-[:R*0..]-(b:S) RETURN DISTINCT b",
+            [true, true],
+            GraphSetQuantifier::Distinct,
+            4,
+        ),
+    ] {
+        let pattern = prepare(text);
+        let definition = pattern
+            .incremental_closure_definition()
+            .unwrap_or_else(|| panic!("selected endpoint support: {text}"));
+        assert_eq!(
+            definition.endpoint_filters().each_ref().map(Option::is_some),
+            filters,
+            "{text}"
+        );
+        assert_eq!(definition.projection().quantifier(), quantifier, "{text}");
+        let input = definition.input();
+        let incidence = input
+            .incremental_pattern()
+            .or_else(|| input.incremental_binary()?.2.incremental_pattern())
+            .unwrap();
+        let edges = [(EId(11), VId(1), R, VId(2)), (EId(12), VId(2), R, VId(3))];
+        // The ordinary fixture supplies NO labels. Restricting this incidence
+        // source to either endpoint's labels would erase the two-hop route.
+        assert_eq!(
+            run(incidence, &edges).len(),
+            incidence_rows,
+            "unqualified intermediate vertex remains in topology: {text}"
+        );
+        for filter in definition.endpoint_filters().iter().flatten() {
+            let filter = filter.incremental_pattern().unwrap();
+            assert!(filter.incremental_row_source_definition().is_some());
+            assert!(filter.incremental_closure_definition().is_none());
+            assert!(!filter.plan().scans_edges());
+        }
+    }
+    let definition = prepare("MATCH (a:L:S)-[:R*0..]->(b) RETURN DISTINCT a")
+        .incremental_closure_definition()
+        .unwrap();
+    let filter = definition.endpoint_filters()[0]
+        .as_ref()
+        .unwrap()
+        .incremental_pattern()
+        .unwrap();
+    let rows = filter
+        .plan()
+        .execute_governed_with_identified_properties(
+            3,
+            VERTICES,
+            std::iter::empty::<Edge>(),
+            |vid, predicates| {
+                let labels: &[LabelId] = match vid {
+                    VId(1) => &[LabelId(1)],
+                    VId(2) => &[LabelId(2)],
+                    _ => &[LabelId(1), LabelId(2)],
+                };
+                Ok::<_, ()>(predicates.iter().all(|test| test.matches(labels, &[])))
+            },
+            |_, _| Ok(None),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap()
+        .value;
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.values().to_vec())
+            .collect::<Vec<_>>(),
+        vec![vec![GraphValue::Vertex(VId(3))]]
+    );
+}
+
+#[test]
+fn projected_reachability_retracts_only_the_last_endpoint_witness() {
+    use fgdb_delta_types::{LimbLimit, ZSet, ZWeight};
+    use fgdb_gql::row_projection::IncrementalRowProjection;
+
+    let limbs = LimbLimit::new(4);
+    for (text, pairs, expected) in [
+        (
+            "MATCH (a)-[:R*]->(b) RETURN DISTINCT b AS node",
+            [(1, 3), (2, 3)],
+            vec![GraphValue::Vertex(VId(3))],
+        ),
+        (
+            "MATCH (a)-[:R*]->(b) RETURN DISTINCT a AS first,a AS second",
+            [(1, 2), (1, 3)],
+            vec![GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(1))],
+        ),
+    ] {
+        let definition = bind(text).incremental_closure_definition().unwrap();
+        let mut projection = IncrementalRowProjection::new(definition.into_parts().2);
+        let pair = |(a, b)| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(a)),
+                GraphValue::Vertex(VId(b)),
+            ])
+        };
+        let input = ZSet::from_updates(
+            pairs.map(|endpoints| (pair(endpoints), ZWeight::ONE)),
+            limbs,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+        let added = projection
+            .prepare(&input, limbs, Some(1), &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .commit();
+        let expected = GraphValueRow::from_owned_values(expected);
+        assert_eq!(added.len(), 1);
+        assert_eq!(added.weight(&expected), Some(&ZWeight::ONE));
+        for (index, endpoints) in pairs.into_iter().enumerate() {
+            let removed = ZSet::from_updates(
+                [(pair(endpoints), ZWeight::from_i128(-1))],
+                limbs,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap();
+            let delta = projection
+                .prepare(&removed, limbs, Some(1), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .commit();
+            if index == 0 {
+                assert!(delta.is_empty(), "another source still supports {text}");
+                assert_eq!(projection.rows().weight(&expected), Some(&ZWeight::ONE));
+            } else {
+                assert_eq!(delta.weight(&expected), Some(&ZWeight::from_i128(-1)));
+                assert!(projection.rows().is_empty());
+            }
+        }
     }
 }

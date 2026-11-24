@@ -131,3 +131,4 @@ impl GlaPlan<GraphValueRow> {
 }
 
 mod incremental_rows;
+pub use incremental_rows::IncrementalClosureDefinition;

@@ -29,6 +29,7 @@ fn addresses(db: &Database<MemVfs>, first: usize, root: usize) -> Vec<usize> {
             StandingQuery::Set(query) => query.as_ref() as *const _ as usize,
             StandingQuery::Closure(query) => query.as_ref() as *const _ as usize,
             StandingQuery::Projection(query) => query.as_ref() as *const _ as usize,
+            StandingQuery::Join(query) => query.as_ref() as *const _ as usize,
             _ => panic!("not a native set node"),
         })
         .collect()
@@ -237,15 +238,20 @@ fn reachability_symbols(
 
 #[test]
 fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_row_limit() {
-    reachability_registration_and_rebuild(false);
+    reachability_registration_and_rebuild(false, false);
 }
 
 #[test]
 fn native_reflexive_reachability_registration_and_rebuild_preserve_private_lifetime_support() {
-    reachability_registration_and_rebuild(true);
+    reachability_registration_and_rebuild(true, false);
 }
 
-fn reachability_registration_and_rebuild(reflexive: bool) {
+#[test]
+fn selected_reachability_registration_and_rebuild_keep_endpoint_owners_atomic() {
+    reachability_registration_and_rebuild(true, true);
+}
+
+fn reachability_registration_and_rebuild(reflexive: bool, selected: bool) {
     let ((), report) = run_async_under_lab(0x6e73_7c11, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -253,7 +259,11 @@ fn reachability_registration_and_rebuild(reflexive: bool) {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut seed = WriteBatch::new(RelationId(1));
         for id in 1..=3 {
-            seed.create_vertex(VId(id), vec![], vec![]);
+            seed.create_vertex(
+                VId(id),
+                if selected { vec![LabelId(1)] } else { vec![] },
+                vec![],
+            );
         }
         for id in 1..=8 {
             seed.add_edge(EId(id), VId(1), VId(2), vec![]);
@@ -266,12 +276,14 @@ fn reachability_registration_and_rebuild(reflexive: bool) {
             .unwrap();
         let before = db.standing_queries.len();
         let prior_answer = db.standing_native_query(&cx, &prior, policy()).unwrap();
-        let text = if reflexive {
+        let text = if selected {
+            "MATCH (a:L)-[:R*0..]->(b:L) RETURN DISTINCT a,b"
+        } else if reflexive {
             "MATCH (a)-[:R*0..]->(b) RETURN DISTINCT a,b"
         } else {
             "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b"
         };
-        let nodes = if reflexive { 5 } else { 3 };
+        let nodes = (if reflexive { 5 } else { 3 }) + if selected { 4 } else { 0 };
         let rows = if reflexive { 6 } else { 3 };
         let query: PreparedGraphSet = PreparedGraphText::prepare(text, reachability_symbols)
             .unwrap()
@@ -344,12 +356,9 @@ fn reachability_registration_and_rebuild(reflexive: bool) {
         else {
             panic!("owned reachability circuit");
         };
-        let expected_private: &[bool] = if reflexive {
-            &[true, true, true, false, false]
-        } else {
-            &[true, false, false]
-        };
-        assert_eq!(private_inputs.as_slice(), expected_private);
+        let mut expected_private = vec![true; nodes];
+        expected_private[nodes - 1] = false;
+        assert_eq!(*private_inputs, expected_private);
         let identities = addresses(&db, *first, handle.index);
         assert!(db.rebuild_standing_query(&cx, &handle, too_few).is_err());
         assert_eq!(addresses(&db, *first, handle.index), identities);
@@ -409,7 +418,6 @@ fn reachability_registration_and_rebuild(reflexive: bool) {
             "MATCH (a)-[:R*2..]->(b) RETURN DISTINCT a,b",
             "MATCH (a)-[:R*1..2]->(b) RETURN DISTINCT a,b",
             "MATCH (a)-[:R*]-(b) RETURN DISTINCT a,b",
-            "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT a,b",
             "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b LIMIT 0",
         ] {
             let prepared =
