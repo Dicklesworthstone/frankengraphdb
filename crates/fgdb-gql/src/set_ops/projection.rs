@@ -1359,8 +1359,12 @@ fn admit(
             GraphSetColumnType::Any
         }
         GraphSetValue::MapGet { map, .. } => {
-            admit(map, types, column, depth + 1, nodes, locals)?;
-            GraphSetColumnType::Any
+            match admit(map, types, column, depth + 1, nodes, locals)? {
+                // An element lookup reads a canonical stored property, including
+                // NULL for a missing key. A query-created map can hold graph values.
+                GraphSetColumnType::Vertex | GraphSetColumnType::Edge => GraphSetColumnType::Stored,
+                _ => GraphSetColumnType::Any,
+            }
         }
         GraphSetValue::Keys(map) => {
             admit(map, types, column, depth + 1, nodes, locals)?;
@@ -1814,6 +1818,24 @@ fn copy_property<E>(
 #[cfg(test)]
 mod property_copy_tests {
     use super::*;
+
+    #[test]
+    fn element_lookup_and_open_map_lookup_keep_their_own_value_domains() {
+        use GraphSetColumnType::{Any, Edge, Stored, Vertex};
+        for property in [
+            GraphElementKey::Property(PropertyKeyId(1)),
+            GraphElementKey::Missing,
+        ] {
+            let field = GraphSetValue::MapGet {
+                map: Box::new(GraphSetValue::Column(0)),
+                key: "score".into(),
+                property,
+            };
+            for (source, expected) in [(Vertex, Stored), (Edge, Stored), (Any, Any)] {
+                assert_eq!(value_type(&field, &[source], 0), Ok(expected));
+            }
+        }
+    }
 
     #[test]
     fn borrowed_property_copies_preserve_scalar_events_and_every_refusal() {
