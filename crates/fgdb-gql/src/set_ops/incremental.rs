@@ -763,7 +763,8 @@ mod tests {
                 )
                 .unwrap()
         };
-        let query = after(vec![GraphSetValue::Literal(CanonicalScalar::Int(7)); 2]);
+        let seven = crate::GqlScalarParameter::new(CanonicalScalar::Int(7)).unwrap();
+        let query = after(vec![GraphSetValue::Literal(seven); 2]);
         let (expanded, spec) = query
             .incremental_captured_unwind_projection(&mut |_| Ok::<_, ()>(()))
             .unwrap()
