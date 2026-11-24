@@ -1692,9 +1692,15 @@ impl PropertyEqualityIndex {
         drop(statements);
         values.sort_unstable();
         let candidates = values
-            .chunk_by(|a, b| a.0 == b.0 && a.1 == b.1)
+            .chunk_by_mut(|a, b| a.0 == b.0 && a.1 == b.1)
             .map(|group| {
-                let key = (group[0].0, std::sync::Arc::from(group[0].1.as_slice()));
+                // Release the sorted buffer as its canonical key enters the
+                // index. Keeping both copies until every group is built can
+                // double the memory needed for distinct property encodings.
+                let key = (
+                    group[0].0,
+                    std::sync::Arc::from(std::mem::take(&mut group[0].1)),
+                );
                 let vids = group.iter().map(|&(_, _, vid)| vid).collect();
                 (key, unit_set(vids, &mut work))
             })
