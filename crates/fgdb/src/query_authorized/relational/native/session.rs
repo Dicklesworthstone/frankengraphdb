@@ -206,8 +206,6 @@ fn result_rows(
     Ok(((result, snapshot_seq), count))
 }
 
-type Live<'cx, 'permit, 'clock> = RefCell<Execution<'cx, 'permit, &'clock mut dyn FnMut() -> u64>>;
-
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
     // Taking the state is the unwind guard: no callback runs while the caller
     // can observe an open session without a completed return path. On ordinary

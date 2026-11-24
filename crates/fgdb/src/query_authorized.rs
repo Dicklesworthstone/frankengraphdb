@@ -412,20 +412,24 @@ fn query_error(error: GqlQueryError<ReadError, QueryError>) -> QueryError {
     }
 }
 
+// Synchronous reads borrow their host clock for the lifetime of the call.
+// All callers can therefore share the same compiled evaluator.
+type Live<'cx, 'permit, 'clock> = RefCell<Execution<'cx, 'permit, &'clock mut dyn FnMut() -> u64>>;
+
 #[allow(clippy::too_many_arguments)]
-fn authorized<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
+fn authorized<V: Vfs + Clone, Row>(
     database: &Database<V>,
     cx: &QueryCx,
     authority: &Authority,
     token: &CapabilityToken,
     branch: &str,
     as_of: Option<CommitSeq>,
-    clock: Clock,
+    clock: impl FnMut() -> u64,
     evaluate: impl FnOnce(
         &Arc<Snapshot>,
         CommitSeq,
         &PlannerPredicates,
-        &RefCell<Execution<'_, '_, Clock>>,
+        &Live<'_, '_, '_>,
     ) -> Result<Vec<Row>, QueryError>,
 ) -> Result<Vec<Row>, QueryError> {
     authorized_with_errors(
@@ -444,20 +448,20 @@ fn authorized<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
 // All governed consumers share authentication, one live allowance and final
 // delivery. Only their typed error carrier differs; no source/permit escapes.
 #[allow(clippy::too_many_arguments)]
-fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
+fn authorized_with_errors<V: Vfs + Clone, Row, Error>(
     database: &Database<V>,
     cx: &QueryCx,
     authority: &Authority,
     token: &CapabilityToken,
     branch: &str,
     as_of: Option<CommitSeq>,
-    mut clock: Clock,
+    mut clock: impl FnMut() -> u64,
     map_error: fn(QueryError) -> Error,
     evaluate: impl FnOnce(
         &Arc<Snapshot>,
         CommitSeq,
         &PlannerPredicates,
-        &RefCell<Execution<'_, '_, Clock>>,
+        &Live<'_, '_, '_>,
     ) -> Result<Vec<Row>, Error>,
 ) -> Result<Vec<Row>, Error> {
     // The host picks its issuer, not the request. Reject a different database
@@ -477,7 +481,11 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
         .begin_read_at(branch, now)
         .map_err(QueryError::Authorization)
         .map_err(map_error)?;
-    let execution = RefCell::new(Execution::new(cx, permit, clock));
+    let execution = RefCell::new(Execution::new(
+        cx,
+        permit,
+        &mut clock as &mut dyn FnMut() -> u64,
+    ));
     execution.borrow_mut().checkpoint().map_err(map_error)?;
     database
         .ensure_readable()
