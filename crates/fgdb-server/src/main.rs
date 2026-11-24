@@ -121,8 +121,9 @@ or scratch limits. Databases without this option refuse those execution modes.
 --buffered-reads-memory-bytes selects bounded cold sources for FGP ReadStream
 and prepared SourceStream on that database. The byte pool is shared across
 four concurrent reads, including readers waiting for credit. This profile uses
-durable catalog names and native vertex/typed-edge queries; unsupported shapes
-refuse. Other read modes and the live writer retain their existing sources.
+durable catalog names and native vertex/single-edge queries, including any or
+finite relation types; unsupported shapes refuse. Other read modes and the live
+writer retain their existing sources.
 
 --compact-interval-seconds and --scrub-interval-seconds opt that database
 into fixed periodic maintenance while fgdbd retains its writer lease. Both

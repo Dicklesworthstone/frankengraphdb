@@ -136,8 +136,9 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     /// consumed, so no second root selection or resident fallback can occur.
     ///
     /// Use the returned canonical session's prepare and stream methods. This
-    /// profile supports native ordered vertex-local and typed single-edge
-    /// patterns, selected scalar properties, predicates, SKIP and LIMIT.
+    /// profile supports native ordered vertex-local and single-edge patterns
+    /// with one, any or a finite set of relation types, selected scalar
+    /// properties, predicates, SKIP and LIMIT.
     /// Complete native-run images are not enabled by this constructor; its
     /// private source always uses the selected-row bounded history profile.
     /// Unsupported plans refuse before candidate I/O. Initial cold admission
@@ -487,7 +488,17 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> AuthorizedBufferedRowCursor<'_, V
 
 enum Plan {
     Vertex(AsyncVertexScanPlan<GraphValueRow>, PropertySelection),
-    Edge(AsyncEdgeScanPlan, PropertySelection, RelationId),
+    Edge(AsyncEdgeScanPlan, PropertySelection, EdgeRelation),
+}
+
+// A finite selector with no allowed member needs no physical source. Any
+// retains per-candidate masking under the separate host physical limits.
+fn excludes_all_relations(relation: EdgeRelation, scope: &PlannerPredicates) -> bool {
+    relation.relations().is_some_and(|relations| {
+        relations
+            .iter()
+            .all(|relation| !scope.allows_relation(*relation))
+    })
 }
 
 fn compile(
@@ -513,10 +524,7 @@ fn compile(
         let plan = AsyncEdgeScanPlan::compile(pattern.plan()).map_err(|error| {
             QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(error)))
         })?;
-        let relation = plan
-            .root_relation()
-            .one()
-            .ok_or(QueryError::StreamingUnsupported { facade })?;
+        let relation = plan.root_relation();
         let keys = match plan.property_demand() {
             EdgeScanPropertyDemand::Topology => PropertySelection::EMPTY,
             EdgeScanPropertyDemand::Properties(keys) => select(keys),
@@ -657,15 +665,18 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
                     .vertex_scan(cx, at)
                     .map(|scan| Position::Vertex(Some(scan.into_state()))),
                 Plan::Edge(_, _, relation)
-                    if !capability.predicates().allows_relation(*relation) =>
+                    if excludes_all_relations(*relation, capability.predicates()) =>
                 {
                     Ok(Position::Edge(None))
                 }
-                Plan::Edge(_, _, relation) => backend
-                    .view
-                    .partition_mut()
-                    .edge_scan_relation(cx, at, *relation)
-                    .map(|scan| Position::Edge(Some(scan.into_state()))),
+                Plan::Edge(_, _, relation) => match relation.one() {
+                    Some(relation) => backend
+                        .view
+                        .partition_mut()
+                        .edge_scan_relation(cx, at, relation),
+                    None => backend.view.partition_mut().edge_scan(cx, at),
+                }
+                .map(|scan| Position::Edge(Some(scan.into_state()))),
             };
             let position = match position {
                 Ok(position) => position,

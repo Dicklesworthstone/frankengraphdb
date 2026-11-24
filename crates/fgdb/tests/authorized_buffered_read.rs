@@ -40,6 +40,8 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const SECRET: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(7);
 const S: RelationId = RelationId(8);
+const T: RelationId = RelationId(9);
+const U: RelationId = RelationId(10);
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0xa5; 32], NS, [0xa7; 32])
@@ -333,6 +335,234 @@ async fn collect<R: GraphSymbolResolver, C: FnMut() -> u64 + Send>(
     assert_eq!(cursor.state(), VertexScanState::Exhausted);
     assert!(cursor.next().await.is_none());
     rows
+}
+
+async fn relation_fixture(
+    cx: &CommitCx,
+    hidden: bool,
+) -> (GateVfs, Database<GateVfs>, CommitSeq, CommitSeq) {
+    let (vfs, mut db, _, _) = fixture(cx, hidden).await;
+    let mut extra = SymbolCatalog::default();
+    extra
+        .bind_all([
+            ("T", CatalogSymbol::Relation(T)),
+            ("U", CatalogSymbol::Relation(U)),
+        ])
+        .unwrap();
+    db.register_symbols(cx, &extra).await.unwrap();
+    let mut parallel = WriteBatch::new(R);
+    parallel.add_edge(EId(102), VId(1), VId(2), vec![(P, CanonicalScalar::Int(9))]);
+    parallel.add_edge(EId(103), VId(1), VId(1), vec![(P, CanonicalScalar::Int(5))]);
+    db.write(cx, parallel).await.unwrap();
+    let mut other = WriteBatch::new(T);
+    other.add_edge(
+        EId(150),
+        VId(2),
+        VId(1),
+        vec![
+            (P, CanonicalScalar::Int(13)),
+            (SECRET, CanonicalScalar::Int(999)),
+        ],
+    );
+    if hidden {
+        other.add_edge(
+            EId(151),
+            VId(1),
+            VId(10),
+            vec![(P, CanonicalScalar::Int(-1))],
+        );
+    }
+    let old = db.write(cx, other).await.unwrap();
+    let mut edit = WriteBatch::new(R);
+    edit.set_edge_property(EId(101), P, Some(CanonicalScalar::Int(27)));
+    edit.delete_edge(EId(102));
+    let current = db.write(cx, edit).await.unwrap();
+    (vfs, db, old, current)
+}
+
+fn relation_rows(rows: &[(u128, u128, u128, i64)]) -> Vec<GraphValueRow> {
+    rows.iter()
+        .map(|&(edge, source, target, score)| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Edge(EId(edge)),
+                GraphValue::Vertex(VId(source)),
+                GraphValue::Vertex(VId(target)),
+                GraphValue::Scalar(CanonicalScalar::Int(score)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ])
+        })
+        .collect()
+}
+
+#[test]
+fn any_and_finite_relation_sources_preserve_occurrences_scopes_and_history() {
+    let ((), report) = run_async_under_lab(0xa6_0111, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let authority = issuer();
+        for hidden in [false, true] {
+            let (_, db, old, current) = relation_fixture(&commit, hidden).await;
+            for at in [old, current] {
+                // Each non-self edge admits two endpoints; a self-loop one.
+                // Exact allowances catch charging hidden or unselected rows.
+                let mut allowed = grant(if at == old { 7 } else { 5 });
+                allowed.relations = Scope::only([R, T]);
+                let token = authority.issue_at(&allowed, 100).unwrap();
+                let pool = memory();
+                let mut session = db
+                    .buffered_read_publication(&cx, pool.clone(), limits())
+                    .unwrap()
+                    .into_authorized_read_session(
+                        &commit,
+                        &cx,
+                        &authority,
+                        &token,
+                        "main",
+                        at,
+                        GqlQueryPolicy::new(4, 10, 100_000, 100_000),
+                        || 100,
+                    )
+                    .await
+                    .unwrap();
+                let weight = if at == old { 17 } else { 27 };
+                let mut directed = vec![(101, 1, 2, weight)];
+                if at == old {
+                    directed.push((102, 1, 2, 9));
+                }
+                directed.extend([(103, 1, 1, 5), (150, 2, 1, 13)]);
+                let any = "MATCH (a)-[r]->(b) RETURN r,a,b,r.score,r.secret";
+                assert_eq!(
+                    collect(&mut session, &cx, any).await,
+                    relation_rows(&directed)
+                );
+                let historical = format!(
+                    "MATCH (a)-[r]->(b) FOR SYSTEM_TIME AS OF SEQ {} RETURN r,a,b,r.score,r.secret",
+                    at.0,
+                );
+                assert_eq!(
+                    collect(&mut session, &cx, &historical).await,
+                    relation_rows(&directed)
+                );
+                let incoming: Vec<_> = directed
+                    .iter()
+                    .map(|&(edge, a, b, score)| (edge, b, a, score))
+                    .collect();
+                assert_eq!(
+                    collect(
+                        &mut session,
+                        &cx,
+                        "MATCH (a)<-[r]-(b) RETURN r,a,b,r.score,r.secret"
+                    )
+                    .await,
+                    relation_rows(&incoming)
+                );
+                let mut undirected = vec![(101, 1, 2, weight), (101, 2, 1, weight)];
+                if at == old {
+                    undirected.extend([(102, 1, 2, 9), (102, 2, 1, 9)]);
+                }
+                undirected.extend([(103, 1, 1, 5), (150, 1, 2, 13), (150, 2, 1, 13)]);
+                assert_eq!(
+                    collect(
+                        &mut session,
+                        &cx,
+                        "MATCH (a)-[r]-(b) RETURN r,a,b,r.score,r.secret"
+                    )
+                    .await,
+                    relation_rows(&undirected)
+                );
+                drop(session);
+                assert_eq!(pool.used(), 0);
+
+                // T is permitted and has real rows, but is NOT in R|S.
+                // S is in the selector but hidden by the capability.
+                allowed.limits.max_nodes = if at == old { 5 } else { 3 };
+                let token = authority.issue_at(&allowed, 100).unwrap();
+                let mut session = db
+                    .buffered_read_publication(&cx, pool.clone(), limits())
+                    .unwrap()
+                    .into_authorized_read_session(
+                        &commit,
+                        &cx,
+                        &authority,
+                        &token,
+                        "main",
+                        at,
+                        GqlQueryPolicy::new(3, 10, 100_000, 100_000),
+                        || 100,
+                    )
+                    .await
+                    .unwrap();
+                let expected = relation_rows(&directed[..directed.len() - 1]);
+                for selector in [":R", ":R|S", ":R|S|R"] {
+                    let text =
+                        format!("MATCH (a)-[r{selector}]->(b) RETURN r,a,b,r.score,r.secret");
+                    assert_eq!(
+                        collect(&mut session, &cx, &text).await,
+                        expected,
+                        "{selector}"
+                    );
+                }
+                drop(session);
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn wholly_denied_finite_relations_open_no_source_and_do_not_spend_nodes() {
+    let ((), report) = run_async_under_lab(0xa6_0112, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, db, _, at) = relation_fixture(&commit, true).await;
+        let authority = issuer();
+        let mut denied = grant(0);
+        denied.relations = Scope::only([T]);
+        let token = authority.issue_at(&denied, 100).unwrap();
+        let pool = memory();
+        let mut session = db
+            .buffered_read_publication(&cx, pool.clone(), limits())
+            .unwrap()
+            .into_authorized_read_session(
+                &commit,
+                &cx,
+                &authority,
+                &token,
+                "main",
+                at,
+                policy(),
+                || 100,
+            )
+            .await
+            .unwrap();
+        vfs.reset();
+        vfs.refuse.store(true, Ordering::SeqCst);
+        for selector in [":R|S", ":S|U", ":S|R|S"] {
+            let text = format!("MATCH (a)-[r{selector}]->(b) RETURN r,r.score");
+            assert!(collect(&mut session, &cx, &text).await.is_empty());
+        }
+        assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+        assert!(!session.is_closed());
+        vfs.refuse.store(false, Ordering::SeqCst);
+        let args = GqlParameters::new();
+        let admitted = session
+            .prepare(&cx, "MATCH (a)-[r]->(b) RETURN r", &args)
+            .unwrap();
+        let mut cursor = session.stream(&cx, &admitted, &args).unwrap();
+        assert!(matches!(
+            cursor.next().await.unwrap(),
+            Err(AuthorizedBufferedError::Query(QueryError::Authorization(
+                Error::LimitExceeded(LimitDimension::Nodes)
+            )))
+        ));
+        drop(cursor);
+        drop(session);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -972,7 +1202,7 @@ fn catalog_and_graph_stay_on_one_cut_and_profile_refusal_precedes_payloads() {
         for text in [
             "MATCH (n) RETURN n.score",
             "MATCH (n) RETURN n,n.score ORDER BY n.score",
-            "MATCH (a)-[r]->(b) RETURN r",
+            "MATCH (a)-[r*1..2]->(b) RETURN r",
             "MATCH (a)-[r:R]->(b) RETURN r,a.score",
             "MATCH (n) RETURN n,42 AS value",
         ] {

@@ -41,6 +41,7 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const SECRET: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(7);
 const S: RelationId = RelationId(8);
+const T: RelationId = RelationId(9);
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0xa9; 32], NS, [0xaa; 32])
@@ -216,6 +217,7 @@ async fn fixture(
             ("H", CatalogSymbol::Label(H)),
             ("R", CatalogSymbol::Relation(R)),
             ("S", CatalogSymbol::Relation(S)),
+            ("T", CatalogSymbol::Relation(T)),
             ("score", CatalogSymbol::Property(P)),
             ("secret", CatalogSymbol::Property(SECRET)),
         ])
@@ -266,7 +268,26 @@ async fn fixture(
         VId(2),
         vec![(P, CanonicalScalar::Int(999))],
     );
-    let current = db.write(cx, denied).await.unwrap();
+    db.write(cx, denied).await.unwrap();
+    let mut third = WriteBatch::new(T);
+    third.add_edge(
+        EId(301),
+        VId(1),
+        VId(2),
+        vec![
+            (P, CanonicalScalar::Int(13)),
+            (SECRET, CanonicalScalar::Int(999)),
+        ],
+    );
+    if hidden {
+        third.add_edge(
+            EId(302),
+            VId(10),
+            VId(1),
+            vec![(P, CanonicalScalar::Int(999))],
+        );
+    }
+    let current = db.write(cx, third).await.unwrap();
     (vfs, db, old, current)
 }
 
@@ -773,7 +794,6 @@ fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_
                 "MATCH (a)-[r:R]->(b) RETURN r,b.score AS score LIMIT 0",
                 false,
             ),
-            ("MATCH (a)-[r]->(b) RETURN r LIMIT 0", false),
             (
                 "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN a,r,b,s,c LIMIT 0",
                 false,
@@ -1177,6 +1197,211 @@ fn cold_projected_payload_stays_charged_through_a_pending_spill_append() {
             0,
             "pending drop releases source, row and all private spill buffers"
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_any_and_finite_relations_keep_selector_scope_and_external_composition_distinct() {
+    use GraphAggregateValue::{Average, Count, Integer, Value};
+    let ((), report) = run_async_under_lab(0xa8_0207, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let cx = c.query();
+        let authority = issuer();
+        let args = GqlParameters::new();
+        for hidden in [false, true] {
+            let (vfs, _db, _, at) = fixture(&commit, hidden).await;
+            let pool = memory();
+            // R, S and T all have real edges at this cut. A finite selector
+            // excludes T even though the capability allows it, whereas Any
+            // includes T and excludes S through the capability predicate.
+            for (selector, nodes, expected, count, total) in [
+                (
+                    "",
+                    8,
+                    vec![
+                        vec![GraphValue::Edge(EId(101)), scalar(17), null()],
+                        vec![GraphValue::Edge(EId(301)), scalar(13), null()],
+                        vec![GraphValue::Edge(EId(102)), scalar(9), null()],
+                        vec![GraphValue::Edge(EId(103)), scalar(5), null()],
+                    ],
+                    4,
+                    44,
+                ),
+                (
+                    ":R|S",
+                    6,
+                    vec![
+                        vec![GraphValue::Edge(EId(101)), scalar(17), null()],
+                        vec![GraphValue::Edge(EId(102)), scalar(9), null()],
+                        vec![GraphValue::Edge(EId(103)), scalar(5), null()],
+                    ],
+                    3,
+                    31,
+                ),
+            ] {
+                let mut allowed = grant(nodes, 4);
+                allowed.relations = Scope::only([R, T]);
+                let token = authority.issue_at(&allowed, 100).unwrap();
+                let (mut ordered, _) = session(
+                    &commit,
+                    &cx,
+                    &vfs,
+                    &pool,
+                    &authority,
+                    &token,
+                    at,
+                    || 100,
+                    policy(4),
+                )
+                .await;
+                let text = format!(
+                    "MATCH (a)-[r{selector}]->(b) RETURN r,r.score AS score,r.secret AS hidden \
+                     ORDER BY score DESC,r"
+                );
+                let prepared = ordered.prepare(&cx, &text, &args).unwrap();
+                let mut cursor = ordered
+                    .execute_ordered(&cx, &prepared, &args)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    values(&mut cursor).await,
+                    expected,
+                    "{selector}; hidden={hidden}"
+                );
+                drop(cursor);
+                assert!(!ordered.is_closed());
+
+                let text = format!(
+                    "MATCH (a)-[r{selector}]->(b) RETURN count(*) AS rows,sum(r.score) AS total, \
+                     avg(r.score) AS mean,count(r.secret) AS hidden"
+                );
+                let prepared = ordered.prepare(&cx, &text, &args).unwrap();
+                let mut cursor = ordered
+                    .execute_ordered_aggregate(&cx, &prepared, &args)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    aggregates(&mut cursor).await,
+                    vec![vec![
+                        Count(count),
+                        Integer(total),
+                        Average(GraphExactAverage::new(total, count).unwrap()),
+                        Count(0),
+                    ]],
+                    "{selector}; hidden={hidden}"
+                );
+                drop(cursor);
+                drop(ordered);
+                assert_eq!(pool.used(), 0);
+            }
+
+            // The two selected bags share R occurrences. UNION ALL keeps
+            // those duplicates through a final page; only three output rows
+            // spend the signed allowance, while seven input edges are legal.
+            let mut allowed = grant(14, 3);
+            allowed.relations = Scope::only([R, T]);
+            let token = authority.issue_at(&allowed, 100).unwrap();
+            let (mut ordered, _) = session(
+                &commit,
+                &cx,
+                &vfs,
+                &pool,
+                &authority,
+                &token,
+                at,
+                || 100,
+                policy(3),
+            )
+            .await;
+            let prepared = ordered
+                .prepare(
+                    &cx,
+                    "MATCH (a)-[r]->(b) RETURN r,r.score AS score UNION ALL \
+                 MATCH (a)-[r:R|S]->(b) RETURN r,r.score AS score \
+                 ORDER BY score DESC,r SKIP 1 LIMIT 3",
+                    &args,
+                )
+                .unwrap();
+            let mut cursor = ordered
+                .execute_ordered(&cx, &prepared, &args)
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(
+                values(&mut cursor).await,
+                vec![
+                    vec![GraphValue::Edge(EId(101)), scalar(17)],
+                    vec![GraphValue::Edge(EId(301)), scalar(13)],
+                    vec![GraphValue::Edge(EId(102)), scalar(9)],
+                ]
+            );
+            drop(cursor);
+            drop(ordered);
+            assert_eq!(pool.used(), 0);
+
+            let mut denied = grant(0, 1);
+            denied.relations = Scope::only([T]);
+            let token = authority.issue_at(&denied, 100).unwrap();
+            let (mut ordered, _) = session(
+                &commit,
+                &cx,
+                &vfs,
+                &pool,
+                &authority,
+                &token,
+                at,
+                || 100,
+                policy(1),
+            )
+            .await;
+            let prepared = ordered
+                .prepare(
+                    &cx,
+                    "MATCH (a)-[r:R|S]->(b) RETURN r,r.score ORDER BY r",
+                    &args,
+                )
+                .unwrap();
+            vfs.reset();
+            let mut cursor = ordered
+                .execute_ordered(&cx, &prepared, &args)
+                .unwrap()
+                .await
+                .unwrap();
+            assert!(values(&mut cursor).await.is_empty());
+            drop(cursor);
+            assert_eq!(
+                vfs.reads.load(Ordering::SeqCst),
+                0,
+                "a finite selector with no authorized member opens no cold candidate scan"
+            );
+            let prepared = ordered.prepare(
+                &cx,
+                "MATCH (a)-[r:R|S]->(b) RETURN count(*) AS rows,sum(r.score) AS total,collect(r.score) AS items",
+                &args,
+            ).unwrap();
+            let mut cursor = ordered
+                .execute_ordered_aggregate(&cx, &prepared, &args)
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(
+                aggregates(&mut cursor).await,
+                vec![vec![
+                    Count(0),
+                    Value(null()),
+                    Value(GraphValue::List(vec![]))
+                ]]
+            );
+            drop(cursor);
+            assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+            assert!(!ordered.is_closed());
+            drop(ordered);
+            assert_eq!(pool.used(), 0);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -22,6 +22,7 @@ async fn start_buffered(
             ("Company", CatalogSymbol::Label(LabelId(2))),
             ("KNOWS", CatalogSymbol::Relation(RelationId(1))),
             ("WORKS_AT", CatalogSymbol::Relation(RelationId(2))),
+            ("LIKES", CatalogSymbol::Relation(RelationId(3))),
             ("name", CatalogSymbol::Property(PropertyKeyId(1))),
             ("age", CatalogSymbol::Property(PropertyKeyId(2))),
         ])
@@ -210,6 +211,117 @@ fn buffered_text_and_prepared_streams_preserve_masking_history_and_typed_edges()
         }
         reader.release_prepared(cx, handle).await.unwrap();
         reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn buffered_any_and_finite_relation_streams_keep_scopes_and_prepared_history() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start_buffered(cx, "buffered-wire-relations").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {age:1}), (b:Person {age:2}), (h:Company {age:999}), \
+             (a)-[:KNOWS {age:3,name:'hidden-3'}]->(b), \
+             (a)-[:KNOWS {age:4,name:'hidden-4'}]->(b), \
+             (a)-[:KNOWS {age:5,name:'hidden-5'}]->(a), \
+             (b)-[:LIKES {age:7,name:'hidden-7'}]->(a), \
+             (a)-[:WORKS_AT {age:999}]->(b), (a)-[:LIKES {age:999}]->(h)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut scope = reader_grant();
+        scope.relations = Scope::only([RelationId(1), RelationId(3)]);
+        scope.limits.max_nodes = 7;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let any = "MATCH (a)-[r]->(b) RETURN r.age AS weight,r.name AS hidden ORDER BY r";
+        let rows = reader
+            .execute(cx, ExecuteMode::ReadStream, any, vec![])
+            .await
+            .unwrap();
+        assert_eq!(rows.columns, ["weight", "hidden"]);
+        assert_eq!(ages(&rows.rows), [3, 4, 5, 7]);
+        assert_eq!(rows.outcome, Outcome::Rows { seq: 2 });
+        let finite = "MATCH (a)-[r:KNOWS|WORKS_AT]->(b) \
+            FOR SYSTEM_TIME AS OF SEQ $cut RETURN r.age AS weight,r.name AS hidden ORDER BY r";
+        let args = |cut| vec![("cut".into(), WireValue::Count(cut))];
+        let prepared = reader.prepare_read(cx, finite, args(2)).await.unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (a)-[r:KNOWS]->(b) SET r.age = r.age + 10",
+                vec![],
+            )
+            .await
+            .unwrap();
+        for (cut, expected) in [
+            (2, vec![3, 4, 5]),
+            (3, vec![13, 14, 15]),
+            (2, vec![3, 4, 5]),
+        ] {
+            let mut rows = Vec::new();
+            let outcome = reader
+                .execute_prepared_streaming(
+                    cx,
+                    PreparedReadMode::SourceStream,
+                    prepared,
+                    args(cut),
+                    |columns| {
+                        assert_eq!(columns, ["weight", "hidden"]);
+                        Ok(())
+                    },
+                    |row| {
+                        rows.push(row);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(ages(&rows), expected);
+            assert_eq!(outcome, Outcome::Rows { seq: cut });
+        }
+        reader.release_prepared(cx, prepared).await.unwrap();
+        reader.close(cx).await.unwrap();
+
+        scope.relations = Scope::only([RelationId(3)]);
+        scope.limits.max_nodes = 0;
+        let mut denied = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        denied.select(cx, "social").await.unwrap();
+        assert!(
+            denied
+                .execute(
+                    cx,
+                    ExecuteMode::ReadStream,
+                    "MATCH (a)-[r:KNOWS|WORKS_AT]->(b) RETURN r.age ORDER BY r",
+                    vec![],
+                )
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert_eq!(
+            server_code(
+                denied
+                    .execute(cx, ExecuteMode::ReadStream, any, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget
+        );
+        denied.ping(cx, 613).await.unwrap();
+        denied.close(cx).await.unwrap();
         owner.close(cx).await.unwrap();
         shutdown.trigger();
         task.join(cx).await.unwrap();

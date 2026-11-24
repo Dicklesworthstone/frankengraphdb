@@ -38,8 +38,9 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     /// Files must be private host-owned backends; request code cannot attach
     /// another file or extract their private input/result spools.
     ///
-    /// Native vertex and typed single-edge leaves compose through the existing
-    /// external set, row-join, scalar-stage, CALL and grouping owners. Complete
+    /// Native vertex and single-edge leaves, including any/finite relation
+    /// selectors, compose through the existing external set, row-join,
+    /// scalar-stage, CALL and grouping owners. Complete
     /// maps, carried-element lookups, walks, probes, fixed-edge joins and
     /// procedures refuse recursively before candidate or scratch access.
     /// Selected leaf properties retain the same staged visibility admission.
@@ -112,9 +113,7 @@ fn admit(plan: &AsyncSpillSetPlan, facade: crate::NativeReadClass) -> Result<()>
             }
         }
         AsyncSpillSetSourcePlan::Edge(plan) => {
-            if plan.root_relation().one().is_none()
-                || matches!(plan.property_demand(), EdgeScanPropertyDemand::Complete)
-            {
+            if matches!(plan.property_demand(), EdgeScanPropertyDemand::Complete) {
                 Err(unsupported(facade))
             } else {
                 Ok(())
@@ -433,10 +432,7 @@ impl<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> Host<'q, V, C> {
                     Plan::Vertex(plan.clone(), keys)
                 }
                 AsyncSpillSetSourcePlan::Edge(plan) => {
-                    let relation = plan
-                        .root_relation()
-                        .one()
-                        .ok_or_else(|| unsupported(crate::NativeReadClass::Set))?;
+                    let relation = plan.root_relation();
                     let keys = match plan.property_demand() {
                         EdgeScanPropertyDemand::Topology => PropertySelection::EMPTY,
                         EdgeScanPropertyDemand::Properties(keys) => selected_keys(keys, scope),
@@ -466,20 +462,21 @@ impl<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> Host<'q, V, C> {
                     .vertex_scan(self.cx, self.at)
                     .map(|scan| Position::Vertex(Some(scan.into_state()))),
                 Plan::Edge(_, _, relation)
-                    if !self
-                        .execution
-                        .borrow()
-                        .permit
-                        .predicates()
-                        .allows_relation(*relation) =>
+                    if excludes_all_relations(
+                        *relation,
+                        self.execution.borrow().permit.predicates(),
+                    ) =>
                 {
                     Ok(Position::Edge(None))
                 }
-                Plan::Edge(_, _, relation) => backend
-                    .view
-                    .partition_mut()
-                    .edge_scan_relation(self.cx, self.at, *relation)
-                    .map(|scan| Position::Edge(Some(scan.into_state()))),
+                Plan::Edge(_, _, relation) => match relation.one() {
+                    Some(relation) => backend
+                        .view
+                        .partition_mut()
+                        .edge_scan_relation(self.cx, self.at, relation),
+                    None => backend.view.partition_mut().edge_scan(self.cx, self.at),
+                }
+                .map(|scan| Position::Edge(Some(scan.into_state()))),
             }
             .map_err(AuthorizedBufferedError::Read)
             .map_err(buffered_error)?;

@@ -366,18 +366,7 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource for Sourc
         relation: EdgeRelation,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<AsyncEdgeCandidate<EdgeRecord>>, EdgeScanSourceError<Self::Error, C>> {
-        let Some(relation) = relation.one() else {
-            return Err(EdgeScanSourceError::Source(
-                QueryError::Authorization(AuthorizationError::ScopeDenied).into(),
-            ));
-        };
-        if !self
-            .execution
-            .borrow()
-            .permit
-            .predicates()
-            .allows_relation(relation)
-        {
+        if excludes_all_relations(relation, self.execution.borrow().permit.predicates()) {
             return Ok(None);
         }
         let Position::Edge(position) = &mut self.position else {
@@ -401,7 +390,11 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource for Sourc
                         let mut live = execution.borrow_mut();
                         live.poll_fresh().map_err(Control::Query)?;
                         let scope = live.permit.predicates();
-                        if !scope.allows_relation(edge.relation)
+                        // Set and Any both use the bounded all-relation root.
+                        // Exclude nonmembers before logical admission, even
+                        // when that unrelated relation is otherwise visible.
+                        if !relation.matches(edge.relation)
+                            || !scope.allows_relation(edge.relation)
                             || !scope.allows_vertex(row.source_vertex().labels())
                             || !scope.allows_vertex(row.target_vertex().labels())
                         {
@@ -425,7 +418,7 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource for Sourc
                 .cx
                 .with_restriction_async(scan.next_admitted_properties_with_endpoints(
                     self.cx,
-                    Some(relation),
+                    relation.one(),
                     self.keys,
                     &mut admit,
                     &mut observe,

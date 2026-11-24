@@ -12,13 +12,47 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Cold untyped and multi-type edge reads — qualification pending
+
+The authorized buffered source and external relation adapter now admit untyped
+single-edge patterns and finite relation-type alternatives, as well as the
+existing typed roots. The same support reaches configured FGP ReadStream and
+prepared SourceStream requests. A native query such as
+`MATCH (a)-[r:R|S]->(b) RETURN r,r.score ORDER BY r` retains its exact relation
+selector through physical admission; an untyped `[r]` selects any permitted type.
+
+One-type roots keep their relation-pruned scan. Any/finite-set roots use the
+existing bounded all-relation scan in stable EId order, preserving native
+parallel-edge and orientation semantics without concatenating per-type results.
+Finite selectors exclude nonmembers before signed node charges, native candidate
+events and selected-property loading, even when an excluded type is otherwise
+allowed by the capability. Wholly denied finite selectors return empty without
+opening a graph scan. Per-row scope and both endpoint lifetimes remain enforced.
+
+Selected property sidecars stay behind admission. Topology and endpoint-label
+reads for mixed selectors remain subject to the separate physical limits; this
+does not establish hidden-I/O or timing noninterference. Complete maps, endpoint
+property payloads, walks, fixed-edge joins and probes retain their existing
+refusal boundaries. This closes a cold-route gap under `fgdb-du0xg`; it does not
+close that bead's broader qualification or the integrated qualification bead.
+
+Public embedded, external and FGP regression sources distinguish any-type reads
+from finite selectors using three actual relations, allowed-but-unselected types,
+hidden endpoints and masked properties. They cover parallel edges, self-loops,
+reverse/undirected orientations, historical reads, prepared requests, exact
+aggregates, UNION pages and wholly denied finite selections at zero signed node
+allowance. Independent source review and focused pinned Rustfmt checks passed.
+Compilation and runtime qualification remain UNRUN; the workspace exhausted
+its storage during the final server fixture edit, which was reconstructed from
+the verified committed file and checked in temporary storage before publication.
+
 ### Cold relational and aggregate execution — qualification pending
 
 `BufferedReadPublication::into_authorized_ordered_read_session` composes the
 canonical authorized session with bounded cold sources and three host-owned
 scratch files. Its `execute_ordered` and `execute_ordered_aggregate` methods
 reuse the existing external relation, grouping, sorting and final-delivery
-owners. The source adapter supplies scoped native vertex and typed single-edge
+owners. The source adapter supplies scoped native vertex and single-edge
 leaves; UNION/INTERSECT/EXCEPT, products and row joins, supported scalar stages,
 correlated CALL and exact terminal aggregates retain their native semantics.
 Numeric cells, collection occurrence order, complete groups and final pages
@@ -74,9 +108,9 @@ Every opening and pull poll is fenced by the served recovery generation. Reads
 keep their captured publication when the live writer advances; they do not hold
 a resident Snapshot or a writer lock while waiting for cold I/O or client credit.
 
-This initial served profile admits native vertex-local and typed single-edge
-source queries, including selected properties, predicates, historical cuts and
-finite native pages. Signed scope masking and source/delivery quotas remain in
+This served profile admits native vertex-local and single-edge source queries,
+including one/any/finite relation selectors, selected properties, predicates,
+historical cuts and finite native pages. Signed scope masking and source/delivery quotas remain in
 the canonical authorized owner. Unsupported shapes refuse without a resident
 fallback. Durable catalog names and exact operator redeclarations are accepted;
 process-local names absent from the selected catalog refuse. Physical errors
@@ -178,8 +212,9 @@ admission, then binds the catalog, graph publication and source to one historica
 commit. A prepared query selecting a different commit returns `DifferentCut`;
 callers open another session for that cut.
 
-The asynchronous cursor admits native vertex-local queries and typed single-edge
-queries with selected fields, native predicates, ordering and finite pages.
+The asynchronous cursor admits native vertex-local queries and single-edge
+queries with one/any/finite relation selectors, selected fields, native predicates,
+ordering and finite pages.
 Labels, relation authority and both endpoint lifetimes are checked before signed
 node admission and selected-property decoding. A denied explicit relation yields
 an empty cursor without opening a graph source. Unsupported joins, walks,
