@@ -3,18 +3,31 @@
 //! Reconstruct only the derived writer/version state at the requested cut;
 //! never reinterpret an old batch against the live writer. The scope exposes
 //! preparation/staging operations only, and restores live state on return or
-//! unwind. No publication, validator installation, allocation of identities or
-//! await occurs.
+//! unwind. No publication, validator installation or await occurs. Authorized
+//! statements allocate only through an allocator captured from the live writer
+//! before selection; its counters and current spent-identity exclusions never
+//! rewind with historical semantic state.
 
 use crate::{
-    Database, PreparedWrite, RebuildError, Snapshot, VersionHeads, WriteBatch, WriteError,
-    WriteHeads, WriteTxn, WriteTxnError,
+    AuthorizedWriteOutput, AuthorizedWriteTransaction, Database, ElementId, PreparedWrite,
+    RebuildError, Snapshot, VersionHeads, WriteBatch, WriteError, WriteHeads, WriteTxn,
+    WriteTxnError,
 };
 use asupersync::fs::Vfs;
 use fgdb_delta_types::DeltaRow;
+use fgdb_gql::algebra::GraphValueRow;
+use fgdb_gql::insertion::GraphInsertRequest;
+use fgdb_gql::{
+    GqlQueryError, GqlQueryExecution, GraphAggregateRow, GraphWriteChainError,
+    PreparedGraphSet, PreparedGraphSetAggregate, PreparedGraphTransactionControl,
+    PreparedGraphWriteChain,
+};
 use fgdb_strata::writer::BlockWriter;
-use fgdb_types::CommitSeq;
+use fgdb_types::{CommitSeq, QueryCx};
 use std::sync::Arc;
+
+type AuthorizedFault =
+    GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
 
 /// An exact native fold at this writer lifetime's lazy-open cut. Keep the
 /// writer, including its spent identities, rather than deriving old state from
@@ -136,6 +149,66 @@ impl<V: Vfs + Clone> PreparationBasis<'_, V> {
             allocate,
         )
     }
+    /// These typed adapters never expose the temporarily selected database.
+    /// The owner was admitted before reconstruction and immediately takes its
+    /// state again, so failure or unwind discards the entire private prefix.
+    pub(crate) fn stage_authorized_chain<Clock: FnMut() -> u64>(
+        &mut self,
+        owner: &mut AuthorizedWriteTransaction<'_, Clock>,
+        cx: &QueryCx,
+        statement: &PreparedGraphWriteChain,
+        allocator: &mut dyn FnMut(GraphInsertRequest) -> Result<ElementId, WriteTxnError>,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, AuthorizedFault> {
+        owner.stage_chain_selected(self.database, cx, statement, allocator, admit)
+    }
+
+    pub(crate) fn read_authorized<Clock: FnMut() -> u64>(
+        &mut self,
+        owner: &mut AuthorizedWriteTransaction<'_, Clock>,
+        cx: &QueryCx,
+        statement: &PreparedGraphSet,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, AuthorizedFault> {
+        owner.read_selected(self.database, cx, statement, admit)
+    }
+
+    pub(crate) fn read_authorized_aggregate<Clock: FnMut() -> u64>(
+        &mut self,
+        owner: &mut AuthorizedWriteTransaction<'_, Clock>,
+        cx: &QueryCx,
+        statement: &PreparedGraphSetAggregate,
+        admit: impl FnOnce(
+            &[GraphAggregateRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, AuthorizedFault> {
+        owner.read_aggregate_selected(self.database, cx, statement, admit)
+    }
+
+    pub(crate) fn control_authorized<Clock: FnMut() -> u64>(
+        &mut self,
+        owner: &mut AuthorizedWriteTransaction<'_, Clock>,
+        cx: &QueryCx,
+        control: &PreparedGraphTransactionControl,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<(), AuthorizedFault> {
+        owner.control_selected(self.database, cx, control, admit)
+    }
+
 }
 
 impl<V: Vfs + Clone> Database<V> {

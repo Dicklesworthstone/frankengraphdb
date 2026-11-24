@@ -8,10 +8,11 @@ use super::{
 use crate::write_txn::{
     FrozenCreations, MutationProgramWorkspace, MutationProjectionTail, frozen_chain,
 };
-use crate::{PendingRow, WriteBatch};
+use crate::{ElementId, PendingRow, WriteBatch};
 use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use fgdb_gql::insertion::{
-    GraphInsertBatch, GraphInsertError, GraphInsertPolicy, GraphInsertStats, PreparedGraphInsert,
+    GraphInsertBatch, GraphInsertError, GraphInsertPolicy, GraphInsertRequest, GraphInsertStats,
+    PreparedGraphInsert,
 };
 use fgdb_gql::{
     GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats,
@@ -29,6 +30,10 @@ use std::cell::RefCell;
 mod merges;
 #[path = "chain_vertex_merges.rs"]
 mod vertices;
+
+/// Captured from the live writer before any historical semantic selection.
+pub(super) type Allocator<'a> =
+    &'a mut dyn FnMut(GraphInsertRequest) -> Result<ElementId, WriteTxnError>;
 
 pub(super) type Fault =
     GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
@@ -446,6 +451,28 @@ pub(super) fn admit_definition<Clock: FnMut() -> u64>(
         )));
     }
     Ok(())
+}
+
+/// Admit a standalone row or aggregate input before selecting historical
+/// writer state. This is the same definition check and signed work charge
+/// previously performed by each selected read executor.
+pub(super) fn admit_read_definition<Clock: FnMut() -> u64>(
+    read: &fgdb_gql::PreparedGraphSet,
+    query_cx: &QueryCx,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<(), Fault> {
+    if !scope.rights().can_read() {
+        return Err(source(WriteTxnError::Authorization(
+            Error::PermissionDenied,
+        )));
+    }
+    read.admit_patterns(&mut |pattern| {
+        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+        execution.checkpoint()?;
+        admit_pattern(pattern, scope)
+    })
+    .map_err(source)
 }
 
 struct ChainSource<'s, 'db, 'run, 'cx, 'permit, V: Vfs, Clock> {
@@ -1089,12 +1116,14 @@ impl<V: Vfs + Clone> Database<V> {
                         .map_err(|error| source(WriteTxnError::Write(error)))?,
                     execution,
                 );
+                let mut allocator = self.engine_allocator(query_cx).map_err(source)?;
                 let (mut state, result) = self.stage_authorized_chains(
                     query_cx,
                     chains,
                     continuation,
                     policy,
                     scope,
+                    &mut allocator,
                     state,
                     active_record,
                     admit,
@@ -1125,6 +1154,7 @@ impl<V: Vfs + Clone> Database<V> {
         continuation: Option<&fgdb_gql::PreparedGraphSet>,
         policy: GraphInsertPolicy,
         scope: &PlannerPredicates,
+        allocator: Allocator<'_>,
         state: ChainState<'cx, 'permit, Clock>,
         active_record: &mut Option<usize>,
         admit: impl FnOnce(
@@ -1249,6 +1279,7 @@ impl<V: Vfs + Clone> Database<V> {
                         &mut execution,
                         frozen.as_mut(),
                         continues,
+                        &mut *allocator,
                     )?
                 } else if matches!(
                     statement,
@@ -1265,6 +1296,7 @@ impl<V: Vfs + Clone> Database<V> {
                         rows.take(),
                         scope,
                         &mut execution,
+                        &mut *allocator,
                     )?
                 } else if matches!(
                     statement,
@@ -1282,6 +1314,7 @@ impl<V: Vfs + Clone> Database<V> {
                         scope,
                         &mut execution,
                         frozen.as_mut(),
+                        &mut *allocator,
                     )?;
                     (stats, returning, 0)
                 } else if let GraphWriteChainStep::Query(query) = statement {
@@ -1299,9 +1332,7 @@ impl<V: Vfs + Clone> Database<V> {
                                     scope,
                                     execution: &controls,
                                 },
-                                |request| {
-                                    database.borrow_mut().allocate_identity(query_cx, request)
-                                },
+                                &mut *allocator,
                                 || {
                                     query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                                     controls.borrow_mut().checkpoint()
@@ -1420,9 +1451,7 @@ impl<V: Vfs + Clone> Database<V> {
                                 },
                             )
                             .with_call_arguments(transaction.call_arguments.clone());
-                            let allocate = |request| {
-                                database.borrow_mut().allocate_identity(query_cx, request)
-                            };
+                            let allocate = &mut *allocator;
                             let checkpoint = || {
                                 if let Some(error) = element_failure.borrow_mut().take() {
                                     return Err(WriteTxnError::Interrupted(error));
@@ -1756,17 +1785,6 @@ impl<V: Vfs + Clone> Database<V> {
         ),
         Fault,
     > {
-        if !scope.rights().can_read() {
-            return Err(source(WriteTxnError::Authorization(
-                Error::PermissionDenied,
-            )));
-        }
-        read.admit_patterns(&mut |pattern| {
-            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-            state.execution.checkpoint()?;
-            admit_pattern(pattern, scope)
-        })
-        .map_err(source)?;
         let allowance = remaining(policy, &state.used, state.mutation_effects, true).query;
         let result = query_cx
             .with_restriction(|| {
@@ -1812,18 +1830,6 @@ impl<V: Vfs + Clone> Database<V> {
         ),
         Fault,
     > {
-        if !scope.rights().can_read() {
-            return Err(source(WriteTxnError::Authorization(
-                Error::PermissionDenied,
-            )));
-        }
-        read.input()
-            .admit_patterns(&mut |pattern| {
-                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                state.execution.checkpoint()?;
-                admit_pattern(pattern, scope)
-            })
-            .map_err(source)?;
         let allowance = remaining(policy, &state.used, state.mutation_effects, true).query;
         let result = query_cx
             .with_restriction(|| {

@@ -953,28 +953,118 @@ mod tests {
     }
 
     #[test]
-    fn native_owner_refuses_a_new_frontier_without_replaying_staged_work() {
+    fn native_owner_keeps_its_begin_snapshot_without_replaying_staged_work() {
         let ((), report) = run_async_under_lab(0xf67a_0004, |cx| async move {
             let (server, token, _) = served(&cx, "fgp-transaction-stale-frontier").await;
             let db = &server.databases["test"];
             let mut transaction = accepted(NativeWriteTransaction::begin(&cx, db, &token).await);
-            accepted(
+            assert_eq!(transaction.basis(), CommitSeq(0));
+            let created = accepted(
                 transaction
                     .execute_framed(&cx, &request(ExecuteMode::Write, "CREATE (n)"), 4096)
                     .await,
             );
+            assert_eq!(created.created.vertices, 1);
+            let read = request(ExecuteMode::Read, "MATCH (n) RETURN n");
+            let original = accepted(transaction.execute_framed(&cx, &read, 4096).await);
+            assert_eq!(original.rows.len(), 1);
+            assert_eq!(original.outcome, Outcome::Rows { seq: 0 });
+
             let concurrent = request(ExecuteMode::Write, "CREATE (n)");
             accepted(super::super::write(&cx, db, &token, &concurrent).await);
             let committed = state(&cx, db).await;
             assert_eq!(committed, (CommitSeq(1), 1));
-            let error = transaction
-                .execute_framed(&cx, &request(ExecuteMode::Read, "MATCH (n) RETURN n"), 4096)
-                .await
-                .err()
-                .expect("a retained transaction cannot silently change its basis");
-            assert_eq!(error.code, ErrorCode::Execution);
-            assert!(transaction.commit(&cx).await.is_err());
+            let resumed = accepted(transaction.execute_framed(&cx, &read, 4096).await);
+            assert_eq!(resumed.columns, original.columns);
+            assert_eq!(resumed.rows, original.rows, "retain the same private identity");
+            assert_eq!(resumed.outcome, Outcome::Rows { seq: 0 });
+            assert_eq!(resumed.created.vertices, 0);
+            assert_eq!(transaction.basis(), CommitSeq(0));
+            let stats = transaction.owner.as_ref().unwrap().statistics().unwrap();
+            assert_eq!(stats.completed_statements, 3);
+            assert_eq!(stats.created_vertices, 1);
             assert_eq!(state(&cx, db).await, committed);
+
+            // Resuming does not refresh the snapshot or erase its scan witness.
+            // The concurrent insertion overlaps MATCH's complete vertex domain,
+            // so the unchanged strict commit validator still rejects publication.
+            let error = transaction.commit(&cx).await.err().expect("scan conflict");
+            assert_eq!(error.code, ErrorCode::Execution);
+            assert_eq!(state(&cx, db).await, committed);
+            server.join_database_workers(&cx).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn native_owner_commits_disjoint_continuations_once_at_the_original_basis() {
+        let ((), report) = run_async_under_lab(0xf67a_0005, |cx| async move {
+            let (server, token, _) = served(&cx, "fgp-transaction-disjoint-frontier").await;
+            let db = &server.databases["test"];
+            let mut transaction = accepted(NativeWriteTransaction::begin(&cx, db, &token).await);
+            let first = accepted(
+                transaction
+                    .execute_framed(
+                        &cx,
+                        &request(ExecuteMode::Write, "CREATE (n) RETURN 7 AS value"),
+                        4096,
+                    )
+                    .await,
+            );
+            assert_eq!(first.rows, [vec![WireValue::Int(7)]]);
+            assert_eq!(first.created.vertices, 1);
+            assert_eq!(first.outcome, Outcome::Rows { seq: 0 });
+            accepted(
+                super::super::write(
+                    &cx,
+                    db,
+                    &token,
+                    &request(ExecuteMode::Write, "CREATE (n)"),
+                )
+                .await,
+            );
+            assert_eq!(state(&cx, db).await, (CommitSeq(1), 1));
+
+            let read = accepted(
+                transaction
+                    .execute_framed(
+                        &cx,
+                        &request(ExecuteMode::Read, "RETURN 11 AS value"),
+                        4096,
+                    )
+                    .await,
+            );
+            assert_eq!(read.rows, [vec![WireValue::Int(11)]]);
+            assert_eq!(read.outcome, Outcome::Rows { seq: 0 });
+            assert_eq!(read.created.vertices, 0);
+            let second = accepted(
+                transaction
+                    .execute_framed(
+                        &cx,
+                        &request(ExecuteMode::Write, "CREATE (n) RETURN 8 AS value"),
+                        4096,
+                    )
+                    .await,
+            );
+            assert_eq!(second.rows, [vec![WireValue::Int(8)]]);
+            assert_eq!(second.created.vertices, 1);
+            assert_eq!(second.outcome, Outcome::Rows { seq: 0 });
+            assert_eq!(transaction.basis(), CommitSeq(0));
+            let stats = transaction.owner.as_ref().unwrap().statistics().unwrap();
+            assert_eq!(stats.completed_statements, 3);
+            assert_eq!(stats.created_vertices, 2);
+            assert_eq!(state(&cx, db).await, (CommitSeq(1), 1));
+
+            let completed = accepted(transaction.commit(&cx).await);
+            assert_eq!(
+                completed.outcome,
+                Outcome::WriteCommitted {
+                    seq: 2,
+                    statements: 3,
+                }
+            );
+            assert_eq!(completed.created.vertices, 2);
+            assert_eq!(state(&cx, db).await, (CommitSeq(2), 3));
             server.join_database_workers(&cx).await;
         });
         assert!(report.lab_test_passed(), "{report:?}");

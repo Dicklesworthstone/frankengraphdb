@@ -821,6 +821,213 @@ fn explicit_statements_share_staged_state_and_publish_one_atomic_commit() {
 }
 
 #[test]
+fn explicit_transactions_continue_on_the_begin_snapshot_across_other_clients_commits() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "explicit-transaction-concurrent-basis").await;
+        let mut scope = grant(Rights::ReadWrite);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        let mut owner = connect(cx, addr, &scope).await;
+        let mut concurrent = connect(cx, addr, &grant(Rights::ReadWrite)).await;
+
+        // The other connection publishes a scope-hidden, disjoint creation.
+        // The retained owner must keep its prefix and statement numbering;
+        // replaying either CREATE would leave an extra visible vertex.
+        let begun = owner.begin_transaction(cx).await.unwrap();
+        assert_eq!(begun.basis, 0);
+        let first = owner
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(
+                    ExecuteMode::Write,
+                    "CREATE (n:Person {age:10}) RETURN n.age AS age",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.rows, [vec![WireValue::Int(10)]]);
+        assert_eq!(first.end.handle, begun.handle);
+        assert_eq!(first.end.statement, 1);
+        let advanced = concurrent
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Company {age:90})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            advanced.outcome,
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1,
+            }
+        );
+        assert!(ages(cx, &mut concurrent).await.is_empty());
+        let second = owner
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(
+                    ExecuteMode::Write,
+                    "CREATE (n:Person {age:20}) RETURN n.age AS age",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.rows, [vec![WireValue::Int(20)]]);
+        assert_eq!(second.end.handle, begun.handle);
+        assert_eq!(second.end.statement, 2);
+        assert!(ages(cx, &mut concurrent).await.is_empty());
+        assert_eq!(
+            owner.commit_transaction(cx, begun.handle).await.unwrap(),
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 2,
+            }
+        );
+        let published = concurrent
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n) RETURN n.age AS age ORDER BY age",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            published.rows,
+            [
+                vec![WireValue::Int(10)],
+                vec![WireValue::Int(20)],
+                vec![WireValue::Int(90)],
+            ]
+        );
+        assert_eq!(published.outcome, Outcome::Rows { seq: 2 });
+
+        // Overlapping changes also cannot refresh a live owner's basis.
+        // Statements continue against BEGIN plus the private writes, and
+        // conflict detection remains at the one native COMMIT boundary.
+        let begun = owner.begin_transaction(cx).await.unwrap();
+        assert_eq!(begun.basis, 2);
+        let updated = owner
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(
+                    ExecuteMode::Write,
+                    "MATCH (n:Person) WHERE n.age=10 SET n.age=11 RETURN n.age AS age",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.rows, [vec![WireValue::Int(11)]]);
+        assert_eq!(updated.end.statement, 1);
+        let advanced = concurrent
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) WHERE n.age=10 SET n.age=110",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            advanced.outcome,
+            Outcome::WriteCommitted {
+                seq: 3,
+                statements: 1,
+            }
+        );
+        let own_rows = owner
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(
+                    ExecuteMode::Read,
+                    "MATCH (n:Person) RETURN n.age AS age ORDER BY age",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            own_rows.rows,
+            [vec![WireValue::Int(11)], vec![WireValue::Int(20)]]
+        );
+        assert_eq!(own_rows.end.handle, begun.handle);
+        assert_eq!(own_rows.end.statement, 2);
+        let next = owner
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(
+                    ExecuteMode::Write,
+                    "MATCH (n:Person) WHERE n.age=11 SET n.age=n.age+1 RETURN n.age AS age",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.rows, [vec![WireValue::Int(12)]]);
+        assert_eq!(next.end.statement, 3);
+        let aggregate = owner
+            .execute_transaction(
+                cx,
+                begun.handle,
+                &statement(
+                    ExecuteMode::Read,
+                    "MATCH (n:Person) RETURN count(*) AS n,sum(n.age) AS total",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            aggregate.rows,
+            [vec![WireValue::Count(2), WireValue::WideInt(32)]]
+        );
+        assert_eq!(aggregate.end.handle, begun.handle);
+        assert_eq!(aggregate.end.statement, 4);
+        assert_eq!(
+            server_code(
+                owner
+                    .commit_transaction(cx, begun.handle)
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Execution
+        );
+        let published = concurrent
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n) RETURN n.age AS age ORDER BY age",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            published.rows,
+            [
+                vec![WireValue::Int(20)],
+                vec![WireValue::Int(90)],
+                vec![WireValue::Int(110)],
+            ]
+        );
+        assert_eq!(published.outcome, Outcome::Rows { seq: 3 });
+
+        // The rejected COMMIT consumed its owner and published no new revision.
+        let fresh = owner.begin_transaction(cx).await.unwrap();
+        assert_eq!(fresh.basis, 3);
+        owner.rollback_transaction(cx, fresh.handle).await.unwrap();
+        owner.close(cx).await.unwrap();
+        concurrent.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn statement_errors_and_cumulative_delivery_limits_abort_the_whole_prefix() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "explicit-transaction-failures").await;

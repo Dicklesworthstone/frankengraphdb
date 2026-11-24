@@ -5,7 +5,7 @@ mod atomic;
 mod incremental;
 mod ordered;
 
-pub(super) use at_basis::PreparationAnchor;
+pub(super) use at_basis::{PreparationAnchor, PreparationBasis};
 
 use crate::gql_exec::source::{IndexIter, IndexMap};
 use crate::{

@@ -442,6 +442,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
     mut frozen: Option<&mut FrozenCreations>,
     continues: bool,
+    allocator: super::Allocator<'_>,
 ) -> Result<(GraphInsertStats, GqlQueryExecution<GraphValueRow>, u64), Fault> {
     if !preflight(step, scope)? {
         return Err(chained(invalid()));
@@ -613,7 +614,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             }
                             Ok(selected)
                         },
-                        |request| database.borrow_mut().allocate_identity(cx, request),
+                        &mut *allocator,
                         || {
                             cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                             controls.borrow_mut().checkpoint()

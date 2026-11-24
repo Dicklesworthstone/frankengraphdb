@@ -806,118 +806,514 @@ fn signed_work_does_not_restart_at_statement_boundaries() {
 }
 
 #[test]
-fn output_errors_swallowed_meter_failures_and_unwinds_abort_earlier_statements() {
+fn output_errors_swallowed_meter_failures_and_unwinds_restore_the_live_database() {
     run(async |commit, query, txn| {
-        for failure in 0..4 {
+        for advanced in [false, true] {
+            for failure in 0..4 {
+                let mut db = Database::open_memory(commit, keys()).await.unwrap();
+                let issuer = authority();
+                let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+                let mut owner = db
+                    .begin_authorized_write(
+                        txn,
+                        commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        policy(),
+                        10,
+                        || NOW,
+                    )
+                    .unwrap();
+                owner
+                    .stage_chain(
+                        &mut db,
+                        query,
+                        &chain("CREATE (n:Visible {p:1})"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
+                if advanced {
+                    let mut winner = WriteBatch::new(R);
+                    winner.create_vertex(
+                        VId(999),
+                        vec![L],
+                        vec![(P, CanonicalScalar::Int(99))],
+                    );
+                    db.write(commit, winner).await.unwrap();
+                }
+                let live = db.frontier().unwrap();
+                let published = db.vertices().unwrap();
+                let mut reached = false;
+                let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    owner.stage_chain(
+                        &mut db,
+                        query,
+                        &chain("MATCH (n:Visible) SET n.p=2 RETURN n"),
+                        |rows, work, output| {
+                            reached = true;
+                            assert_eq!(rows.len(), 1, "only the private original-basis row");
+                            match failure {
+                                0 => return Err(WriteTxnError::AuthorizedMutationRefused),
+                                1 => {
+                                    assert!(work(u64::MAX).is_err());
+                                }
+                                2 => {
+                                    let [GraphValue::Vertex(vertex)] = rows[0].values() else {
+                                        panic!("vertex result")
+                                    };
+                                    assert!(
+                                        output
+                                            .metadata(
+                                                ElementId::Vertex(*vertex),
+                                                GraphElementMetadata::Properties,
+                                                &ReverseSymbolCatalog::new()
+                                            )
+                                            .is_err()
+                                    );
+                                }
+                                _ => panic!("host output failed"),
+                            }
+                            Ok(())
+                        },
+                    )
+                }));
+                assert!(reached, "historical staging reached output admission");
+                if failure == 3 {
+                    assert!(attempt.is_err());
+                } else {
+                    assert!(attempt.unwrap().is_err());
+                }
+                assert!(!owner.is_active());
+                assert!(matches!(
+                    owner.commit(&mut db).await,
+                    Err(WriteTxnError::Finished)
+                ));
+                assert_eq!(db.vertices().unwrap(), published);
+                assert_eq!(db.frontier().unwrap(), live);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn foreign_handle_refuses_before_continuing_the_prefix() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut other = Database::open_memory(commit, keys()).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("CREATE (n:Visible {p:1})"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        let mut reached = false;
+        let error = owner
+            .read(
+                &mut other,
+                query,
+                &read("MATCH (n:Visible) RETURN n"),
+                |_, _, _| {
+                    reached = true;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert!(!reached);
+        assert!(has_error(&error, |e| matches!(e, WriteTxnError::WrongDatabase)));
+        assert!(!owner.is_active());
+        assert!(other.vertices().unwrap().is_empty());
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn disjoint_commits_preserve_original_reads_staged_effects_and_savepoints() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+        seed.create_vertex(VId(2), vec![HIDDEN], vec![(P, CanonicalScalar::Int(90))]);
+        db.write(commit, seed).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 20, || NOW)
+            .unwrap();
+        let basis = owner.basis();
+
+        let mut concurrent = WriteBatch::new(R);
+        concurrent.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(91)));
+        let advanced = db.write(commit, concurrent).await.unwrap();
+        assert!(advanced > basis);
+        // The first statement has no prepared effects. It must still select
+        // the original basis and retain a finite label-domain read witness.
+        let selected = owner
+            .read(
+                &mut db,
+                query,
+                &read("MATCH (n:Visible) RETURN n.p AS p"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(selected.value.len(), 1);
+        assert_eq!(selected.value[0].values(), &[integer(7)]);
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("MATCH (n:Visible) SET n.p=8"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("SAVEPOINT kept"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("CREATE (:Visible {p:12})"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        let count_and_sum = aggregate("MATCH (n:Visible) RETURN count(*) AS c, sum(n.p) AS s");
+        let with_private = owner
+            .read_aggregate(&mut db, query, &count_and_sum, |_, _, _| Ok(()))
+            .unwrap();
+        assert_eq!(with_private.value.len(), 1);
+        assert_eq!(with_private.value[0].values()[0].as_count(), Some(2));
+        assert_eq!(with_private.value[0].values()[1].as_integer(), Some(20));
+
+        // A second disjoint commit must survive temporary historical staging
+        // and a rollback of our younger effect.
+        let mut concurrent = WriteBatch::new(R);
+        concurrent.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(92)));
+        let advanced = db.write(commit, concurrent).await.unwrap();
+        let published = db.vertices().unwrap();
+        owner
+            .control(
+                &mut db,
+                query,
+                &savepoint_control("ROLLBACK TO kept"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        let restored = owner
+            .read_aggregate(&mut db, query, &count_and_sum, |_, _, _| Ok(()))
+            .unwrap();
+        assert_eq!(restored.value.len(), 1);
+        assert_eq!(restored.value[0].values()[0].as_count(), Some(1));
+        assert_eq!(restored.value[0].values()[1].as_integer(), Some(8));
+        let changed = owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("MATCH (n:Visible) SET n.p=9 RETURN n.p AS p"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(changed.value.len(), 1);
+        assert_eq!(changed.value[0].values(), &[integer(9)]);
+        assert_eq!(owner.basis(), basis);
+        assert_eq!(db.frontier().unwrap(), advanced);
+        assert_eq!(db.vertices().unwrap(), published);
+        assert_eq!(owner.statistics().unwrap().completed_statements, 8);
+        assert!(matches!(
+            owner.commit(&mut db).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                if commit_seq.0 == advanced.0 + 1
+        ));
+        let vertices = db.vertices().unwrap();
+        assert_eq!(vertices.len(), 2, "the rolled-back creation stayed private");
+        for expected in [9, 92] {
+            assert!(vertices.iter().any(|vertex| {
+                vertex
+                    .props
+                    .contains(&(P, CanonicalScalar::Int(expected).into()))
+            }));
+        }
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn a_conflicting_advance_returns_original_values_before_native_commit_refuses() {
+    run(async |commit, query, txn| {
+        for write_after_read in [false, true] {
             let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(1),
+                vec![L],
+                vec![
+                    (P, CanonicalScalar::Int(7)),
+                    (SECRET, CanonicalScalar::Int(90)),
+                ],
+            );
+            db.write(commit, seed).await.unwrap();
             let issuer = authority();
             let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
-            let before = db.frontier().unwrap();
             let mut owner = db
                 .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
                 .unwrap();
-            owner
-                .stage_chain(
+            let basis = owner.basis();
+            let mut concurrent = WriteBatch::new(R);
+            concurrent.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(8)));
+            let advanced = db.write(commit, concurrent).await.unwrap();
+            let published = db.vertices().unwrap();
+            let selected = owner
+                .read(
                     &mut db,
                     query,
-                    &chain("CREATE (n:Visible {p:1})"),
-                    |_, _, _| Ok(()),
-                )
-                .unwrap();
-            let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                owner.stage_chain(
-                    &mut db,
-                    query,
-                    &chain("MATCH (n:Visible) SET n.p=2 RETURN n"),
-                    |rows, work, output| {
-                        match failure {
-                            0 => return Err(WriteTxnError::AuthorizedMutationRefused),
-                            1 => {
-                                assert!(work(u64::MAX).is_err());
-                            }
-                            2 => {
-                                let [GraphValue::Vertex(vertex)] = rows[0].values() else {
-                                    panic!("vertex result")
-                                };
-                                assert!(
-                                    output
-                                        .metadata(
-                                            ElementId::Vertex(*vertex),
-                                            GraphElementMetadata::Properties,
-                                            &ReverseSymbolCatalog::new()
-                                        )
-                                        .is_err()
-                                );
-                            }
-                            _ => panic!("host output failed"),
-                        }
+                    &read("MATCH (n:Visible) RETURN n, n.p AS p"),
+                    |rows, _, output| {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            output.metadata(
+                                ElementId::Vertex(VId(1)),
+                                GraphElementMetadata::Properties,
+                                &names(),
+                            )?,
+                            Some(GraphValue::map(vec![("p".into(), integer(7))]).unwrap())
+                        );
                         Ok(())
                     },
                 )
-            }));
-            if failure == 3 {
-                assert!(attempt.is_err());
-            } else {
-                assert!(attempt.unwrap().is_err());
+                .unwrap();
+            assert_eq!(
+                selected.value[0].values(),
+                &[GraphValue::Vertex(VId(1)), integer(7)]
+            );
+            if write_after_read {
+                owner
+                    .stage_chain(
+                        &mut db,
+                        query,
+                        &chain("CREATE (:Visible {p:500})"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
             }
-            assert!(!owner.is_active());
+            assert_eq!(owner.basis(), basis);
+            assert_eq!(db.frontier().unwrap(), advanced);
+            assert_eq!(db.vertices().unwrap(), published);
             assert!(matches!(
-                owner.commit(&mut db).await,
-                Err(WriteTxnError::Finished)
+                owner.commit(&mut db).await.unwrap_err(),
+                WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                })
             ));
-            assert!(db.vertices().unwrap().is_empty());
-            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(db.frontier().unwrap(), advanced);
+            assert_eq!(db.vertices().unwrap(), published);
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
 }
 
 #[test]
-fn foreign_handle_and_advanced_basis_refuse_before_continuing_the_prefix() {
+fn negative_reads_after_advance_survive_savepoint_rollback_and_reject_phantoms() {
     run(async |commit, query, txn| {
-        for foreign in [false, true] {
+        for source in 0..3 {
             let mut db = Database::open_memory(commit, keys()).await.unwrap();
-            let mut other = Database::open_memory(commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(99), vec![HIDDEN], vec![(P, CanonicalScalar::Int(90))]);
+            if source == 2 {
+                seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+                seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+            }
+            db.write(commit, seed).await.unwrap();
             let issuer = authority();
             let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
             let mut owner = db
                 .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
                 .unwrap();
+            let basis = owner.basis();
+            let mut unrelated = WriteBatch::new(R);
+            unrelated.set_vertex_property(VId(99), P, Some(CanonicalScalar::Int(91)));
+            db.write(commit, unrelated).await.unwrap();
+            // The matching row or edge already exists at the live frontier
+            // before the first observation, but not at the retained basis.
+            let mut phantom = WriteBatch::new(R);
+            if source == 2 {
+                phantom.add_edge(fgdb_types::EId(10), VId(1), VId(2), vec![]);
+            } else {
+                phantom.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+            }
+            let advanced = db.write(commit, phantom).await.unwrap();
+            let published = db.vertices().unwrap();
+            let edges = db.edges().unwrap();
+            owner
+                .control(
+                    &mut db,
+                    query,
+                    &savepoint_control("SAVEPOINT before"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            if source == 1 {
+                let selected = owner
+                    .read_aggregate(
+                        &mut db,
+                        query,
+                        &aggregate("MATCH (n:Visible) RETURN count(*) AS c"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
+                assert_eq!(selected.value.len(), 1);
+                assert_eq!(selected.value[0].values()[0].as_count(), Some(0));
+            } else {
+                let statement = if source == 0 {
+                    "MATCH (n:Visible) RETURN n.p AS p"
+                } else {
+                    "MATCH (a:Visible)-[:R]->(b:Visible) RETURN a, b"
+                };
+                let selected = owner
+                    .read(&mut db, query, &read(statement), |_, _, _| Ok(()))
+                    .unwrap();
+                assert!(selected.value.is_empty());
+            }
             owner
                 .stage_chain(
                     &mut db,
                     query,
-                    &chain("CREATE (n:Visible {p:1})"),
+                    &chain("CREATE (:Visible {p:500})"),
                     |_, _, _| Ok(()),
                 )
                 .unwrap();
-            if !foreign {
-                let mut update = WriteBatch::new(R);
-                update.create_vertex(VId(999), vec![L], vec![(P, CanonicalScalar::Int(9))]);
-                db.write(commit, update).await.unwrap();
-            }
-            let mut reached = false;
-            let target = if foreign { &mut other } else { &mut db };
-            let error = owner
-                .read(
-                    target,
+            owner
+                .control(
+                    &mut db,
                     query,
-                    &read("MATCH (n:Visible) RETURN n"),
-                    |_, _, _| {
-                        reached = true;
-                        Ok(())
-                    },
+                    &savepoint_control("ROLLBACK TO before"),
+                    |_, _, _| Ok(()),
                 )
-                .unwrap_err();
-            assert!(!reached);
-            assert!(has_error(&error, |e| if foreign {
-                matches!(e, WriteTxnError::WrongDatabase)
+                .unwrap();
+            assert_eq!(owner.basis(), basis);
+            // No reread is allowed to replace a witness discarded by rollback.
+            assert!(matches!(
+                owner.commit(&mut db).await.unwrap_err(),
+                WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                })
+            ));
+            assert_eq!(db.frontier().unwrap(), advanced);
+            assert_eq!(db.vertices().unwrap(), published);
+            assert_eq!(db.edges().unwrap(), edges);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn historical_create_and_merge_skip_vertex_and_edge_ids_occupied_after_begin() {
+    run(async |commit, query, txn| {
+        for merge in [false, true] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let mut reference = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+            let create =
+                chain("CREATE (a:Visible {p:1})-[r:R]->(b:Visible {p:2}) RETURN a, r, b");
+            // Equal keys and initial state reveal the next engine reservations
+            // without guessing or exposing the private allocator.
+            let mut reference_owner = reference
+                .begin_authorized_write(
+                    txn,
+                    commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    policy(),
+                    10,
+                    || NOW,
+                )
+                .unwrap();
+            let reserved = reference_owner
+                .stage_chain(&mut reference, query, &create, |_, _, _| Ok(()))
+                .unwrap();
+            let [GraphValue::Vertex(first), GraphValue::Edge(edge), GraphValue::Vertex(second)] =
+                reserved.value[0].values()
+            else {
+                panic!("created graph identities")
+            };
+            let (first, edge, second) = (*first, *edge, *second);
+            reference_owner.rollback();
+            assert_eq!(txn.outstanding_obligations(), 0);
+
+            let mut owner = db
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+                .unwrap();
+            let basis = owner.basis();
+            let mut winner = WriteBatch::new(R);
+            winner.create_vertex(first, vec![L], vec![(P, CanonicalScalar::Int(90))]);
+            winner.create_vertex(second, vec![L], vec![(P, CanonicalScalar::Int(91))]);
+            winner.add_edge(edge, first, second, vec![]);
+            let advanced = db.write(commit, winner).await.unwrap();
+            let published_vertices = db.vertices().unwrap();
+            let published_edges = db.edges().unwrap();
+            let statement = if merge {
+                chain(
+                    "MERGE (a:Visible {p:1}) WITH a \
+                     MERGE (b:Visible {p:2}) WITH a,b \
+                     MERGE (a)-[r:R]->(b) RETURN a,r,b",
+                )
             } else {
-                matches!(e, WriteTxnError::SnapshotAdvanced { .. })
-            }));
-            assert!(!owner.is_active());
-            assert!(other.vertices().unwrap().is_empty());
-            assert_eq!(db.vertices().unwrap().len(), usize::from(!foreign));
+                create
+            };
+            let created = owner
+                .stage_chain(&mut db, query, &statement, |_, _, _| Ok(()))
+                .unwrap();
+            assert_eq!(created.value.len(), 1);
+            let [GraphValue::Vertex(new_first), GraphValue::Edge(new_edge), GraphValue::Vertex(new_second)] =
+                created.value[0].values()
+            else {
+                panic!("new graph identities")
+            };
+            assert!(![first, second].contains(new_first));
+            assert!(![first, second].contains(new_second));
+            assert_ne!(new_first, new_second);
+            assert_ne!(*new_edge, edge);
+            assert_eq!(owner.basis(), basis);
+            assert_eq!(db.frontier().unwrap(), advanced);
+            assert_eq!(db.vertices().unwrap(), published_vertices);
+            assert_eq!(db.edges().unwrap(), published_edges);
+            if merge {
+                // MERGE's negative selection may conflict at commit. This
+                // case isolates live-ID admission and private prefix rollback.
+                owner.rollback();
+                assert_eq!(db.frontier().unwrap(), advanced);
+                assert_eq!(db.vertices().unwrap(), published_vertices);
+                assert_eq!(db.edges().unwrap(), published_edges);
+            } else {
+                assert!(matches!(
+                    owner.commit(&mut db).await.unwrap(),
+                    EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                        if commit_seq.0 == advanced.0 + 1
+                ));
+                let vertices = db.vertices().unwrap();
+                let edges = db.edges().unwrap();
+                assert_eq!(vertices.len(), 4);
+                assert_eq!(edges.len(), 2);
+                assert!(published_vertices.iter().all(|row| vertices.contains(row)));
+                assert!(published_edges.iter().all(|row| edges.contains(row)));
+            }
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -979,8 +1375,7 @@ fn reads_before_the_first_write_remain_dependencies_at_commit() {
                 concurrent.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(8)));
                 let advanced = db.write(commit, concurrent).await.unwrap();
                 let published = db.vertices().unwrap();
-                // No further statement can obscure the bug by rejecting the
-                // advanced basis first: go straight to native completion.
+                // Validate the observation directly at native completion.
                 let error = owner.commit(&mut db).await.unwrap_err();
                 assert!(matches!(
                     error,
@@ -2300,9 +2695,9 @@ fn savepoint_controls_preserve_successful_write_classification_and_consumed_limi
 }
 
 #[test]
-fn savepoint_controls_abort_unknown_names_stale_bases_and_late_authority_failures() {
+fn savepoint_controls_abort_unknown_names_and_late_authority_failures() {
     run(async |commit, query, txn| {
-        for failure in 0..5 {
+        for failure in 0..4 {
             let mut db = Database::open_memory(commit, keys()).await.unwrap();
             let issuer = authority();
             let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
@@ -2320,11 +2715,6 @@ fn savepoint_controls_abort_unknown_names_stale_bases_and_late_authority_failure
                     |_, _, _| Ok(()),
                 )
                 .unwrap();
-            if failure == 1 {
-                let mut winner = WriteBatch::new(R);
-                winner.create_vertex(VId(99), vec![L], vec![(P, CanonicalScalar::Int(99))]);
-                db.write(commit, winner).await.unwrap();
-            }
             let control = savepoint_control(if failure == 0 {
                 "ROLLBACK TO absent"
             } else {
@@ -2335,9 +2725,9 @@ fn savepoint_controls_abort_unknown_names_stale_bases_and_late_authority_failure
                 .control(&mut db, query, &control, |_, work, _| {
                     admitted = true;
                     match failure {
-                        2 => now.store(1001, Ordering::Relaxed),
-                        3 => assert!(issuer.retire()),
-                        4 => {
+                        1 => now.store(1001, Ordering::Relaxed),
+                        2 => assert!(issuer.retire()),
+                        3 => {
                             let _ = work(u64::MAX);
                         }
                         _ => {}
@@ -2345,15 +2735,14 @@ fn savepoint_controls_abort_unknown_names_stale_bases_and_late_authority_failure
                     Ok(())
                 })
                 .unwrap_err();
-            assert_eq!(admitted, failure >= 2);
+            assert_eq!(admitted, failure != 0);
             assert!(has_error(&error, |error| match failure {
                 0 => matches!(error, WriteTxnError::UnknownSavepoint),
-                1 => matches!(error, WriteTxnError::SnapshotAdvanced { .. }),
-                2 | 3 => matches!(error, WriteTxnError::Authorization(_)),
+                1 | 2 => matches!(error, WriteTxnError::Authorization(_)),
                 _ => matches!(error, WriteTxnError::AuthorizedMutationRefused),
             }));
             assert!(!owner.is_active());
-            assert_eq!(db.vertices().unwrap().len(), usize::from(failure == 1));
+            assert!(db.vertices().unwrap().is_empty());
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -2406,8 +2795,7 @@ fn savepoint_rollback_keeps_read_witnesses_until_native_commit_validation() {
         let mut winner = WriteBatch::new(R);
         winner.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(8)));
         let frontier = db.write(commit, winner).await.unwrap();
-        // Go directly to commit so stale statement admission cannot hide a
-        // lost witness in the restored empty overlay.
+        // No reread may replace a lost witness in the restored empty overlay.
         assert!(matches!(
             owner.commit(&mut db).await.unwrap_err(),
             WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins {

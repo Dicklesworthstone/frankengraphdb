@@ -342,6 +342,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
     frozen: Option<&mut crate::write_txn::FrozenCreations>,
+    allocator: super::Allocator<'_>,
 ) -> Result<(GraphInsertStats, GqlQueryExecution<GraphValueRow>), Fault> {
     if !preflight(step, scope)? {
         return Err(invalid());
@@ -402,6 +403,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
             execution,
             selected,
             frozen,
+            &mut *allocator,
         )
         .map_err(|error| {
             error.map_source(|error| {
@@ -529,6 +531,7 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
     owned: Option<Vec<GraphValueRow>>,
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
+    allocator: super::Allocator<'_>,
 ) -> Result<(GraphInsertStats, GqlQueryExecution<GraphValueRow>, u64), Fault> {
     if !preflight(step, scope).map_err(action_context)? {
         return Err(action_context(invalid()));
@@ -681,7 +684,7 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             },
                             stats,
                             &mut source,
-                            |request| database.borrow_mut().allocate_identity(cx, request),
+                            &mut *allocator,
                             || {
                                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                                 controls.borrow_mut().checkpoint()
@@ -719,7 +722,7 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 // Move the original row into and back out of the native collector;
                 // do not duplicate a carried list/map for each relationship probe.
                 let (merged, targets, mut rows) =
-                    edge_merge::apply_occurrence_reusing_targets::<EdgeUpsertRowTargets, _, _>(
+                    edge_merge::apply_occurrence_reusing_targets_with_allocator::<EdgeUpsertRowTargets, _, _>(
                         transaction,
                         database,
                         cx,
@@ -737,6 +740,7 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                         },
                         at,
                         match_targets.as_mut(),
+                        &mut *allocator,
                     )
                     .map_err(|error| {
                         action_error(error.map_source(|error| {

@@ -62,9 +62,15 @@ impl<'issuer, Clock> IdleState<'issuer, Clock> {
 /// output, cancellation or unwind terminally aborts the whole transaction.
 ///
 /// The trusted host supplies the same database handle for each call; the owner
-/// does not hold a database borrow or lock while idle. A different handle or an
-/// advanced write basis is refused before graph access. COMMIT uses the native
-/// conflict validator and semantic completion, with no implicit replay.
+/// does not hold a database borrow or lock while idle. Each statement selects
+/// the original retained basis plus earlier staged effects, even when another
+/// writer has committed. COMMIT validates every intervening change through the
+/// existing strict conflict validator; no statement is refreshed or replayed.
+///
+/// An older basis reconstructs resident writer/version state and copies snapshot
+/// metadata. That reconstruction polls cancellation but is not charged as visible
+/// graph work: hidden history cannot spend the signed allowance. It is not a
+/// memory/spill bound or retention lease; unavailable history still refuses.
 ///
 /// This is local ownership of the existing embedded transaction. It does not
 /// introduce durable ownership leases, reattachment or a separate commit lane.
@@ -199,7 +205,7 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         state: &mut chain::ChainState<'_, '_, Clock>,
         database: &Database<V>,
         query_cx: &QueryCx,
-    ) -> Result<(), WriteTxnError> {
+    ) -> Result<bool, WriteTxnError> {
         // Ownership precedes even the foreign handle's health/frontier check.
         state.workspace.transaction().ensure_database(database)?;
         query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
@@ -210,13 +216,63 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
             });
         }
         let live = database.frontier().map_err(WriteTxnError::from)?;
-        if live != self.basis {
-            return Err(WriteTxnError::SnapshotAdvanced {
-                pinned: self.basis,
-                live,
+        database.snapshot.check_frontier(self.basis)?;
+        Ok(live != self.basis)
+    }
+
+    /// Keep the owner terminal while admitting the definition and selecting
+    /// semantic state. Setup can retain the LIVE allocator before historical
+    /// writer selection, but cannot issue output. The typed scope adapters immediately consume the restored state.
+    /// No publication-capable database borrow escapes the preparation scope.
+    fn at_basis<V: Vfs + Clone, T, Setup>(
+        &mut self,
+        database: &mut Database<V>,
+        query_cx: &QueryCx,
+        setup: impl FnOnce(
+            &mut Database<V>,
+            &PlannerPredicates,
+            &mut Execution<'_, '_, Clock>,
+        ) -> Result<Setup, chain::Fault>,
+        execute: impl FnOnce(
+            &mut crate::prepared_write::PreparationBasis<'_, V>,
+            &mut Self,
+            Setup,
+        ) -> Result<T, chain::Fault>,
+    ) -> Result<T, chain::Fault> {
+        let idle = self
+            .state
+            .take()
+            .ok_or_else(|| chain::source(WriteTxnError::Finished))?;
+        let commit_cx = self.cx.clone();
+        let mut state = idle.enter(&commit_cx);
+        commit_cx.with_restriction(|| {
+            let advanced = self
+                .admit_statement(&mut state, database, query_cx)
+                .map_err(chain::source)?;
+            let setup = setup(database, &self.scope, &mut state.execution)?;
+            let selected = database.preparation_basis_controlled(self.basis, || {
+                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                state.execution.poll()
             });
-        }
-        Ok(())
+            // History replay is private physical work. Check live authority
+            // after it, once, rather than charging or sampling the clock once
+            // per hidden row. The current-basis path keeps its existing bill.
+            if advanced {
+                query_cx
+                    .checkpoint()
+                    .map_err(WriteTxnError::Interrupted)
+                    .map_err(chain::source)?;
+                state.execution.checkpoint().map_err(chain::source)?;
+            }
+            let mut basis = selected.map_err(|error| {
+                chain::source(match error {
+                    error @ WriteTxnError::BasisRebuild(_) => super::redacted(error),
+                    error => error,
+                })
+            })?;
+            self.state = Some(IdleState::leave(state));
+            execute(&mut basis, self, setup)
+        })
     }
 
     /// Explicit statements return before the final commit checkpoints. Check
@@ -338,23 +394,47 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
             &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, chain::Fault> {
+        self.at_basis(
+            database,
+            query_cx,
+            |database, scope, execution| {
+                chain::admit_definition(statement, None, query_cx, scope, execution)?;
+                database.engine_allocator(query_cx).map_err(chain::source)
+            },
+            |basis, owner, mut allocator| {
+                basis.stage_authorized_chain(owner, query_cx, statement, &mut allocator, admit)
+            },
+        )
+    }
+
+    /// Synchronous entry used only by the admitted original-basis scope.
+    pub(crate) fn stage_chain_selected<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        query_cx: &QueryCx,
+        statement: &PreparedGraphWriteChain,
+        allocator: chain::Allocator<'_>,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, chain::Fault> {
         // Leave the owner terminal until the entire call has succeeded.
         let idle = self
             .state
             .take()
             .ok_or_else(|| chain::source(WriteTxnError::Finished))?;
-        let mut state = idle.enter(&self.cx);
+        let state = idle.enter(&self.cx);
         let policy = self.statement_policy();
         let (state, result) = self.cx.with_restriction(|| {
-            self.admit_statement(&mut state, database, query_cx)
-                .map_err(chain::source)?;
-            chain::admit_definition(statement, None, query_cx, &self.scope, &mut state.execution)?;
             let (mut state, result) = database.stage_authorized_chains(
                 query_cx,
                 core::slice::from_ref(statement),
                 None,
                 policy,
                 &self.scope,
+                allocator,
                 state,
                 &mut None,
                 |_, rows, work, output| admit(rows, work, output),
@@ -381,10 +461,30 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
     /// read/conflict witness remain cumulative. Controls require the retained
     /// Write authority but do not require Read authority or create a write.
     ///
-    /// The checked output is empty and provisional. An unknown name, stale
-    /// basis, output refusal, expired authority or cancellation aborts the
+    /// The checked output is empty and provisional. An unknown name, missing
+    /// retained basis, output refusal, expired authority or cancellation aborts the
     /// entire owner, exactly as for a failed graph statement.
     pub fn control<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        query_cx: &QueryCx,
+        control: &PreparedGraphTransactionControl,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<(), chain::Fault> {
+        self.at_basis(
+            database,
+            query_cx,
+            |_, _, _| Ok(()),
+            |basis, owner, ()| basis.control_authorized(owner, query_cx, control, admit),
+        )
+    }
+
+    /// Synchronous entry used only by the admitted original-basis scope.
+    pub(crate) fn control_selected<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
         query_cx: &QueryCx,
@@ -402,8 +502,6 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         let mut state = idle.enter(&self.cx);
         let policy = self.statement_policy();
         self.cx.with_restriction(|| {
-            self.admit_statement(&mut state, database, query_cx)
-                .map_err(chain::source)?;
             let transaction = state.workspace.transaction();
             // Charge the bounded name/stack traversal before touching it.
             // Rollback also visits the discarded staging and retirement
@@ -496,15 +594,35 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
             &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, chain::Fault> {
+        self.at_basis(
+            database,
+            query_cx,
+            |_, scope, execution| {
+                chain::admit_read_definition(statement, query_cx, scope, execution)
+            },
+            |basis, owner, ()| basis.read_authorized(owner, query_cx, statement, admit),
+        )
+    }
+
+    /// Synchronous entry used only by the admitted original-basis scope.
+    pub(crate) fn read_selected<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        query_cx: &QueryCx,
+        statement: &PreparedGraphSet,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, chain::Fault> {
         let idle = self
             .state
             .take()
             .ok_or_else(|| chain::source(WriteTxnError::Finished))?;
-        let mut state = idle.enter(&self.cx);
+        let state = idle.enter(&self.cx);
         let policy = self.statement_policy();
         let (state, result) = self.cx.with_restriction(|| {
-            self.admit_statement(&mut state, database, query_cx)
-                .map_err(chain::source)?;
             let (mut state, result) = database.read_authorized_chain_state(
                 query_cx,
                 statement,
@@ -539,15 +657,35 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
             &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<GqlQueryExecution<fgdb_gql::GraphAggregateRow>, chain::Fault> {
+        self.at_basis(
+            database,
+            query_cx,
+            |_, scope, execution| {
+                chain::admit_read_definition(statement.input(), query_cx, scope, execution)
+            },
+            |basis, owner, ()| basis.read_authorized_aggregate(owner, query_cx, statement, admit),
+        )
+    }
+
+    /// Synchronous entry used only by the admitted original-basis scope.
+    pub(crate) fn read_aggregate_selected<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        query_cx: &QueryCx,
+        statement: &fgdb_gql::PreparedGraphSetAggregate,
+        admit: impl FnOnce(
+            &[fgdb_gql::GraphAggregateRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<GqlQueryExecution<fgdb_gql::GraphAggregateRow>, chain::Fault> {
         let idle = self
             .state
             .take()
             .ok_or_else(|| chain::source(WriteTxnError::Finished))?;
-        let mut state = idle.enter(&self.cx);
+        let state = idle.enter(&self.cx);
         let policy = self.statement_policy();
         let (state, result) = self.cx.with_restriction(|| {
-            self.admit_statement(&mut state, database, query_cx)
-                .map_err(chain::source)?;
             let (mut state, result) = database.read_authorized_chain_aggregate_state(
                 query_cx,
                 statement,

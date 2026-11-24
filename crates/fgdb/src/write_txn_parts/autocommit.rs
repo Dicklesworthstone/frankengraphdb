@@ -414,7 +414,9 @@ impl<V: Vfs + Clone> Database<V> {
         &mut self,
         cx: &'a fgdb_types::QueryCx,
     ) -> Result<
-        impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, WriteTxnError> + 'a,
+        impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, WriteTxnError>
+        + 'a
+        + use<'a, V>,
         WriteTxnError,
     > {
         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;

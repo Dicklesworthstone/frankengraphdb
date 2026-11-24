@@ -12,6 +12,36 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Authorized transactions continue at their original basis — qualification pending
+
+An authorized explicit write owner can prepare and execute later statements
+after another writer commits. Reads, mutations, aggregates, savepoints and
+checked output continue against the original retained graph plus the owner's
+canonical staged effects. The existing native historical-preparation scope
+selects writer, version-head and schema state and restores the current database
+on success, refusal or unwind. The same-handle and health fences remain active.
+
+Engine allocation retains the current writer's spent identities while graph
+semantics use the original basis. CREATE and vertex/relationship MERGE therefore
+skip identities explicitly committed after BEGIN; shared counters and consumed
+allowances never rewind. Reconstruction polls cancellation without charging
+hidden history cardinality, with live authority checked around the operation.
+The final native validator still rejects overlapping point, scan, absence and
+write dependencies. Continuation neither rebases effects nor replays statements.
+
+Embedded regression sources cover disjoint advancement, original and staged
+values, exact aggregates, savepoint restoration, already-committed phantoms,
+identity collisions, output refusal and unwind. Server-owner and two-connection
+FGP cases retain the original provisional sequence, publish disjoint effects
+once, and preserve the concurrent winner after a final conflict. FGP and Bolt
+share this native owner and retain their BEGIN catalog bindings.
+
+This is the existing resident reconstruction path: older bases require retained
+history, and no CPU/RSS bound, full SSI or durable transaction lease is claimed.
+The executor was unavailable. Compilation, runtime tests, pinned formatting,
+Clippy, UBS and exact-tree gates remain UNRUN; integrated qualification
+`fgdb-qualify-integrated-nov22-maz0p` remains open.
+
 ### Authorized external ordering of existence-filtered relations — qualification pending
 
 Authorized external ordering now admits vertex-rooted finite EXISTS and NOT

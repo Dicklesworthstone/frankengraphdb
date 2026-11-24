@@ -387,6 +387,7 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -404,6 +405,7 @@ pub(super) fn apply_selected<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
     selected: GqlQueryExecution<GraphValueRow>,
     frozen: Option<&mut crate::write_txn::FrozenCreations>,
+    allocator: super::chain::Allocator<'_>,
 ) -> Result<(GraphEdgeMergeStats, EdgeMergeRows, Vec<GraphValueRow>), Fault> {
     apply_with_input(
         transaction,
@@ -417,6 +419,7 @@ pub(super) fn apply_selected<V: Vfs + Clone, Clock: FnMut() -> u64>(
         Some((selected, None)),
         frozen,
         None,
+        Some(allocator),
     )
 }
 
@@ -453,6 +456,43 @@ pub(super) fn apply_occurrence_reusing_targets<
         Some((selected, Some(occurrence))),
         None,
         targets,
+        None,
+    )
+}
+
+/// A chain uses the captured live allocator even when the ordinary MERGE
+/// fallback resolves its occurrences against historical semantic state.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_occurrence_reusing_targets_with_allocator<
+    Output: EdgeMergeOutput,
+    V: Vfs + Clone,
+    Clock: FnMut() -> u64,
+>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    merge: &PreparedGraphEdgeMerge,
+    policy: GraphEdgeMergePolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    selected: GqlQueryExecution<GraphValueRow>,
+    occurrence: usize,
+    targets: Option<&mut crate::write_txn::EdgeUpsertMatchTargets>,
+    allocator: super::chain::Allocator<'_>,
+) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
+    apply_with_input(
+        transaction,
+        database,
+        cx,
+        merge,
+        policy,
+        scope,
+        execution,
+        false,
+        Some((selected, Some(occurrence))),
+        None,
+        targets,
+        Some(allocator),
     )
 }
 
@@ -469,6 +509,7 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
     selected: Option<(GqlQueryExecution<GraphValueRow>, Option<usize>)>,
     frozen: Option<&mut crate::write_txn::FrozenCreations>,
     targets: Option<&mut crate::write_txn::EdgeUpsertMatchTargets>,
+    mut allocator: Option<super::chain::Allocator<'_>>,
 ) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     if !scope.allows_relation(merge.relation()) {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
@@ -592,9 +633,11 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
             },
             |row| {
                 let row = original_row.unwrap_or(row);
-                database
-                    .borrow_mut()
-                    .allocate_identity(cx, GraphInsertRequest::Edge { row, edge: 0 })
+                let request = GraphInsertRequest::Edge { row, edge: 0 };
+                match allocator.as_deref_mut() {
+                    Some(allocator) => allocator(request),
+                    None => database.borrow_mut().allocate_identity(cx, request),
+                }
             },
             || {
                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
