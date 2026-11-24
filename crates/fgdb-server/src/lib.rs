@@ -269,9 +269,10 @@ pub struct DatabaseConfig {
     /// trusted scratch directory and physical limits. Request bodies cannot
     /// replace those files, limits or the database's shared resident pool.
     pub ordered_reads: Option<OrderedReadConfig>,
-    /// Opt FGP source-stream reads into bounded cold-storage sources. This
-    /// uses durable catalog names and refuses unsupported native profiles;
-    /// other read modes and the live writer retain their existing owners.
+    /// Opt FGP source streams and configured ordered reads into bounded
+    /// cold-storage sources with shared admission. Ordered reads also require
+    /// `ordered_reads`. Durable catalog names and admitted native profiles
+    /// are required; differences and the live writer retain resident owners.
     pub buffered_reads: Option<BufferedReadConfig>,
 }
 

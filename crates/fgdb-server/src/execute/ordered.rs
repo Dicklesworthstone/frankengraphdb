@@ -2,23 +2,53 @@
 //! owners. Scratch is supplied only by the database's trusted host policy.
 
 use super::*;
-use asupersync::fs::File;
+use asupersync::fs::{File, UnixVfs};
 use core::future::{Future, poll_fn};
 use core::pin::Pin;
 use core::task::Poll;
 use fgdb::NativeSpoolError;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::scan_stream::ScanState;
-use fgdb_strata::tiered::memory::SpillError;
+use fgdb_strata::tiered::memory::{SpillError, SpillFile};
 use fgdb_types::QueryCx;
 use std::sync::Arc;
 
+type BufferedSource = fgdb::AuthorizedBufferedReadSource<UnixVfs>;
+type OrderedFiles = (
+    SpillFile<File>,
+    SpillFile<File>,
+    SpillFile<File>,
+    crate::ordered::OrderLease,
+);
+
+enum OrderSession<'a> {
+    Resident(
+        Box<fgdb::AuthorizedOrderedReadSession<'a, crate::Symbols, fn() -> u64, File, File, File>>,
+    ),
+    Buffered(
+        Box<
+            fgdb::AuthorizedOrderedReadSession<
+                'a,
+                crate::Symbols,
+                fn() -> u64,
+                File,
+                File,
+                File,
+                BufferedSource,
+            >,
+        >,
+    ),
+}
+
 pub(crate) struct OrderedSession<'a> {
-    native: fgdb::AuthorizedOrderedReadSession<'a, crate::Symbols, fn() -> u64, File, File, File>,
+    native: OrderSession<'a>,
     generation: Generation,
     // File owners drop before the slot is released. Any already-started
     // foundation syscall finishes against its unlinked, never-reused file.
     _lease: crate::ordered::OrderLease,
+    // Cold graph admission spans sorting, completed spool reads and credit
+    // waits. Both leases retire only after the native file/source owners.
+    _buffered_lease: Option<crate::buffered::BufferedLease>,
 }
 
 pub(crate) struct OrderedExecution<'q> {
@@ -29,6 +59,8 @@ pub(crate) struct OrderedExecution<'q> {
 enum OrderExecution<'q> {
     Rows(fgdb::AuthorizedOrderExecution<'q, File>),
     Aggregate(fgdb::AuthorizedAggregateOrderExecution<'q, File>),
+    BufferedRows(fgdb::AuthorizedOrderExecution<'q, File, BufferedSource>),
+    BufferedAggregate(fgdb::AuthorizedAggregateOrderExecution<'q, File, BufferedSource>),
 }
 
 pub(crate) struct OrderedCursor<'q> {
@@ -40,6 +72,8 @@ pub(crate) struct OrderedCursor<'q> {
 enum OrderSource<'q> {
     Rows(fgdb::AuthorizedSpoolCursor<'q, File>),
     Aggregate(fgdb::AuthorizedAggregateSpoolCursor<'q, File>),
+    BufferedRows(fgdb::AuthorizedSpoolCursor<'q, File, BufferedSource>),
+    BufferedAggregate(fgdb::AuthorizedAggregateSpoolCursor<'q, File, BufferedSource>),
 }
 
 pub(crate) struct DifferenceExecution<'q> {
@@ -123,7 +157,127 @@ pub(crate) async fn read_ordered_session_for<'a>(
     generation: Generation,
     statement: (&str, &fgdb_gql::GqlParameters),
 ) -> Result<(OrderedSession<'a>, Option<fgdb::AuthorizedPreparedRead>), Refusal> {
+    if db.buffered_reads.is_some() {
+        return read_buffered_ordered_session_for(cx, db, token, prepared, generation, statement)
+            .await;
+    }
     read_ordered_session_selected(cx, db, token, prepared, generation, &[], Some(statement)).await
+}
+
+/// The configured cold route consumes the same publication/catalog capture
+/// as ReadStream and the same private scratch admission as resident ordering.
+/// Difference keeps its separate resident multi-cut route.
+async fn read_buffered_ordered_session_for<'a>(
+    cx: &Cx,
+    db: &'a Served,
+    token: &CapabilityToken,
+    prepared: Option<&PreparedRead>,
+    generation: Generation,
+    (text, parameters): (&str, &fgdb_gql::GqlParameters),
+) -> Result<(OrderedSession<'a>, Option<fgdb::AuthorizedPreparedRead>), Refusal> {
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = crate::query_cx(&contexts);
+    let now = unix_millis();
+    let capability = db
+        .authority
+        .verify_at(token, TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let mut admission = capability
+        .begin_read_at(TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    generation.check().map_err(Refusal::from)?;
+    if let Some(prepared) = prepared {
+        prepared.generation.check().map_err(Refusal::from)?;
+    }
+    let host = db.ordered_reads.as_ref().ok_or_else(|| {
+        Refusal::new(
+            ErrorCode::Statement,
+            "external ordered reads are not enabled for this database",
+        )
+    })?;
+    let captured = super::buffered::capture_prepared_publication_for(
+        cx,
+        db,
+        token,
+        prepared,
+        &generation,
+        text,
+        parameters,
+    )
+    .await?;
+    let (scratch, destination, auxiliary, lease) =
+        admitted_files(cx, &query, host, &generation, &mut admission).await?;
+    let super::buffered::PreparedBufferedPublication {
+        publication,
+        selected,
+        definition,
+        lease: buffered_lease,
+    } = captured;
+    let (native, prepared) = in_generation(&generation, async {
+        publication
+            .into_authorized_prepared_ordered_read_session_with_resolver(
+                &contexts.commit(),
+                &query,
+                &db.authority,
+                token,
+                TRUNK,
+                selected,
+                db.query_policy,
+                unix_millis as fn() -> u64,
+                |catalog| super::buffered::resolve_publication_catalog(db, &definition, &catalog),
+                Arc::clone(&definition.selector),
+                Arc::clone(&definition.native),
+                definition.lowered.clone(),
+                scratch,
+                destination,
+                auxiliary,
+                host.limits(),
+            )
+            .await
+            .map_err(spool_refusal)
+    })
+    .await?;
+    Ok((
+        OrderedSession {
+            native: OrderSession::Buffered(Box::new(native)),
+            generation,
+            _lease: lease,
+            _buffered_lease: Some(buffered_lease),
+        },
+        // Raw text was already compiled against the captured catalog too.
+        // Reuse that immutable template instead of preparing it a second time.
+        Some(prepared),
+    ))
+}
+
+async fn admitted_files(
+    cx: &Cx,
+    query: &QueryCx,
+    host: &crate::ordered::OrderedReads,
+    generation: &Generation,
+    admission: &mut fgdb_warden::ExecutionPermit<'_, fgdb_warden::ReadAccess>,
+) -> Result<OrderedFiles, Refusal> {
+    let files = host.files(cx, query);
+    let mut files = std::pin::pin!(files);
+    let admitted = poll_fn(|context| {
+        let check = |admission: &mut fgdb_warden::ExecutionPermit<'_, fgdb_warden::ReadAccess>| {
+            query
+                .checkpoint()
+                .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+            admission
+                .checkpoint_at(unix_millis())
+                .map_err(|error| Refusal::new(warden_code(error), error.to_string()))
+        };
+        if let Err(error) = check(admission) {
+            return Poll::Ready(Err(error));
+        }
+        let result = files.as_mut().poll(context);
+        if let Err(error) = check(admission) {
+            return Poll::Ready(Err(error));
+        }
+        result
+    });
+    in_generation(generation, admitted).await
 }
 
 async fn read_ordered_session_selected<'a>(
@@ -194,28 +348,8 @@ async fn read_ordered_session_selected<'a>(
             "external ordered reads are not enabled for this database",
         )
     })?;
-    let files = host.files(cx, &query);
-    let mut files = std::pin::pin!(files);
-    let admitted_files = poll_fn(|context| {
-        let check = |admission: &mut fgdb_warden::ExecutionPermit<'_, fgdb_warden::ReadAccess>| {
-            query
-                .checkpoint()
-                .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-            admission
-                .checkpoint_at(unix_millis())
-                .map_err(|error| Refusal::new(warden_code(error), error.to_string()))
-        };
-        if let Err(error) = check(&mut admission) {
-            return Poll::Ready(Err(error));
-        }
-        let result = files.as_mut().poll(context);
-        if let Err(error) = check(&mut admission) {
-            return Poll::Ready(Err(error));
-        }
-        result
-    });
     let (scratch, destination, auxiliary, lease) =
-        in_generation(&generation, admitted_files).await?;
+        admitted_files(cx, &query, host, &generation, &mut admission).await?;
     let (view, _) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     generation.check().map_err(Refusal::from)?;
     let symbols = symbols_at(&view, &db.symbols, cuts);
@@ -275,9 +409,10 @@ async fn read_ordered_session_selected<'a>(
     let (native, template) = result.map_err(spool_refusal)?;
     Ok((
         OrderedSession {
-            native,
+            native: OrderSession::Resident(Box::new(native)),
             generation,
             _lease: lease,
+            _buffered_lease: None,
         },
         template,
     ))
@@ -295,7 +430,10 @@ impl OrderedSession<'_> {
         parameters: &fgdb_gql::GqlParameters,
     ) -> Result<fgdb::AuthorizedPreparedRead, Refusal> {
         let _operation = self.generation.enter().map_err(Refusal::from)?;
-        let result = self.native.prepare(cx, text, parameters);
+        let result = match &mut self.native {
+            OrderSession::Resident(native) => native.prepare(cx, text, parameters),
+            OrderSession::Buffered(native) => native.prepare(cx, text, parameters),
+        };
         self.generation.check().map_err(Refusal::from)?;
         result.map_err(query_refusal)
     }
@@ -310,17 +448,25 @@ impl OrderedSession<'_> {
         let _operation = generation.enter().map_err(Refusal::from)?;
         // Select one admitted compiler before opening a source. Aggregate
         // results retain their exact numeric domain through typed scratch rows.
-        let result = match prepared.facade_class() {
+        let aggregate = matches!(
+            prepared.facade_class(),
             fgdb::NativeReadClass::Aggregate
-            | fgdb::NativeReadClass::TemporalAggregate
-            | fgdb::NativeReadClass::PipelineAggregate => self
-                .native
+                | fgdb::NativeReadClass::TemporalAggregate
+                | fgdb::NativeReadClass::PipelineAggregate
+        );
+        let result = match (&mut self.native, aggregate) {
+            (OrderSession::Resident(native), true) => native
                 .execute_ordered_aggregate(cx, prepared, parameters)
                 .map(OrderExecution::Aggregate),
-            _ => self
-                .native
+            (OrderSession::Resident(native), false) => native
                 .execute_ordered(cx, prepared, parameters)
                 .map(OrderExecution::Rows),
+            (OrderSession::Buffered(native), true) => native
+                .execute_ordered_aggregate(cx, prepared, parameters)
+                .map(OrderExecution::BufferedAggregate),
+            (OrderSession::Buffered(native), false) => native
+                .execute_ordered(cx, prepared, parameters)
+                .map(OrderExecution::BufferedRows),
         };
         generation.check().map_err(Refusal::from)?;
         Ok(OrderedExecution {
@@ -341,7 +487,13 @@ impl OrderedSession<'_> {
     ) -> Result<DifferenceExecution<'q>, Refusal> {
         let generation = self.generation.clone();
         let _operation = generation.enter().map_err(Refusal::from)?;
-        let result = self.native.difference_stream(
+        let OrderSession::Resident(native) = &mut self.native else {
+            return Err(Refusal::new(
+                ErrorCode::Statement,
+                "ordered differences require the resident multi-snapshot source",
+            ));
+        };
+        let result = native.difference_stream(
             cx,
             prepared,
             parameters,
@@ -361,6 +513,8 @@ impl<'q> OrderedExecution<'q> {
         match &self.native {
             OrderExecution::Rows(execution) => execution.columns(),
             OrderExecution::Aggregate(execution) => execution.columns(),
+            OrderExecution::BufferedRows(execution) => execution.columns(),
+            OrderExecution::BufferedAggregate(execution) => execution.columns(),
         }
     }
 
@@ -379,6 +533,14 @@ impl<'q> OrderedExecution<'q> {
                         .await
                         .map(OrderSource::Aggregate)
                         .map_err(spool_refusal),
+                    OrderExecution::BufferedRows(execution) => execution
+                        .await
+                        .map(OrderSource::BufferedRows)
+                        .map_err(spool_refusal),
+                    OrderExecution::BufferedAggregate(execution) => execution
+                        .await
+                        .map(OrderSource::BufferedAggregate)
+                        .map_err(spool_refusal),
                 }
             })
             .await?;
@@ -396,12 +558,16 @@ impl OrderedCursor<'_> {
         match &self.native {
             OrderSource::Rows(cursor) => cursor.snapshot_seq().0,
             OrderSource::Aggregate(cursor) => cursor.snapshot_seq().0,
+            OrderSource::BufferedRows(cursor) => cursor.snapshot_seq().0,
+            OrderSource::BufferedAggregate(cursor) => cursor.snapshot_seq().0,
         }
     }
     pub(crate) fn exhausted(&self) -> bool {
         let state = match &self.native {
             OrderSource::Rows(cursor) => cursor.state(),
             OrderSource::Aggregate(cursor) => cursor.state(),
+            OrderSource::BufferedRows(cursor) => cursor.state(),
+            OrderSource::BufferedAggregate(cursor) => cursor.state(),
         };
         !self.failed && state == ScanState::Exhausted
     }
@@ -418,37 +584,22 @@ impl OrderedCursor<'_> {
                 OrderSource::Rows(cursor) => {
                     let frame = cursor.next_row().await.map_err(spool_refusal)?;
                     frame
-                        .map(|frame| {
-                            GraphValueRow::decode_canonical(frame.as_ref())
-                                .map(|row| row.values().iter().map(convert::graph).collect())
-                                .map_err(|_| {
-                                    Refusal::new(
-                                        ErrorCode::Execution,
-                                        "invalid canonical ordered row",
-                                    )
-                                })
-                        })
+                        .map(|frame| decode_ordered_row(frame.as_ref()))
+                        .transpose()
+                }
+                OrderSource::BufferedRows(cursor) => {
+                    let frame = cursor.next_row().await.map_err(spool_refusal)?;
+                    frame
+                        .map(|frame| decode_ordered_row(frame.as_ref()))
                         .transpose()
                 }
                 OrderSource::Aggregate(cursor) => {
                     let row = cursor.next_row().await.map_err(spool_refusal)?;
-                    Ok(row.map(|row| {
-                        // Output ordinals are validated by the native compiler.
-                        // Counts, wide sums and rational averages never narrow
-                        // through an intermediate GraphValue representation.
-                        cursor
-                            .output_slots()
-                            .iter()
-                            .map(|slot| match *slot {
-                                fgdb_gql::GraphAggregateTextSlot::GroupKey(at) => {
-                                    convert::graph(&row.keys()[at])
-                                }
-                                fgdb_gql::GraphAggregateTextSlot::Aggregate(at) => {
-                                    convert::cell(&row.values()[at])
-                                }
-                            })
-                            .collect()
-                    }))
+                    Ok(row.map(|row| convert_ordered_aggregate(&row, cursor.output_slots())))
+                }
+                OrderSource::BufferedAggregate(cursor) => {
+                    let row = cursor.next_row().await.map_err(spool_refusal)?;
+                    Ok(row.map(|row| convert_ordered_aggregate(&row, cursor.output_slots())))
                 }
             }
         })
@@ -458,6 +609,27 @@ impl OrderedCursor<'_> {
         }
         result
     }
+}
+
+fn decode_ordered_row(frame: &[u8]) -> Result<Vec<WireValue>, Refusal> {
+    GraphValueRow::decode_canonical(frame)
+        .map(|row| row.values().iter().map(convert::graph).collect())
+        .map_err(|_| Refusal::new(ErrorCode::Execution, "invalid canonical ordered row"))
+}
+
+fn convert_ordered_aggregate(
+    row: &fgdb::NativeAggregateSpoolRow,
+    slots: &[fgdb_gql::GraphAggregateTextSlot],
+) -> Vec<WireValue> {
+    // Output ordinals are validated by the native compiler. Counts, wide sums
+    // and rational averages never narrow through an intermediate GraphValue.
+    slots
+        .iter()
+        .map(|slot| match *slot {
+            fgdb_gql::GraphAggregateTextSlot::GroupKey(at) => convert::graph(&row.keys()[at]),
+            fgdb_gql::GraphAggregateTextSlot::Aggregate(at) => convert::cell(&row.values()[at]),
+        })
+        .collect()
 }
 
 impl<'q> DifferenceExecution<'q> {

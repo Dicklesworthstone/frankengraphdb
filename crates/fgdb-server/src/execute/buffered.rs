@@ -5,6 +5,7 @@ use asupersync::fs::UnixVfs;
 use fgdb::{
     AuthorizedBufferedError, AuthorizedBufferedReadSource, BufferedOpenError, BufferedReadError,
 };
+use fgdb_delta_types::catalog::SymbolCatalog;
 use fgdb_gql::GqlParameters;
 use fgdb_strata::tiered::buffer::BufferError;
 use fgdb_types::QueryCx;
@@ -20,6 +21,31 @@ pub(crate) struct BufferedSession<'a> {
     generation: Generation,
     // Native owners retire before another source may occupy this slot.
     _lease: crate::buffered::BufferedLease,
+}
+
+/// One writer publication and its exact catalog binding. Both source streaming
+/// and external ordering consume this owner; neither can reopen a newer root
+/// after the writer lock has been released.
+pub(super) struct PreparedBufferedPublication {
+    pub(super) publication: fgdb::BufferedReadPublication<UnixVfs>,
+    pub(super) selected: fgdb_types::CommitSeq,
+    pub(super) definition: PreparedRead,
+    pub(super) lease: crate::buffered::BufferedLease,
+}
+
+pub(super) fn resolve_publication_catalog(
+    db: &Served,
+    definition: &PreparedRead,
+    catalog: &SymbolCatalog,
+) -> Result<crate::Symbols, String> {
+    let symbols = db
+        .symbols
+        .with_catalog(catalog)
+        .map_err(|_| "configured bindings conflict with the publication catalog".to_owned())?;
+    if !symbols.matches_catalog(catalog) || !same_symbols(&definition.symbols, &symbols) {
+        return Err("prepared bindings do not match the exact publication catalog".to_owned());
+    }
+    Ok(symbols)
 }
 
 impl BufferedSession<'_> {
@@ -44,9 +70,6 @@ impl BufferedSession<'_> {
     }
 }
 
-/// Capture catalog and root while borrowing the same healthy writer, then
-/// release that borrow before cold admission. No resident Snapshot enters the
-/// returned session, and no path or independently reopened root is selected.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) async fn read_buffered_session_for<'a>(
     cx: &Cx,
@@ -57,6 +80,60 @@ pub(crate) async fn read_buffered_session_for<'a>(
     text: &str,
     parameters: &GqlParameters,
 ) -> Result<(BufferedSession<'a>, fgdb::AuthorizedPreparedRead), Refusal> {
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = crate::query_cx(&contexts);
+    let PreparedBufferedPublication {
+        publication,
+        selected,
+        definition,
+        lease,
+    } = capture_prepared_publication_for(cx, db, token, prepared, &generation, text, parameters)
+        .await?;
+    // The capture's read lock is gone. Recovery may fence any Pending I/O;
+    // every poll and final result retains the original generation checks.
+    let (native, prepared) = ordered::in_generation(&generation, async {
+        publication
+            .into_authorized_prepared_read_session_with_resolver(
+                &contexts.commit(),
+                &query,
+                &db.authority,
+                token,
+                TRUNK,
+                selected,
+                db.query_policy,
+                unix_millis as fn() -> u64,
+                |catalog| resolve_publication_catalog(db, &definition, &catalog),
+                Arc::clone(&definition.selector),
+                Arc::clone(&definition.native),
+                definition.lowered.clone(),
+            )
+            .await
+            .map_err(refusal)
+    })
+    .await?;
+    Ok((
+        BufferedSession {
+            native,
+            generation,
+            _lease: lease,
+        },
+        prepared,
+    ))
+}
+
+/// Capture catalog and root while borrowing the same healthy writer, then
+/// release that borrow before cold admission. No resident Snapshot enters the
+/// returned owner, and no path or independently reopened root is selected.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn capture_prepared_publication_for(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    prepared: Option<&PreparedRead>,
+    generation: &Generation,
+    text: &str,
+    parameters: &GqlParameters,
+) -> Result<PreparedBufferedPublication, Refusal> {
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
     let now = unix_millis();
@@ -104,7 +181,7 @@ pub(crate) async fn read_buffered_session_for<'a>(
         )
     })?;
     let (pool, limits, lease) = host.admit()?;
-    let (publication, selected, definition) = ordered::in_generation(&generation, async {
+    let (publication, selected, definition) = ordered::in_generation(generation, async {
         let guard = db.db.read(cx).await.map_err(Refusal::from)?;
         admission.checkpoint_at(unix_millis())
             .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
@@ -142,49 +219,12 @@ pub(crate) async fn read_buffered_session_for<'a>(
         guard.generation().check().map_err(Refusal::from)?;
         Ok((publication, selected, definition?))
     }).await?;
-    // The capture's read lock is gone. Recovery may fence any Pending I/O;
-    // every poll and final result retains the original generation checks.
-    let (native, prepared) = ordered::in_generation(&generation, async {
-        publication
-            .into_authorized_prepared_read_session_with_resolver(
-                &contexts.commit(),
-                &query,
-                &db.authority,
-                token,
-                TRUNK,
-                selected,
-                db.query_policy,
-                unix_millis as fn() -> u64,
-                |catalog| {
-                    let symbols = db.symbols.with_catalog(&catalog).map_err(|_| {
-                        "configured bindings conflict with the publication catalog".to_owned()
-                    })?;
-                    if !symbols.matches_catalog(&catalog)
-                        || !same_symbols(&definition.symbols, &symbols)
-                    {
-                        return Err(
-                            "prepared bindings do not match the exact publication catalog"
-                                .to_owned(),
-                        );
-                    }
-                    Ok(symbols)
-                },
-                Arc::clone(&definition.selector),
-                Arc::clone(&definition.native),
-                definition.lowered.clone(),
-            )
-            .await
-            .map_err(refusal)
+    Ok(PreparedBufferedPublication {
+        publication,
+        selected,
+        definition,
+        lease,
     })
-    .await?;
-    Ok((
-        BufferedSession {
-            native,
-            generation,
-            _lease: lease,
-        },
-        prepared,
-    ))
 }
 
 /// Physical failures keep a stable public class and never disclose a path,

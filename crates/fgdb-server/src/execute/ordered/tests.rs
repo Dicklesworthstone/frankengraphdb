@@ -1,10 +1,286 @@
 use super::*;
-use crate::recovery::tests::{fail_after_marker, served, settled, vertex};
+use crate::recovery::tests::{fail_after_marker, served, served_with_config, settled, vertex};
 use asupersync::lab::run_async_under_lab;
 use fgdb_warden::{Grant, QueryLimits, Scope};
 
 fn accepted<T>(result: Result<T, Refusal>) -> T {
     result.unwrap_or_else(|error| panic!("{}: {}", error.code.name(), error.message))
+}
+
+#[test]
+fn buffered_ordering_pins_one_publication_shares_admission_and_fences_recovery() {
+    let ((), report) = run_async_under_lab(0xb0ff_0ade, |root| async move {
+        let (mut server, token, path) =
+            served_with_config(&root, "buffered-order-owner", |config| {
+                let mut buffered = crate::BufferedReadConfig::new(64 * 1024 * 1024);
+                buffered.max_concurrent = 1;
+                config.buffered_reads = Some(buffered);
+            })
+            .await;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = crate::query_cx(&contexts);
+        let parameters = fgdb_gql::GqlParameters::new();
+        let statement = "MATCH (n) RETURN n ORDER BY n DESC";
+        let db = &server.databases["test"];
+        let generation = accepted(ordered_generation(db, &token));
+        let expired = db
+            .authority
+            .issue_at(
+                &Grant::read_only(
+                    TRUNK,
+                    1,
+                    QueryLimits {
+                        max_nodes: 100,
+                        max_work: 100,
+                        max_rows: 100,
+                    },
+                ),
+                0,
+            )
+            .unwrap();
+        for (candidate, code) in [
+            (&expired, ErrorCode::PermissionDenied),
+            (&token, ErrorCode::Statement),
+        ] {
+            assert_eq!(
+                read_ordered_session_for(
+                    &root,
+                    db,
+                    candidate,
+                    None,
+                    generation.clone(),
+                    (statement, &parameters),
+                )
+                .await
+                .err()
+                .expect("authentication precedes disabled ordered policy")
+                .code,
+                code
+            );
+        }
+
+        let directory = path.join("ordered-scratch");
+        asupersync::fs::create_dir(&directory).await.unwrap();
+        let mut order = crate::OrderedReadConfig::new(&directory);
+        order.max_concurrent = 1;
+        order.sort.run_rows = 2;
+        order.sort.page_bytes = 31;
+        order.sort.max_sort_work = 1_000_000;
+        Arc::get_mut(server.databases.get_mut("test").unwrap())
+            .unwrap()
+            .ordered_reads = Some(
+            crate::ordered::OrderedReads::open(&root, order)
+                .await
+                .unwrap(),
+        );
+        let db = &server.databases["test"];
+        let mut initial = vertex(1);
+        initial.create_vertex(fgdb_types::VId(2), vec![], vec![]);
+        initial.create_vertex(fgdb_types::VId(3), vec![], vec![]);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), initial)
+            .await
+            .unwrap();
+        let (mut session, template) = accepted(
+            read_ordered_session_for(
+                &root,
+                db,
+                &token,
+                None,
+                generation.clone(),
+                (statement, &parameters),
+            )
+            .await,
+        );
+        let template = template.expect("cold text keeps its captured immutable template");
+        // No writer borrow remains during sort or delivery. A later commit
+        // must not replace the publication already selected for this request.
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(4))
+            .await
+            .unwrap();
+        let mut cursor = accepted(
+            accepted(session.start(&query, &template, &parameters))
+                .finish()
+                .await,
+        );
+        assert_eq!(cursor.snapshot_seq(), 1);
+        for id in [3, 2, 1] {
+            assert_eq!(
+                accepted(cursor.next().await),
+                Some(vec![WireValue::Vertex(id)])
+            );
+        }
+        assert!(accepted(cursor.next().await).is_none());
+        assert!(cursor.exhausted());
+        assert_eq!(
+            super::super::buffered::read_buffered_session_for(
+                &root,
+                db,
+                &token,
+                None,
+                generation.clone(),
+                "MATCH (n) RETURN n ORDER BY n",
+                &parameters,
+            )
+            .await
+            .err()
+            .expect("a completed ordered owner still retains its cold admission")
+            .code,
+            ErrorCode::Budget
+        );
+        drop(cursor);
+        drop(session);
+
+        let (source_session, _) = accepted(
+            super::super::buffered::read_buffered_session_for(
+                &root,
+                db,
+                &token,
+                None,
+                generation.clone(),
+                "MATCH (n) RETURN n ORDER BY n",
+                &parameters,
+            )
+            .await,
+        );
+        assert_eq!(
+            read_ordered_session_for(
+                &root,
+                db,
+                &token,
+                None,
+                generation.clone(),
+                (statement, &parameters),
+            )
+            .await
+            .err()
+            .expect("source and ordered modes share one cold concurrency ceiling")
+            .code,
+            ErrorCode::Budget
+        );
+        drop(source_session);
+
+        // Difference deliberately keeps the established resident multi-cut
+        // owner even when this database selects cold ordinary ordered reads.
+        let cuts = [
+            Some(fgdb_types::CommitSeq(1)),
+            Some(fgdb_types::CommitSeq(2)),
+        ];
+        let (mut difference, _) = accepted(
+            read_ordered_session_at(&root, db, &token, None, generation.clone(), &cuts).await,
+        );
+        let difference_template =
+            accepted(difference.prepare(&query, "MATCH (n) RETURN n", &parameters));
+        let mut changes = accepted(
+            accepted(difference.start_difference(&query, &difference_template, &parameters, 1, 2))
+                .finish()
+                .await,
+        );
+        assert_eq!(
+            accepted(changes.next().await),
+            Some((1, vec![WireValue::Vertex(4)]))
+        );
+        assert!(accepted(changes.next().await).is_none());
+        assert!(changes.exhausted());
+        drop(changes);
+        drop(difference);
+
+        let (mut fenced, template) = accepted(
+            read_ordered_session_for(
+                &root,
+                db,
+                &token,
+                None,
+                generation.clone(),
+                (statement, &parameters),
+            )
+            .await,
+        );
+        let mut cursor = accepted(
+            accepted(fenced.start(&query, &template.unwrap(), &parameters))
+                .finish()
+                .await,
+        );
+        assert_eq!(cursor.snapshot_seq(), 2);
+        assert_eq!(
+            accepted(cursor.next().await),
+            Some(vec![WireValue::Vertex(4)])
+        );
+        fail_after_marker(&root, db, 5).await;
+        assert_eq!(
+            cursor.next().await.err().unwrap().code,
+            ErrorCode::DatabaseRecovering
+        );
+        assert!(!cursor.exhausted());
+        assert!(accepted(cursor.next().await).is_none());
+        assert!(!cursor.exhausted());
+        drop(cursor);
+        drop(fenced);
+        assert!(matches!(
+            settled(db).await,
+            crate::DatabaseStatus::Ready { .. }
+        ));
+        assert_eq!(
+            read_ordered_session_for(
+                &root,
+                db,
+                &token,
+                None,
+                generation,
+                (statement, &parameters),
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::DatabaseRecovering
+        );
+        let (mut recovered, template) = accepted(
+            read_ordered_session_for(
+                &root,
+                db,
+                &token,
+                None,
+                accepted(ordered_generation(db, &token)),
+                (statement, &parameters),
+            )
+            .await,
+        );
+        let mut cursor = accepted(
+            accepted(recovered.start(&query, &template.unwrap(), &parameters))
+                .finish()
+                .await,
+        );
+        assert_eq!(cursor.snapshot_seq(), 3);
+        for id in [5, 4, 3, 2, 1] {
+            assert_eq!(
+                accepted(cursor.next().await),
+                Some(vec![WireValue::Vertex(id)])
+            );
+        }
+        assert!(accepted(cursor.next().await).is_none());
+        assert!(cursor.exhausted());
+        drop(cursor);
+        drop(recovered);
+        assert!(
+            asupersync::fs::read_dir(&directory)
+                .await
+                .unwrap()
+                .next_entry()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

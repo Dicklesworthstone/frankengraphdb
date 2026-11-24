@@ -12,6 +12,34 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Served cold ordered relations and aggregates — qualification pending
+
+When a database configures both buffered reads and trusted query scratch,
+FGP `ReadOrdered` and prepared `OrderedStream` now use the canonical cold
+external executor. Scoped vertex and single-edge sources compose through the
+existing relational, grouping and ordering owners. Exact counts, wide sums,
+rational averages and collections retain their typed wire representation.
+The raw-text route imports its captured template instead of parsing it again.
+
+Source streams and ordered reads consume one shared publication/catalog capture
+path under the healthy writer, release that borrow before asynchronous cold
+admission, and retain the selected cut after later writes. Both modes share the
+cold memory pool and concurrency ceiling. Ordered sessions additionally retain
+their private scratch files and ordered admission lease through sorting, final
+delivery and client credit waits. Existing generation fences and wire control
+loops remain the owners of recovery, cancellation and terminal delivery.
+Difference reads keep their resident two-cut owner; unsupported cold shapes
+refuse without switching to another source.
+
+Added lab and FGP regression sources cover fixed publication capture followed
+by writer advance, shared source/ordered admission and release, recovery fencing,
+resident differences under cold configuration, masked sorted pages, grouped and
+global exact aggregates, relation alternatives, prepared historical rebinding,
+row-budget exhaustion, credit, cancellation and scratch cleanup. Focused pinned
+Rustfmt and independent source review passed. Native compilation/runtime and
+the full exact-tree gate remain UNRUN under the recorded environment blockers;
+the integrated qualification bead remains open.
+
 ### Prepared cold ordered sessions — qualification pending
 
 Cold ordered publications now expose trusted exact-cut resolver binding and
@@ -26,8 +54,8 @@ graph storage after that session is dropped.
 The embedded regression source covers repeated map-argument and historical-cut
 rebinding, zero further resolver lookups, foreign-session handle rejection,
 different-cut rejection before candidate/scratch I/O, and catalog refusal or
-late expiry taking precedence over invalid sort limits. This is an embedding
-capability; served cold ordered routing is a separate follow-on integration.
+late expiry taking precedence over invalid sort limits. The served cold ordered
+route described above uses this same embedding capability.
 
 Focused pinned Rustfmt parsing/formatting and source review passed. Compilation,
 runtime assertions and the full pinned native gate remain UNRUN. The canonical

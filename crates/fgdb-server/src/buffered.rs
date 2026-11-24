@@ -1,4 +1,4 @@
-//! Host-owned physical admission for capability-authorized FGP source reads.
+//! Host-owned physical admission for capability-authorized FGP cold reads.
 
 use crate::ServerError;
 use crate::execute::Refusal;
@@ -8,18 +8,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Select bounded cold-storage sources for FGP `ReadStream` and prepared
-/// `SourceStream`. Other execution modes retain their existing source owners.
+/// `SourceStream`, plus `ReadOrdered` and prepared `OrderedStream` when query
+/// scratch is configured. Both routes share this pool and concurrency limit;
+/// ordered reads also retain their separate scratch admission.
 ///
 /// This profile requires durable catalog names. Exact operator redeclarations
 /// are accepted; process-local names absent from the selected cut refuse.
 /// The writer and server startup still use the resident database. This policy
 /// changes query source residency, not the whole server's memory contract.
+/// Difference reads retain their resident two-cut execution owner.
 #[derive(Clone, Debug)]
 pub struct BufferedReadConfig {
     /// Shared metadata, extent-cache and native row reservations across reads.
     /// Wire frames and foundation I/O buffers have their existing separate bounds.
     pub memory_bytes: usize,
-    /// Active source reads, including reads suspended on client credit.
+    /// Active cold reads, including ordering and reads suspended on client credit.
     pub max_concurrent: usize,
     /// Physical root, history, extent and cumulative scan work ceilings.
     pub limits: BufferedReadLimits,

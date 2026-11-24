@@ -1,4 +1,4 @@
-//! Public FGP source reads over the explicitly configured cold backend.
+//! Public FGP source and ordered reads over the configured cold backend.
 use super::*;
 use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
 
@@ -9,6 +9,20 @@ async fn start_buffered(
     SocketAddr,
     fgdb_server::Shutdown,
     asupersync::runtime::TaskHandle<()>,
+) {
+    let (addr, shutdown, task, _) = start_buffered_configured(cx, name, false).await;
+    (addr, shutdown, task)
+}
+
+async fn start_buffered_configured(
+    cx: &Cx,
+    name: &str,
+    ordered: bool,
+) -> (
+    SocketAddr,
+    fgdb_server::Shutdown,
+    asupersync::runtime::TaskHandle<()>,
+    PathBuf,
 ) {
     let path = scratch(name);
     let contexts = PurposeContexts::narrow_runtime_root(cx);
@@ -51,6 +65,20 @@ async fn start_buffered(
     let mut buffered = fgdb_server::BufferedReadConfig::new(64 * 1024 * 1024);
     buffered.max_concurrent = 1;
     config.buffered_reads = Some(buffered);
+    let directory = path.join("query-scratch");
+    if ordered {
+        asupersync::fs::create_dir(&directory).await.unwrap();
+        let mut order = fgdb_server::OrderedReadConfig::new(&directory);
+        order.memory_bytes = 64 * 1024;
+        order.sort.group_capacity = 2;
+        order.sort.max_partitions = 32;
+        order.sort.run_rows = 2;
+        order.sort.page_bytes = 31;
+        order.sort.max_row_bytes = 4096;
+        order.sort.max_sort_work = 1_000_000;
+        order.sort.max_input_rows = 100;
+        config.ordered_reads = Some(order);
+    }
     server.open_database(cx, &path, config).await.unwrap();
     let server = Arc::new(server);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -61,7 +89,7 @@ async fn start_buffered(
             server.serve(&child, listener).await.unwrap();
         })
         .unwrap();
-    (addr, shutdown, handle)
+    (addr, shutdown, handle, directory)
 }
 
 async fn seed_people(cx: &Cx, owner: &mut Client) {
@@ -489,6 +517,460 @@ fn buffered_credit_cancellation_budget_and_refusal_release_the_only_source_slot(
         owner.close(cx).await.unwrap();
         shutdown.trigger();
         task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn buffered_ordered_rows_groups_and_prepared_history_keep_scoped_exact_results() {
+    run(async |cx| {
+        let (addr, shutdown, mut task, directory) =
+            start_buffered_configured(cx, "buffered-ordered-results", true).await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed_people(cx, &mut owner).await;
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {age:7,name:'left'}), (b:Person {age:8,name:'right'}), \
+                 (h:Company {age:999,name:'hidden'}), \
+                 (a)-[:KNOWS {age:3,name:'hidden-3'}]->(b), \
+                 (a)-[:KNOWS {age:4,name:'hidden-4'}]->(b), \
+                 (a)-[:KNOWS {age:5,name:'hidden-5'}]->(a), \
+                 (b)-[:LIKES {age:6,name:'hidden-6'}]->(a), \
+                 (a)-[:WORKS_AT {age:999}]->(b), (a)-[:LIKES {age:999}]->(h)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut scope = reader_grant();
+        scope.relations = Scope::only([RelationId(1), RelationId(3)]);
+        scope.limits.max_nodes = 14;
+        scope.limits.max_rows = 4;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+
+        // Four delivered rows cross the two-row credit window, while fourteen
+        // visible inputs cross seven spill runs. Hidden labels cannot spend
+        // the exact node allowance, and hidden names cannot order the page.
+        let page = reader
+            .execute(
+                cx,
+                ExecuteMode::ReadOrdered,
+                "MATCH (n) RETURN n.age AS age,n.name AS hidden \
+                 ORDER BY n.name DESC,age DESC SKIP 2 LIMIT 4",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.columns, ["age", "hidden"]);
+        assert_eq!(
+            page.rows,
+            [9, 8, 8, 7].map(|age| vec![WireValue::Int(age), WireValue::Null])
+        );
+        assert_eq!(page.outcome, Outcome::Rows { seq: 3 });
+        let grouped = reader
+            .execute(
+                cx,
+                ExecuteMode::ReadOrdered,
+                "MATCH (n) RETURN n.age AS age,count(*) AS rows GROUP BY n.age \
+                 ORDER BY rows DESC,age ASC SKIP 1 LIMIT 3",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(grouped.columns, ["age", "rows"]);
+        assert_eq!(
+            grouped.rows,
+            [
+                vec![WireValue::Int(8), WireValue::Count(2)],
+                vec![WireValue::Int(0), WireValue::Count(1)],
+                vec![WireValue::Int(1), WireValue::Count(1)],
+            ]
+        );
+        assert_eq!(grouped.outcome, Outcome::Rows { seq: 3 });
+        let summary = reader
+            .execute(
+                cx,
+                ExecuteMode::ReadOrdered,
+                "MATCH (n) RETURN count(*) AS rows,sum(n.age) AS total, \
+                 avg(n.age) AS average,count(n.name) AS hidden",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.columns, ["rows", "total", "average", "hidden"]);
+        assert_eq!(
+            summary.rows,
+            [vec![
+                WireValue::Count(14),
+                WireValue::WideInt(81),
+                WireValue::Average {
+                    numerator: 81,
+                    denominator: 14,
+                },
+                WireValue::Count(0),
+            ]]
+        );
+        assert_eq!(summary.outcome, Outcome::Rows { seq: 3 });
+        let collected = reader
+            .execute(
+                cx,
+                ExecuteMode::ReadOrdered,
+                "UNWIND [3,1,3,2] AS value RETURN count(*) AS rows, \
+                 collect(value) AS items,collect(DISTINCT value) AS unique_items",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            collected.rows,
+            [vec![
+                WireValue::Count(4),
+                WireValue::List([3, 1, 3, 2].map(WireValue::Int).to_vec()),
+                WireValue::List([3, 1, 2].map(WireValue::Int).to_vec()),
+            ]]
+        );
+        for (pattern, expected) in [
+            ("(a)-[r]->(b)", vec![6, 5, 4, 3]),
+            ("(a)-[r:KNOWS|WORKS_AT]->(b)", vec![5, 4, 3]),
+        ] {
+            let edges = reader
+                .execute(
+                    cx,
+                    ExecuteMode::ReadOrdered,
+                    &format!(
+                        "MATCH {pattern} RETURN r.age AS age,r.name AS hidden ORDER BY age DESC"
+                    ),
+                    vec![],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                edges.rows,
+                expected
+                    .into_iter()
+                    .map(|age| vec![WireValue::Int(age), WireValue::Null])
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(edges.outcome, Outcome::Rows { seq: 3 });
+        }
+
+        // Topology needs no property authority. The exact per-edge allowance
+        // proves both the finite selector and capability mask precede charging.
+        for (pattern, nodes, expected) in [
+            ("(a)-[r]->(b)", 7, 4),
+            ("(a)-[r:KNOWS|WORKS_AT]->(b)", 5, 3),
+        ] {
+            let mut topology_scope = scope.clone();
+            topology_scope.properties = Scope::only([]);
+            topology_scope.limits.max_nodes = nodes;
+            topology_scope.limits.max_rows = 1;
+            let mut topology = Client::connect(cx, addr, token(&topology_scope))
+                .await
+                .unwrap();
+            topology.select(cx, "social").await.unwrap();
+            let result = topology
+                .execute(
+                    cx,
+                    ExecuteMode::ReadOrdered,
+                    &format!("MATCH {pattern} RETURN count(*) AS rows"),
+                    vec![],
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.rows, [vec![WireValue::Count(expected)]]);
+            assert_eq!(result.outcome, Outcome::Rows { seq: 3 });
+            topology.close(cx).await.unwrap();
+        }
+
+        let historical = "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $cut \
+            WHERE n.age >= $minimum RETURN n.age AS age,n.name AS hidden \
+            ORDER BY age DESC LIMIT $take";
+        let arguments = |cut, minimum| {
+            vec![
+                ("cut".into(), WireValue::Count(cut)),
+                ("minimum".into(), WireValue::Int(minimum)),
+                ("take".into(), WireValue::Count(4)),
+            ]
+        };
+        let handle = reader
+            .prepare_read(cx, historical, arguments(3, 7))
+            .await
+            .unwrap();
+        let historical_summary = "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $cut \
+            RETURN count(*) AS rows,sum(n.age) AS total,avg(n.age) AS average";
+        let summary_handle = reader
+            .prepare_read(
+                cx,
+                historical_summary,
+                vec![("cut".into(), WireValue::Count(3))],
+            )
+            .await
+            .unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) SET n.age = n.age + 100",
+                vec![],
+            )
+            .await
+            .unwrap();
+        for (cut, minimum, total, expected) in [
+            (3, 7, 81, [11, 10, 9, 8]),
+            (4, 107, 1481, [111, 110, 109, 108]),
+            (3, 7, 81, [11, 10, 9, 8]),
+        ] {
+            let mut columns = Vec::new();
+            let mut rows = Vec::new();
+            let outcome = reader
+                .execute_prepared_streaming(
+                    cx,
+                    PreparedReadMode::OrderedStream,
+                    handle,
+                    arguments(cut, minimum),
+                    |names| {
+                        columns = names.to_vec();
+                        Ok(())
+                    },
+                    |row| {
+                        rows.push(row);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(columns, ["age", "hidden"]);
+            assert_eq!(
+                rows,
+                expected.map(|age| vec![WireValue::Int(age), WireValue::Null])
+            );
+            assert_eq!(outcome, Outcome::Rows { seq: cut });
+            let mut columns = Vec::new();
+            let mut rows = Vec::new();
+            let outcome = reader
+                .execute_prepared_streaming(
+                    cx,
+                    PreparedReadMode::OrderedStream,
+                    summary_handle,
+                    vec![("cut".into(), WireValue::Count(cut))],
+                    |names| {
+                        columns = names.to_vec();
+                        Ok(())
+                    },
+                    |row| {
+                        rows.push(row);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(columns, ["rows", "total", "average"]);
+            assert_eq!(
+                rows,
+                [vec![
+                    WireValue::Count(14),
+                    WireValue::WideInt(total),
+                    WireValue::Average {
+                        numerator: total,
+                        denominator: 14,
+                    },
+                ]]
+            );
+            assert_eq!(outcome, Outcome::Rows { seq: cut });
+        }
+        reader.release_prepared(cx, handle).await.unwrap();
+        reader.release_prepared(cx, summary_handle).await.unwrap();
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+        super::ordered_stream::empty_scratch(&directory).await;
+    });
+}
+
+#[test]
+fn buffered_ordered_credit_cancel_and_refusal_release_cold_and_scratch_owners() {
+    run(async |cx| {
+        let (addr, shutdown, mut task, directory) =
+            start_buffered_configured(cx, "buffered-ordered-lifetimes", true).await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed_people(cx, &mut owner).await;
+        let mut scope = reader_grant();
+        scope.limits.max_nodes = 12;
+        scope.limits.max_rows = 2;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let statement = "MATCH (n:Person) RETURN n.age AS age ORDER BY age DESC";
+        let mut rows = Vec::new();
+        let error = reader
+            .execute_streaming(
+                cx,
+                ExecuteMode::ReadOrdered,
+                statement,
+                vec![],
+                |_| Ok(()),
+                |row| {
+                    rows.push(row);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(error), ErrorCode::Budget);
+        assert_eq!(rows, [vec![WireValue::Int(11)], vec![WireValue::Int(10)]]);
+        reader.ping(cx, 630).await.unwrap();
+        super::ordered_stream::empty_scratch(&directory).await;
+        assert_eq!(
+            reader
+                .execute(
+                    cx,
+                    ExecuteMode::ReadOrdered,
+                    &format!("{statement} LIMIT 2"),
+                    vec![],
+                )
+                .await
+                .unwrap()
+                .rows,
+            rows
+        );
+
+        let mut callbacks = 0;
+        let error = reader
+            .execute_streaming(
+                cx,
+                ExecuteMode::ReadOrdered,
+                statement,
+                vec![],
+                |_| Err(ClientError::Protocol("cancel cold ordered schema")),
+                |_| {
+                    callbacks += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Protocol("cancel cold ordered schema")
+        ));
+        assert_eq!(callbacks, 0);
+        reader.ping(cx, 631).await.unwrap();
+        super::ordered_stream::empty_scratch(&directory).await;
+
+        let prepared = format!("{statement} LIMIT $take");
+        let handle = reader
+            .prepare_read(cx, &prepared, vec![("take".into(), WireValue::Count(6))])
+            .await
+            .unwrap();
+        let error = reader
+            .execute_prepared_streaming(
+                cx,
+                PreparedReadMode::OrderedStream,
+                handle,
+                vec![("take".into(), WireValue::Count(6))],
+                |_| Ok(()),
+                |row| {
+                    callbacks += 1;
+                    assert_eq!(row, vec![WireValue::Int(11)]);
+                    Err(ClientError::Protocol("cancel cold ordered row"))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Protocol("cancel cold ordered row")
+        ));
+        assert_eq!(callbacks, 1);
+        reader.ping(cx, 632).await.unwrap();
+        super::ordered_stream::empty_scratch(&directory).await;
+        let mut rebound = Vec::new();
+        assert_eq!(
+            reader
+                .execute_prepared_streaming(
+                    cx,
+                    PreparedReadMode::OrderedStream,
+                    handle,
+                    vec![("take".into(), WireValue::Count(2))],
+                    |_| Ok(()),
+                    |row| {
+                        rebound.push(row);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap(),
+            Outcome::Rows { seq: 2 }
+        );
+        assert_eq!(rebound, rows);
+        reader.release_prepared(cx, handle).await.unwrap();
+
+        // The ordinary resident path accepts these statements. Cold ordering
+        // must preserve recursive native admission even with no final rows,
+        // rather than silently switching to a resident execution owner.
+        for unsupported in [
+            "MATCH (n:Person) RETURN n,properties(n) AS fields LIMIT 0",
+            "MATCH (n:Person) WITH n AS item RETURN properties([item][0]) AS fields LIMIT 0",
+            "MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) RETURN a,r,b,s,c LIMIT 0",
+        ] {
+            assert!(
+                reader
+                    .execute(cx, ExecuteMode::Read, unsupported, vec![])
+                    .await
+                    .unwrap()
+                    .rows
+                    .is_empty(),
+                "resident statement: {unsupported}"
+            );
+            let mut schemas = 0;
+            let mut delivered = 0;
+            let error = reader
+                .execute_streaming(
+                    cx,
+                    ExecuteMode::ReadOrdered,
+                    unsupported,
+                    vec![],
+                    |_| {
+                        schemas += 1;
+                        Ok(())
+                    },
+                    |_| {
+                        delivered += 1;
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(server_code(error), ErrorCode::Statement, "{unsupported}");
+            assert_eq!((schemas, delivered), (0, 0), "{unsupported}");
+            reader.ping(cx, 633).await.unwrap();
+            super::ordered_stream::empty_scratch(&directory).await;
+        }
+        assert_eq!(
+            reader
+                .execute(
+                    cx,
+                    ExecuteMode::ReadOrdered,
+                    &format!("{statement} LIMIT 2"),
+                    vec![],
+                )
+                .await
+                .unwrap()
+                .rows,
+            rows
+        );
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+        super::ordered_stream::empty_scratch(&directory).await;
     });
 }
 

@@ -189,10 +189,13 @@ impl Lane {
         self.send_generation = Some(session.generation());
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query = crate::query_cx(&contexts);
-        let prepared = match statement {
-            SourceStatement::Text(text) => session.prepare(&query, text, &parameters),
-            SourceStatement::Prepared(_) => {
-                Ok(imported.expect("prepared ordered admission returns its session handle"))
+        let prepared = match (imported, statement) {
+            // A cold text request is compiled once against its captured
+            // publication catalog and imported just like a cached template.
+            (Some(prepared), _) => Ok(prepared),
+            (None, SourceStatement::Text(text)) => session.prepare(&query, text, &parameters),
+            (None, SourceStatement::Prepared(_)) => {
+                unreachable!("prepared ordered admission returns its session handle")
             }
         };
         let execution =

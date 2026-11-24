@@ -119,11 +119,14 @@ clients request ReadOrdered or prepared OrderedStream without supplying paths
 or scratch limits. Databases without this option refuse those execution modes.
 
 --buffered-reads-memory-bytes selects bounded cold sources for FGP ReadStream
-and prepared SourceStream on that database. The byte pool is shared across
-four concurrent reads, including readers waiting for credit. This profile uses
-durable catalog names and native vertex/single-edge queries, including any or
-finite relation types; unsupported shapes refuse. Other read modes and the live
-writer retain their existing sources.
+and prepared SourceStream on that database, plus ReadOrdered and prepared
+OrderedStream when --query-scratch-dir is configured. The byte pool is shared
+across four concurrent cold reads, including ordering and waiting for credit;
+ordered execution also uses the separate scratch limits. This profile requires
+durable catalog names. Cold ordered reads compose native vertex/single-edge
+sources, including any or finite relation types, through external relational
+and aggregate operators; unsupported shapes refuse. Difference reads and the
+live writer retain their existing resident sources.
 
 --compact-interval-seconds and --scrub-interval-seconds opt that database
 into fixed periodic maintenance while fgdbd retains its writer lease. Both
