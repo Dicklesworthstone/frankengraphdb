@@ -15,6 +15,9 @@ use super::super::{ZSet, ZSetError, ZSetEvent, admit, event};
 use crate::{LimbLimit, ZWeight};
 use std::collections::BTreeMap;
 
+mod partitioned;
+pub use partitioned::{IncrementalPartitionedTopK, PartitionedKey, PartitionedTopKUpdate};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TopKError<E> {
     Delta(ZSetError<E>),
@@ -100,6 +103,28 @@ impl<T: Ord + Clone> IncrementalTopK<T> {
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<TopKUpdate<'_, T>, TopKError<E>> {
+        let TopKPatch {
+            replacements,
+            rows,
+            delta,
+        } = self.prepare_patch(changes, limbs, control)?;
+        Ok(TopKUpdate {
+            owner: self,
+            replacements,
+            rows,
+            delta,
+        })
+    }
+
+    // A partitioned owner prepares several independent windows before any of
+    // them may publish. Keep that staging immutable, using this same selection
+    // kernel and event sequence as an ordinary single-window update.
+    fn prepare_patch<E>(
+        &self,
+        changes: &ZSet<T>,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<TopKPatch<T>, TopKError<E>> {
         event(control, ZSetEvent::Work)?;
         let replacements = self.counts.prepare_integration(changes, limbs, control)?;
         for weight in replacements.values() {
@@ -118,8 +143,7 @@ impl<T: Ord + Clone> IncrementalTopK<T> {
         )?;
         let delta = rows.minus(&self.rows, limbs, control)?;
         event(control, ZSetEvent::Work)?;
-        Ok(TopKUpdate {
-            owner: self,
+        Ok(TopKPatch {
             replacements,
             rows,
             delta,
@@ -135,6 +159,12 @@ impl<T: Ord + Clone> IncrementalTopK<T> {
     ) -> Result<ZSet<T>, TopKError<E>> {
         Ok(self.prepare(changes, limbs, control)?.commit())
     }
+}
+
+struct TopKPatch<T: Ord> {
+    replacements: BTreeMap<T, ZWeight>,
+    rows: ZSet<T>,
+    delta: ZSet<T>,
 }
 
 fn select_window<T: Ord + Clone, E>(
