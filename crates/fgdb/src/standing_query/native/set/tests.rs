@@ -238,20 +238,30 @@ fn reachability_symbols(
 
 #[test]
 fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_row_limit() {
-    reachability_registration_and_rebuild(false, false);
+    reachability_registration_and_rebuild(false, false, false);
 }
 
 #[test]
 fn native_reflexive_reachability_registration_and_rebuild_preserve_private_lifetime_support() {
-    reachability_registration_and_rebuild(true, false);
+    reachability_registration_and_rebuild(true, false, false);
 }
 
 #[test]
 fn selected_reachability_registration_and_rebuild_keep_endpoint_owners_atomic() {
-    reachability_registration_and_rebuild(true, true);
+    reachability_registration_and_rebuild(true, true, false);
 }
 
-fn reachability_registration_and_rebuild(reflexive: bool, selected: bool) {
+#[test]
+fn bounded_walk_registration_and_rebuild_preserve_shared_hop_dependencies_atomically() {
+    reachability_registration_and_rebuild(false, false, true);
+}
+
+#[test]
+fn selected_reflexive_bounded_walk_keeps_private_lifetimes_and_endpoint_owners_atomic() {
+    reachability_registration_and_rebuild(true, true, true);
+}
+
+fn reachability_registration_and_rebuild(reflexive: bool, selected: bool, bounded: bool) {
     let ((), report) = run_async_under_lab(0x6e73_7c11, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -276,15 +286,32 @@ fn reachability_registration_and_rebuild(reflexive: bool, selected: bool) {
             .unwrap();
         let before = db.standing_queries.len();
         let prior_answer = db.standing_native_query(&cx, &prior, policy()).unwrap();
-        let text = if selected {
+        let text = if bounded && selected {
+            "MATCH REPEATABLE ELEMENTS WALK (a:L)-[:R*0..3]->(b:L) RETURN DISTINCT a,b"
+        } else if bounded && reflexive {
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..3]->(b) RETURN DISTINCT a,b"
+        } else if bounded {
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) RETURN DISTINCT a,b"
+        } else if selected {
             "MATCH (a:L)-[:R*0..]->(b:L) RETURN DISTINCT a,b"
         } else if reflexive {
             "MATCH (a)-[:R*0..]->(b) RETURN DISTINCT a,b"
         } else {
             "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b"
         };
-        let nodes = (if reflexive { 5 } else { 3 }) + if selected { 4 } else { 0 };
+        let nodes = match (bounded, reflexive) {
+            (true, true) => 11,
+            (true, false) => 9,
+            (false, true) => 5,
+            (false, false) => 3,
+        } + if selected { 4 } else { 0 };
         let rows = if reflexive { 6 } else { 3 };
+        let prepared = PreparedNativeRead::prepare(text, &params, reachability_symbols).unwrap();
+        assert_eq!(
+            prepared.subscription_footprint(&cx, &params).unwrap().0,
+            nodes as u64,
+            "shared sources are charged once, before any registry mutation"
+        );
         let query: PreparedGraphSet = PreparedGraphText::prepare(text, reachability_symbols)
             .unwrap()
             .bind_parameters(&params)

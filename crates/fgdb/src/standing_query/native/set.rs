@@ -596,6 +596,130 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         }
         Ok(input)
     }
+
+    fn compile_bounded_walk(
+        &mut self,
+        cx: &QueryCx,
+        definition: fgdb_gql::algebra::IncrementalBoundedWalkDefinition,
+        policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+    ) -> Result<usize, StandingQueryError> {
+        // Each layer contains one row per reachable endpoint pair. DISTINCT
+        // retains counted support underneath, so removing one alternative
+        // walk or parallel incidence cannot retract another. Sharing the
+        // one-hop source makes this a bounded derivative DAG, never a tree
+        // that clones the source or enumerates complete walks on every tick.
+        let input_policy = group::input_policy(policy);
+        let mut selected = if let Some(lifetimes) = definition.lifetimes() {
+            Some(self.compile_group_input(cx, lifetimes, input_policy, checkpoint)?)
+        } else {
+            None
+        };
+        if let Some(edges) = definition.edges() {
+            let input = self.compile_group_input(cx, edges, input_policy, checkpoint)?;
+            let pair_projection = |width, destination| {
+                RowProjectionSpec::new(
+                    vec![GraphSetColumnType::Vertex; width],
+                    vec![
+                        GraphSetProjection::new("source", GraphSetValue::Column(0)),
+                        GraphSetProjection::new("destination", GraphSetValue::Column(destination)),
+                    ],
+                    GraphSetQuantifier::Distinct,
+                )
+                .map_err(StandingQueryError::ProjectionSchema)
+            };
+            let state = self.database.prepare_standing_projection(
+                cx,
+                input,
+                pair_projection(2, 1)?,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            let one_hop = self.append_private(StandingQuery::Projection(Box::new(state)));
+            checkpoint()?;
+            let join = RowJoinSpec::new(
+                &[GraphSetColumnType::Vertex; 2],
+                &[GraphSetColumnType::Vertex; 2],
+                &[(1, 0)],
+            )
+            .map_err(StandingQueryError::JoinSchema)?;
+            let projection = pair_projection(4, 3)?;
+            let mut layer = one_hop;
+            for hop in 1..=definition.bounds().maximum() {
+                if hop > 1 {
+                    let state = self.database.prepare_standing_join_spec(
+                        cx,
+                        [layer, one_hop],
+                        &join,
+                        input_policy,
+                        self.database.standing_queries.len(),
+                    )?;
+                    let joined = self.append_private(StandingQuery::Join(Box::new(state)));
+                    checkpoint()?;
+                    let state = self.database.prepare_standing_projection(
+                        cx,
+                        joined,
+                        projection.clone(),
+                        input_policy,
+                        self.database.standing_queries.len(),
+                    )?;
+                    layer = self.append_private(StandingQuery::Projection(Box::new(state)));
+                    checkpoint()?;
+                }
+                if hop >= definition.bounds().minimum() {
+                    selected = Some(if let Some(previous) = selected {
+                        let state = self.database.prepare_standing_set(
+                            cx,
+                            [previous, layer],
+                            SetOperation::UnionDistinct,
+                            input_policy,
+                            self.database.standing_queries.len(),
+                        )?;
+                        let selected = self.append_private(StandingQuery::Set(Box::new(state)));
+                        checkpoint()?;
+                        selected
+                    } else {
+                        layer
+                    });
+                }
+            }
+        }
+        let mut selected = selected.ok_or(StandingQueryError::Unsupported)?;
+        // Endpoint predicates apply only after all transit layers. Filtering
+        // the incidence source by either endpoint's labels would lose valid
+        // routes through differently labelled intermediate vertices.
+        for (endpoint, filter) in definition.endpoint_filters().iter().enumerate() {
+            let Some(filter) = filter else {
+                continue;
+            };
+            let vertices = self.compile_group_input(cx, filter, input_policy, checkpoint)?;
+            let spec = RowJoinSpec::new(
+                &[GraphSetColumnType::Vertex; 2],
+                &[GraphSetColumnType::Vertex],
+                &[(endpoint, 0)],
+            )
+            .map_err(StandingQueryError::JoinSchema)?
+            .with_kind(RowJoinKind::Semi);
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [selected, vertices],
+                &spec,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            selected = self.append_private(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+        }
+        let state = self.database.prepare_standing_projection(
+            cx,
+            selected,
+            definition.projection().clone(),
+            policy,
+            self.database.standing_queries.len(),
+        )?;
+        Ok(self.append(StandingQuery::Projection(Box::new(state))))
+    }
+
     fn compile(
         &mut self,
         cx: &QueryCx,
@@ -691,6 +815,8 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                     self.database.standing_queries.len(),
                 )?;
                 self.append(StandingQuery::Projection(Box::new(output)))
+            } else if let Some(definition) = pattern.incremental_bounded_walk_definition() {
+                self.compile_bounded_walk(cx, definition, policy, checkpoint)?
             } else {
                 let query = self.database.prepare_registered_rows_with_delivery(
                     cx,

@@ -434,6 +434,140 @@ fn closure_recipe_admits_only_distinct_unbounded_endpoint_support() {
 }
 
 #[test]
+fn bounded_walk_recipe_keeps_exact_intervals_and_limits_the_shared_circuit() {
+    use fgdb_delta_types::LabelId;
+    use fgdb_gql::GraphSetQuantifier;
+
+    let prepare = |text| {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+            _ => symbols(kind, name),
+        })
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    };
+    for (text, minimum, maximum, nodes, filters, quantifier) in [
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..3]->(b) RETURN DISTINCT a,b",
+            0,
+            3,
+            11,
+            [false, false],
+            GraphSetQuantifier::All,
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a:L)<-[:R|S*2..3]-(b) RETURN DISTINCT b AS target,a AS origin",
+            2,
+            3,
+            10,
+            [true, false],
+            GraphSetQuantifier::All,
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[*3]-(b:L) RETURN DISTINCT b AS first,b AS second",
+            3,
+            3,
+            9,
+            [false, true],
+            GraphSetQuantifier::Distinct,
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a:L)-[:R*0]->(b:L) RETURN DISTINCT a,b,a AS again",
+            0,
+            0,
+            6,
+            [true, true],
+            GraphSetQuantifier::All,
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..21]->(b) RETURN DISTINCT a",
+            1,
+            21,
+            63,
+            [false, false],
+            GraphSetQuantifier::Distinct,
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*31]->(b) RETURN DISTINCT a,b",
+            31,
+            31,
+            63,
+            [false, false],
+            GraphSetQuantifier::All,
+        ),
+    ] {
+        let pattern = prepare(text);
+        assert!(pattern.incremental_closure_definition().is_none(), "{text}");
+        let definition = pattern.incremental_bounded_walk_definition().unwrap();
+        assert_eq!(definition.bounds().minimum(), minimum, "{text}");
+        assert_eq!(definition.bounds().maximum(), maximum, "{text}");
+        assert_eq!(definition.circuit_nodes(), nodes, "{text}");
+        assert_eq!(definition.edges().is_some(), maximum != 0, "{text}");
+        assert_eq!(definition.lifetimes().is_some(), minimum == 0, "{text}");
+        assert_eq!(
+            definition
+                .endpoint_filters()
+                .each_ref()
+                .map(Option::is_some),
+            filters,
+            "{text}"
+        );
+        assert_eq!(definition.projection().quantifier(), quantifier, "{text}");
+        assert_eq!(
+            definition.projection().columns().collect::<Vec<_>>(),
+            pattern
+                .columns()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "{text}"
+        );
+        if let Some(edges) = definition.edges() {
+            let edges = edges.incremental_pattern().unwrap();
+            assert!(edges.preserves_duplicates());
+            assert!(edges.incremental_row_source_definition().is_some());
+            assert_eq!(
+                edges.plan().edge_relations(),
+                pattern.plan().edge_relations()
+            );
+            // No vertex in this fixture has a label: endpoint selection must
+            // never remove a differently labelled intermediate incidence.
+            let incidence = [(EId(11), VId(1), R, VId(2))];
+            assert!(!run(edges, &incidence).is_empty(), "{text}");
+        }
+        if let Some(lifetimes) = definition.lifetimes() {
+            let lifetimes = lifetimes.incremental_pattern().unwrap();
+            assert!(!lifetimes.plan().scans_edges());
+            assert_eq!(run(lifetimes, &[]).len(), VERTICES.len());
+        }
+    }
+    for text in [
+        "MATCH (a)-[:R*0..3]->(b) RETURN DISTINCT a,b",
+        "MATCH TRAIL (a)-[:R*1..3]->(b) RETURN DISTINCT a,b",
+        "MATCH REPEATABLE ELEMENTS TRAIL (a)-[:R*1..3]->(b) RETURN DISTINCT a,b",
+        "MATCH REPEATABLE ELEMENTS ACYCLIC (a)-[:R*1..3]->(b) RETURN DISTINCT a,b",
+        "MATCH REPEATABLE ELEMENTS SIMPLE (a)-[:R*1..3]->(b) RETURN DISTINCT a,b",
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) RETURN a,b",
+        "MATCH REPEATABLE ELEMENTS p = WALK (a)-[:R*1..3]->(b) RETURN DISTINCT a,b,p",
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) WHERE b.p=1 RETURN DISTINCT a,b",
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) RETURN DISTINCT a,b LIMIT 0",
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) RETURN DISTINCT a,b ORDER BY a",
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..22]->(b) RETURN DISTINCT a,b",
+        "MATCH REPEATABLE ELEMENTS WALK (a:L)-[:R*1..21]->(b) RETURN DISTINCT a,b",
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*32]->(b) RETURN DISTINCT a,b",
+    ] {
+        assert!(
+            prepare(text)
+                .incremental_bounded_walk_definition()
+                .is_none(),
+            "path identity and owner bounds must remain explicit: {text}"
+        );
+    }
+}
+
+#[test]
 fn undirected_zero_hop_support_includes_isolates_without_admitting_nonempty_false_cycles() {
     let edge = [(EId(11), VId(1), R, VId(2))];
     let zero = bind("MATCH (a)-[:R*0..]-(b) RETURN DISTINCT a,b");
@@ -514,7 +648,10 @@ fn closure_endpoint_labels_select_membership_after_unrestricted_transit() {
             .incremental_closure_definition()
             .unwrap_or_else(|| panic!("selected endpoint support: {text}"));
         assert_eq!(
-            definition.endpoint_filters().each_ref().map(Option::is_some),
+            definition
+                .endpoint_filters()
+                .each_ref()
+                .map(Option::is_some),
             filters,
             "{text}"
         );

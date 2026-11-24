@@ -61,6 +61,99 @@ impl IncrementalClosureDefinition {
     }
 }
 
+/// A finite endpoint-reachability circuit for repeatable-element WALK.
+/// Every hop keeps DISTINCT endpoint support, not complete path occurrences.
+/// The host shares the edge source between hop layers and unions exactly the
+/// requested inclusive interval before applying endpoint membership filters.
+#[derive(Clone, Debug)]
+pub struct IncrementalBoundedWalkDefinition {
+    edges: Option<crate::PreparedGraphSet>,
+    lifetimes: Option<crate::PreparedGraphSet>,
+    bounds: crate::GraphWalkBounds,
+    endpoint_filters: [Option<crate::PreparedGraphSet>; 2],
+    projection: crate::row_projection::RowProjectionSpec,
+}
+
+impl IncrementalBoundedWalkDefinition {
+    #[must_use]
+    pub const fn edges(&self) -> Option<&crate::PreparedGraphSet> {
+        self.edges.as_ref()
+    }
+
+    #[must_use]
+    pub const fn lifetimes(&self) -> Option<&crate::PreparedGraphSet> {
+        self.lifetimes.as_ref()
+    }
+
+    #[must_use]
+    pub const fn bounds(&self) -> crate::GraphWalkBounds {
+        self.bounds
+    }
+
+    #[must_use]
+    pub const fn endpoint_filters(&self) -> &[Option<crate::PreparedGraphSet>; 2] {
+        &self.endpoint_filters
+    }
+
+    #[must_use]
+    pub const fn projection(&self) -> &crate::row_projection::RowProjectionSpec {
+        &self.projection
+    }
+
+    /// Owners beyond the source leaves and endpoint Semi joins: one edge
+    /// threshold, a join/projection per later hop, a union per extra selected
+    /// hop, and the final output projection. All arithmetic is over an
+    /// admitted finite GraphWalkBounds, never the unbounded sentinel.
+    #[must_use]
+    pub fn derived_nodes(&self) -> u64 {
+        let maximum = u64::from(self.bounds.maximum());
+        u64::from(self.edges.is_some()) + maximum.saturating_sub(1) * 2 + maximum
+            - u64::from(self.bounds.minimum())
+            + 1
+    }
+
+    /// Exact private registry footprint of this recipe before a host's
+    /// optional outer window or capability owner.
+    #[must_use]
+    pub fn circuit_nodes(&self) -> u64 {
+        self.derived_nodes()
+            + u64::from(self.edges.is_some())
+            + u64::from(self.lifetimes.is_some())
+            + self.endpoint_filters.iter().flatten().count() as u64 * 2
+    }
+}
+
+struct EndpointWalk {
+    input: crate::PreparedGraphSet,
+    bounds: crate::GraphWalkBounds,
+    direction: crate::algebra::GlaDirection,
+    search: crate::algebra::GraphWalkSearch,
+    different_edges: bool,
+    endpoint_filters: [Option<crate::PreparedGraphSet>; 2],
+    projection: crate::row_projection::RowProjectionSpec,
+}
+
+fn vertex_lifetimes() -> Option<crate::PreparedGraphSet> {
+    use crate::algebra::{GraphColumn, GraphPatternBuilder};
+
+    let mut vertices = GraphPatternBuilder::new();
+    vertices.vertex("vertex").ok()?;
+    Some(
+        vertices
+            .prepare_values(
+                &[
+                    GraphColumn::vertex("source", "vertex"),
+                    GraphColumn::vertex("destination", "vertex"),
+                ],
+                0,
+                None,
+            )
+            .ok()?
+            .with_duplicates()
+            .into(),
+    )
+}
+
 impl PreparedGraphPattern<GraphValueRow> {
     /// Compile the support of one unbounded TRAIL into a counted edge/lifetime
     /// relation, optional endpoint membership sources and an endpoint projection.
@@ -86,12 +179,77 @@ impl PreparedGraphPattern<GraphValueRow> {
     /// sees incidence or vertex lifetimes.
     #[must_use]
     pub fn incremental_closure_definition(&self) -> Option<IncrementalClosureDefinition> {
-        use crate::algebra::{
-            GlaDirection, GraphColumn, GraphPatternBuilder, GraphWalkSearch, VertexPredicate,
+        use crate::algebra::{GlaDirection, GraphWalkSearch};
+        use crate::{GraphSetOperation, GraphSetQuantifier};
+
+        let path = self.incremental_endpoint_walk()?;
+        if path.bounds.minimum() > 1
+            || path.bounds.is_bounded()
+            || (path.direction == GlaDirection::Undirected && path.bounds.minimum() != 0)
+            || !matches!(path.search, GraphWalkSearch::Trail | GraphWalkSearch::All)
+            || (path.search == GraphWalkSearch::All && !path.different_edges)
+        {
+            return None;
+        }
+        let input = if path.bounds.minimum() == 0 {
+            path.input
+                .combine(
+                    GraphSetOperation::Union,
+                    GraphSetQuantifier::All,
+                    vertex_lifetimes()?,
+                )
+                .ok()?
+        } else {
+            path.input
         };
+        Some(IncrementalClosureDefinition {
+            input,
+            endpoint_filters: path.endpoint_filters,
+            projection: path.projection,
+        })
+    }
+
+    /// Compile finite WALK reachability using only existing maintained joins,
+    /// DISTINCT projections and unions. Each layer represents the existence
+    /// of a walk of exactly that length. Intermediate vertices remain wholly
+    /// unrestricted by endpoint labels, and zero hops include visible isolates.
+    ///
+    /// Reusing an edge is legal only for repeatable-element WALK. Bounded
+    /// TRAIL, SIMPLE, ACYCLIC, shortest selectors, path capture/bags, predicates
+    /// and pages keep their existing refusal; their semantics cannot be
+    /// recovered from endpoint support. The entire recipe must fit the native
+    /// relational depth budget before any source is read or owner registered.
+    #[must_use]
+    pub fn incremental_bounded_walk_definition(&self) -> Option<IncrementalBoundedWalkDefinition> {
+        let path = self.incremental_endpoint_walk()?;
+        if !path.bounds.is_bounded()
+            || path.bounds.minimum() > path.bounds.maximum()
+            || path.search != crate::algebra::GraphWalkSearch::All
+            || path.different_edges
+        {
+            return None;
+        }
+        let definition = IncrementalBoundedWalkDefinition {
+            edges: (path.bounds.maximum() != 0).then_some(path.input),
+            lifetimes: if path.bounds.minimum() == 0 {
+                Some(vertex_lifetimes()?)
+            } else {
+                None
+            },
+            bounds: path.bounds,
+            endpoint_filters: path.endpoint_filters,
+            projection: path.projection,
+        };
+        (definition.circuit_nodes() <= crate::MAX_GRAPH_SET_DEPTH as u64).then_some(definition)
+    }
+
+    /// One source/selection/projection proof shared by finite and unbounded
+    /// reachability. The caller separately proves its path-mode derivative.
+    fn incremental_endpoint_walk(&self) -> Option<EndpointWalk> {
+        use crate::algebra::{GraphColumn, GraphPatternBuilder, VertexPredicate};
         use crate::{
-            GraphSetColumnType, GraphSetOperation, GraphSetProjection, GraphSetQuantifier,
-            GraphSetValue, PreparedGraphSet,
+            GraphSetColumnType, GraphSetProjection, GraphSetQuantifier, GraphSetValue,
+            PreparedGraphSet,
         };
 
         let output = self.incremental_rows_output()?;
@@ -157,14 +315,7 @@ impl PreparedGraphPattern<GraphValueRow> {
         else {
             return None;
         };
-        if source.ordinal() != 0
-            || bounds.minimum() > 1
-            || bounds.is_bounded()
-            || (*direction == GlaDirection::Undirected && bounds.minimum() != 0)
-            || !edge_predicates.is_empty()
-            || !matches!(search, GraphWalkSearch::Trail | GraphWalkSearch::All)
-            || (*search == GraphWalkSearch::All && !different_edges)
-        {
+        if source.ordinal() != 0 || !edge_predicates.is_empty() {
             return None;
         }
 
@@ -173,7 +324,7 @@ impl PreparedGraphPattern<GraphValueRow> {
         pattern
             .edge("source", *relation, *direction, "destination")
             .ok()?;
-        let mut input: PreparedGraphSet = pattern
+        let input: PreparedGraphSet = pattern
             .prepare_values(
                 &[
                     GraphColumn::vertex("source", "source"),
@@ -185,29 +336,6 @@ impl PreparedGraphPattern<GraphValueRow> {
             .ok()?
             .with_duplicates()
             .into();
-        if bounds.minimum() == 0 {
-            let mut vertices = GraphPatternBuilder::new();
-            vertices.vertex("vertex").ok()?;
-            let lifetimes = vertices
-                .prepare_values(
-                    &[
-                        GraphColumn::vertex("source", "vertex"),
-                        GraphColumn::vertex("destination", "vertex"),
-                    ],
-                    0,
-                    None,
-                )
-                .ok()?
-                .with_duplicates();
-            input = input
-                .combine(
-                    GraphSetOperation::Union,
-                    GraphSetQuantifier::All,
-                    lifetimes.into(),
-                )
-                .ok()?;
-        }
-
         let mut endpoint_filters = [None, None];
         for (endpoint, mut labels) in labels.into_iter().enumerate() {
             if labels.is_empty() {
@@ -249,8 +377,12 @@ impl PreparedGraphPattern<GraphValueRow> {
             quantifier,
         )
         .ok()?;
-        Some(IncrementalClosureDefinition {
+        Some(EndpointWalk {
             input,
+            bounds: *bounds,
+            direction: *direction,
+            search: *search,
+            different_edges,
             endpoint_filters,
             projection,
         })

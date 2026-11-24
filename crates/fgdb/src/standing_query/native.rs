@@ -160,7 +160,9 @@ impl PreparedNativeRead {
                     let bound = prepared
                         .bind_parameters(params)
                         .map_err(|e| prepare_error(QueryError::PatternText(e)))?;
-                    if bound.incremental_closure_definition().is_some() {
+                    if bound.incremental_closure_definition().is_some()
+                        || bound.incremental_bounded_walk_definition().is_some()
+                    {
                         return set::register(database, cx, &bound.into(), policy);
                     }
                     let layout = Layout::Rows {

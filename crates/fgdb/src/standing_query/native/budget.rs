@@ -70,6 +70,29 @@ fn closure_footprint(
     Ok(footprint)
 }
 
+fn bounded_walk_footprint(
+    cx: &QueryCx,
+    definition: &fgdb_gql::algebra::IncrementalBoundedWalkDefinition,
+    scoped: bool,
+) -> Result<Footprint, StandingQueryError> {
+    // Hop layers share the same incidence owner. Count it once, alongside
+    // the optional zero-hop lifetimes and each post-traversal endpoint join.
+    let mut footprint = Footprint {
+        nodes: definition.derived_nodes(),
+        source_width: 0,
+    };
+    for source in [definition.edges(), definition.lifetimes()]
+        .into_iter()
+        .flatten()
+    {
+        footprint = footprint.combine(circuit(cx, source, scoped)?, 0)?;
+    }
+    for filter in definition.endpoint_filters().iter().flatten() {
+        footprint = footprint.combine(circuit(cx, filter, scoped)?, 1)?;
+    }
+    Ok(footprint)
+}
+
 fn pattern_width(
     pattern: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
 ) -> u64 {
@@ -105,6 +128,9 @@ fn circuit(
     if let Some(pattern) = query.incremental_pattern() {
         if let Some(definition) = pattern.incremental_closure_definition() {
             return closure_footprint(cx, &definition, scoped);
+        }
+        if let Some(definition) = pattern.incremental_bounded_walk_definition() {
+            return bounded_walk_footprint(cx, &definition, scoped);
         }
         return Ok(Footprint {
             nodes: 1,
@@ -308,6 +334,8 @@ impl PreparedNativeRead {
                     .map_err(|error| prepare_error(QueryError::PatternText(error)))?;
                 if let Some(definition) = bound.incremental_closure_definition() {
                     closure_footprint(cx, &definition, scoped)?
+                } else if let Some(definition) = bound.incremental_bounded_walk_definition() {
+                    bounded_walk_footprint(cx, &definition, scoped)?
                 } else {
                     Footprint {
                         nodes: 1,

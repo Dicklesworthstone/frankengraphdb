@@ -12,6 +12,55 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Maintained bounded WALK reachability — qualification pending
+
+Native standing queries and authorized subscriptions can now maintain finite
+repeatable-element WALK reachability with exact lengths or inclusive hop
+intervals. Forward, reverse and undirected traversal share the same recipe.
+Zero hops come from independent visible vertex lifetimes, including isolated
+vertices. Endpoint label conjunctions and endpoint-only DISTINCT projections
+are applied after traversal, so differently labeled intermediate vertices
+remain usable.
+
+```gql
+MATCH REPEATABLE ELEMENTS WALK (a:Start)-[:R*0..3]->(b:Goal)
+RETURN DISTINCT a,b
+```
+
+The compiler shares one counted incidence source and its one-hop DISTINCT
+relation across all layers. Each further layer uses the existing maintained
+join and DISTINCT projection; only the requested depths enter the final
+union. Removing a parallel edge, alternative route or self-loop retracts a
+result only when its last supporting walk disappears. No complete paths are
+materialized by this derivative circuit.
+
+The complete generated recipe must fit the existing 64-owner circuit ceiling
+before any source read or registration. Pre-admission footprint includes each
+shared source once, lifetime sources, endpoint filters and the existing scoped
+owner. Private intermediate policies retain work and scratch admission; the
+final projection owns the public row allowance. Existing staged cancellation,
+rebuild and release paths own the complete circuit.
+
+This is an endpoint-only DISTINCT WALK subset. Bounded TRAIL, SIMPLE, ACYCLIC,
+shortest selectors, captured paths, path bags, property predicates and
+unsupported ordering/paging retain their refusal. Default different-edge
+semantics are never silently changed into repeatable WALK.
+
+Regression sources include an independent finite-walk oracle over eight
+profiles and eleven real commits, all directions, repeated cycles, alternative
+support, zero-hop isolates, labels, cascading deletion, exact deltas, scoped
+subscriptions, replay/release, circuit limits, and every injected registration
+and rebuild checkpoint. Independent source reviews found no remaining blocker.
+Pinned formatting and whitespace checks passed on the changed Rust sources.
+
+Compilation and Rust test execution remain UNRUN: the pinned dependency cache
+was missing after an environment reset, and the controlled fetch retry ended
+with another executor disconnect before compilation. Clippy, UBS,
+`scripts/check.sh` and complete exact-tree proof are also UNRUN. The original
+`fgdb-w6-recursion-x78`, `fgdb-w6-zset-circuits-kjv` and integrated qualification
+`fgdb-qualify-integrated-nov22-maz0p` remain open. No full recursion, path
+enumeration or measured speedup claim is made.
+
 ### Maintained grouped correlated summaries — qualification pending
 
 Returning CALL and OPTIONAL CALL bodies can now maintain multiple groups per
@@ -134,8 +183,9 @@ All source observations retain capability masking. Registration reserves the
 complete owned circuit; private intermediate rows retain work and scratch
 admission, and the final projection enforces the public row allowance.
 Cancellation and failed rebuilds preserve existing registered state.
-This remains an exact, DISTINCT, endpoint-only subset of unbounded reachability;
-it does not admit bounded-hop or path-enumeration subscriptions.
+This remains an exact, DISTINCT, endpoint-only subset of unbounded reachability.
+The separate bounded repeatable-WALK recipe is described above; path-enumeration
+subscriptions remain unsupported.
 
 Regression sources cover isolated-vertex lifetimes, all admitted directions,
 parallel/self-loop support, cycles, label changes, collapsed endpoint support,
