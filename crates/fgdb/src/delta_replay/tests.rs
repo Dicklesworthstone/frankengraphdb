@@ -264,12 +264,15 @@ async fn complete_validation_attempt(
     commit: &CommitCx,
     prepared: &mut Option<PreparedWrite>,
     transaction: &mut Option<WriteTxn>,
+    automatic: bool,
 ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
     if let Some(prepared) = prepared.take() {
         db.commit_prepared(commit, prepared)
             .await
             .map(|commit_seq| EmbeddedTxnCompletion::WriteCommitted { commit_seq })
             .map_err(WriteTxnError::from)
+    } else if automatic {
+        transaction.as_mut().unwrap().finish(db, commit).await
     } else {
         transaction
             .as_mut()
@@ -345,9 +348,17 @@ fn prepared_and_strict_completion_do_not_publish_early_conflicts_before_source_a
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
-        // Direct preparation, strict write, strict observed read, and an empty
-        // strict read all require the complete interval before acceptance.
-        for consumer in 0..4 {
+        // Direct preparation plus strict and automatic write, observed read
+        // and empty read all authenticate the complete interval before deciding.
+        for (consumer, automatic) in [
+            (0, false),
+            (1, false),
+            (2, false),
+            (3, false),
+            (1, true),
+            (2, true),
+            (3, true),
+        ] {
             for fault in 0..3 {
                 let (mut db, vfs, mut prepared, mut transaction) =
                     validation_fixture(&commit, &txn_cx, consumer, true).await;
@@ -366,6 +377,7 @@ fn prepared_and_strict_completion_do_not_publish_early_conflicts_before_source_a
                             &commit,
                             &mut prepared,
                             &mut transaction,
+                            automatic,
                         )
                         .await,
                         Err(WriteTxnError::Write(WriteError::HistoryRebuild(_)))
@@ -377,6 +389,7 @@ fn prepared_and_strict_completion_do_not_publish_early_conflicts_before_source_a
                         &commit,
                         &mut prepared,
                         &mut transaction,
+                        automatic,
                     ));
                     poll_fn(|cx| {
                         assert!(pending.as_mut().poll(cx).is_pending());
@@ -436,15 +449,28 @@ fn prepared_and_strict_success_preserve_unloaded_prefix_and_cached_tail() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
-        for consumer in 0..4 {
+        for (consumer, automatic) in [
+            (0, false),
+            (1, false),
+            (2, false),
+            (3, false),
+            (1, true),
+            (2, true),
+            (3, true),
+        ] {
             let (mut db, vfs, mut prepared, mut transaction) =
                 validation_fixture(&commit, &txn_cx, consumer, false).await;
             let snapshot = Arc::clone(&db.snapshot);
             let window = db.delta_index().unwrap().clone();
-            let completion =
-                complete_validation_attempt(&mut db, &commit, &mut prepared, &mut transaction)
-                    .await
-                    .unwrap();
+            let completion = complete_validation_attempt(
+                &mut db,
+                &commit,
+                &mut prepared,
+                &mut transaction,
+                automatic,
+            )
+            .await
+            .unwrap();
             assert_eq!(db.delta_materialized_after, CommitSeq(3));
             assert_eq!(
                 db.delta_index().unwrap().retained_after_commit_seq(),
@@ -462,7 +488,7 @@ fn prepared_and_strict_success_preserve_unloaded_prefix_and_cached_tail() {
                 );
                 assert_eq!(db.delta_since(CommitSeq(3)).unwrap().count(), 2);
                 assert!(db.vertex(VId(99)).unwrap().is_some());
-                // Strict writes preserve the sole ordinary publication path:
+                // Both policies preserve the sole ordinary publication path:
                 // its prepared validator authenticates the missing prefix again.
                 assert_eq!(vfs.count(), if consumer == 0 { 2 } else { 4 });
             } else {
@@ -479,6 +505,150 @@ fn prepared_and_strict_success_preserve_unloaded_prefix_and_cached_tail() {
             }
             if let Some(transaction) = transaction {
                 assert_eq!(transaction.state(), EmbeddedTxnState::Completed(completion));
+            }
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn automatic_completion_preserves_read_conflicts_and_explicit_retirement() {
+    let ((), report) = run_async_under_lab(0xd31a_1013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        for (consumer, retired) in [(1, false), (2, false), (1, true), (2, true), (3, true)] {
+            let (mut db, vfs, _, transaction) =
+                validation_fixture(&commit, &txn_cx, consumer, true).await;
+            let mut transaction = transaction.unwrap();
+            if retired {
+                Arc::make_mut(&mut db.snapshot)
+                    .delta_index
+                    .retire_prefix(CommitSeq(4))
+                    .unwrap();
+            }
+            let snapshot = Arc::clone(&db.snapshot);
+            let window = db.delta_index().unwrap().clone();
+            let manifest = db.manifest().unwrap();
+            let error = transaction.finish(&mut db, &commit).await.unwrap_err();
+            if retired {
+                assert!(matches!(
+                    error,
+                    WriteTxnError::Write(WriteError::PreparedHistory(
+                        crate::IndexError::CursorRetired {
+                            asked: CommitSeq(1),
+                            retained_after: CommitSeq(4),
+                            frontier: CommitSeq(4),
+                        }
+                    ))
+                ));
+                assert_eq!(vfs.count(), 0);
+            } else {
+                assert!(matches!(
+                    error,
+                    WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    })
+                ));
+                assert_eq!(vfs.count(), 2);
+            }
+            assert!(Arc::ptr_eq(&snapshot, &db.snapshot));
+            assert_eq!(db.delta_index().unwrap(), &window);
+            assert_eq!(db.delta_materialized_after, CommitSeq(3));
+            assert_eq!(db.frontier().unwrap(), CommitSeq(4));
+            assert_eq!(db.manifest().unwrap(), manifest);
+            assert!(db.vertex(VId(99)).unwrap().is_none());
+            assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn automatic_write_conflicts_materialize_only_for_replay_and_keep_later_reads() {
+    let ((), report) = run_async_under_lab(0xd31a_1014, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        for later_read in [false, true] {
+            let vfs = ReplayVfs::new();
+            let mut db = database(&commit, &vfs, 0x72).await;
+            let mut seed = create(1);
+            seed.create_vertex(
+                VId(2),
+                vec![],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+            );
+            db.write(&commit, seed.clone()).await.unwrap();
+            let mut transaction = db.begin(&txn_cx).unwrap();
+            if later_read {
+                transaction.vertex(&db, VId(2)).unwrap();
+            }
+            let mut staged = WriteBatch::new(RelationId(1));
+            staged.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
+            transaction.write(&mut db, staged.clone()).unwrap();
+            // The earliest overlap is element-level FCW, eligible for the
+            // existing disjoint-field rebase law. The next commit can also
+            // invalidate a recorded read; replay must never erase that witness.
+            let mut first = WriteBatch::new(RelationId(1));
+            first.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(20)));
+            db.write(&commit, first.clone()).await.unwrap();
+            let mut second = WriteBatch::new(RelationId(1));
+            second.set_vertex_property(VId(2), PropertyKeyId(1), Some(CanonicalScalar::Int(30)));
+            db.write(&commit, second.clone()).await.unwrap();
+            Arc::make_mut(&mut db.snapshot).delta_index =
+                crate::empty_delta_window_at(&commit, &db.coordinator, CommitSeq(3)).unwrap();
+            db.delta_materialized_after = CommitSeq(3);
+            db.write(&commit, create(3)).await.unwrap();
+            let pin = db.read_session().unwrap();
+            vfs.reset();
+            let result = transaction.commit(&mut db, &commit).await;
+            // Two missing batches were streamed for validation, then admitted
+            // for the existing replay evaluator. The cached tail was not read.
+            assert_eq!(vfs.count(), 4);
+            assert_eq!(db.delta_materialized_after, CommitSeq(1));
+            assert_eq!(
+                db.delta_index().unwrap().retained_after_commit_seq(),
+                CommitSeq(1)
+            );
+            assert!(db.delta_index().unwrap().get(CommitSeq(2)).is_some());
+            assert!(db.delta_index().unwrap().get(CommitSeq(3)).is_some());
+            assert!(pin.snapshot.delta_index.get(CommitSeq(2)).is_none());
+            if later_read {
+                assert!(matches!(
+                    result,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
+                assert_eq!(db.frontier().unwrap(), CommitSeq(4));
+                assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
+                assert_eq!(db.vertices().unwrap(), pin.vertices().unwrap());
+            } else {
+                assert_eq!(result.unwrap(), CommitSeq(5));
+                assert_eq!(transaction.basis(), CommitSeq(4));
+                let mut serial = Database::open_memory(&commit, keys(0x72)).await.unwrap();
+                for batch in [seed, first, second, create(3), staged] {
+                    serial.write(&commit, batch).await.unwrap();
+                }
+                assert_eq!(db.vertices().unwrap(), serial.vertices().unwrap());
+                assert_eq!(db.edges().unwrap(), serial.edges().unwrap());
+                drop(db);
+                let reopened = Database::open_with_vfs(
+                    &commit,
+                    vfs.clone(),
+                    &vfs.memory.database_dir(),
+                    keys(0x72),
+                )
+                .await
+                .unwrap();
+                assert_eq!(reopened.frontier().unwrap(), CommitSeq(5));
+                assert_eq!(reopened.vertices().unwrap(), serial.vertices().unwrap());
+                assert_eq!(reopened.edges().unwrap(), serial.edges().unwrap());
             }
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }

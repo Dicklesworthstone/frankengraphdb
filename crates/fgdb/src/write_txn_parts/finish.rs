@@ -116,6 +116,11 @@ impl WriteTxn {
     /// scopes and authorization-bound writes retain strict behavior.
     /// Use finish_strict to retain element-level conflict rejection throughout.
     ///
+    /// Ordinary validation authenticates omitted history one complete batch
+    /// at a time without retaining it in the database. Only an actual write
+    /// conflict enters the resident-history semantic replay path. This is a
+    /// bound on retained delta batches, not a whole-handle memory ceiling.
+    ///
     /// The validation contract is the existing conservative embedded read and
     /// scan witness contract, not full SSI or the durable session protocol.
     /// A dropped UNPOLLED future has no effect. Once polled and admitted by the
@@ -279,7 +284,7 @@ impl WriteTxn {
         cx: &CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
         require_write: bool,
-        rebase: Option<RebasePreparation>,
+        mut rebase: Option<RebasePreparation>,
         mut checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
         self.ensure_database(database)?;
@@ -291,14 +296,41 @@ impl WriteTxn {
             return Err(WriteTxnError::NoPreparedWrite);
         }
         checkpoint()?;
-        let strict_conflict = if rebase.is_none() {
-            Some(
-                attempt
-                    .transaction
-                    .transaction_conflict_streamed(attempt.database, cx, &mut checkpoint)
-                    .await?,
-            )
+        let strict_conflict = if matches!(rebase, None | Some(RebasePreparation::Automatic)) {
+            let conflict = attempt
+                .transaction
+                .transaction_conflict_streamed(attempt.database, cx, &mut checkpoint)
+                .await?;
+            if rebase.is_some()
+                && let Some((law, element, committed_at)) = conflict
+            {
+                if law != "FG-LAW-FCW-01" {
+                    // The stream authenticated the complete suffix before
+                    // reporting this read conflict. No replay policy may
+                    // change an observation, so refuse without retaining it.
+                    return Err(WriteError::FirstCommitterWins {
+                        law,
+                        detail: format!(
+                            "rebase read {element:?} changed at {committed_at:?} after pinned basis {:?}",
+                            attempt.transaction.basis
+                        ),
+                    }
+                    .into());
+                }
+                // Only an actual conservative write conflict can need the
+                // resident history consumed by semantic replay below.
+                None
+            } else {
+                // Read-only and independent write completions use the same
+                // bounded history validation as strict completion. Leave the
+                // checkpoint's omitted prefix unloaded when no replay is needed.
+                rebase = None;
+                Some(conflict)
+            }
         } else {
+            None
+        };
+        if strict_conflict.is_none() {
             // Semantic replay still consumes its existing synchronous history
             // contract. Strict validation does not install an omitted prefix.
             attempt
@@ -309,8 +341,7 @@ impl WriteTxn {
                     crate::RebuildError::Interrupted(error) => WriteTxnError::Interrupted(error),
                     error => WriteTxnError::Write(WriteError::from(error)),
                 })?;
-            None
-        };
+        }
         // A new apply basis must never erase the interval over which earlier
         // point, negative and query observations need validation. Reuse the
         // ordinary witness checker BEFORE any policy can replace the basis.
@@ -732,8 +763,8 @@ impl WriteTxn {
         Ok(first_conflict)
     }
 
-    // Shared verbatim by the resident rebase/refresh paths and strict streamed
-    // completion. The original per-row and read-before-write precedence stays
+    // Shared verbatim by resident rebase/refresh and streamed completion. The
+    // original per-row and read-before-write conflict precedence stays
     // inside this helper rather than being reimplemented by a replay adapter.
     fn transaction_conflict_in_batch<V: Vfs + Clone>(
         &self,
