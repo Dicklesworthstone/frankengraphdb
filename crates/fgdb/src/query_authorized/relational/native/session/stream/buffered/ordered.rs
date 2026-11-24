@@ -75,9 +75,68 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     where
         C: FnMut() -> u64,
     {
+        self.into_authorized_ordered_read_session_with_resolver(
+            commit_cx,
+            cx,
+            authority,
+            token,
+            branch,
+            at,
+            policy,
+            clock,
+            |catalog| Ok(Catalog(catalog)),
+            scratch,
+            destination,
+            auxiliary,
+            limits,
+        )
+        .await
+    }
+
+    /// Bind a trusted host resolver and external scratch to one authenticated
+    /// cold publication. The callback receives the exact-cut catalog once,
+    /// after capability admission and before graph admission. Host aliases
+    /// cannot change the selected graph cut or the signed scope.
+    ///
+    /// The session owns the three files for its entire lifetime. Resolver
+    /// refusal and late credential failures precede sort-limit inspection;
+    /// every failed constructor releases its publication and scratch owners.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn into_authorized_ordered_read_session_with_resolver<
+        'a,
+        R: GraphSymbolResolver,
+        C: FnMut() -> u64,
+        A,
+        B,
+        D,
+    >(
+        self,
+        commit_cx: &CommitCx,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        at: CommitSeq,
+        policy: GqlQueryPolicy,
+        clock: C,
+        bind_catalog: impl FnOnce(SymbolCatalog) -> core::result::Result<R, String>,
+        scratch: SpillFile<A>,
+        destination: SpillFile<B>,
+        auxiliary: SpillFile<D>,
+        limits: AuthorizedSortLimits,
+    ) -> Result<AuthorizedOrderedReadSession<'a, R, C, A, B, D, AuthorizedBufferedReadSource<V>>>
+    {
         let session = self
-            .into_authorized_read_session(
-                commit_cx, cx, authority, token, branch, at, policy, clock,
+            .into_authorized_read_session_with_resolver(
+                commit_cx,
+                cx,
+                authority,
+                token,
+                branch,
+                at,
+                policy,
+                clock,
+                bind_catalog,
             )
             .await
             .map_err(buffered_error)?;
@@ -89,6 +148,75 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
             auxiliary,
             limits,
         })
+    }
+
+    /// Reattach a trusted host's immutable prepared template to an ordered
+    /// cold session without parsing or rebinding its symbol names. The host
+    /// must validate the template's database, branch, generation and frozen
+    /// catalog; `bind_catalog` verifies the latter against the selected cut.
+    ///
+    /// Template ownership, map-argument lowering and temporal parameters use
+    /// the same canonical admission as prepared buffered source sessions.
+    /// The returned handle belongs only to this session and retains no graph
+    /// storage independently. Execution rechecks live authority and arguments.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub async fn into_authorized_prepared_ordered_read_session_with_resolver<
+        'a,
+        R: GraphSymbolResolver,
+        C: FnMut() -> u64,
+        A,
+        B,
+        D,
+    >(
+        self,
+        commit_cx: &CommitCx,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        at: CommitSeq,
+        policy: GqlQueryPolicy,
+        clock: C,
+        bind_catalog: impl FnOnce(SymbolCatalog) -> core::result::Result<R, String>,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+        lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
+        scratch: SpillFile<A>,
+        destination: SpillFile<B>,
+        auxiliary: SpillFile<D>,
+        limits: AuthorizedSortLimits,
+    ) -> Result<(
+        AuthorizedOrderedReadSession<'a, R, C, A, B, D, AuthorizedBufferedReadSource<V>>,
+        AuthorizedPreparedRead,
+    )> {
+        let (session, prepared) = self
+            .into_authorized_prepared_read_session_with_resolver(
+                commit_cx,
+                cx,
+                authority,
+                token,
+                branch,
+                at,
+                policy,
+                clock,
+                bind_catalog,
+                selector,
+                native,
+                lowered,
+            )
+            .await
+            .map_err(buffered_error)?;
+        limits.validate()?;
+        Ok((
+            AuthorizedOrderedReadSession {
+                session,
+                scratch,
+                destination,
+                auxiliary,
+                limits,
+            },
+            prepared,
+        ))
     }
 }
 

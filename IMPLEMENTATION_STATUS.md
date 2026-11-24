@@ -12,6 +12,29 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Prepared cold ordered sessions — qualification pending
+
+Cold ordered publications now expose trusted exact-cut resolver binding and
+prepared-template attachment, matching the canonical buffered source session.
+The host can carry an immutable prepared selector, native template and lowered
+map arguments into external relational or aggregate execution without reparsing
+names. Catalog validation occurs after signed read admission and before graph
+admission; physical sort-limit validation follows template ownership admission.
+The returned prepared handle is scoped to its new session and does not retain
+graph storage after that session is dropped.
+
+The embedded regression source covers repeated map-argument and historical-cut
+rebinding, zero further resolver lookups, foreign-session handle rejection,
+different-cut rejection before candidate/scratch I/O, and catalog refusal or
+late expiry taking precedence over invalid sort limits. This is an embedding
+capability; served cold ordered routing is a separate follow-on integration.
+
+Focused pinned Rustfmt parsing/formatting and source review passed. Compilation,
+runtime assertions and the full pinned native gate remain UNRUN. The canonical
+workspace has no free storage, and the preceding locked native attempt stopped
+at the pinned asupersync compiler process before reaching this crate. Existing
+integrated qualification work remains open; this paragraph is not a gate verdict.
+
 ### Cold untyped and multi-type edge reads — qualification pending
 
 The authorized buffered source and external relation adapter now admit untyped

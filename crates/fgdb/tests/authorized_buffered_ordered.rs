@@ -10,15 +10,17 @@ use fgdb::{
     AuthorizedAggregateSpoolCursor, AuthorizedBufferedError, AuthorizedBufferedReadSource,
     AuthorizedOrderedReadSession, AuthorizedSortLimits, AuthorizedSpoolCursor, BufferLimits,
     BufferedReadLimits, Database, DatabaseKeys, MemVfs, MemVfsFile, MemoryPool, NativeSpoolError,
-    QueryError, WriteBatch,
+    PreparedNativeRead, QueryError, WriteBatch,
 };
 use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::scan_stream::ScanState;
+use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphAggregateTextSlot, GraphAggregateValue, GraphExactAverage,
-    GraphSymbolResolver,
+    GqlMapArgumentText, GqlParameters, GqlQueryPolicy, GraphAggregateTextSlot, GraphAggregateValue,
+    GraphExactAverage, GraphSymbol, GraphSymbolKind, GraphSymbolResolver, PreparedGraphBranchText,
+    ReverseSymbolCatalog,
 };
 use fgdb_strata::tiered::memory::{SpillFile, SpillLimits};
 use fgdb_types::{
@@ -101,6 +103,30 @@ fn cold_limits() -> BufferedReadLimits {
 
 fn memory() -> MemoryPool {
     MemoryPool::new(32 * 1024 * 1024, 0).unwrap()
+}
+
+struct HostCatalog {
+    catalog: SymbolCatalog,
+    lookups: Arc<AtomicUsize>,
+}
+
+impl GraphSymbolResolver for HostCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        CatalogSymbolResolver::new(&self.catalog).resolve_symbol(kind, name)
+    }
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        CatalogSymbolResolver::new(&self.catalog).time_zones()
+    }
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        CatalogSymbolResolver::new(&self.catalog).reverse_catalog()
+    }
+    fn reverse_label(&self, id: LabelId) -> Option<String> {
+        CatalogSymbolResolver::new(&self.catalog).reverse_label(id)
+    }
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        CatalogSymbolResolver::new(&self.catalog).reverse_relation(id)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -490,6 +516,205 @@ async fn aggregates(
     }
     assert_eq!(cursor.state(), ScanState::Exhausted);
     rows
+}
+
+#[test]
+fn cold_ordered_host_templates_rebind_maps_and_history_without_reparsing() {
+    let ((), report) = run_async_under_lab(0xa8_0209, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, db, old, current) = fixture(&commit, true).await;
+        let authority = issuer();
+        let token = authority.issue_at(&grant(5, 3), 100).unwrap();
+        let pool = memory();
+        let catalog = db.symbol_catalog_at(old).unwrap();
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let arguments = |at: CommitSeq, minimum, page| {
+            GqlParameters::new()
+                .with_text("route", "main")
+                .unwrap()
+                .with_uint64("cut", at.0)
+                .unwrap()
+                .with_uint64("page", page)
+                .unwrap()
+                .with_map("filter", vec![("minimum".into(), scalar(minimum))])
+                .unwrap()
+        };
+        let text = "AT BRANCH $route MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut \
+                    WHERE n.score >= $filter.minimum RETURN n,n.score AS score \
+                    ORDER BY score DESC,n LIMIT $page";
+        let (lowered, derived) =
+            GqlMapArgumentText::lower_fields(text, &arguments(old, 2, 3)).unwrap();
+        let selector = Arc::new(PreparedGraphBranchText::prepare(lowered.text()).unwrap());
+        let native = {
+            let selected = selector.bind_parameters(&derived).unwrap();
+            Arc::new(
+                PreparedNativeRead::prepare(
+                    selected.statement(),
+                    selected.parameters(),
+                    HostCatalog {
+                        catalog: catalog.clone(),
+                        lookups: lookups.clone(),
+                    },
+                )
+                .unwrap(),
+            )
+        };
+        let lowered = Arc::new(lowered);
+        let bound_lookups = lookups.load(Ordering::SeqCst);
+        assert!(bound_lookups > 0);
+        let mut foreign = None;
+        for (at, minimum, page, expected) in [
+            (old, 2, 3, vec![(1, 3), (3, 3), (5, 2)]),
+            (current, 3, 2, vec![(1, 30), (3, 3)]),
+            (old, 1, 1, vec![(1, 3)]),
+        ] {
+            let args = arguments(at, minimum, page);
+            let (scratch, a) = file(&cx, &pool).await;
+            let (destination, b) = file(&cx, &pool).await;
+            let (auxiliary, c) = file(&cx, &pool).await;
+            let files = [a, b, c];
+            let (mut ordered, prepared) = db
+                .buffered_read_publication(&cx, pool.clone(), cold_limits())
+                .unwrap()
+                .into_authorized_prepared_ordered_read_session_with_resolver(
+                    &commit,
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    at,
+                    policy(3),
+                    || 100,
+                    |selected| {
+                        if selected != catalog {
+                            return Err("prepared catalog changed".into());
+                        }
+                        Ok(HostCatalog {
+                            catalog: selected,
+                            lookups: lookups.clone(),
+                        })
+                    },
+                    selector.clone(),
+                    native.clone(),
+                    Some(lowered.clone()),
+                    scratch,
+                    destination,
+                    auxiliary,
+                    limits(),
+                )
+                .await
+                .unwrap();
+            if let Some(foreign) = &foreign {
+                let before = observations(&files);
+                vfs.reset();
+                assert!(matches!(ordered.execute_ordered(&cx, foreign, &args),
+                    Err(NativeSpoolError::Authorized(error))
+                        if matches!(*error, QueryError::Authorization(Error::WrongAuthority))));
+                assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+                assert_eq!(observations(&files), before);
+                assert!(!ordered.is_closed());
+            }
+            let execution = ordered.execute_ordered(&cx, &prepared, &args).unwrap();
+            assert_send(&execution);
+            assert_eq!(execution.snapshot_seq(), at);
+            let mut cursor = execution.await.unwrap();
+            assert_eq!(
+                values(&mut cursor).await,
+                expected
+                    .into_iter()
+                    .map(|(id, score)| vec![GraphValue::Vertex(VId(id)), scalar(score)])
+                    .collect::<Vec<_>>()
+            );
+            drop(cursor);
+            assert_eq!(lookups.load(Ordering::SeqCst), bound_lookups);
+            let other = if at == old { current } else { old };
+            let before = observations(&files);
+            vfs.reset();
+            assert!(matches!(
+                ordered.execute_ordered(&cx, &prepared, &arguments(other, minimum, page)),
+                Err(NativeSpoolError::BufferedSession(error))
+                    if matches!(*error, AuthorizedBufferedError::DifferentCut { requested, bound }
+                        if requested == other && bound == at)
+            ));
+            assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+            assert_eq!(observations(&files), before);
+            drop(ordered);
+            assert_eq!(
+                pool.used(),
+                0,
+                "a retained template does not retain its source"
+            );
+            foreign = Some(prepared);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_ordered_catalog_admission_and_live_expiry_precede_invalid_sort_limits() {
+    let ((), report) = run_async_under_lab(0xa8_0210, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, db, at, _) = fixture(&commit, true).await;
+        let authority = issuer();
+        let token = authority.issue_at(&grant(5, 3), 100).unwrap();
+        let pool = memory();
+        for scenario in 0..3 {
+            let now = Arc::new(AtomicU64::new(if scenario == 0 { 1001 } else { 100 }));
+            let clock = Arc::clone(&now);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let (scratch, a) = file(&cx, &pool).await;
+            let (destination, b) = file(&cx, &pool).await;
+            let (auxiliary, c) = file(&cx, &pool).await;
+            let files = [a, b, c];
+            let before = observations(&files);
+            let mut invalid = limits();
+            invalid.run_rows = 0;
+            vfs.reset();
+            let result = db
+                .buffered_read_publication(&cx, pool.clone(), cold_limits())
+                .unwrap()
+                .into_authorized_ordered_read_session_with_resolver(
+                    &commit,
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    at,
+                    policy(3),
+                    move || clock.load(Ordering::SeqCst),
+                    |_| -> Result<HostCatalog, String> {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        if scenario == 2 {
+                            now.store(1001, Ordering::SeqCst);
+                        }
+                        Err("prepared catalog changed".into())
+                    },
+                    scratch,
+                    destination,
+                    auxiliary,
+                    invalid,
+                )
+                .await;
+            if scenario == 1 {
+                assert!(
+                    matches!(result, Err(NativeSpoolError::BufferedSession(error))
+                    if matches!(*error, AuthorizedBufferedError::CatalogBinding(_)))
+                );
+            } else {
+                assert!(matches!(result, Err(NativeSpoolError::Authorized(error))
+                    if matches!(*error, QueryError::Authorization(Error::Expired))));
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), usize::from(scenario != 0));
+            assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+            assert_eq!(observations(&files), before);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
