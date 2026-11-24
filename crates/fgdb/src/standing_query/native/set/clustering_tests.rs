@@ -367,7 +367,7 @@ fn clustering_projection_refusals_and_final_row_budgets_preserve_the_circuit() {
             "{relations:['R'],self_loops:'drop'}",
             "{relations:['R'],parallel:'collapse',self_loops:'reject'}",
             "{relations:['R'],weight:'p',parallel:'collapse',self_loops:'drop'}",
-            "{relations:['R','S'],parallel:'collapse',self_loops:'drop'}",
+            "{relations:['R',7],parallel:'collapse',self_loops:'drop'}",
             "{relations:['R'],direction:'directed',parallel:'collapse',self_loops:'drop'}",
             "{relations:['R'],direction:'reversed',parallel:'collapse',self_loops:'drop'}",
         ] {

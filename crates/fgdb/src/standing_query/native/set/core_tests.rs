@@ -465,7 +465,7 @@ fn core_projection_refusals_and_quotas_never_publish_partial_circuits() {
             "CALL fnx.core_number({relations:['R'],parallel:'collapse',self_loops:'keep'})".into(),
             "CALL fnx.core_number({relations:['R'],parallel:'collapse',self_loops:'reject'})".into(),
             "CALL fnx.core_number({relations:['R'],weight:'p',parallel:'collapse',self_loops:'drop'})".into(),
-            "CALL fnx.core_number({relations:['R','S'],parallel:'collapse',self_loops:'drop'})".into(),
+            "CALL fnx.core_number({relations:['R',7],parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.core_number({relations:['R'],direction:'directed',parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.core_number({relations:['R'],direction:'reversed',parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.core_number(relation => 'R',parallel => 'collapse',self_loops => 'drop')".into(),
