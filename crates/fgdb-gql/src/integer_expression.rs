@@ -863,6 +863,37 @@ impl GraphIntegerExpression {
         })
     }
 
+    /// Preserve this checked program when its input row moves one column.
+    /// Lexical locals and branch targets address different coordinate spaces.
+    pub(crate) fn with_relocated_column<E>(
+        &self,
+        from: usize,
+        to: usize,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let mut code = Vec::new();
+        for instruction in &self.code {
+            checkpoint()?;
+            let mut instruction = instruction.clone();
+            match &mut instruction {
+                Instruction::Column(slot)
+                | Instruction::ScalarColumn(slot)
+                | Instruction::IdentityColumn { column: slot, .. }
+                | Instruction::PresenceColumn(slot)
+                    if *slot == from =>
+                {
+                    *slot = to
+                }
+                _ => {}
+            }
+            code.push(instruction);
+        }
+        Ok(Self {
+            code: code.into_boxed_slice(),
+            stack_entries: self.stack_entries,
+        })
+    }
+
     /// Bound preparation-time or governed dependency inspection without
     /// materializing this program's canonical transcript.
     pub(crate) fn instruction_count(&self) -> usize {

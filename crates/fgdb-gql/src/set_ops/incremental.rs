@@ -310,7 +310,10 @@ impl PreparedGraphSet {
         }
         for item in items {
             control(Work)?;
-            if !matches!(item, GraphSetValue::Literal(_)) {
+            if !matches!(
+                item,
+                GraphSetValue::Literal(_) | GraphSetValue::TypedNull(_)
+            ) {
                 return Ok(None);
             }
         }
@@ -319,7 +322,10 @@ impl PreparedGraphSet {
         for output in outputs {
             control(Work)?;
             match output.value() {
-                GraphSetValue::Column(_) => {}
+                GraphSetValue::Column(_)
+                | GraphSetValue::Integer(_)
+                | GraphSetValue::Literal(_)
+                | GraphSetValue::TypedNull(_) => {}
                 GraphSetValue::MapGet {
                     map,
                     property: GraphElementKey::Property(key),
@@ -348,22 +354,28 @@ impl PreparedGraphSet {
         let Ok(input) = captured.unwind(alias.to_owned(), list.clone()) else {
             return Ok(None);
         };
+        let unwind_slot = width + fields.len();
         let mut next_field = width;
         let mut projected = Vec::with_capacity(outputs.len());
         for output in outputs {
             control(ScratchEntry)?;
-            let column = match output.value() {
-                GraphSetValue::Column(column) if *column == width => width + fields.len(),
-                GraphSetValue::Column(column) => *column,
-                _ => {
-                    next_field += 1;
-                    next_field - 1
+            let value = match output.value() {
+                GraphSetValue::Column(column) if *column == width => {
+                    GraphSetValue::Column(unwind_slot)
                 }
+                GraphSetValue::Integer(expression) => GraphSetValue::Integer(
+                    expression.with_relocated_column(width, unwind_slot, || {
+                        control(Work)?;
+                        control(ScratchEntry)
+                    })?,
+                ),
+                GraphSetValue::MapGet { .. } => {
+                    next_field += 1;
+                    GraphSetValue::Column(next_field - 1)
+                }
+                unchanged => unchanged.clone(),
             };
-            projected.push(GraphSetProjection::new(
-                output.name(),
-                GraphSetValue::Column(column),
-            ));
+            projected.push(GraphSetProjection::new(output.name(), value));
         }
         Ok(crate::row_projection::RowProjectionSpec::new(
             input.types.clone(),
