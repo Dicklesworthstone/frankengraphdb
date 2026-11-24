@@ -755,6 +755,35 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         policy: GqlQueryPolicy,
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
+        // Drop the operator preparation frame before descending a binary set
+        // tree. Its recipe and state temporaries are large on debug builds.
+        if let Some(index) = self.compile_operator(cx, query, policy, checkpoint)? {
+            return Ok(index);
+        }
+        let (operation, quantifier, left, right) = query
+            .incremental_binary()
+            .ok_or(StandingQueryError::Unsupported)?;
+        let left = self.compile(cx, left, policy, checkpoint)?;
+        let right = self.compile(cx, right, policy, checkpoint)?;
+        let query = self.database.prepare_standing_set(
+            cx,
+            [left, right],
+            operation_of(operation, quantifier),
+            policy,
+            self.database.standing_queries.len(),
+        )?;
+        let index = self.append(StandingQuery::Set(Box::new(query)));
+        checkpoint()?;
+        Ok(index)
+    }
+
+    fn compile_operator(
+        &mut self,
+        cx: &QueryCx,
+        query: &PreparedGraphSet,
+        policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+    ) -> Result<Option<usize>, StandingQueryError> {
         checkpoint()?;
         let index = if query.operand_count() == 0 {
             let state = self
@@ -1233,7 +1262,7 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             }
             input
         } else if let Some(input) = query.incremental_scope() {
-            return self.compile(cx, input, policy, checkpoint);
+            return self.compile(cx, input, policy, checkpoint).map(Some);
         } else if let Some((input, projection, quantifier)) = query.incremental_projection() {
             let spec = RowProjectionSpec::new(
                 input.column_types().to_vec(),
@@ -1340,22 +1369,11 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 self.database.standing_queries.len(),
             )?;
             self.append(StandingQuery::Join(Box::new(query)))
-        } else if let Some((operation, quantifier, left, right)) = query.incremental_binary() {
-            let left = self.compile(cx, left, policy, checkpoint)?;
-            let right = self.compile(cx, right, policy, checkpoint)?;
-            let query = self.database.prepare_standing_set(
-                cx,
-                [left, right],
-                operation_of(operation, quantifier),
-                policy,
-                self.database.standing_queries.len(),
-            )?;
-            self.append(StandingQuery::Set(Box::new(query)))
         } else {
-            return Err(StandingQueryError::Unsupported);
+            return Ok(None);
         };
         checkpoint()?;
-        Ok(index)
+        Ok(Some(index))
     }
 }
 impl<V: Vfs + Clone> Drop for Staging<'_, V> {
