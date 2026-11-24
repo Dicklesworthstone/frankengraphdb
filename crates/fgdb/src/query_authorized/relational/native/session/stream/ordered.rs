@@ -512,7 +512,9 @@ fn bind_projected_order(
         return Ok((plan, tail, at, query.columns().to_vec(), Some(pull), None));
     }
     let unsupported = || QueryError::StreamingUnsupported { facade };
-    let stages = AsyncSpillSetPlan::compile(query).map_err(|_| unsupported())?;
+    let stages =
+        AsyncSpillSetPlan::compile_with_bounded_walks(query).map_err(|_| unsupported())?;
+    admit_external_sources(&stages)?;
     // A unary program retains one ordinary scoped graph source. Its canonical
     // order/page must finish before the first stage evaluates a row, including
     // property-only projections whose failure ordinals differ from VId order.
@@ -576,15 +578,19 @@ enum BoundExternalOrder {
 // a resident evaluator after a sibling has already consumed private input.
 fn admit_external_sources(plan: &AsyncSpillSetPlan) -> core::result::Result<(), QueryError> {
     match plan.source() {
-        AsyncSpillSetSourcePlan::Procedure(_)
-        | AsyncSpillSetSourcePlan::Walk(_)
-        | AsyncSpillSetSourcePlan::VertexProbe(_) => Err(QueryError::StreamingUnsupported {
-            facade: crate::NativeReadClass::Set,
-        }),
+        AsyncSpillSetSourcePlan::Procedure(_) | AsyncSpillSetSourcePlan::Walk(_) => {
+            Err(QueryError::StreamingUnsupported {
+                facade: crate::NativeReadClass::Set,
+            })
+        }
         AsyncSpillSetSourcePlan::Values(_) | AsyncSpillSetSourcePlan::Arguments(_) => Ok(()),
         AsyncSpillSetSourcePlan::Vertex(_)
+        | AsyncSpillSetSourcePlan::VertexProbe(_)
         | AsyncSpillSetSourcePlan::Edge(_)
         | AsyncSpillSetSourcePlan::Join(_) => {
+            // The asynchronous plan classifies the leaf; execution still uses
+            // the existing scoped synchronous source. Probes must pass that
+            // source's complete native profile before any sibling opens.
             compile_ordered(
                 plan.source_pattern()
                     .expect("graph plan retains its pattern"),
@@ -641,10 +647,14 @@ fn bind_external_order(
         return bind_projected_order(&query, at, prepared.facade_class())
             .map(|bound| BoundExternalOrder::Linear(Box::new(bound)));
     }
-    let plan =
-        AsyncSpillSetPlan::compile(&query).map_err(|_| QueryError::StreamingUnsupported {
+    // This compiler retains finite semi/anti probes inside graph leaves.
+    // The recursive fence below admits only sources implemented by this
+    // authorized host; an outer walk or procedure still refuses before I/O.
+    let plan = AsyncSpillSetPlan::compile_with_bounded_walks(&query).map_err(|_| {
+        QueryError::StreamingUnsupported {
             facade: prepared.facade_class(),
-        })?;
+        }
+    })?;
     admit_external_sources(&plan)?;
     if let Some(pattern) = plan.source_pattern() {
         let (input, tail) = compile_ordered(pattern)?;

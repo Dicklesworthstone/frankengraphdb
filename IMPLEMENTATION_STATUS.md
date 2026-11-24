@@ -12,6 +12,28 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Authorized external ordering of existence-filtered relations — qualification pending
+
+Authorized external ordering now admits vertex-rooted finite EXISTS and NOT
+EXISTS filters inside complete relational plans, including UNION and correlated
+CALL bodies. The shared physical compiler retains each probe; the recursive
+admission fence validates every graph leaf against the existing scoped native
+reader before any sibling opens a source or scratch file. Execution reuses
+that reader's masking, snapshot, native budget and live signed allowance.
+Outer walk and procedure sources retain their explicit refusal boundary.
+
+Regression sources compare native and external row order and literal bags,
+fixed and finite-hop probes, repeated correlated input, denied property values,
+hidden endpoints and relations, and visible work against a physically reduced
+graph. Further cases retain division errors and private-input limits beneath
+LIMIT 0 and refuse an unsupported walk sibling before scratch is touched.
+
+The executor was unavailable while this increment was prepared through GitHub.
+Compilation, runtime tests, pinned formatting, Clippy, UBS and exact-tree gates
+are UNRUN; source inspection is not a passing qualification. The integrated
+qualification task `fgdb-qualify-integrated-nov22-maz0p` remains open. No storage
+memory bound, full path-source support or measured speedup is claimed.
+
 ### Maintained reflexive and label-selected reachability — qualification pending
 
 Native maintained endpoint queries now admit zero-or-more hops, including
