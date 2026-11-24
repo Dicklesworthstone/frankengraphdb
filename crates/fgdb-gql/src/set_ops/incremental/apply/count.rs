@@ -241,6 +241,8 @@ struct CapturedCollectionOrder<'a> {
     width: usize,
 }
 
+type SummarySteps<'a> = (Vec<RowProjectionSpec>, Option<CapturedCollectionOrder<'a>>);
+
 /// Peel row stages on either side of the aggregate without moving them across
 /// its conversion boundary. Rejoining a projection of Arguments contributes
 /// exactly one row from this invocation, even when an imported value is NULL.
@@ -329,7 +331,7 @@ fn summary_steps<'a, E>(
     restored: &[usize],
     key_width: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<Option<(Vec<RowProjectionSpec>, Option<CapturedCollectionOrder<'a>>)>, E> {
+) -> Result<Option<SummarySteps<'a>>, E> {
     let mut steps = vec![initial];
     let private_width = key_width + restored.len();
     let mut captured: Option<CapturedCollectionOrder<'a>> = None;
@@ -638,9 +640,58 @@ impl PreparedGraphSet {
             }
             None => Vec::new(),
         };
+        let needed = if original_keys.is_empty()
+            && summary
+                .aggregate_specs()
+                .eq([(GraphAggregateFunction::CountRows, None)])
+            && let Some(join) = source_join
+            && join.predicate().is_none()
+            && let Some(SummaryStage::Project(_, cells, GraphSetQuantifier::Distinct)) =
+                stages.first()
+        {
+            // A simple first DISTINCT projection discards every imported cell
+            // it neither copies nor joins on. COUNT subqueries implicitly
+            // capture the whole outer scope, including unrelated list values.
+            charge(slots.len(), control)?;
+            let mut needed = vec![false; slots.len()];
+            for &(column, _) in join.keys() {
+                control(GlaExecutionEvent::Work)?;
+                needed[column] = true;
+            }
+            for cell in *cells {
+                control(GlaExecutionEvent::Work)?;
+                match cell.value() {
+                    GraphSetValue::Column(column) => {
+                        if let Some(live) = needed.get_mut(*column) {
+                            *live = true;
+                        }
+                    }
+                    GraphSetValue::Literal(_)
+                    | GraphSetValue::Value(_)
+                    | GraphSetValue::TypedNull(_) => {}
+                    _ => {
+                        needed.fill(true);
+                        break;
+                    }
+                }
+            }
+            Some(needed)
+        } else {
+            None
+        };
+        charge(slots.len() * 2, control)?;
+        let mut key_slots = Vec::with_capacity(slots.len());
+        let mut values = Vec::with_capacity(slots.len());
+        for (column, &slot) in slots.iter().enumerate() {
+            if needed.as_ref().is_none_or(|needed| needed[column]) {
+                key_slots.push(slot);
+                values.push(GraphSetValue::Column(slot));
+            } else {
+                // Keep the checked frame width and type until the projection.
+                values.push(GraphSetValue::TypedNull(left.types[slot]));
+            }
+        }
         let mut restored = Vec::new();
-        charge(slots.len(), control)?;
-        let mut key_slots = slots.clone();
         for stage in stages.iter().chain(&tail) {
             control(GlaExecutionEvent::Work)?;
             if let SummaryStage::Restore(_, columns) = stage {
@@ -663,8 +714,7 @@ impl PreparedGraphSet {
         let key_width = outer.column_types().len() - left_width;
         let private_width = key_width + restored.len();
         let right_width = right.types.len();
-        charge(argument_width + private_width, control)?;
-        let mut values: Vec<_> = slots.into_iter().map(GraphSetValue::Column).collect();
+        charge(private_width, control)?;
         values.extend((left_width..left_width + key_width).map(GraphSetValue::Column));
         values.extend(restored.iter().copied().map(GraphSetValue::Column));
         let Some(arguments) = distinct::projection(

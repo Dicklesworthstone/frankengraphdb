@@ -906,6 +906,10 @@ impl FilteredCircuit {
             .incremental_filtered_aggregate_with_control(&mut allow)
             .unwrap()
             .unwrap();
+        Self::from_recipe(recipe)
+    }
+
+    fn from_recipe(recipe: MaintainedFilteredAggregate<'_>) -> Self {
         let schema = recipe.group.input().column_types().to_vec();
         Self {
             outer: IncrementalRowProjection::new(recipe.outer),
@@ -1287,6 +1291,70 @@ fn filtered_aggregate_recipe(query: &PreparedGraphSet) -> Option<MaintainedFilte
 
 fn has_filtered_aggregate(query: &PreparedGraphSet) -> bool {
     filtered_aggregate_recipe(query).is_some()
+}
+
+#[test]
+fn count_over_distinct_retains_outer_rows_and_counts_null_witnesses() {
+    let prepare = |projection| {
+        let text = format!(
+            "MATCH (a:L) UNWIND [7,7] AS token WITH token,a \
+             RETURN token,a,COUNT {{ MATCH (a)-[:R]->(b) RETURN DISTINCT {projection} }} AS degree"
+        );
+        PreparedGraphSetText::prepare(&text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    let tokens = [
+        (scalar(Some(7)), 1, 2),
+        (scalar(None), 1, 1),
+        (GraphValue::List(vec![scalar(Some(9))].into()), 1, 3),
+        (scalar(None), 3, 2),
+    ];
+    let left = bag(tokens
+        .iter()
+        .map(|(token, owner, weight)| (row(vec![token.clone(), vertex(*owner)]), *weight)));
+    let rhs = |b, weight| (row(vec![vertex(1), vertex(b)]), weight);
+    let expected = |degree| {
+        bag(tokens.iter().map(|(token, owner, weight)| {
+            (
+                row(vec![
+                    token.clone(),
+                    vertex(*owner),
+                    scalar(Some(if *owner == 1 { degree } else { 0 })),
+                ]),
+                *weight,
+            )
+        }))
+    };
+    for (projection, initial_degree) in [("b", 2), ("b,NULL AS missing", 2), ("NULL AS missing", 1)]
+    {
+        let query = prepare(projection);
+        let mut circuit = FilteredCircuit::from_recipe(filtered_aggregate_recipe(&query).unwrap());
+        let initial = expected(initial_degree);
+        assert_eq!(
+            circuit.tick(&left, &bag([rhs(2, 2), rhs(4, 1)])).unwrap(),
+            initial
+        );
+        assert!(
+            circuit
+                .tick(&bag([]), &bag([rhs(2, -1)]))
+                .unwrap()
+                .is_empty()
+        );
+        let one = expected(1);
+        assert_eq!(
+            circuit.tick(&bag([]), &bag([rhs(4, -1)])).unwrap(),
+            difference(&one, &initial)
+        );
+        assert_eq!(
+            circuit.tick(&bag([]), &bag([rhs(2, -1)])).unwrap(),
+            difference(&expected(0), &one)
+        );
+    }
+    // This projection reads the open-domain import itself. Its invocation
+    // identity still requires the existing typed-key proof.
+    assert!(!has_filtered_aggregate(&prepare("token AS used")));
 }
 
 #[test]
@@ -2869,15 +2937,12 @@ fn native_grouped_recipes_preserve_definition_cancellation_and_source_boundaries
             .unwrap();
         assert!(has_filtered_aggregate(&query), "{text}");
     }
-    for text in [
-        "MATCH (a:L) WITH a OPTIONAL CALL (a) { MATCH (a)-[:R]->(b) RETURN b.p AS bucket,count(*) AS degree } RETURN a,bucket,degree",
-    ] {
-        let query = PreparedGraphSetText::prepare(text, symbols)
-            .unwrap()
-            .bind_parameters(&GqlParameters::new())
-            .unwrap();
-        assert!(!has_filtered_aggregate(&query), "{text}");
-    }
+    let text = "MATCH (a:L) WITH a OPTIONAL CALL (a) { MATCH (a)-[:R]->(b) RETURN b.p AS bucket,count(*) AS degree } RETURN a,bucket,degree";
+    let query = PreparedGraphSetText::prepare(text, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    assert!(!has_filtered_aggregate(&query), "{text}");
     let query = grouped_filtered_summary(true, 3);
     let original = query.canonical_bytes();
     let mut calls = 0;
@@ -3431,11 +3496,10 @@ fn grouped_page_oracle(
         let weight = weight.to_i128().unwrap();
         let mut candidates: Vec<_> = summaries
             .iter()
-            .filter_map(|(row, n)| {
-                (row.values().get(..3) == Some(outer.values())).then(|| {
-                    assert_eq!(n % weight, 0);
-                    (row.values()[3..].to_vec(), n / weight)
-                })
+            .filter(|(row, _)| row.values().get(..3) == Some(outer.values()))
+            .map(|(row, n)| {
+                assert_eq!(n % weight, 0);
+                (row.values()[3..].to_vec(), n / weight)
             })
             .collect();
         candidates.sort_by(|(a, _), (b, _)| {
@@ -4175,11 +4239,10 @@ fn collected_page_oracle(
         let weight = weight.to_i128().unwrap();
         let mut candidates: Vec<_> = summaries
             .iter()
-            .filter_map(|(row, n)| {
-                (row.values().get(..3) == Some(outer.values())).then(|| {
-                    assert_eq!(*n, weight);
-                    row.values()[3..].to_vec()
-                })
+            .filter(|(row, _)| row.values().get(..3) == Some(outer.values()))
+            .map(|(row, n)| {
+                assert_eq!(*n, weight);
+                row.values()[3..].to_vec()
             })
             .collect();
         let rank = usize::from(grouped);

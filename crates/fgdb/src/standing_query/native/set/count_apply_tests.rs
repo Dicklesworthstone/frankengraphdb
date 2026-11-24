@@ -631,8 +631,7 @@ fn grouped_witnesses_preserve_public_quotas_and_failed_registration_atomicity() 
             assert!(db.rebuild_standing_query(&cx, &handle, refused).is_err());
             assert_eq!(saved(&db.standing_queries), before);
         }
-        let too_few = GqlQueryPolicy::new(1_000, 3, 50_000_000, 50_000_000);
-        assert!(db.standing_native_bag(&cx, &handle, too_few).is_err());
+        check_delivery_limits(&db, &cx, &handle, &expected);
         assert_eq!(saved(&db.standing_queries), before);
         let from = db.frontier().unwrap();
         let mut change = WriteBatch::new(R);
@@ -791,6 +790,32 @@ fn check(
             "{text}"
         );
     }
+}
+
+fn check_delivery_limits(
+    db: &Database<MemVfs>,
+    cx: &QueryCx,
+    handle: &StandingQueryHandle,
+    expected: &Bag,
+) {
+    let limit = |rows| GqlQueryPolicy::new(1_000, rows, 50_000_000, 50_000_000);
+    let support = u64::try_from(expected.len()).unwrap();
+    let occurrences = u64::try_from(expected.values().sum::<i128>()).unwrap();
+    assert!(support > 0 && support < occurrences);
+    let (_, rows) = db.standing_native_bag(cx, handle, limit(support)).unwrap();
+    assert_eq!(native_bag(&rows), *expected);
+    assert!(matches!(
+        db.standing_native_bag(cx, handle, limit(support - 1)),
+        Err(StandingQueryError::Delivery(
+            StandingQueryFailure::ResultBudget
+        ))
+    ));
+    assert!(matches!(
+        db.standing_native_query(cx, handle, limit(occurrences - 1)),
+        Err(StandingQueryError::Delivery(
+            StandingQueryFailure::ResultBudget
+        ))
+    ));
 }
 
 fn check_delta(
@@ -2426,8 +2451,7 @@ fn filtered_scalar_aggregate_witnesses_preserve_final_quota_and_budget_atomicity
                 );
                 assert_eq!(saved(&db.standing_queries), before);
             }
-            let too_few = GqlQueryPolicy::new(1_000, 3, 50_000_000, 50_000_000);
-            assert!(db.standing_native_bag(&cx, &handle, too_few).is_err());
+            check_delivery_limits(&db, &cx, &handle, &expected[index]);
             assert_eq!(saved(&db.standing_queries), before);
             check(&db, &cx, &text, &query, &handle, &expected[index], four);
             queries.push((text, query, handle));

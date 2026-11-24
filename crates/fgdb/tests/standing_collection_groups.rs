@@ -1028,7 +1028,9 @@ fn ordered_correlated_collections_replay_hidden_ranks_and_distinct_refills() {
             // Every invocation has two outer occurrences, including global
             // empty summaries. Their weights never multiply collection inputs.
             assert_eq!(rows.len(), 8);
-            for (owner, copies) in (1..=4).zip(rows.chunks_exact(2)) {
+            let (pairs, remainder) = rows.as_chunks::<2>();
+            assert!(remainder.is_empty());
+            for (owner, copies) in (1..=4).zip(pairs) {
                 for row in copies {
                     assert_eq!(row.len(), 3);
                     assert_eq!(row[0].as_value(), Some(&GraphValue::Vertex(VId(owner))));
