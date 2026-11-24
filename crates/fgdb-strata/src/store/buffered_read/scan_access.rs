@@ -383,6 +383,64 @@ impl<V: Vfs> BufferedPartition<V> {
         })
     }
 
+    /// Materialize only one already admitted winning row. Its original
+    /// topology ordinal selects the authenticated sidecar locator; EId merge
+    /// order is never reused as a property-row position. Hidden sibling rows
+    /// remain framed and authenticated without materializing their values.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn edge_scan_selected_row<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        at: usize,
+        original: usize,
+        expected: AdjacencyEntry,
+        keys: PropertySelection,
+        work: &mut EdgeScanWork,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<BufferedValue<BufferedEdge>, BufferedScanError<C>> {
+        work.step(cx, observe)?;
+        let descriptor = self
+            .blocks
+            .get(at)
+            .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
+        if original >= descriptor.rows {
+            return Err(BufferedReadError::from(BufferError::InvalidLoad).into());
+        }
+        for _ in 0..descriptor.rows {
+            work.step(cx, observe)?;
+        }
+        let charge = self.reserve_scan_workspace(cx)?;
+        let (entries, locators) = self.block_keys(cx, at, Admission::ScanBypass).await?;
+        let entry = *entries
+            .get(original)
+            .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
+        if entry != expected {
+            return Err(BufferedReadError::from(BufferError::InvalidLoad).into());
+        }
+        let locator = locators
+            .as_ref()
+            .map(|locators| {
+                locators
+                    .get(original)
+                    .copied()
+                    .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        drop(entries);
+        drop(locators);
+        let props = if keys.is_empty() || locator == 0 {
+            Vec::new()
+        } else {
+            work.step(cx, observe)?;
+            self.block_property_row(cx, at, locator, Some(keys), Admission::ScanBypass)
+                .await?
+        };
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        BufferedValue::from_reserved(BufferedEdge { entry, props }, charge)
+            .retain_scan_edge(&mut || work.step(cx, observe))
+    }
+
     // Endpoint resolution shares the edge cursor's allowance. Its immutable
     // interval directory prunes unrelated metadata and payloads, while every
     // possibly matching history still enters the ordinary same-cut resolver.

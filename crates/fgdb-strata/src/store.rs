@@ -108,13 +108,13 @@ pub use pack::{PACK_DIR, PACK_MIN_OBJECTS, inspect_host_pack_table, read_host_pa
 /// packs together; fewer stay loose, as a small transaction's objects do.
 pub const ROOT_SEGMENT_PACK_MIN: usize = 8;
 mod buffered_read;
-pub(crate) use buffered_read::{BufferedVertexScanState, NativeRunRow, NativeRunSuffix};
+pub(crate) use buffered_read::{NativeRunRow, NativeRunSuffix};
 #[cfg(test)]
 mod pack_tests;
 pub use buffered_read::{
     BufferedEdge, BufferedPartition, BufferedReadCx, BufferedReadError, BufferedReadLimits,
     BufferedScanError, BufferedScanEvent, BufferedValue, BufferedVertexCandidate,
-    BufferedVertexProperties, BufferedVertexScan, BufferedVertexTopology,
+    BufferedVertexProperties, BufferedVertexScan, BufferedVertexScanState, BufferedVertexTopology,
 };
 
 /// Directory holding a database's Strata blocks.

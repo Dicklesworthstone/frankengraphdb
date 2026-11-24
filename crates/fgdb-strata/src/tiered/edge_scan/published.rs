@@ -319,6 +319,38 @@ pub(super) async fn next<V: Vfs, C: Send>(
     Ok(Some(candidate))
 }
 
+/// Materialize the exact native winner that the staged root just admitted.
+/// This deliberately reuses the immutable locator without advancing the root
+/// or emitting a second candidate identity.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn selected_current<V: Vfs, C: Send>(
+    partition: &mut BufferedPartition<V>,
+    work: &mut EdgeScanWork,
+    run: &RunCursor,
+    cx: &QueryCx,
+    as_of: CommitSeq,
+    eid: EId,
+    keys: PropertySelection,
+    observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+) -> Result<BufferedValue<BufferedEdge>, BufferedScanError<C>> {
+    if run.after != Some(eid) {
+        return Err(invalid_load().into());
+    }
+    row(
+        partition,
+        work,
+        &run.locator,
+        cx,
+        as_of,
+        eid,
+        EdgePropertyAccess::Properties(keys),
+        observe,
+    )
+    .await?
+    .row
+    .ok_or_else(|| invalid_load().into())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn row<V: Vfs, C: Send>(
     partition: &mut BufferedPartition<V>,

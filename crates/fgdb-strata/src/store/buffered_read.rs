@@ -35,6 +35,7 @@ use fgdb_delta_types::{PropertyKeyId, PropertySelection, RelationId};
 use fgdb_types::{CanonicalPropertyValue, CommitCx, CommitSeq, EId, QueryCx, StorageReadCx, VId};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
+use std::sync::Arc;
 
 // One stored payload is at most 16 KiB, with at most 256 rows. This allowance
 // covers two encoded objects, their decoded vectors/scalars, temporary scalar
@@ -531,9 +532,12 @@ pub struct BufferedVertexScan<'source, V: Vfs> {
 
 /// The owned half of one vertex merge, temporarily detached from its exact
 /// admitted partition so another cursor can borrow that partition. This state
-/// is never a public resume token: it retains the heap, decoded patch and their
-/// affine charges, and can only be restored at the same root and temporal cut.
-pub(crate) struct BufferedVertexScanState {
+/// retains the heap, decoded patch and their affine charges. It is not a
+/// serializable continuation: only its original admitted partition may resume
+/// it, with the exact temporal cut and cumulative source allowance. Moving a
+/// partition preserves this ownership; reopening the same root does not.
+pub struct BufferedVertexScanState {
+    owner: Arc<()>,
     root: PartitionRootVersion,
     as_of: CommitSeq,
     heads: BinaryHeap<Reverse<VertexScanHead>>,
@@ -542,11 +546,13 @@ pub(crate) struct BufferedVertexScanState {
     initialized: bool,
     done: bool,
     work: usize,
+    work_limit: usize,
 }
 
 /// An owned authenticated source generation. Only cached/active extent handles
 /// pin bytes; this root descriptor never pins every graph payload in RAM.
 pub struct BufferedPartition<V: Vfs> {
+    scan_owner: Arc<()>,
     store: BlockStore<V>,
     root_id: PartitionRootVersion,
     root: PartitionRoot,
@@ -927,6 +933,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
         cx.buffered_checkpoint()
             .map_err(BufferedReadError::Interrupted)?;
         Ok(BufferedPartition {
+            scan_owner: Arc::new(()),
             store: self.clone(),
             root_id: id,
             root,
@@ -943,6 +950,10 @@ impl<V: Vfs + Clone> BlockStore<V> {
 }
 
 impl<V: Vfs> BufferedPartition<V> {
+    pub(crate) fn scan_owner(&self) -> &Arc<()> {
+        &self.scan_owner
+    }
+
     pub const fn root_id(&self) -> PartitionRootVersion {
         self.root_id
     }
@@ -990,7 +1001,12 @@ impl<V: Vfs> BufferedPartition<V> {
         if let Some(limits) = limits {
             BufferedReadLimits::validate_native_run_limits(limits)?;
         }
-        self.native_run_limits = limits;
+        if self.native_run_limits != limits {
+            // Detached positions retain decoder/pool admission from this
+            // exact profile. A profile change cannot adopt their old charges.
+            self.scan_owner = Arc::new(());
+            self.native_run_limits = limits;
+        }
         Ok(())
     }
 
@@ -1057,7 +1073,12 @@ impl<V: Vfs> BufferedPartition<V> {
             return Ok(scan);
         };
         self.begin(cx, as_of)?;
-        if state.root != self.root_id || state.as_of != as_of || work < state.work {
+        if !Arc::ptr_eq(&state.owner, &self.scan_owner)
+            || state.root != self.root_id
+            || state.as_of != as_of
+            || work < state.work
+            || work_limit > state.work_limit
+        {
             return Err(BufferedReadError::Buffer(BufferError::InvalidLoad));
         }
         Ok(BufferedVertexScan {
@@ -1071,6 +1092,22 @@ impl<V: Vfs> BufferedPartition<V> {
             work,
             work_limit,
         })
+    }
+
+    /// Restore an affine merge position to the same admitted partition. A
+    /// state from another open is refused even when both roots are identical:
+    /// cached allocations, pool admission and decoder profiles are not
+    /// transferable. This performs no I/O and cannot reset work or revive a
+    /// closed/exhausted position.
+    pub fn resume_vertex_scan(
+        &mut self,
+        cx: &QueryCx,
+        state: BufferedVertexScanState,
+    ) -> Result<BufferedVertexScan<'_, V>, BufferedReadError> {
+        let as_of = state.as_of;
+        let work = state.work;
+        let work_limit = state.work_limit;
+        self.vertex_scan_from_state(cx, as_of, Some(state), work, work_limit)
     }
 
     fn begin(&self, cx: &QueryCx, as_of: CommitSeq) -> Result<(), BufferedReadError> {
@@ -1792,8 +1829,9 @@ impl<V: Vfs> BufferedPartition<V> {
 impl<V: Vfs> BufferedVertexScan<'_, V> {
     /// End this partition loan without restarting or copying the merge. The
     /// detached state owns all allocations and remains fused after exhaustion.
-    pub(crate) fn into_state(self) -> BufferedVertexScanState {
+    pub fn into_state(self) -> BufferedVertexScanState {
         BufferedVertexScanState {
+            owner: self.partition.scan_owner.clone(),
             root: self.partition.root_id,
             as_of: self.as_of,
             heads: self.heads,
@@ -1802,6 +1840,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
             initialized: self.initialized,
             done: self.done,
             work: self.work,
+            work_limit: self.work_limit,
         }
     }
 
@@ -1960,6 +1999,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         &mut self,
         cx: &QueryCx,
         access: VertexPointAccess,
+        admit: &mut (impl FnMut(VId, &[fgdb_delta_types::LabelId]) -> Result<bool, C> + Send),
         observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedVertexCandidate>, BufferedScanError<C>> {
         let properties = match access {
@@ -2050,6 +2090,12 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         }
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         let mut winning_row = winning_row.filter(|row| row.visible_at(self.as_of));
+        if let Some(row) = winning_row.as_ref()
+            && !admit(row.vid, &row.labels).map_err(BufferedScanError::Control)?
+        {
+            winning_row = None;
+        }
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         if let (Some(row), VertexPointAccess::Properties(Some(keys))) =
             (winning_row.as_mut(), access)
         {
@@ -2143,13 +2189,53 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         // Leave terminal set while the future can suspend. Dropping that
         // future must never restart after partially consuming one identity.
         self.done = true;
-        let result = self.next_candidate_inner(cx, access, observe).await;
+        let result = self
+            .next_candidate_inner(cx, access, &mut |_, _| Ok(true), observe)
+            .await;
         if matches!(result, Ok(Some(_))) && !self.heads.is_empty() {
             self.done = false;
         } else {
             self.finish();
         }
         result
+    }
+
+    /// Resolve visible identity/labels before admitting property observation.
+    /// A false decision suppresses this row before selected scalar values are
+    /// decoded; it does not suppress immutable framing/checksum validation or
+    /// physical topology work. The observer's raw Identity event is distinct
+    /// from this post-mask admission boundary and need not be publicly charged.
+    /// Any admission/control error or dropped pending pull fuses the cursor.
+    pub async fn next_admitted_properties_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        keys: PropertySelection,
+        admit: &mut (impl FnMut(VId, &[fgdb_delta_types::LabelId]) -> Result<bool, C> + Send),
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate<BufferedVertexProperties>>, BufferedScanError<C>>
+    {
+        if self.done {
+            self.finish();
+            return Ok(None);
+        }
+        self.done = true;
+        let access = if keys.is_empty() {
+            VertexPointAccess::Topology
+        } else {
+            VertexPointAccess::Properties(Some(keys))
+        };
+        let result = self.next_candidate_inner(cx, access, admit, observe).await;
+        if matches!(result, Ok(Some(_))) && !self.heads.is_empty() {
+            self.done = false;
+        } else {
+            self.finish();
+        }
+        result.map(|candidate| {
+            candidate.map(|candidate| BufferedVertexCandidate {
+                vid: candidate.vid,
+                row: candidate.row.map(BufferedVertexProperties),
+            })
+        })
     }
 
     /// Yield visible rows in ascending stable VId order.
@@ -2610,6 +2696,40 @@ mod tests {
                     }
                 }
             }
+            // An affine continuation preserves the original pool, exact cut
+            // and consumed prefix even when another open names the same root.
+            let baseline = pool.used();
+            let other_pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+            let mut other = store
+                .open_buffered_root(&query, id, other_pool.clone(), limits)
+                .await
+                .unwrap();
+            let state = view.vertex_scan(&query, CommitSeq(1)).unwrap().into_state();
+            let other_before = other.stats();
+            assert!(matches!(
+                other.resume_vertex_scan(&query, state),
+                Err(BufferedReadError::Buffer(BufferError::InvalidLoad)),
+            ));
+            assert_eq!(other.stats(), other_before);
+            assert_eq!(pool.used(), baseline);
+            drop(other);
+            assert_eq!(other_pool.used(), 0);
+
+            let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
+            assert_eq!(scan.next(&query).await.unwrap().unwrap().vid, VID);
+            let used = scan.work_used();
+            let state = scan.into_state();
+            let mut scan = view.resume_vertex_scan(&query, state).unwrap();
+            assert_eq!(scan.work_used(), used);
+            assert_eq!(scan.next(&query).await.unwrap().unwrap().vid, VId(u128::MAX));
+            let state = scan.into_state();
+            let mut scan = view.resume_vertex_scan(&query, state).unwrap();
+            assert!(scan.next_candidate_with(
+                &query,
+                &mut |_| -> Result<(), ()> { panic!("exhausted state cannot read again") },
+            ).await.unwrap().is_none());
+            drop(scan);
+
             let selected = view
                 .vertex_property_at(&query, VID, PropertyKeyId(1), CommitSeq(1))
                 .await
@@ -3040,6 +3160,49 @@ mod tests {
                 drop(topology);
                 drop(scan);
                 assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
+                // Even an explicitly demanded unavailable value is not
+                // observed until the visible topology passes caller admission.
+                for rejected in [false, true] {
+                    let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
+                    let result = scan.next_admitted_properties_candidate_with(
+                        &query,
+                        PropertySelection::one(PropertyKeyId(1)),
+                        &mut |vid, labels| {
+                            assert_eq!(vid, VId(101));
+                            assert!(labels.is_empty());
+                            if rejected { Err("quota") } else { Ok(false) }
+                        },
+                        &mut |_| Ok(()),
+                    ).await;
+                    if rejected {
+                        assert!(matches!(result, Err(BufferedScanError::Control("quota"))));
+                    } else {
+                        assert!(result.unwrap().unwrap().row.is_none());
+                    }
+                    assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
+                    let used = scan.work_used();
+                    let state = scan.into_state();
+                    let mut scan = view.resume_vertex_scan(&query, state).unwrap();
+                    assert_eq!(scan.work_used(), used);
+                    assert!(scan.next_admitted_properties_candidate_with(
+                        &query,
+                        PropertySelection::one(PropertyKeyId(1)),
+                        &mut |_, _| -> Result<bool, &str> { panic!("terminal admission cannot repeat") },
+                        &mut |_| panic!("terminal source cannot read"),
+                    ).await.unwrap().is_none());
+                }
+                let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
+                assert!(matches!(
+                    scan.next_admitted_properties_candidate_with(
+                        &query,
+                        PropertySelection::one(PropertyKeyId(1)),
+                        &mut |_, _| Ok::<_, ()>(true),
+                        &mut |_| Ok(()),
+                    ).await,
+                    Err(BufferedScanError::Read(_)),
+                ));
+                assert!(resolver.calls.load(Ordering::Relaxed) > 0);
+                drop(scan);
                 assert!(
                     view.vertex_property_at(&query, VId(101), PropertyKeyId(1), CommitSeq(1))
                         .await

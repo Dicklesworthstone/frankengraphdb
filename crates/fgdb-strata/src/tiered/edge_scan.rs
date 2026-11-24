@@ -232,6 +232,14 @@ struct Head {
     slot: usize,
 }
 
+// Keep the original stored ordinal of the winning version across topology
+// admission. The EId-sorted permutation ordinal is never a property locator.
+#[derive(Clone, Copy)]
+struct WinningLocation {
+    block: usize,
+    original: usize,
+}
+
 type Key = (EId, CommitSeq, usize);
 struct ActiveBlock {
     block: usize,
@@ -410,6 +418,70 @@ pub struct BufferedEdgeScan<'source, V: Vfs> {
     state: Option<State>,
     work: EdgeScanWork,
 }
+/// An owned edge cursor position detached from its exclusive partition borrow.
+///
+/// Decoder, merge and native-run reservations remain owned by this position.
+/// Resumption is permitted only on the same admitted partition and source
+/// profile. A closed, failed or exhausted cursor remains terminal; resumption
+/// does not reset cumulative work or re-admit an already consumed identity.
+pub struct BufferedEdgeScanState {
+    owner: std::sync::Arc<()>,
+    as_of: CommitSeq,
+    blocks: usize,
+    relation: Option<RelationId>,
+    state: Option<State>,
+    work: EdgeScanWork,
+}
+
+impl BufferedEdgeScanState {
+    pub const fn snapshot_seq(&self) -> CommitSeq {
+        self.as_of
+    }
+
+    pub const fn work_used(&self) -> usize {
+        self.work.used
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.state.is_none()
+    }
+}
+
+impl core::fmt::Debug for BufferedEdgeScanState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BufferedEdgeScanState")
+            .field("snapshot", &self.as_of)
+            .field("finished", &self.is_finished())
+            .field("work", &self.work.used)
+            .field("source", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl<V: Vfs> BufferedPartition<V> {
+    /// Reattach a previously detached edge cursor without replaying its prefix.
+    /// A position from another admitted partition or source profile is refused
+    /// before any source access, even when its root bytes are identical.
+    pub fn resume_edge_scan(
+        &mut self,
+        cx: &QueryCx,
+        state: BufferedEdgeScanState,
+    ) -> Result<BufferedEdgeScan<'_, V>, BufferedReadError> {
+        if !std::sync::Arc::ptr_eq(self.scan_owner(), &state.owner) {
+            return Err(invalid_load());
+        }
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        Ok(BufferedEdgeScan {
+            partition: self,
+            as_of: state.as_of,
+            blocks: state.blocks,
+            relation: state.relation,
+            state: state.state,
+            work: state.work,
+        })
+    }
+}
+
 impl<V: Vfs> core::fmt::Debug for BufferedEdgeScan<'_, V> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("BufferedEdgeScan")
@@ -461,6 +533,19 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
     }
     pub fn close(&mut self) {
         self.state = None;
+    }
+
+    /// Release the exclusive partition borrow while retaining this exact
+    /// position and its reservations. No unread source work is performed.
+    pub fn into_state(self) -> BufferedEdgeScanState {
+        BufferedEdgeScanState {
+            owner: self.partition.scan_owner().clone(),
+            as_of: self.as_of,
+            blocks: self.blocks,
+            relation: self.relation,
+            state: self.state,
+            work: self.work,
+        }
     }
 
     async fn load<C: Send>(
@@ -553,6 +638,18 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
+        self.advance_with_location(state, cx, properties, observe)
+            .await
+            .map(|candidate| candidate.map(|(candidate, _)| candidate))
+    }
+
+    async fn advance_with_location<C: Send>(
+        &mut self,
+        state: &mut State,
+        cx: &QueryCx,
+        properties: EdgePropertyAccess,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<(BufferedEdgeCandidate, Option<WinningLocation>)>, BufferedScanError<C>> {
         if !state.initialized {
             self.prepare_published_run(state, cx, observe).await?;
         }
@@ -566,7 +663,8 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 properties,
                 observe,
             )
-            .await;
+            .await
+            .map(|candidate| candidate.map(|candidate| (candidate, None)));
         }
         if !state.initialized {
             let mut selected = self
@@ -649,6 +747,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         };
         observe(BufferedEdgeScanEvent::Identity(first.eid)).map_err(BufferedScanError::Control)?;
         let mut winner: Option<(BufferedEdge, MemoryCharge)> = None;
+        let mut location = None;
         while let Some(Reverse(head)) = state.heads.first().copied() {
             if head.eid != first.eid {
                 break;
@@ -679,6 +778,10 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 self.work.step(cx, observe)?;
                 let value = &mut winner.as_mut().expect("reserved winner").0;
                 value.entry = *entry;
+                location = Some(WinningLocation {
+                    block: head.block,
+                    original,
+                });
                 value.props = match properties {
                     EdgePropertyAccess::Read => active
                         .image
@@ -726,10 +829,13 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                     .retain_scan_edge(&mut || self.work.step(cx, observe))
             })
             .transpose()?;
-        Ok(Some(BufferedEdgeCandidate {
-            eid: first.eid,
-            row,
-        }))
+        Ok(Some((
+            BufferedEdgeCandidate {
+                eid: first.eid,
+                row,
+            },
+            location,
+        )))
     }
 
     pub async fn next_candidate_with<C: Send>(
@@ -927,6 +1033,113 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 source,
                 target,
             })
+        } else {
+            None
+        };
+        if state.has_more() {
+            self.state = Some(state);
+        }
+        Ok(Some(BufferedEdgeCandidate {
+            eid: candidate.eid,
+            row,
+        }))
+    }
+
+    /// Admit a visible edge and both same-cut endpoint topologies before
+    /// materializing any requested edge property. The callback can enforce
+    /// authorization using identities, relation and endpoint labels without
+    /// faulting a hidden edge's sidecar. A refusal returns the already admitted
+    /// identity with no row and continues at the next identity.
+    ///
+    /// Every historical version participates in winner selection before this
+    /// callback. Selected properties use that winner's original stored ordinal;
+    /// absent newer keys never fall back to an older version. Complete native
+    /// image admission retains its existing validation and residency contract.
+    /// Callback errors, source failures and cancellation fuse this cursor.
+    pub async fn next_admitted_properties_with_endpoints<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        relation: Option<RelationId>,
+        keys: PropertySelection,
+        admit: &mut (impl FnMut(&BufferedEdgeTopologyEndpoints) -> Result<bool, C> + Send),
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertiesEndpoints>>, BufferedScanError<C>>
+    {
+        let Some(mut state) = self.state.take() else {
+            return Ok(None);
+        };
+        let Some((candidate, location)) = self
+            .advance_with_location(&mut state, cx, EdgePropertyAccess::Skip, observe)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let row = if let Some(edge) = candidate
+            .row
+            .filter(|row| relation.is_none_or(|r| r == row.entry.relation))
+        {
+            let (source, target) = self
+                .resolve_topology_vertices(cx, &edge.entry, observe)
+                .await?;
+            let topology = BufferedEdgeTopologyEndpoints {
+                edge: BufferedEdgeTopology(edge),
+                source,
+                target,
+            };
+            let admitted = admit(&topology).map_err(BufferedScanError::Control)?;
+            // A callback may cancel while returning success. No sidecar or
+            // result may cross that boundary without observing cancellation.
+            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+            if admitted {
+                let BufferedEdgeTopologyEndpoints {
+                    edge,
+                    source,
+                    target,
+                } = topology;
+                let edge = if keys.is_empty() {
+                    edge.0
+                } else {
+                    let expected = *edge.entry();
+                    drop(edge);
+                    let selected = if let Some(run) = state.run.as_ref() {
+                        published::selected_current(
+                            self.partition,
+                            &mut self.work,
+                            run,
+                            cx,
+                            self.as_of,
+                            candidate.eid,
+                            keys,
+                            observe,
+                        )
+                        .await?
+                    } else {
+                        let location = location.ok_or_else(invalid_load)?;
+                        self.partition
+                            .edge_scan_selected_row(
+                                cx,
+                                location.block,
+                                location.original,
+                                expected,
+                                keys,
+                                &mut self.work,
+                                observe,
+                            )
+                            .await?
+                    };
+                    if selected.entry != expected {
+                        return Err(invalid_load().into());
+                    }
+                    selected
+                };
+                Some(BufferedEdgePropertiesEndpoints {
+                    edge: BufferedEdgeProperties(edge),
+                    source,
+                    target,
+                })
+            } else {
+                None
+            }
         } else {
             None
         };
