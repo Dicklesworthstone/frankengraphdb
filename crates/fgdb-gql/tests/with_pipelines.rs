@@ -2583,6 +2583,101 @@ fn equality_of_open_columns_preserves_identity_and_three_valued_results() {
     ));
 }
 
+/// A scalar peer does not narrow an open column's runtime domain. Equality
+/// reads elements, lists and maps as values in either operand order, while
+/// retaining scalar numeric equivalence and NULL's three-valued result.
+#[test]
+fn equality_of_open_columns_with_scalar_atoms_preserves_value_domains() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let values = [CanonicalScalar::Int(1)];
+    let cases: &[(&str, &[usize])] = &[
+        ("1", &[1, 2]),
+        ("1.0", &[1, 2]),
+        ("1e0", &[1, 2]),
+        ("'1'", &[6]),
+        ("true", &[7]),
+        ("false", &[]),
+        ("NULL", &[]),
+        ("-1", &[9, 10]),
+        ("-1.0", &[9, 10]),
+        (".5", &[11]),
+        ("5e-1", &[11]),
+        ("9007199254740993", &[12]),
+        ("9007199254740992.0", &[13]),
+    ];
+    for &(literal, matching) in cases {
+        for operator in ["=", "<>", "!="] {
+            let text = format!(
+                "MATCH (n {{p:1}}) \
+                 WITH {literal} AS scalar, \
+                 [n,1,1.0,NULL,[1],{{k:1}},'1',true,2,-1,-1.0,.5,\
+                  9007199254740993,9007199254740992.0] AS values \
+                 UNWIND range(0,13) AS i WITH i,scalar,values[i] AS x \
+                 RETURN i,x {operator} {literal} AS literal_right,\
+                 {literal} {operator} x AS literal_left,\
+                 x {operator} scalar AS alias_right,\
+                 scalar {operator} x AS alias_left ORDER BY i"
+            );
+            let query = prepare(&text);
+            let execution = run(&query, &values, wide(), &mut || Ok(())).unwrap();
+            assert_eq!(execution.value.len(), 14, "{text}");
+            for (i, row) in execution.value.iter().enumerate() {
+                let truth = if i == 3 || literal == "NULL" {
+                    None
+                } else {
+                    Some(matching.contains(&i) == (operator == "="))
+                };
+                let expected =
+                    GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool));
+                assert_eq!(
+                    row.values(),
+                    &[
+                        GraphValue::Scalar(CanonicalScalar::Int(i as i64)),
+                        expected.clone(),
+                        expected.clone(),
+                        expected.clone(),
+                        expected,
+                    ],
+                    "value {i}: {text}"
+                );
+            }
+        }
+    }
+    // A comparison leaves AND/OR to their enclosing Boolean expression,
+    // including when its own result is NULL.
+    let query = prepare(
+        "MATCH (n {p:1}) UNWIND [n,1,NULL,[1],{k:1}] AS x \
+         RETURN 1 = x AND false AS conjunction,x <> 1 OR true AS disjunction",
+    );
+    let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+    assert_eq!(rows.len(), 5);
+    for row in rows {
+        assert_eq!(
+            row.values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                GraphValue::Scalar(CanonicalScalar::Bool(true)),
+            ]
+        );
+    }
+    let query = prepare(
+        "MATCH (n {p:1}) UNWIND [n,1,1.0,NULL,[1],{k:1}] AS x \
+         WITH x WHERE 1 = x RETURN x",
+    );
+    assert_eq!(
+        run(&query, &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+            .len(),
+        2
+    );
+    assert!(matches!(
+        run(&query, &values, wide(), &mut || Err(79)),
+        Err(GqlQueryError::Interrupted(79))
+    ));
+}
+
 /// The later MATCH owns q, while the comprehension owns x and reads ps from
 /// the incoming row. Neither comparison operand is a scalar projection.
 #[test]

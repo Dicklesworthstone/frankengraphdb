@@ -977,9 +977,8 @@ impl<'a> Parser<'a> {
         Ok(self.scalar_let_value(operand, slots, at)?)
     }
 
-    /// One side of a composite comparison. A comprehension element or a
-    /// dynamically typed bare column that no tighter operator follows is read
-    /// whole (any_column_ordered and local_ordered routed its ordering here):
+    /// One side of a composite comparison. A comprehension element or a bare
+    /// column that no tighter operator follows is read whole:
     /// the composite reader would hand it back to the scalar compiler, which
     /// would see the same comparison again. Everything else is
     /// list_operand_value: a sum such as `y + [3]`, or `b IS NOT NULL`,
@@ -1005,8 +1004,9 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 return Ok(ReadValueTemplate::Local(offset));
             }
-        } else if let Some(column) = self.row_any_column(self.routing_row(columns))?
+        } else if let Some(column) = self.row_bare_column(self.routing_row(columns), |_| true)?
             && !tighter
+            && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b':'))
         {
             return self.bare_column_value(columns, column);
         }
@@ -1029,6 +1029,30 @@ impl<'a> Parser<'a> {
             let column = resolve(self)?
                 .ok_or_else(|| error(at, GraphPatternTextErrorKind::UnknownVariable))?;
             return Ok(ReadValueTemplate::Column(column));
+        }
+        // An equality such as `1 = open` owns the comparison around this
+        // literal. Read just its atom: the whole scalar expression would
+        // rediscover the same equality, or consume a following Boolean clause.
+        if let Some(consumed) = Self::scalar_atom_tokens_at(self.current, &self.lexer)? {
+            let mut lexer = self.lexer.clone();
+            for _ in 1..consumed {
+                lexer.next()?;
+            }
+            let postfix = matches!(
+                lexer.clone().next()?.kind,
+                TokenKind::Punct(b'(' | b'.' | b'[' | b':')
+            );
+            let collection = matches!(self.current.kind, TokenKind::Parameter(name)
+                if matches!(self.parameter_types.get(name),
+                    Some(GqlParameterType::List | GqlParameterType::Map)));
+            if !postfix
+                && !collection
+                && !super::return_projection::tighter_than_comparison(&mut lexer)?
+            {
+                let literal_at = self.current.at;
+                let operand = self.row_operand(&[])?;
+                return Ok(self.scalar_let_value(operand, Vec::new(), literal_at)?);
+            }
         }
         self.list_operand_value(columns, nesting, at)
     }
@@ -2306,6 +2330,16 @@ impl<'a> Parser<'a> {
         // -9223372036854775808 is one legal signed literal, not negation of
         // an unrepresentable positive integer. Other signs are checked unary
         // IR, including `-2.5`: negation of a float literal.
+        // A signed literal compared with an open value must enter the value
+        // comparison before unary parsing moves past its comparison boundary.
+        if self.is_punct(b'-')
+            && self.lets.is_some()
+            && !(self.having_operand && self.let_base + depth == 0)
+            && self.comparison_start == at
+            && self.open_element_compared(self.route(columns))?
+        {
+            return self.composite_comparison(columns, depth, program, at, false);
+        }
         let signed_literal = self.is_punct(b'-')
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Digits(_))
             && self.scan_float_literal()?.is_none();
