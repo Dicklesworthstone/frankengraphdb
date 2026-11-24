@@ -2504,6 +2504,151 @@ fn strata_block_publication_crashes_fence_and_recover_the_integrated_spine() {
 }
 
 #[test]
+fn packed_publication_recovers_every_committed_edge_after_a_power_loss() {
+    use asupersync::io::AsyncReadExt;
+    use fgdb_strata::store::{BLOCK_DIR, PACK_DIR, PACK_MIN_OBJECTS, inspect_host_pack_table};
+
+    let points = [
+        BlockStoreCrashPoint::AfterBatchStagingWrite,
+        BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication,
+        BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync,
+        BlockStoreCrashPoint::AfterBatchRenames,
+        BlockStoreCrashPoint::AfterBatchFileSyncs,
+        BlockStoreCrashPoint::AfterBatchDirectorySync,
+    ];
+    for (loss, dirent_loss) in [Trigger::Never, Trigger::Always].into_iter().enumerate() {
+        for (index, point) in points.into_iter().enumerate() {
+            let seed = 0x5c80 + (loss * points.len() + index) as u64;
+            under_lab(seed, move |cx| async move {
+                let dir = scratch(&format!("packed-publication-{seed}"));
+                let vfs = FaultVfs::unix(FaultPlan {
+                    seed,
+                    dirent_loss,
+                    ..FaultPlan::faultless()
+                });
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+                    .await
+                    .unwrap();
+                let n = PACK_MIN_OBJECTS as u128 + 1;
+                let sink = VId(n + 1);
+                let mut batch = WriteBatch::new(KNOWS);
+                for id in 1..=sink.0 {
+                    batch.create_vertex(VId(id), vec![], vec![]);
+                }
+                for id in 1..=n {
+                    batch.add_edge(
+                        EId(id),
+                        VId(id),
+                        sink,
+                        vec![(PropertyKeyId(2), CanonicalScalar::Int(id as i64))],
+                    );
+                }
+                let failure = db
+                    .write_with_block_store_crash(&cx, batch, point)
+                    .await
+                    .unwrap_err();
+                let recovery = match failure {
+                    WriteError::CommittedNeedsRecovery { recovery, .. } => Some(recovery),
+                    _ => None,
+                }
+                .expect("the Chronicle commit must survive the failed Strata publication");
+                assert_eq!(
+                    (recovery.durable_frontier, recovery.published_frontier),
+                    (CommitSeq(1), CommitSeq(0))
+                );
+                assert_recovery_fence(recovery.failed_stage, recovery, db.edges());
+                drop(db);
+
+                // The loose publisher has the same failpoints. Inspect the
+                // actual staged or renamed pack before losing directory entries.
+                let pack_dir = dir.join(BLOCK_DIR).join(PACK_DIR);
+                let mut largest = 0;
+                let mut canonical = Vec::new();
+                for entry in std::fs::read_dir(&pack_dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    let mut header = [0; 12];
+                    let mut live = vfs
+                        .open(&path, &OpenOptions::new().read(true))
+                        .await
+                        .unwrap();
+                    live.read_exact(&mut header).await.unwrap();
+                    assert_eq!(&header[..8], b"FGPK\x01\0\0\0");
+                    let count = u32::from_le_bytes(header[8..].try_into().unwrap()) as usize;
+                    largest = largest.max(count);
+                    let durable = inspect_host_pack_table(&cx, &path).unwrap();
+                    if point == BlockStoreCrashPoint::AfterBatchStagingWrite {
+                        assert!(
+                            durable.is_none(),
+                            "the unsynced inode reached durable storage"
+                        );
+                    } else {
+                        assert_eq!(durable.unwrap().len(), count, "{point:?}");
+                    }
+                    if path.extension().is_some_and(|ext| ext == "pack") {
+                        canonical.push(path);
+                    }
+                }
+                assert!(
+                    largest >= PACK_MIN_OBJECTS,
+                    "{point:?} did not reach a bulk pack"
+                );
+                let renamed = !matches!(
+                    point,
+                    BlockStoreCrashPoint::AfterBatchStagingWrite
+                        | BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication
+                );
+                assert_eq!(!canonical.is_empty(), renamed, "{point:?}");
+                vfs.crash().await.unwrap();
+                for path in canonical {
+                    assert_eq!(
+                        path.try_exists().unwrap(),
+                        dirent_loss == Trigger::Never
+                            || point == BlockStoreCrashPoint::AfterBatchDirectorySync,
+                        "canonical pack name after {point:?} with {dirent_loss:?}"
+                    );
+                }
+
+                let recovered = Database::open_with_vfs(&cx, vfs, &dir, engine_keys())
+                    .await
+                    .unwrap();
+                assert_eq!(recovered.frontier().unwrap(), CommitSeq(1));
+                assert!(recovered.edges_at(CommitSeq(0)).unwrap().is_empty());
+                let edges = recovered.edges().unwrap();
+                assert_eq!(edges.len(), n as usize);
+                assert_eq!(recovered.vertices().unwrap().len(), sink.0 as usize);
+                drop(recovered);
+                let coordinator = CommitCoordinator::open(&cx, &dir, oracle_keys())
+                    .await
+                    .unwrap();
+                assert_eq!(coordinator.chain().entries().len(), 1);
+                let oracle = replay(&cx, &coordinator).await.unwrap();
+                let graph = oracle.database.graph(GRAPH, BRANCH).unwrap();
+                assert_eq!(graph.edge_count(), edges.len());
+                for (ordinal, edge) in (1..=n).zip(edges) {
+                    let expected = graph.edge(EId(ordinal)).unwrap();
+                    assert_eq!(edge.entry.eid, EId(ordinal));
+                    assert_eq!(
+                        (edge.entry.src, edge.entry.relation, edge.entry.dst),
+                        (expected.src, expected.relation, expected.dst)
+                    );
+                    assert_eq!(
+                        edge.props,
+                        vec![(
+                            PropertyKeyId(2),
+                            CanonicalScalar::Int(ordinal as i64).into()
+                        )]
+                    );
+                    assert_eq!(
+                        expected.props.get(&PropertyKeyId(2)),
+                        Some(&edge.props[0].1)
+                    );
+                }
+            });
+        }
+    }
+}
+
+#[test]
 fn strata_existing_pack_sync_lie_cannot_mint_publication_receipts() {
     under_lab(0x9_112, move |cx| async move {
         use asupersync::io::AsyncWriteExt;
