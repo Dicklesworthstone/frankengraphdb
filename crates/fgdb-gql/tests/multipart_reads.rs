@@ -2825,6 +2825,10 @@ fn illegal_imports_scopes_and_statement_wide_depth_refuse_before_catalog() {
         "MATCH (n) WITH n.p AS kept MATCH (m) WHERE EXISTS { MATCH (kept)-[:R]->(x) } RETURN m",
         "WITH {p:1} AS kept MATCH (m) OPTIONAL MATCH (kept)-[:R]->(x) RETURN x",
         "WITH {p:1} AS kept MATCH (m) WHERE EXISTS { MATCH (kept)-[:R]->(x) } RETURN m",
+        "UNWIND [1] AS wanted CALL (wanted) { MATCH (n) WHERE EXISTS { \
+         MATCH (n)-[:R]->(m {p:wanted}) } RETURN n.p AS p } RETURN p",
+        "UNWIND [1] AS wanted CALL (wanted) { MATCH (n) WHERE EXISTS { \
+         MATCH (n)-[:R]->(m) WHERE m.p=wanted } RETURN n.p AS p } RETURN p",
         "MATCH (n) WITH n MATCH (n) RETURN n+1 AS bad",
     ] {
         let mut calls = 0;
@@ -2892,9 +2896,22 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
             "MATCH (n) WITH n.p AS v MATCH (q {p: v})-[:R]->(r) WHERE r.p > 1 RETURN v, r",
             "MATCH (n) WITH n.p AS v MATCH (q)-[:R]->(r) WHERE q.p = v AND r.p > 1 RETURN v, r",
         ),
+        (
+            "UNWIND [1,1,2,NULL] AS v MATCH (q {p:v}) WHERE EXISTS { MATCH (q)-[:R]->() } RETURN q",
+            "UNWIND [1,1,2,NULL] AS v MATCH (q) WHERE q.p=v AND EXISTS { MATCH (q)-[:R]->() } RETURN q",
+        ),
     ] {
         assert_eq!(template(map), template(spelled), "{spelled}");
     }
+    // Vertex 4 is the only sink. Both occurrences of 3 survive the
+    // anti-probe and the NULL import matches no root.
+    assert_eq!(
+        execute(
+            "UNWIND [3,3,2,NULL] AS v MATCH (q) \
+             WHERE NOT EXISTS { MATCH (q)-[:R]->() } AND v=q.p RETURN q"
+        ),
+        vec![vertices(&[4]), vertices(&[4])]
+    );
     // p = [1, 2, 2, 3]: only vertex 4 holds the maximum.
     assert_eq!(
         execute("MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p = m RETURN q"),

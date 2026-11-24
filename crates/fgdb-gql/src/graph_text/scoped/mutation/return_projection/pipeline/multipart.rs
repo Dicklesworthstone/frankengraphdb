@@ -4650,10 +4650,16 @@ impl<'a> Parser<'a> {
                 keys.push(crate::set_text::BoundCorrelation::Column { left, right });
             }
         }
-        // The current property-map correlation record has no scope tag. Do
-        // not accidentally move an OPTIONAL/EXISTS predicate onto the outer
-        // required join. Root-only maps remain supported without ambiguity.
-        if !self.read_correlations.is_empty() && !self.syntax.scopes.is_empty() {
+        // An existence probe hides incoming row bindings before parsing its
+        // body, so every recorded key beside such probes belongs to the root.
+        // Other scoped continuations retain their root-only restriction.
+        if !self.read_correlations.is_empty()
+            && self
+                .syntax
+                .scopes
+                .iter()
+                .any(|scope| !matches!(scope.kind, ScopeKind::Exists | ScopeKind::NotExists))
+        {
             return Err(expected(at, "root-only imported property-map correlations"));
         }
         if !row_comparisons.is_empty() && !self.syntax.scopes.is_empty() {
