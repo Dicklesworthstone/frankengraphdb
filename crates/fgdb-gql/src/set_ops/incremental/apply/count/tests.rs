@@ -1758,8 +1758,6 @@ fn scalar_recipe_accepts_native_calls_and_keeps_conditional_effect_refusals() {
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN avg(b.p) AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH b LIMIT 1 RETURN min(b) AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b LIMIT 1 RETURN max(b) AS total } RETURN a,total",
-        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN sum(1) AS total,collect(b) AS values } RETURN a,total,values",
-        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN collect(b) AS total } RETURN a,total",
     ] {
         assert!(!has_filtered_aggregate(&bind(text)), "{text}");
     }
@@ -2861,6 +2859,7 @@ fn grouped_no_import_calls_distinguish_real_null_groups_from_absent_groups() {
 fn native_grouped_recipes_preserve_definition_cancellation_and_source_boundaries() {
     for text in [
         "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b:L) RETURN b AS bucket,count(*) AS degree } RETURN a,bucket,degree",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b) RETURN b AS bucket,count(*) AS degree LIMIT 1 } RETURN a,bucket,degree",
         "MATCH (a:L) WITH a OPTIONAL CALL (a) { MATCH (a)-[:R]->(b:L {p:1}) RETURN id(b)%2 AS bucket,count(*) AS degree,sum(id(b)) AS total } RETURN a,bucket,degree,total",
         "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (a)-[:R]->(b) WITH b,threshold,count(*) AS n WHERE n>1 RETURN DISTINCT threshold AS category,n+1 AS degree } RETURN a,category,degree",
     ] {
@@ -2872,7 +2871,6 @@ fn native_grouped_recipes_preserve_definition_cancellation_and_source_boundaries
     }
     for text in [
         "MATCH (a:L) WITH a OPTIONAL CALL (a) { MATCH (a)-[:R]->(b) RETURN b.p AS bucket,count(*) AS degree } RETURN a,bucket,degree",
-        "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b) RETURN b AS bucket,count(*) AS degree LIMIT 1 } RETURN a,bucket,degree",
     ] {
         let query = PreparedGraphSetText::prepare(text, symbols)
             .unwrap()
@@ -3697,5 +3695,609 @@ fn grouped_pages_preserve_tail_errors_and_exact_sequence_boundaries() {
         );
         assert_eq!(seen, stop);
         assert_eq!(query.canonical_bytes(), original);
+    }
+}
+
+fn collected_summary(optional: bool, grouped: bool, distinct_rows: bool) -> PreparedGraphSet {
+    let args = arguments(vec![GraphSetColumnType::Stored, GraphSetColumnType::Vertex]);
+    let source = right();
+    let on = RowJoinSpec::cross(args.column_types(), source.column_types())
+        .unwrap()
+        .with_predicate(&[
+            GraphSetPredicateOp::Compare {
+                left: GraphSetOperand::Column(3),
+                comparison: IntegerComparison::NotEqual,
+                right: GraphSetOperand::Column(1),
+            },
+            GraphSetPredicateOp::IsNull {
+                operand: GraphSetOperand::Column(1),
+                is_null: true,
+            },
+            GraphSetPredicateOp::Or,
+        ])
+        .unwrap();
+    let body = args
+        .join(source, on)
+        .unwrap()
+        .project(
+            vec![
+                // Retain the source identity ahead of the payload. Sorting
+                // collection values instead of full input rows is observably
+                // wrong when these identities carry reverse-valued payloads.
+                GraphSetProjection::new("ordinal", GraphSetValue::Column(2)),
+                GraphSetProjection::new("member", GraphSetValue::Column(3)),
+                GraphSetProjection::new("threshold", GraphSetValue::Column(0)),
+                GraphSetProjection::new(
+                    "nested",
+                    GraphSetValue::List(vec![GraphSetValue::Column(3), GraphSetValue::Column(0)]),
+                ),
+            ],
+            if distinct_rows {
+                GraphSetQuantifier::Distinct
+            } else {
+                GraphSetQuantifier::All
+            },
+        )
+        .unwrap()
+        .filter(&[
+            GraphSetPredicateOp::Compare {
+                left: GraphSetOperand::Column(2),
+                comparison: IntegerComparison::Greater,
+                right: GraphSetOperand::Literal(
+                    crate::GqlScalarParameter::new(CanonicalScalar::Int(2)).unwrap(),
+                ),
+            },
+            GraphSetPredicateOp::IsNull {
+                operand: GraphSetOperand::Column(2),
+                is_null: true,
+            },
+            GraphSetPredicateOp::Or,
+        ])
+        .unwrap()
+        .group_by(
+            if grouped { &[1] } else { &[] },
+            &[
+                GraphAggregate::count_rows("rows"),
+                GraphAggregate::collect("members", 1),
+                GraphAggregate::collect_distinct("unique", 1),
+                GraphAggregate::collect("nested", 3),
+                GraphAggregate::collect_distinct("unique_nested", 3),
+                GraphAggregate::collect("imports", 2),
+            ],
+        )
+        .unwrap();
+    if optional {
+        outer().optional_apply(body, vec![0, 2]).unwrap()
+    } else {
+        outer().apply(body, vec![0, 2]).unwrap()
+    }
+}
+
+fn collected_right(mask: usize) -> ZSet<GraphValueRow> {
+    bag([
+        (mask & 1 != 0, row(vec![vertex(100), vertex(9)]), 2),
+        (mask != 0, row(vec![vertex(101), vertex(8)]), 3),
+        (mask & 2 != 0, row(vec![vertex(102), vertex(9)]), 4),
+        (mask != 0, row(vec![vertex(103), scalar(None)]), 1),
+        (mask & 2 != 0, row(vec![vertex(104), vertex(7)]), 2),
+    ]
+    .into_iter()
+    .filter_map(|(present, row, weight)| present.then_some((row, weight))))
+}
+
+fn collected_list(values: Vec<GraphValue>) -> GraphValue {
+    GraphValue::List(values.into_boxed_slice())
+}
+
+// Independent sequence arithmetic over the fixture's complete source order.
+// No native group, row comparator or compiled recipe supplies expected lists.
+fn collected_oracle(
+    left: &ZSet<GraphValueRow>,
+    right: &ZSet<GraphValueRow>,
+    optional: bool,
+    grouped: bool,
+    distinct_rows: bool,
+) -> Bag {
+    let mut output = Bag::new();
+    for (outer, multiplicity) in left.iter() {
+        let threshold = &outer.values()[0];
+        let other = &outer.values()[2];
+        let mut groups = BTreeMap::<GraphValue, Vec<(GraphValue, i128)>>::new();
+        if !grouped {
+            groups.insert(scalar(None), Vec::new());
+        }
+        if threshold.is_null() || threshold == &scalar(Some(3)) {
+            for (inner, weight) in right.iter() {
+                let member = &inner.values()[1];
+                if other.is_null() || (!member.is_null() && member != other) {
+                    groups
+                        .entry(if grouped {
+                            member.clone()
+                        } else {
+                            scalar(None)
+                        })
+                        .or_default()
+                        .push((
+                            member.clone(),
+                            if distinct_rows {
+                                1
+                            } else {
+                                weight.to_i128().unwrap()
+                            },
+                        ));
+                }
+            }
+        }
+        if groups.is_empty() && optional {
+            let mut cells = outer.values().to_vec();
+            cells.extend((0..7).map(|_| scalar(None)));
+            output.insert(row(cells), multiplicity.to_i128().unwrap());
+        }
+        for (key, occurrences) in groups {
+            let mut count = 0_i64;
+            let mut members = Vec::new();
+            let mut unique = Vec::new();
+            let mut nested = Vec::new();
+            let mut unique_nested = Vec::new();
+            let mut imports = Vec::new();
+            let mut seen = BTreeSet::new();
+            let mut seen_nested = BTreeSet::new();
+            for (member, weight) in occurrences {
+                let item = collected_list(vec![member.clone(), threshold.clone()]);
+                if !member.is_null() && seen.insert(member.clone()) {
+                    unique.push(member.clone());
+                }
+                if seen_nested.insert(item.clone()) {
+                    unique_nested.push(item.clone());
+                }
+                for _ in 0..weight {
+                    count += 1;
+                    if !member.is_null() {
+                        members.push(member.clone());
+                    }
+                    nested.push(item.clone());
+                    if !threshold.is_null() {
+                        imports.push(threshold.clone());
+                    }
+                }
+            }
+            let mut cells = outer.values().to_vec();
+            if grouped {
+                cells.push(key);
+            }
+            cells.extend([
+                scalar(Some(count)),
+                collected_list(members),
+                collected_list(unique),
+                collected_list(nested),
+                collected_list(unique_nested),
+                collected_list(imports),
+            ]);
+            output.insert(row(cells), multiplicity.to_i128().unwrap());
+        }
+    }
+    output
+}
+
+#[test]
+fn correlated_collections_match_weighted_transitions_and_first_occurrence_retractions() {
+    for optional in [false, true] {
+        for grouped in [false, true] {
+            for distinct_rows in [false, true] {
+                let query = collected_summary(optional, grouped, distinct_rows);
+                for before in 0..16 {
+                    for after in 0..16 {
+                        let old_left = filtered_left(before & 3);
+                        let old_right = collected_right(before >> 2);
+                        let next_left = filtered_left(after & 3);
+                        let next_right = collected_right(after >> 2);
+                        let old = collected_oracle(
+                            &old_left,
+                            &old_right,
+                            optional,
+                            grouped,
+                            distinct_rows,
+                        );
+                        let next = collected_oracle(
+                            &next_left,
+                            &next_right,
+                            optional,
+                            grouped,
+                            distinct_rows,
+                        );
+                        let mut circuit = FilteredCircuit::new(&query);
+                        circuit.tick(&old_left, &old_right).unwrap();
+                        assert_eq!(plain(circuit.rows()), old, "seed {before}");
+                        let delta = circuit
+                            .tick(
+                                &difference(&next_left, &old_left),
+                                &difference(&next_right, &old_right),
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            plain(circuit.rows()),
+                            next,
+                            "optional {optional}, grouped {grouped}, distinct {distinct_rows}, {before}->{after}"
+                        );
+                        assert_eq!(
+                            delta,
+                            bag(next
+                                .into_iter()
+                                .chain(old.into_iter().map(|(row, n)| (row, -n))))
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn collection_completion_keeps_list_types_and_runs_before_the_summary_tail() {
+    let SetNode::Apply {
+        left,
+        right,
+        imports,
+        ..
+    } = collected_summary(false, false, false).node
+    else {
+        unreachable!()
+    };
+    let body = right
+        .project(
+            vec![
+                GraphSetProjection::new("members", GraphSetValue::Column(1)),
+                GraphSetProjection::new(
+                    "size",
+                    GraphSetValue::Size(Box::new(GraphSetValue::Column(1))),
+                ),
+            ],
+            GraphSetQuantifier::All,
+        )
+        .unwrap();
+    let query = (*left).optional_apply(body, imports).unwrap();
+    let recipe = query
+        .incremental_filtered_aggregate_with_control(&mut allow)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recipe.summary[0].column_types()[1],
+        GraphSetColumnType::List
+    );
+    assert_eq!(query.column_types()[3], GraphSetColumnType::List);
+    let left = filtered_left(3);
+    let mut circuit = FilteredCircuit::new(&query);
+    circuit.tick(&left, &ZSet::new()).unwrap();
+    let expected: Bag = plain(&left)
+        .into_iter()
+        .map(|(outer, weight)| {
+            let mut cells = outer.values().to_vec();
+            cells.extend([collected_list(vec![]), scalar(Some(0))]);
+            (row(cells), weight)
+        })
+        .collect();
+    assert_eq!(plain(circuit.rows()), expected);
+}
+
+#[test]
+fn collection_bodies_remain_lazy_and_keep_discarded_expression_errors() {
+    let divide = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Literal(Some(1)),
+            GraphIntegerOp::Literal(Some(0)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+        ])
+        .unwrap(),
+    );
+    for filter_first in [false, true] {
+        let mut body = base();
+        if filter_first {
+            body = body
+                .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                .unwrap();
+        }
+        body = body
+            .project(
+                vec![GraphSetProjection::new("failed", divide.clone())],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        if !filter_first {
+            body = body
+                .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                .unwrap();
+        }
+        let query = outer()
+            .apply(
+                body.group_by(&[], &[GraphAggregate::collect("members", 0)])
+                    .unwrap(),
+                vec![1, 1],
+            )
+            .unwrap();
+        let mut circuit = FilteredCircuit::new(&query);
+        circuit.tick(&ZSet::new(), &right_rows(3)).unwrap();
+        assert!(circuit.rows().is_empty());
+        assert_eq!(
+            circuit.tick(&left_rows(1), &ZSet::new()).is_ok(),
+            filter_first
+        );
+        if filter_first {
+            let mut cells = left_rows(1).iter().next().unwrap().0.values().to_vec();
+            cells.push(collected_list(vec![]));
+            assert_eq!(plain(circuit.rows()), BTreeMap::from([(row(cells), 2)]));
+        }
+    }
+}
+
+#[test]
+fn collections_require_proven_input_order_and_distinct_can_restore_that_proof() {
+    let unwind = || {
+        base()
+            .unwind(
+                "member".into(),
+                GraphSetValue::List(vec![
+                    GraphSetValue::Value(scalar(Some(2))),
+                    GraphSetValue::Value(scalar(Some(1))),
+                    GraphSetValue::Value(scalar(Some(2))),
+                ]),
+            )
+            .unwrap()
+    };
+    for body in [
+        unwind(),
+        unwind()
+            .project(
+                (0..5)
+                    .map(|column| {
+                        GraphSetProjection::new(format!("c{column}"), GraphSetValue::Column(column))
+                    })
+                    .collect(),
+                GraphSetQuantifier::All,
+            )
+            .unwrap(),
+        base()
+            .with_order_by(&[GraphValueOrder::descending(3)])
+            .unwrap(),
+    ] {
+        let column = body.column_types().len() - 1;
+        let summary = body
+            .group_by(&[], &[GraphAggregate::collect("members", column)])
+            .unwrap();
+        for terminal_page in [false, true] {
+            let body = if terminal_page {
+                summary
+                    .clone()
+                    .with_order_by(&[GraphValueOrder::ascending(0)])
+                    .unwrap()
+                    .with_page(0, Some(1))
+            } else {
+                summary.clone()
+            };
+            let query = outer().apply(body, vec![1, 1]).unwrap();
+            assert!(
+                query
+                    .incremental_filtered_aggregate_with_control(&mut allow)
+                    .unwrap()
+                    .is_none(),
+                "ordering a completed summary cannot prove its collection input sequence"
+            );
+        }
+    }
+    let body = unwind()
+        .project(
+            vec![GraphSetProjection::new("member", GraphSetValue::Column(4))],
+            GraphSetQuantifier::Distinct,
+        )
+        .unwrap()
+        .group_by(&[], &[GraphAggregate::collect("members", 0)])
+        .unwrap();
+    let query = outer().apply(body, vec![1, 1]).unwrap();
+    let mut circuit = FilteredCircuit::new(&query);
+    let left = left_rows(3);
+    let right = right_rows(3);
+    circuit.tick(&left, &right).unwrap();
+    let expected = |members: Vec<GraphValue>| -> Bag {
+        plain(&left)
+            .into_iter()
+            .map(|(outer, weight)| {
+                let mut cells = outer.values().to_vec();
+                cells.push(collected_list(members.clone()));
+                (row(cells), weight)
+            })
+            .collect()
+    };
+    assert_eq!(
+        plain(circuit.rows()),
+        expected(vec![scalar(Some(1)), scalar(Some(2))])
+    );
+    circuit
+        .tick(&ZSet::new(), &difference(&ZSet::new(), &right))
+        .unwrap();
+    assert_eq!(plain(circuit.rows()), expected(vec![]));
+}
+
+#[test]
+fn native_correlated_collections_keep_schema_identity_and_cancellation() {
+    for text in [
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN sum(1) AS total,collect(b) AS values } RETURN a,total,values",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN collect(b) AS total } RETURN a,total",
+        "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[:R]->(b:L) RETURN collect(b) AS members } RETURN a,members",
+        "MATCH (a:L) WITH a OPTIONAL CALL(a) { MATCH (a)-[:R]->(b:L) RETURN collect(DISTINCT b) AS members,count(*) AS degree } RETURN a,members,degree",
+        "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[:R]->(b:L) WITH DISTINCT b RETURN collect(b) AS members } RETURN a,members",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(has_filtered_aggregate(&query), "{text}");
+    }
+    let query = collected_summary(true, false, false);
+    let original = query.canonical_bytes();
+    let mut calls = 0;
+    query
+        .incremental_filtered_aggregate_with_control(&mut |_| {
+            calls += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap()
+        .unwrap();
+    for stop in 1..=calls {
+        let mut seen = 0;
+        assert!(
+            matches!(query.incremental_filtered_aggregate_with_control(&mut |_| {
+            seen += 1;
+            if seen == stop { Err(stop) } else { Ok(()) }
+        }), Err(at) if at == stop)
+        );
+        assert_eq!(seen, stop);
+        assert_eq!(query.canonical_bytes(), original);
+    }
+}
+
+// Rank completed summaries independently of the collection's input sequence.
+// Each original group has one occurrence per invocation; outer weights are
+// restored only after literal page slicing of these expected summaries.
+fn collected_page_oracle(
+    left: &ZSet<GraphValueRow>,
+    right: &ZSet<GraphValueRow>,
+    optional: bool,
+    grouped: bool,
+    distinct_rows: bool,
+    offset: u64,
+    count: u64,
+) -> Bag {
+    let summaries = collected_oracle(left, right, false, grouped, distinct_rows);
+    let mut output = Bag::new();
+    for (outer, weight) in left.iter() {
+        let weight = weight.to_i128().unwrap();
+        let mut candidates: Vec<_> = summaries
+            .iter()
+            .filter_map(|(row, n)| {
+                (row.values().get(..3) == Some(outer.values())).then(|| {
+                    assert_eq!(*n, weight);
+                    row.values()[3..].to_vec()
+                })
+            })
+            .collect();
+        let rank = usize::from(grouped);
+        candidates.sort_by(|a, b| {
+            let integer = |value: &GraphValue| match value {
+                GraphValue::Scalar(CanonicalScalar::Int(value)) => *value,
+                _ => panic!("the fixture ranks a nonnull COUNT result"),
+            };
+            integer(&b[rank])
+                .cmp(&integer(&a[rank]))
+                .then_with(|| {
+                    if grouped {
+                        match (a[0].is_null(), b[0].is_null()) {
+                            (true, false) => std::cmp::Ordering::Greater,
+                            (false, true) => std::cmp::Ordering::Less,
+                            _ => a[0].cmp(&b[0]),
+                        }
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then_with(|| a.cmp(b))
+        });
+        let mut selected = false;
+        for cells in candidates
+            .into_iter()
+            .skip(usize::try_from(offset).unwrap())
+            .take(usize::try_from(count).unwrap())
+        {
+            selected = true;
+            let mut result = outer.values().to_vec();
+            result.extend(cells);
+            output.insert(row(result), weight);
+        }
+        if optional && !selected {
+            let mut result = outer.values().to_vec();
+            result.extend(vec![scalar(None); if grouped { 7 } else { 6 }]);
+            output.insert(row(result), weight);
+        }
+    }
+    output
+}
+
+#[test]
+fn ranked_collection_pages_preserve_lists_completion_and_optional_absence() {
+    for optional in [false, true] {
+        for grouped in [false, true] {
+            for distinct_rows in [false, true] {
+                for (offset, count) in [(0, 1), (1, 1), (0, 0)] {
+                    let SetNode::Apply {
+                        left,
+                        right,
+                        imports,
+                        ..
+                    } = collected_summary(optional, grouped, distinct_rows).node
+                    else {
+                        unreachable!()
+                    };
+                    let order = if grouped {
+                        vec![
+                            GraphValueOrder::descending(1),
+                            GraphValueOrder::ascending(0),
+                        ]
+                    } else {
+                        vec![GraphValueOrder::descending(0)]
+                    };
+                    let body = (*right)
+                        .with_order_by(&order)
+                        .unwrap()
+                        .with_page(offset, Some(count));
+                    let query = if optional {
+                        (*left).optional_apply(body, imports).unwrap()
+                    } else {
+                        (*left).apply(body, imports).unwrap()
+                    };
+                    let recipe = query
+                        .incremental_filtered_aggregate_with_control(&mut allow)
+                        .unwrap()
+                        .unwrap();
+                    assert!(recipe.window.is_some());
+                    assert!(query.incremental_window_sequence_compatible());
+                    let mut circuit = FilteredCircuit::new(&query);
+                    let mut old_left = ZSet::new();
+                    let mut old_right = ZSet::new();
+                    let mut old = Bag::new();
+                    // Delete first DISTINCT support, remove every group, refill
+                    // off-page groups and reactivate NULL/duplicate invocations.
+                    for (left_mask, right_mask) in
+                        [(3, 3), (3, 2), (1, 0), (3, 1), (2, 3), (0, 3), (3, 3)]
+                    {
+                        let left = filtered_left(left_mask);
+                        let right = collected_right(right_mask);
+                        let next = collected_page_oracle(
+                            &left,
+                            &right,
+                            optional,
+                            grouped,
+                            distinct_rows,
+                            offset,
+                            count,
+                        );
+                        let delta = circuit
+                            .tick(
+                                &difference(&left, &old_left),
+                                &difference(&right, &old_right),
+                            )
+                            .unwrap();
+                        assert_eq!(plain(circuit.rows()), next);
+                        assert_eq!(
+                            delta,
+                            bag(next
+                                .iter()
+                                .map(|(row, n)| (row.clone(), *n))
+                                .chain(old.into_iter().map(|(row, n)| (row, -n))),)
+                        );
+                        old = next;
+                        old_left = left;
+                        old_right = right;
+                    }
+                }
+            }
+        }
     }
 }

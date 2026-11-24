@@ -40,7 +40,8 @@ pub struct MaintainedCountJoin<'a> {
 /// Group by that private key followed by the original grouping keys. Join
 /// through complete to the DISTINCT argument bag, then apply summary and every
 /// ordered post-group projection/filter. Only a global aggregate uses a Left
-/// completion and COUNT's zero-fill; a grouped aggregate has no empty group.
+/// completion, COUNT's zero-fill and COLLECT's empty list; a grouped aggregate
+/// has no empty group.
 /// Restore the ORIGINAL keyed outer bag only
 /// after the complete invocation succeeds. Optional calls null-extend only
 /// after their complete post-group tail. Other aggregates retain their native
@@ -127,6 +128,7 @@ fn aggregate_summary<'a, E>(
             {
                 return Ok(None);
             }
+            let mut collects = false;
             for spec in specs {
                 control(GlaExecutionEvent::Work)?;
                 if !matches!(
@@ -140,12 +142,32 @@ fn aggregate_summary<'a, E>(
                                 | GraphAggregateFunction::AverageInt
                                 | GraphAggregateFunction::AverageIntDistinct
                                 | GraphAggregateFunction::Min
-                                | GraphAggregateFunction::Max,
+                                | GraphAggregateFunction::Max
+                                | GraphAggregateFunction::Collect
+                                | GraphAggregateFunction::CollectDistinct,
                             Some(_),
                         )
                 ) {
                     return Ok(None);
                 }
+                collects |= matches!(
+                    spec.0,
+                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+                );
+            }
+            // A counted bag alone cannot recover a positional input sequence.
+            // The keyed recipe below retains every public input cell and adds
+            // only a suffix constant within one invocation. Canonical complete
+            // rows therefore retain the original collection occurrence order.
+            // Explicit or unknown orders require a separate proof; never sort
+            // them here merely to obtain a maintained collection.
+            if collects
+                && !summary
+                    .input()
+                    .incremental_result_order()
+                    .is_some_and(|(order, _)| order.is_empty())
+            {
+                return Ok(None);
             }
             Ok(Some(summary))
         }
@@ -357,7 +379,10 @@ impl PreparedGraphSet {
     /// This fallback retains every ordered body projection and filter rather
     /// than tracing an aggregate argument through discarded computation. It
     /// admits any nonempty tuple of COUNT, integer SUM/AVG (including argument
-    /// DISTINCT), and typed MIN/MAX, including imported values. Relational
+    /// DISTINCT), typed MIN/MAX, and COLLECT with or without DISTINCT, including
+    /// imported values. Collections require canonical complete-row input order
+    /// both before and after invocation rekeying; unknown positional order and
+    /// explicit comparators retain their refusal. Relational
     /// DISTINCT retains the private invocation key at every body barrier.
     /// Reader-free list/range UNWIND may appear before and after the summary.
     /// Its appended member is placed before the private suffix so subsequent
@@ -373,8 +398,9 @@ impl PreparedGraphSet {
     /// Argument tuples use the existing NULL-safe canonical key proof.
     /// DISTINCT arguments prevent duplicate outer occurrences from multiplying
     /// aggregates; the final restoration preserves those occurrences.
-    /// Empty global bodies produce zero for each COUNT and NULL for other
-    /// aggregates. Grouped bodies instead produce only their actual groups,
+    /// Empty global bodies produce zero for each COUNT, an empty list for each
+    /// COLLECT, and NULL for numeric/extremum aggregates. Grouped bodies instead
+    /// produce only their actual groups,
     /// including a real NULL-key group when its input contains NULL values;
     /// they never fabricate a zero-count group after the last input retracts.
     /// NULL is an invocation value, not a missing invocation. Body evaluation
@@ -394,7 +420,9 @@ impl PreparedGraphSet {
     /// exact invocation key partitions the existing weighted row window;
     /// deleted winners refill from retained groups and outer duplicates do not
     /// consume page positions. Empty global completion still precedes the
-    /// page, so SKIP can remove a zero COUNT before Optional null extension.
+    /// page, so SKIP can remove a zero COUNT or empty COLLECT before Optional
+    /// null extension. Ordering the completed summaries does not relax the
+    /// collection input's separate canonical occurrence-order proof.
     /// Intermediate or nested pages, unbounded ordering, internal exact-domain
     /// HAVING/output transforms,
     /// unsupported key domains and reader/ordinal effects retain their refusal.
@@ -595,6 +623,7 @@ impl PreparedGraphSet {
             aggregate_names.push(name);
         }
         let mut aggregates = Vec::new();
+        let mut collects = false;
         for ((function, argument), name) in summary.aggregate_specs().zip(&aggregate_names) {
             charge(1, control)?;
             let name = name.as_str();
@@ -620,9 +649,28 @@ impl PreparedGraphSet {
                 }
                 (GraphAggregateFunction::Min, Some(column)) => GraphAggregate::min(name, column),
                 (GraphAggregateFunction::Max, Some(column)) => GraphAggregate::max(name, column),
+                (GraphAggregateFunction::Collect, Some(column)) => {
+                    collects = true;
+                    GraphAggregate::collect(name, column)
+                }
+                (GraphAggregateFunction::CollectDistinct, Some(column)) => {
+                    collects = true;
+                    GraphAggregate::collect_distinct(name, column)
+                }
                 _ => return Ok(None),
             };
             aggregates.push(aggregate);
+        }
+        // The native collection owner orders these complete retained rows.
+        // Verify the reconstructed relation's proof too: a body expansion or
+        // order-preserving projection must not silently canonicalize a sequence
+        // that the original summary would visit differently.
+        if collects
+            && !active
+                .incremental_result_order()
+                .is_some_and(|(order, _)| order.is_empty())
+        {
+            return Ok(None);
         }
         // Invocation identity partitions each original group independently.
         // Its columns live in the private suffix, so they cannot alias a user
@@ -701,9 +749,30 @@ impl PreparedGraphSet {
         charge(private_width, control)?;
         values.extend((0..private_width).map(GraphSetValue::Column));
         let types: Vec<_> = complete.column_types().collect();
-        let Some(completed) = project(&types, values, control)? else {
+        let Some(mut completed) = project(&types, values, control)? else {
             return Ok(None);
         };
+        if grouped_width == 0 && collects {
+            for (column, (function, _)) in summary.aggregate_specs().enumerate() {
+                control(GlaExecutionEvent::Work)?;
+                if matches!(
+                    function,
+                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+                ) {
+                    // A real collection result is never NULL. Only the absent
+                    // global group needs completion, before the summary tail.
+                    // The checked same-domain default retains List instead of
+                    // widening it to Any through a general CASE expression.
+                    charge(4, control)?;
+                    let Ok(filled) =
+                        completed.with_null_default(column, GraphValue::List(Box::new([])))
+                    else {
+                        return Ok(None);
+                    };
+                    completed = filled;
+                }
+            }
+        }
         let Some(post_group) = summary_steps(completed, tail, &restored, key_width, control)?
         else {
             return Ok(None);
