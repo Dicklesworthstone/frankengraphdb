@@ -26,6 +26,7 @@ use std::cmp::Reverse;
 
 mod incidence;
 pub use incidence::{BufferedEdgeDirection, BufferedEdgeIncidenceScan, BufferedEdgeJoinScan};
+mod point;
 mod published;
 
 /// Controls precede work and candidate history resolution. Identity is emitted
@@ -174,6 +175,13 @@ pub struct BufferedEdgePropertiesEndpoints {
 impl BufferedEdgePropertiesEndpoints {
     pub fn edge(&self) -> &BufferedEdgeProperties {
         &self.edge
+    }
+
+    /// Retain the selected edge image and release its endpoint owners after
+    /// their visibility predicates have been consumed. The edge keeps its
+    /// own affine property reservation independently of the source cursor.
+    pub fn into_edge(self) -> BufferedEdgeProperties {
+        self.edge
     }
 
     pub fn source_vertex(&self) -> &BufferedVertexTopology {

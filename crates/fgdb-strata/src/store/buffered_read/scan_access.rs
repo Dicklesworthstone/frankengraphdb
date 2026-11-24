@@ -383,6 +383,43 @@ impl<V: Vfs> BufferedPartition<V> {
         })
     }
 
+    // Resolve an explicitly requested EId without constructing an all-edge
+    // merge. The winner helper is shared with ordinary point reads; its
+    // original topology ordinal remains the sole selected-payload locator.
+    pub(crate) async fn edge_scan_point_topology<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        eid: EId,
+        as_of: CommitSeq,
+        work: &mut EdgeScanWork,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<(BufferedValue<BufferedEdge>, usize, usize)>, BufferedScanError<C>> {
+        let winner = self
+            .edge_point_winner_with(cx, eid, as_of, Admission::ScanBypass, &mut |event| {
+                work.step(cx, observe)?;
+                if let PointReadEvent::Decode(rows) = event {
+                    for _ in 0..rows {
+                        work.step(cx, observe)?;
+                    }
+                }
+                Ok::<_, BufferedScanError<C>>(())
+            })
+            .await?;
+        let Some(winner) = winner else {
+            return Ok(None);
+        };
+        let charge = self.reserve_scan_workspace(cx)?;
+        let edge = BufferedValue::from_reserved(
+            BufferedEdge {
+                entry: winner.entry,
+                props: Vec::new(),
+            },
+            charge,
+        )
+        .retain_scan_edge(&mut || work.step(cx, observe))?;
+        Ok(Some((edge, winner.block, winner.original)))
+    }
+
     /// Materialize only one already admitted winning row. Its original
     /// topology ordinal selects the authenticated sidecar locator; EId merge
     /// order is never reused as a property-row position. Hidden sibling rows
@@ -522,7 +559,7 @@ impl<V: Vfs> BufferedPartition<V> {
                 // and admit the complete bounded decode before every parse,
                 // including a deferred winning row's materialization.
                 work.step(cx, observe)?;
-                if let VertexPointEvent::Decode(rows) = event {
+                if let PointReadEvent::Decode(rows) = event {
                     for _ in 0..rows {
                         work.step(cx, observe)?;
                     }

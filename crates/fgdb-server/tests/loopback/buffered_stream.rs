@@ -1404,6 +1404,210 @@ fn buffered_ordered_credit_cancel_and_refusal_release_cold_and_scratch_owners() 
 }
 
 #[test]
+fn buffered_ordered_carried_properties_reauthorize_and_keep_missing_historical_fields() {
+    run(async |cx| {
+        let (addr, shutdown, mut task, directory) =
+            start_buffered_configured(cx, "buffered-carried-properties", true).await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {age:10,name:'left'}), (b:Person {age:20,name:'right'}), \
+                 (h:Company {age:999,name:'hidden'}), \
+                 (a)-[:KNOWS {age:3,name:'private-3'}]->(b), \
+                 (a)-[:KNOWS {age:4,name:'private-4'}]->(a), \
+                 (b)-[:LIKES {age:6,name:'private-6'}]->(a), \
+                 (a)-[:WORKS_AT {age:999}]->(b), (a)-[:KNOWS {age:999}]->(h)",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Nesting the carried identity forces a reached stage lookup rather
+        // than a selected field on the original vertex scan. Each visible
+        // lookup spends a fresh node; denied keys spend none.
+        let vertices = "MATCH (n:Person) WITH n AS item \
+            RETURN [item][0].age AS age,[item][0].name AS hidden ORDER BY age DESC";
+        for (nodes, properties, expected) in [
+            (
+                4,
+                Scope::only([PropertyKeyId(2)]),
+                Some(vec![
+                    vec![WireValue::Int(20), WireValue::Null],
+                    vec![WireValue::Int(10), WireValue::Null],
+                ]),
+            ),
+            (3, Scope::only([PropertyKeyId(2)]), None),
+            (2, Scope::only([]), Some(vec![vec![WireValue::Null; 2]; 2])),
+        ] {
+            let mut scope = reader_grant();
+            scope.properties = properties;
+            scope.limits.max_nodes = nodes;
+            scope.limits.max_rows = 2;
+            let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+            reader.select(cx, "social").await.unwrap();
+            let result = reader
+                .execute(cx, ExecuteMode::ReadOrdered, vertices, vec![])
+                .await;
+            match expected {
+                Some(expected) => {
+                    let result = result.unwrap();
+                    assert_eq!(result.columns, ["age", "hidden"]);
+                    assert_eq!(result.rows, expected);
+                    assert_eq!(result.outcome, Outcome::Rows { seq: 2 });
+                }
+                None => assert_eq!(server_code(result.unwrap_err()), ErrorCode::Budget),
+            }
+            reader.ping(cx, 710).await.unwrap();
+            reader.close(cx).await.unwrap();
+        }
+
+        let projection = "WITH r AS item,a AS left_node,b AS right_node \
+            RETURN [item][0].age AS edge_age,[left_node][0].age AS source_age, \
+            [right_node][0].age AS target_age,[item][0].name AS hidden \
+            ORDER BY edge_age DESC NULLS LAST";
+        let edges = format!("MATCH (a)-[r]->(b) {projection}");
+        let expected_edges = |rows: [[Option<i64>; 3]; 3]| {
+            rows.into_iter()
+                .map(|row| {
+                    let mut values: Vec<_> = row
+                        .into_iter()
+                        .map(|value| value.map_or(WireValue::Null, WireValue::Int))
+                        .collect();
+                    values.push(WireValue::Null);
+                    values
+                })
+                .collect::<Vec<_>>()
+        };
+        let initial = expected_edges([
+            [Some(6), Some(20), Some(10)],
+            [Some(4), Some(10), Some(10)],
+            [Some(3), Some(10), Some(20)],
+        ]);
+        let mut scope = reader_grant();
+        scope.relations = Scope::only([RelationId(1), RelationId(3)]);
+        scope.limits.max_rows = 3;
+        // The root spends five endpoints, the three edge points spend five
+        // more, and the two vertex points per row spend six. The self-loop
+        // shares its endpoint only within each edge admission. Reached vertex
+        // operands remain distinct reads even when both name that endpoint.
+        for (nodes, properties, expected) in [
+            (16, Scope::only([PropertyKeyId(2)]), Some(initial.clone())),
+            (15, Scope::only([PropertyKeyId(2)]), None),
+            (5, Scope::only([]), Some(vec![vec![WireValue::Null; 4]; 3])),
+        ] {
+            let mut selected = scope.clone();
+            selected.limits.max_nodes = nodes;
+            selected.properties = properties;
+            let mut reader = Client::connect(cx, addr, token(&selected)).await.unwrap();
+            reader.select(cx, "social").await.unwrap();
+            let result = reader
+                .execute(cx, ExecuteMode::ReadOrdered, &edges, vec![])
+                .await;
+            match expected {
+                Some(expected) => {
+                    let result = result.unwrap();
+                    assert_eq!(
+                        result.columns,
+                        ["edge_age", "source_age", "target_age", "hidden"]
+                    );
+                    assert_eq!(result.rows, expected);
+                    assert_eq!(result.outcome, Outcome::Rows { seq: 2 });
+                }
+                None => assert_eq!(server_code(result.unwrap_err()), ErrorCode::Budget),
+            }
+            reader.ping(cx, 711).await.unwrap();
+            reader.close(cx).await.unwrap();
+        }
+
+        scope.limits.max_nodes = 16;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let historical = format!("MATCH (a)-[r]->(b) FOR SYSTEM_TIME AS OF SEQ $cut {projection}");
+        let arguments = |cut| vec![("cut".into(), WireValue::Count(cut))];
+        let handle = reader
+            .prepare_read(cx, &historical, arguments(2))
+            .await
+            .unwrap();
+        for statement in [
+            "MATCH (n:Person) SET n.age = n.age + 100",
+            "MATCH (a)-[r:KNOWS]->(b) SET r.age = r.age + 10",
+            "MATCH (a)-[r:KNOWS]->(b) WHERE r.age = 13 REMOVE r.age",
+            "MATCH (n:Person) WHERE n.age = 110 REMOVE n.age",
+        ] {
+            owner
+                .execute(cx, ExecuteMode::Write, statement, vec![])
+                .await
+                .unwrap();
+        }
+        // Missing fields belong to the winning vertex/edge version. Neither
+        // source may revive an older value after REMOVE, and rebinding the
+        // same prepared handle to the old cut must still reproduce that cut.
+        for (cut, expected) in [
+            (2, initial.clone()),
+            (
+                4,
+                expected_edges([
+                    [Some(14), Some(110), Some(110)],
+                    [Some(13), Some(110), Some(120)],
+                    [Some(6), Some(120), Some(110)],
+                ]),
+            ),
+            (
+                5,
+                expected_edges([
+                    [Some(14), Some(110), Some(110)],
+                    [Some(6), Some(120), Some(110)],
+                    [None, Some(110), Some(120)],
+                ]),
+            ),
+            (
+                6,
+                expected_edges([
+                    [Some(14), None, None],
+                    [Some(6), Some(120), None],
+                    [None, None, Some(120)],
+                ]),
+            ),
+            (2, initial),
+        ] {
+            let mut columns = Vec::new();
+            let mut rows = Vec::new();
+            let outcome = reader
+                .execute_prepared_streaming(
+                    cx,
+                    PreparedReadMode::OrderedStream,
+                    handle,
+                    arguments(cut),
+                    |names| {
+                        columns = names.to_vec();
+                        Ok(())
+                    },
+                    |row| {
+                        rows.push(row);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(columns, ["edge_age", "source_age", "target_age", "hidden"]);
+            assert_eq!(rows, expected);
+            assert_eq!(outcome, Outcome::Rows { seq: cut });
+        }
+        reader.release_prepared(cx, handle).await.unwrap();
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+        super::ordered_stream::empty_scratch(&directory).await;
+    });
+}
+
+#[test]
 fn buffered_server_configuration_rejects_process_local_symbol_overlays() {
     run(async |cx| {
         let path = scratch("buffered-symbol-overlay");

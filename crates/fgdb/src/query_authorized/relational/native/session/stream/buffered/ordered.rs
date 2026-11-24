@@ -17,8 +17,12 @@ use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::scan_stream::{ScanKind, ScanState};
 use fgdb_gql::spill_set::{AsyncSpillElementSource, AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
 use fgdb_gql::{GlaExecutionStats, GqlExecutionStats};
+use fgdb_strata::tiered::edge_scan::BufferedEdgeScanState;
 use fgdb_strata::tiered::memory::{SpillError, SpillFile};
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalarResolver};
+
+#[path = "ordered/elements.rs"]
+mod elements;
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 
@@ -40,8 +44,9 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     ///
     /// Native vertex and single-edge leaves, including any/finite relation
     /// selectors, compose through the existing external set, row-join,
-    /// scalar-stage, CALL and grouping owners. Complete
-    /// maps, carried-element lookups, walks, probes, fixed-edge joins and
+    /// stage, CALL and grouping owners. Carried identities can read selected
+    /// properties through a same-cut scoped point reader. Complete element
+    /// metadata, walks, probes, fixed-edge joins and
     /// procedures refuse recursively before candidate or scratch access.
     /// Selected leaf properties, including both endpoints of a single edge,
     /// retain the same staged visibility admission before value decoding.
@@ -229,7 +234,11 @@ fn unsupported(facade: crate::NativeReadClass) -> NativeSpoolError {
 // empty input or LIMIT zero. No output-stage reader can gain unscoped storage
 // authority just because a leaf was already visible.
 fn admit(plan: &AsyncSpillSetPlan, facade: crate::NativeReadClass) -> Result<()> {
-    if plan.stages().iter().any(|stage| stage.may_read_elements()) {
+    if plan
+        .stages()
+        .iter()
+        .any(|stage| stage.may_read_element_metadata())
+    {
         return Err(unsupported(facade));
     }
     match plan.source() {
@@ -517,8 +526,8 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> SpoolInput for Input<'_, V, C> {
     }
 }
 
-// No graph handle is present. The cached effect fence above refuses every
-// stage which could call this reader, without evaluating user expressions.
+// Row-only programs retain their reader-free path. The cached effect selects
+// the scoped point owner only when a stage can request a selected property.
 struct NoElements;
 impl AsyncSpillElementSource for NoElements {
     type Error = NativeSpoolError;
@@ -534,6 +543,9 @@ impl AsyncSpillElementSource for NoElements {
 }
 
 struct Host<'q, V: Vfs, C> {
+    // A single point source spans every stage/CALL batch in this execution.
+    // Detachment releases the exclusive borrow, never its physical allowance.
+    points: Option<BufferedEdgeScanState>,
     returned: Returned<V>,
     cx: &'q QueryCx,
     at: CommitSeq,
@@ -726,10 +738,46 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> ExternalOrderHost for Host<'_, V,
         Box::pin(async move {
             self.check_snapshot(input.snapshot_seq())?;
             let execution = self.execution.clone();
-            ordered_stages(
+            if !plan.stages().iter().any(|stage| stage.may_read_elements()) {
+                return ordered_stages(
+                    plan,
+                    input,
+                    &mut NoElements,
+                    &mut || execution.borrow_mut().checkpoint().map_err(authorized),
+                    cx,
+                    policy,
+                    scratch,
+                    destination,
+                    limits.run_rows,
+                    limits.max_runs,
+                    limits.page_bytes,
+                    limits.max_row_bytes,
+                    limits.max_input_rows,
+                    limits.max_sort_work,
+                    prior_work,
+                    resolver,
+                )
+                .await
+                .map_err(stage_error);
+            }
+            self.checkpoint()?;
+            // This lexical checkout outlives the borrowed point reader. On
+            // pending-drop, the reader retires before the backend is parked
+            // for the outer execution guard to close the affine session.
+            let mut checkout = elements::Checkout::new(self.returned.clone())?;
+            let mut elements = elements::Elements::new(
+                checkout.view(),
+                self.points.take(),
+                self.cx,
+                self.at,
+                execution.clone(),
+                policy.rows,
+                input.row_stats().snapshot_records,
+            )?;
+            let (spool, work) = ordered_stages(
                 plan,
                 input,
-                &mut NoElements,
+                &mut elements,
                 &mut || execution.borrow_mut().checkpoint().map_err(authorized),
                 cx,
                 policy,
@@ -745,7 +793,10 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> ExternalOrderHost for Host<'_, V,
                 resolver,
             )
             .await
-            .map_err(stage_error)
+            .map_err(stage_error)?;
+            let (state, records) = elements.into_state();
+            self.points = Some(state);
+            Ok((spool.with_snapshot_records(records)?, work))
         })
     }
 }
@@ -795,6 +846,7 @@ where
             // A Source parks its backend before the guard restores/discards it.
             let future = async {
                 let mut host = Host {
+                    points: None,
                     returned,
                     cx,
                     at,
@@ -892,6 +944,7 @@ where
             } = opened;
             let future = async {
                 let mut host = Host {
+                    points: None,
                     returned,
                     cx,
                     at,

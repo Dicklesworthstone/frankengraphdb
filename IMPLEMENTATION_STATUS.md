@@ -12,6 +12,52 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Cold carried-element selected properties — qualification pending
+
+Authorized cold ordered stages now read selected properties from carried vertex
+and edge identities, including identities nested in lists, CASE/coalesce and
+comprehensions, scalar returning CALL bodies, and values feeding exact aggregate
+inputs. Ordinary admitted element-bearing list parameters use this same reader.
+Each lookup rechecks the signed property scope, visibility and pinned historical
+cut; carrying an identity through an earlier scan never grants a later read.
+
+The expression compiler caches an exhaustive effect that distinguishes selected
+property reads from complete element metadata. Recursive admission still refuses
+metadata in every branch before source or scratch access, including unreachable
+CASE arms and LIMIT zero. Aggregate-output element readers retain their existing
+separate refusal; the new support is for ordinary relational input stages.
+
+The stage host reuses one detached buffered scan state across stages and CALL
+batches. Routed topology reads establish the authoritative version and admit a
+vertex, or a relation and both edge endpoints, before decoding the selected
+payload. Edge properties use the same winning history ordinal. Denied property
+keys do no point I/O and spend no visible-node or snapshot-record allowance.
+Hidden, absent, future and retired identities return NULL; a missing field in a
+newer visible version cannot resurrect an older value. Visible lookups receive
+fresh logical admission, and physical work remains cumulative for the execution.
+
+Storage property owners remain charged until the canonical evaluator makes its
+charged copy. The edge-only owner releases endpoint reservations after admission.
+An unpolled execution restores the backend; dropping a polled Pending point read
+releases its borrowed reader before the checkout returns the backend and the
+outer guard closes the affine session. Payload copies stay charged across
+suspended spill appends.
+
+Four embedded regressions cover composition and exact results, caller-provided
+identities and historical visibility, cumulative signed-node/native-record limits
+with retry, and Pending/drop ownership with a retained 4 KB payload. An FGP
+regression covers vertex/edge/endpoint compositions, exact and one-short node
+budgets, denied fields, prepared reuse across historical updates and field
+removal, connection reuse, and scratch cleanup. Existing prepared and direct
+endpoint regressions remain intact.
+
+Focused pinned formatting, a standalone module-path compiler probe and
+independent source review passed. Native compilation, runtime tests, clippy, UBS
+and the full exact-tree gate remain UNRUN for this extension: workspace storage
+exhaustion and executor interruptions prevented native qualification. This is
+an implementation checkpoint, not a passing integrated-gate verdict. W5 executor
+and integrated qualification `fgdb-qualify-integrated-nov22-maz0p` remain open.
+
 ### Cold selected endpoint properties — qualification pending
 
 Authorized buffered single-edge reads now admit selected endpoint properties
@@ -29,8 +75,9 @@ identity, lifetime and labels at the same cut. All reads share the detached
 scan's cumulative physical allowance. Selected storage values and returned row
 copies keep affine pool reservations, including after cursor/session drop.
 The existing conservative edge-only demand API retains its contract. Complete
-maps, carried-element readers, fixed-edge joins and probes remain outside this
-new cold leaf profile; whole-server resident startup/writer ownership is unchanged.
+maps, fixed-edge joins and probes remain outside this cold leaf profile. Selected
+carried-element reads use the separate ordered-stage point owner described above;
+whole-server resident startup/writer ownership is unchanged.
 
 Regression sources cover explicit literal values and resident parity, historical
 updates, orientation/self-loops, missing versus stored NULL fields, hidden
@@ -141,10 +188,11 @@ do not gain a second evaluator or reducer.
 Authorization, immutable prepared-handle identity, exact historical cut and
 recursive effect admission precede candidate and scratch access. Every branch
 and correlated body is checked, even under empty inputs or LIMIT zero. Complete
-property maps, carried-element property/metadata readers, walks, probes,
-fixed-edge joins and procedures still refuse. Direct
-selected leaf properties remain behind staged visibility admission; supported
-row-only expressions can compose over already captured scalar values.
+property maps, carried-element metadata, walks, probes, fixed-edge joins and
+procedures still refuse. Direct selected leaf properties and selected carried
+properties in ordinary relational stages remain behind staged visibility
+admission. Aggregate-output element readers retain their separate refusal;
+row-only expressions continue to compose over already captured scalar values.
 
 The shared return guard now also owns affine buffered backends. An unpolled
 execution returns its backend without I/O. Dropping a polled pending source,

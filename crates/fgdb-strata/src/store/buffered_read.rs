@@ -417,6 +417,14 @@ enum VertexPointWinner {
 }
 
 #[derive(Clone, Copy)]
+struct EdgePointWinner {
+    entry: AdjacencyEntry,
+    block: usize,
+    original: usize,
+    locator: u8,
+}
+
+#[derive(Clone, Copy)]
 enum VertexPointAccess {
     Properties(Option<PropertySelection>),
     Topology,
@@ -433,14 +441,14 @@ struct VertexPointRead {
 // Point and governed sources retain their own admission/work policies while
 // sharing historical selection. In particular, a governed endpoint continues
 // the caller's cumulative meter instead of starting another point-read limit.
-enum VertexPointEvent {
+enum PointReadEvent {
     Directory,
     Decode(usize),
     Row,
     Complete,
 }
 
-impl VertexPointEvent {
+impl PointReadEvent {
     fn point(
         self,
         cx: &QueryCx,
@@ -1332,7 +1340,7 @@ impl<V: Vfs> BufferedPartition<V> {
         cx: &QueryCx,
         request: VertexPointRead,
         mut output_charge: Option<&mut Option<MemoryCharge>>,
-        control: &mut (impl FnMut(VertexPointEvent) -> Result<(), C> + Send),
+        control: &mut (impl FnMut(PointReadEvent) -> Result<(), C> + Send),
     ) -> Result<Option<VertexPointWinner>, C> {
         let VertexPointRead {
             vid,
@@ -1344,9 +1352,10 @@ impl<V: Vfs> BufferedPartition<V> {
         let mut ready = None;
         let mut last: Option<(usize, BufferHandle)> = None;
         let mut candidates = self.patch_directory.candidates(vid);
-        while let Some(at) = self.patch_directory.next(&mut candidates, &mut || {
-            control(VertexPointEvent::Directory)
-        })? {
+        while let Some(at) = self
+            .patch_directory
+            .next(&mut candidates, &mut || control(PointReadEvent::Directory))?
+        {
             let descriptor = self.patches[at];
             if self.root.vertex_patches[at].first_seq > as_of || !descriptor.may_contain(vid) {
                 continue;
@@ -1360,7 +1369,7 @@ impl<V: Vfs> BufferedPartition<V> {
             let unique = last.is_none()
                 && candidates.is_exhausted()
                 && (descriptor.rows == 1 || reference.first_seq == reference.last_seq);
-            control(VertexPointEvent::Decode(descriptor.rows))?;
+            control(PointReadEvent::Decode(descriptor.rows))?;
             drop(last.take());
             let _workspace = self.reserve_scan_workspace(cx)?;
             let bytes = self
@@ -1396,7 +1405,7 @@ impl<V: Vfs> BufferedPartition<V> {
                 }
             };
             for (row_at, row) in rows.into_iter().enumerate() {
-                control(VertexPointEvent::Row)?;
+                control(PointReadEvent::Row)?;
                 if row.vid == vid
                     && row.created_at <= as_of
                     && result.is_none_or(|old| {
@@ -1426,14 +1435,14 @@ impl<V: Vfs> BufferedPartition<V> {
                 }
             }
             if unique {
-                control(VertexPointEvent::Complete)?;
+                control(PointReadEvent::Complete)?;
                 return Ok(ready
                     .filter(|row| row.visible_at(as_of))
                     .map(VertexPointWinner::Ready));
             }
             last = Some((at, bytes));
         }
-        control(VertexPointEvent::Complete)?;
+        control(PointReadEvent::Complete)?;
         if matches!(access, VertexPointAccess::Topology) {
             return Ok(ready
                 .filter(|row| row.visible_at(as_of))
@@ -1474,7 +1483,7 @@ impl<V: Vfs> BufferedPartition<V> {
         winner: VertexPointWinner,
         keys: Option<PropertySelection>,
         admission: Admission,
-        control: &mut (impl FnMut(VertexPointEvent) -> Result<(), C> + Send),
+        control: &mut (impl FnMut(PointReadEvent) -> Result<(), C> + Send),
     ) -> Result<VertexRow, C> {
         let (winner, retained) = match winner {
             VertexPointWinner::Ready(row) => return Ok(row),
@@ -1483,7 +1492,7 @@ impl<V: Vfs> BufferedPartition<V> {
         let descriptor = self.patches[winner.patch];
         // Materialization reparses the complete bounded row framing, even
         // when its extent is still pinned. Admit that work before decoding.
-        control(VertexPointEvent::Decode(descriptor.rows))?;
+        control(PointReadEvent::Decode(descriptor.rows))?;
         let _workspace = self.reserve_scan_workspace(cx)?;
         let bytes = match retained {
             Some(bytes) if bytes.key() == descriptor.extent => bytes,
@@ -1601,6 +1610,59 @@ impl<V: Vfs> BufferedPartition<V> {
             })
     }
 
+    // Plain points and staged scoped points share this sole EId history
+    // selection. Only authenticated topology/locators are decoded here;
+    // payload access remains a separate operation after the visible winner.
+    async fn edge_point_winner_with<C: From<BufferedReadError>>(
+        &mut self,
+        cx: &QueryCx,
+        eid: EId,
+        as_of: CommitSeq,
+        admission: Admission,
+        control: &mut (impl FnMut(PointReadEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<EdgePointWinner>, C> {
+        let mut result: Option<EdgePointWinner> = None;
+        let mut candidates = self.block_directory.edge_candidates(eid);
+        while let Some(at) = self
+            .block_directory
+            .next_edge(&mut candidates, &mut || control(PointReadEvent::Directory))?
+        {
+            let descriptor = self.blocks[at];
+            if self.root.blocks[at].first_seq.0 > as_of.0
+                || descriptor
+                    .summary
+                    .is_none_or(|summary| !summary.may_contain_edge(eid))
+            {
+                continue;
+            }
+            control(PointReadEvent::Decode(descriptor.rows))?;
+            let _workspace = self
+                .buffer
+                .reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)
+                .map_err(BufferedReadError::from)?;
+            let (entries, locators) = self.block_keys(cx, at, admission).await?;
+            for (original, entry) in entries.iter().enumerate() {
+                control(PointReadEvent::Row)?;
+                if entry.eid == eid
+                    && entry.created_at.0 <= as_of.0
+                    && result.is_none_or(|old| {
+                        (old.entry.created_at, old.block) <= (entry.created_at, at)
+                    })
+                {
+                    let locator = locators.as_ref().map_or(0, |locators| locators[original]);
+                    result = Some(EdgePointWinner {
+                        entry: *entry,
+                        block: at,
+                        original,
+                        locator,
+                    });
+                }
+            }
+        }
+        control(PointReadEvent::Complete)?;
+        Ok(result.filter(|winner| winner.entry.visible_at(as_of)))
+    }
+
     /// Seek admitted EId intervals across all possibly matching histories, then
     /// fault only the winning edge's property patch. EId bounds are independent
     /// of adjacency order; an absent or propertyless winner reads no sidecar.
@@ -1612,38 +1674,18 @@ impl<V: Vfs> BufferedPartition<V> {
     ) -> Result<Option<BufferedValue<BufferedEdge>>, BufferedReadError> {
         self.begin(cx, as_of)?;
         let result_charge = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
-        let mut result: Option<(AdjacencyEntry, usize, u8)> = None;
         let mut work = 0;
-        let mut candidates = self.block_directory.edge_candidates(eid);
-        while let Some(at) = self.block_directory.next_edge(&mut candidates, &mut || {
-            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, self.limits.max_work)
-        })? {
-            let descriptor = self.blocks[at];
-            if self.root.blocks[at].first_seq.0 > as_of.0
-                || descriptor
-                    .summary
-                    .is_none_or(|summary| !summary.may_contain_edge(eid))
-            {
-                continue;
-            }
-            advance(&mut work, descriptor.rows, self.limits.max_work)?;
-            let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
-            let (entries, locators) = self.block_keys(cx, at, Admission::Normal).await?;
-            for (index, entry) in entries.iter().enumerate() {
-                if entry.eid == eid
-                    && entry.created_at.0 <= as_of.0
-                    && result.as_ref().is_none_or(|(old, old_at, _)| {
-                        (old.created_at, *old_at) <= (entry.created_at, at)
-                    })
-                {
-                    let locator = locators.as_ref().map_or(0, |locators| locators[index]);
-                    result = Some((*entry, at, locator));
-                }
-            }
-        }
-        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-        let Some((entry, block, locator)) = result.filter(|(entry, _, _)| entry.visible_at(as_of))
+        let maximum = self.limits.max_work;
+        let Some(EdgePointWinner {
+            entry,
+            block,
+            locator,
+            ..
+        }) = self
+            .edge_point_winner_with(cx, eid, as_of, Admission::Normal, &mut |event| {
+                event.point(cx, &mut work, maximum)
+            })
+            .await?
         else {
             return Ok(None);
         };
@@ -1686,38 +1728,13 @@ impl<V: Vfs> BufferedPartition<V> {
     ) -> Result<Option<BufferedValue<CanonicalPropertyValue>>, BufferedReadError> {
         self.begin(cx, as_of)?;
         let result_charge = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
-        let mut result: Option<(AdjacencyEntry, usize, u8)> = None;
         let mut work = 0;
-        let mut candidates = self.block_directory.edge_candidates(eid);
-        while let Some(at) = self.block_directory.next_edge(&mut candidates, &mut || {
-            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, self.limits.max_work)
-        })? {
-            let descriptor = self.blocks[at];
-            if self.root.blocks[at].first_seq.0 > as_of.0
-                || descriptor
-                    .summary
-                    .is_none_or(|summary| !summary.may_contain_edge(eid))
-            {
-                continue;
-            }
-            advance(&mut work, descriptor.rows, self.limits.max_work)?;
-            let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
-            let (entries, locators) = self.block_keys(cx, at, Admission::Normal).await?;
-            for (index, entry) in entries.iter().enumerate() {
-                if entry.eid == eid
-                    && entry.created_at.0 <= as_of.0
-                    && result.as_ref().is_none_or(|(old, old_at, _)| {
-                        (old.created_at, *old_at) <= (entry.created_at, at)
-                    })
-                {
-                    let locator = locators.as_ref().map_or(0, |locators| locators[index]);
-                    result = Some((*entry, at, locator));
-                }
-            }
-        }
-        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-        let Some((_, block, locator)) = result.filter(|(entry, _, _)| entry.visible_at(as_of))
+        let maximum = self.limits.max_work;
+        let Some(EdgePointWinner { block, locator, .. }) = self
+            .edge_point_winner_with(cx, eid, as_of, Admission::Normal, &mut |event| {
+                event.point(cx, &mut work, maximum)
+            })
+            .await?
         else {
             return Ok(None);
         };

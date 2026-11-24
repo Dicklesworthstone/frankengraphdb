@@ -1133,11 +1133,15 @@ fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_
                 false,
             ),
             (
-                "MATCH (n:L) WITH n AS item RETURN [item][0].score AS score LIMIT 0",
+                "MATCH (n:L) WITH n AS item RETURN properties([item][0]) AS fields LIMIT 0",
                 false,
             ),
             (
                 "MATCH (n:L) WITH n AS item RETURN properties(item) AS fields LIMIT 0",
+                false,
+            ),
+            (
+                "MATCH (n:L) WITH n AS item RETURN CASE WHEN true THEN {} ELSE properties([item][0]) END AS fields LIMIT 0",
                 false,
             ),
             (
@@ -1150,7 +1154,7 @@ fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_
             ),
             ("MATCH (a)-[r:R*1..2]->(b) RETURN a,b LIMIT 0", false),
             (
-                "UNWIND [] AS item CALL() { MATCH (n:L) WITH n AS carried RETURN [carried][0].score AS score } RETURN score LIMIT 0",
+                "UNWIND [] AS item CALL() { MATCH (n:L) WITH n AS carried RETURN properties([carried][0]) AS fields } RETURN fields LIMIT 0",
                 false,
             ),
             (
@@ -1769,6 +1773,458 @@ fn cold_any_and_finite_relations_keep_selector_scope_and_external_composition_di
             drop(ordered);
             assert_eq!(pool.used(), 0);
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_carried_fields_compose_with_lazy_scalars_calls_and_aggregate_inputs() {
+    use GraphAggregateValue::{Average, Count, Integer};
+    let ((), report) = run_async_under_lab(0xa8_0212, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let authority = issuer();
+        let args = GqlParameters::new();
+        for hidden in [false, true] {
+            let (vfs, _db, old, current) = fixture(&commit, hidden).await;
+            for at in [old, current] {
+                let first = if at == old { 3 } else { 30 };
+                let edge_rows = if at == old {
+                    vec![
+                        vec![scalar(9), scalar(3), scalar(1)],
+                        vec![scalar(7), scalar(3), scalar(1)],
+                        vec![scalar(5), scalar(1), scalar(3)],
+                    ]
+                } else {
+                    vec![
+                        vec![scalar(17), scalar(30), scalar(1)],
+                        vec![scalar(9), scalar(30), scalar(1)],
+                        vec![scalar(5), scalar(1), scalar(3)],
+                    ]
+                };
+                for (nodes, text, expected) in [
+                    (
+                        10,
+                        "MATCH (n:L) WITH n AS item RETURN \
+                         CASE WHEN true THEN [item][0].score ELSE [item][0].secret END AS score, \
+                         [item][0].secret AS hidden ORDER BY score DESC LIMIT 3",
+                        vec![
+                            vec![scalar(first), null()],
+                            vec![scalar(3), null()],
+                            vec![scalar(2), null()],
+                        ],
+                    ),
+                    (
+                        18,
+                        "MATCH (a)-[r:R]->(b) WITH a,r,b RETURN [r][0].score AS weight, \
+                         [a][0].score AS source,[b][0].score AS target ORDER BY weight DESC",
+                        edge_rows,
+                    ),
+                    (
+                        15,
+                        "MATCH (n:L) WITH n AS item CALL(item) { \
+                         RETURN [member IN [item,item] | member.score] AS scores } \
+                         UNWIND scores AS score RETURN score ORDER BY score DESC LIMIT 3",
+                        vec![vec![scalar(first)], vec![scalar(first)], vec![scalar(3)]],
+                    ),
+                ] {
+                    let token = authority.issue_at(&grant(nodes, 3), 100).unwrap();
+                    let pool = memory();
+                    let (mut ordered, _) = session(
+                        &commit,
+                        &cx,
+                        &vfs,
+                        &pool,
+                        &authority,
+                        &token,
+                        at,
+                        || 100,
+                        policy(3),
+                    )
+                    .await;
+                    let prepared = ordered.prepare(&cx, text, &args).unwrap();
+                    let execution = ordered.execute_ordered(&cx, &prepared, &args).unwrap();
+                    assert_send(&execution);
+                    let mut cursor = execution.await.unwrap();
+                    assert_eq!(cursor.snapshot_seq(), at);
+                    assert_eq!(
+                        values(&mut cursor).await,
+                        expected,
+                        "{text}; hidden={hidden}; at={at:?}"
+                    );
+                    drop(cursor);
+                    assert!(!ordered.is_closed());
+                    drop(ordered);
+                    assert_eq!(pool.used(), 0);
+                }
+                // Selected fields are ordinary relational input cells before
+                // grouping; terminal aggregate output metadata stays refused.
+                let token = authority.issue_at(&grant(10, 1), 100).unwrap();
+                let pool = memory();
+                let (mut ordered, _) = session(
+                    &commit,
+                    &cx,
+                    &vfs,
+                    &pool,
+                    &authority,
+                    &token,
+                    at,
+                    || 100,
+                    GqlQueryPolicy::new(10, 1, 1_000_000, 1_000_000),
+                )
+                .await;
+                let prepared = ordered
+                    .prepare(
+                        &cx,
+                        "MATCH (n:L) WITH n AS item WITH [item][0].score AS score \
+                         RETURN count(*) AS rows,sum(score) AS total,avg(score) AS mean",
+                        &args,
+                    )
+                    .unwrap();
+                let mut cursor = ordered
+                    .execute_ordered_aggregate(&cx, &prepared, &args)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                let sum = if at == old { 8 } else { 35 };
+                assert_eq!(
+                    aggregates(&mut cursor).await,
+                    vec![vec![
+                        Count(5),
+                        Integer(sum),
+                        Average(GraphExactAverage::new(sum, 5).unwrap()),
+                    ]]
+                );
+                drop(cursor);
+                drop(ordered);
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_captured_identity_fields_recheck_scope_existence_and_the_pinned_cut() {
+    let ((), report) = run_async_under_lab(0xa8_0213, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, mut db, old, current) = fixture(&commit, true).await;
+        let mut birth = WriteBatch::new(R);
+        birth.create_vertex(VId(20), vec![L], vec![]);
+        let born = db.write(&commit, birth).await.unwrap();
+        let mut deletion = WriteBatch::new(R);
+        deletion.delete_vertex(VId(1));
+        let retired = db.write(&commit, deletion).await.unwrap();
+        let authority = issuer();
+        // These are the ordinary admitted list parameters, not a host reader
+        // or injected prepared plan. Every returned identity came from caller
+        // data and must independently satisfy the same-cut visibility check.
+        let vertices = GqlParameters::new()
+            .with_list(
+                "items",
+                [1, 10, 20, 99]
+                    .map(|id| GraphValue::Vertex(VId(id)))
+                    .to_vec(),
+            )
+            .unwrap();
+        let edges = GqlParameters::new()
+            .with_list(
+                "items",
+                [10, 101, 201, 999]
+                    .map(|id| GraphValue::Edge(EId(id)))
+                    .to_vec(),
+            )
+            .unwrap();
+        let text = "UNWIND $items AS item RETURN item,[item][0].score AS score ORDER BY item";
+        for (at, nodes, first) in [
+            (old, 1, scalar(3)),
+            (current, 1, scalar(30)),
+            (born, 2, scalar(30)),
+            (retired, 1, null()),
+        ] {
+            let token = authority.issue_at(&grant(nodes, 4), 100).unwrap();
+            let pool = memory();
+            let (mut ordered, _) = session(
+                &commit,
+                &cx,
+                &vfs,
+                &pool,
+                &authority,
+                &token,
+                at,
+                || 100,
+                GqlQueryPolicy::new(nodes, 4, 1_000_000, 1_000_000),
+            )
+            .await;
+            let prepared = ordered.prepare(&cx, text, &vertices).unwrap();
+            let mut cursor = ordered
+                .execute_ordered(&cx, &prepared, &vertices)
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(
+                values(&mut cursor).await,
+                vec![
+                    vec![GraphValue::Vertex(VId(1)), first],
+                    vec![GraphValue::Vertex(VId(10)), null()],
+                    vec![GraphValue::Vertex(VId(20)), null()],
+                    vec![GraphValue::Vertex(VId(99)), null()],
+                ]
+            );
+            drop(cursor);
+            drop(ordered);
+            assert_eq!(pool.used(), 0);
+        }
+        for (at, nodes, records, visible) in [
+            (old, 2, 1, scalar(7)),
+            (current, 2, 1, scalar(17)),
+            (retired, 0, 0, null()),
+        ] {
+            let token = authority.issue_at(&grant(nodes, 4), 100).unwrap();
+            let pool = memory();
+            let (mut ordered, _) = session(
+                &commit,
+                &cx,
+                &vfs,
+                &pool,
+                &authority,
+                &token,
+                at,
+                || 100,
+                GqlQueryPolicy::new(records, 4, 1_000_000, 1_000_000),
+            )
+            .await;
+            let prepared = ordered.prepare(&cx, text, &edges).unwrap();
+            let mut cursor = ordered
+                .execute_ordered(&cx, &prepared, &edges)
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(
+                values(&mut cursor).await,
+                vec![
+                    vec![GraphValue::Edge(EId(10)), null()],
+                    vec![GraphValue::Edge(EId(101)), visible],
+                    vec![GraphValue::Edge(EId(201)), null()],
+                    vec![GraphValue::Edge(EId(999)), null()],
+                ]
+            );
+            drop(cursor);
+            drop(ordered);
+            assert_eq!(pool.used(), 0);
+        }
+        // A denied key reveals neither existence nor topology. It opens no
+        // point payload even for caller-supplied visible and hidden identities.
+        let token = authority.issue_at(&grant(0, 4), 100).unwrap();
+        let pool = memory();
+        let (mut ordered, _) = session(
+            &commit,
+            &cx,
+            &vfs,
+            &pool,
+            &authority,
+            &token,
+            current,
+            || 100,
+            GqlQueryPolicy::new(0, 4, 1_000_000, 1_000_000),
+        )
+        .await;
+        for args in [&vertices, &edges] {
+            let prepared = ordered
+                .prepare(
+                    &cx,
+                    "UNWIND $items AS item RETURN [item][0].secret AS hidden",
+                    args,
+                )
+                .unwrap();
+            vfs.reset();
+            let mut cursor = ordered
+                .execute_ordered(&cx, &prepared, args)
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(values(&mut cursor).await, vec![vec![null()]; 4]);
+            drop(cursor);
+            assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+            assert!(!ordered.is_closed());
+        }
+        drop(ordered);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_point_allowances_are_cumulative_across_stages_and_retryable() {
+    let ((), report) = run_async_under_lab(0xa8_0214, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _db, at, _) = fixture(&commit, true).await;
+        let authority = issuer();
+        let args = GqlParameters::new()
+            .with_list("items", vec![GraphValue::Vertex(VId(1))])
+            .unwrap();
+        let twice = "UNWIND $items AS item WITH item,[item][0].score AS first \
+                     RETURN first,[item][0].score AS second";
+        for (nodes, records) in [(2, 2), (1, 2), (2, 1)] {
+            let token = authority.issue_at(&grant(nodes, 1), 100).unwrap();
+            let pool = memory();
+            let (mut ordered, _) = session(
+                &commit,
+                &cx,
+                &vfs,
+                &pool,
+                &authority,
+                &token,
+                at,
+                || 100,
+                GqlQueryPolicy::new(records, 1, 1_000_000, 1_000_000),
+            )
+            .await;
+            let prepared = ordered.prepare(&cx, twice, &args).unwrap();
+            let result = ordered
+                .execute_ordered(&cx, &prepared, &args)
+                .unwrap()
+                .await;
+            if nodes == 2 && records == 2 {
+                let mut cursor = result.unwrap();
+                assert_eq!(values(&mut cursor).await, vec![vec![scalar(3), scalar(3)]]);
+            } else {
+                let error = result.unwrap_err();
+                if nodes == 1 {
+                    assert!(matches!(error, NativeSpoolError::Authorized(error)
+                        if matches!(*error, QueryError::Authorization(
+                            Error::LimitExceeded(LimitDimension::Nodes)))));
+                } else {
+                    assert!(matches!(error, NativeSpoolError::Authorized(error)
+                        if matches!(*error, QueryError::Set(fgdb_gql::GqlQueryError::Rows(error))
+                            if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                                && error.limit == 1 && error.observed == 2)));
+                }
+            }
+            assert!(!ordered.is_closed());
+            let once = ordered
+                .prepare(
+                    &cx,
+                    "UNWIND $items AS item RETURN [item][0].score AS score",
+                    &args,
+                )
+                .unwrap();
+            let mut cursor = ordered
+                .execute_ordered(&cx, &once, &args)
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(values(&mut cursor).await, vec![vec![scalar(3)]]);
+            drop(cursor);
+            drop(ordered);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_point_pending_reads_and_copied_payloads_keep_the_affine_owner() {
+    let ((), report) = run_async_under_lab(0xa8_0215, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, mut db, at, _) = fixture(&commit, true).await;
+        let authority = issuer();
+        let token = authority.issue_at(&grant(1, 1), 100).unwrap();
+        let args = GqlParameters::new()
+            .with_list("items", vec![GraphValue::Vertex(VId(1))])
+            .unwrap();
+        let text = "UNWIND $items AS item RETURN [item][0].score AS payload";
+        let pool = memory();
+        let (mut ordered, files) = session(
+            &commit,
+            &cx,
+            &vfs,
+            &pool,
+            &authority,
+            &token,
+            at,
+            || 100,
+            GqlQueryPolicy::new(1, 1, 1_000_000, 1_000_000),
+        )
+        .await;
+        let prepared = ordered.prepare(&cx, text, &args).unwrap();
+        let baseline = pool.used();
+        let before = observations(&files);
+        vfs.reset();
+        drop(ordered.execute_ordered(&cx, &prepared, &args).unwrap());
+        assert!(!ordered.is_closed());
+        assert_eq!(pool.used(), baseline);
+        assert_eq!(observations(&files), before);
+        assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+        vfs.pause.store(true, Ordering::SeqCst);
+        let mut pending = Box::pin(ordered.execute_ordered(&cx, &prepared, &args).unwrap());
+        poll_fn(|task| {
+            assert!(pending.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(vfs.reads.load(Ordering::SeqCst) > 0);
+        drop(pending);
+        assert!(ordered.is_closed());
+        drop(ordered);
+        assert_eq!(pool.used(), 0);
+        vfs.pause.store(false, Ordering::SeqCst);
+
+        let mut change = WriteBatch::new(R);
+        change.set_vertex_property(
+            VId(1),
+            P,
+            Some(CanonicalScalar::bytes(vec![0x7a; 4096]).unwrap()),
+        );
+        let at = db.write(&commit, change).await.unwrap();
+        let (mut ordered, files) = session(
+            &commit,
+            &cx,
+            &vfs,
+            &pool,
+            &authority,
+            &token,
+            at,
+            || 100,
+            GqlQueryPolicy::new(1, 1, 1_000_000, 1_000_000),
+        )
+        .await;
+        let prepared = ordered.prepare(&cx, text, &args).unwrap();
+        let baseline = pool.used();
+        for file in &files {
+            file.0.lock().unwrap().pending_on_payload = Some(&[0x7a; 16]);
+        }
+        let mut pending = Box::pin(ordered.execute_ordered(&cx, &prepared, &args).unwrap());
+        let mut polls = 0;
+        poll_fn(|task| {
+            polls += 1;
+            assert!(polls <= 1024, "point payload must reach its bounded append");
+            assert!(pending.as_mut().poll(task).is_pending());
+            if files
+                .iter()
+                .any(|file| file.0.lock().unwrap().pending_write)
+            {
+                Poll::Ready(())
+            } else {
+                task.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+        assert!(
+            pool.used() >= baseline + 4096,
+            "copied point payload remains charged until the suspended append releases it"
+        );
+        drop(pending);
+        assert!(ordered.is_closed());
+        assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

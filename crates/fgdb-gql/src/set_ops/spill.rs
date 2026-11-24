@@ -944,12 +944,12 @@ enum Operation {
     Identity,
     Project {
         projection: Vec<GraphSetProjection>,
-        reads_elements: bool,
+        element_effect: projection::ElementReadEffect,
     },
     Filter(RowPredicate),
     Unwind {
         value: GraphSetValue,
-        reads_elements: bool,
+        element_effect: projection::ElementReadEffect,
     },
 }
 
@@ -1001,10 +1001,22 @@ impl SpillSetStage {
     /// carried element. Hosts without a scoped point reader use this cached
     /// effect to refuse the complete program before opening any source.
     pub fn may_read_elements(&self) -> bool {
+        self.element_read_effect() != projection::ElementReadEffect::None
+    }
+
+    /// Whether any expression child can request element metadata, including
+    /// complete properties, keys, labels, type or stored endpoints. This
+    /// includes lazy branches without evaluating them; a selected-field host
+    /// can reject the complete program before graph or scratch access.
+    pub fn may_read_element_metadata(&self) -> bool {
+        self.element_read_effect() == projection::ElementReadEffect::Metadata
+    }
+
+    fn element_read_effect(&self) -> projection::ElementReadEffect {
         match &self.operation {
-            Operation::Identity | Operation::Filter(_) => false,
-            Operation::Project { reads_elements, .. }
-            | Operation::Unwind { reads_elements, .. } => *reads_elements,
+            Operation::Identity | Operation::Filter(_) => projection::ElementReadEffect::None,
+            Operation::Project { element_effect, .. }
+            | Operation::Unwind { element_effect, .. } => *element_effect,
         }
     }
 
@@ -1416,9 +1428,11 @@ fn compile_stages<'a>(
             input.types.clone(),
             Operation::Project {
                 projection: projection.clone(),
-                reads_elements: projection
+                element_effect: projection
                     .iter()
-                    .any(|output| output.value().may_read_element_properties()),
+                    .map(|output| output.value().element_read_effect())
+                    .max()
+                    .unwrap_or(projection::ElementReadEffect::None),
             },
             (!*preserve_order && !input.preserves_row_order())
                 || *quantifier == GraphSetQuantifier::Distinct,
@@ -1429,7 +1443,7 @@ fn compile_stages<'a>(
             input.types.clone(),
             Operation::Unwind {
                 value: value.clone(),
-                reads_elements: value.may_read_element_properties(),
+                element_effect: value.element_read_effect(),
             },
             false,
             false,
@@ -1706,7 +1720,7 @@ mod tests {
                 value: GraphSetValue::Value(GraphValue::Vertices(
                     vec![VId(1), VId(2), VId(3)].into_boxed_slice(),
                 )),
-                reads_elements: false,
+                element_effect: projection::ElementReadEffect::None,
             },
             order: None,
             distinct: false,

@@ -34,6 +34,16 @@ use fgdb_types::CanonicalScalar;
 use std::borrow::Borrow;
 use std::collections::BTreeSet;
 
+/// Preparation-time source capability required by an expression. Metadata
+/// dominates selected fields: a property-only host must refuse the whole
+/// program if any reachable or lazy child can request element metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ElementReadEffect {
+    None,
+    Property,
+    Metadata,
+}
+
 /// Checked output expression. Column positions refer to the input relation,
 /// including when that relation is itself a projection or compound set.
 #[derive(Clone, PartialEq, Eq)]
@@ -712,6 +722,19 @@ impl GraphSetValue {
     // Typed admission already bounds this tree. The exhaustive match keeps new
     // expression variants from silently selecting a reader-free executor.
     pub(crate) fn may_read_element_properties(&self) -> bool {
+        self.element_read_effect() != ElementReadEffect::None
+    }
+
+    pub(crate) fn element_read_effect(&self) -> ElementReadEffect {
+        let optional =
+            |value: Option<&Self>| value.map_or(ElementReadEffect::None, Self::element_read_effect);
+        let many = |values: &[Self]| {
+            values
+                .iter()
+                .map(Self::element_read_effect)
+                .max()
+                .unwrap_or(ElementReadEffect::None)
+        };
         match self {
             Self::Column(_)
             | Self::Literal(_)
@@ -719,15 +742,24 @@ impl GraphSetValue {
             | Self::Integer(_)
             | Self::Value(_)
             | Self::Local(_)
-            | Self::Random { .. } => false,
+            | Self::Random { .. } => ElementReadEffect::None,
             Self::MapGet { map, property, .. } => {
-                matches!(property, GraphElementKey::Property(_))
-                    || map.may_read_element_properties()
+                let own = if matches!(property, GraphElementKey::Property(_)) {
+                    ElementReadEffect::Property
+                } else {
+                    ElementReadEffect::None
+                };
+                own.max(map.element_read_effect())
             }
             Self::ElementMetadata { value, .. } => {
-                value.may_read_element_properties() || value.may_be_element_value()
+                let own = if value.may_be_element_value() {
+                    ElementReadEffect::Metadata
+                } else {
+                    ElementReadEffect::None
+                };
+                own.max(value.element_read_effect())
             }
-            Self::List(values) => values.iter().any(Self::may_read_element_properties),
+            Self::List(values) => many(values),
             Self::Size(value)
             | Self::Keys(value)
             | Self::Temporal {
@@ -735,7 +767,7 @@ impl GraphSetValue {
             }
             | Self::Function {
                 argument: value, ..
-            } => value.may_read_element_properties(),
+            } => value.element_read_effect(),
             Self::Index {
                 list: left,
                 index: right,
@@ -750,52 +782,37 @@ impl GraphSetValue {
                 list: left,
                 predicate: right,
                 ..
-            } => left.may_read_element_properties() || right.may_read_element_properties(),
-            Self::Comprehension { list, filter, map } => {
-                list.may_read_element_properties()
-                    || filter
-                        .as_deref()
-                        .is_some_and(Self::may_read_element_properties)
-                    || map
-                        .as_deref()
-                        .is_some_and(Self::may_read_element_properties)
-            }
-            Self::Slice { list, from, to } => {
-                list.may_read_element_properties()
-                    || from
-                        .as_deref()
-                        .is_some_and(Self::may_read_element_properties)
-                    || to.as_deref().is_some_and(Self::may_read_element_properties)
-            }
-            Self::Range { start, end, step } => {
-                start.may_read_element_properties()
-                    || end.may_read_element_properties()
-                    || step
-                        .as_deref()
-                        .is_some_and(Self::may_read_element_properties)
-            }
-            Self::Reduce { init, list, expr } => {
-                init.may_read_element_properties()
-                    || list.may_read_element_properties()
-                    || expr.may_read_element_properties()
-            }
-            Self::MapLiteral { values, guard, .. } => {
-                guard
-                    .as_deref()
-                    .is_some_and(Self::may_read_element_properties)
-                    || values.iter().any(Self::may_read_element_properties)
-            }
+            } => left.element_read_effect().max(right.element_read_effect()),
+            Self::Comprehension { list, filter, map } => list
+                .element_read_effect()
+                .max(optional(filter.as_deref()))
+                .max(optional(map.as_deref())),
+            Self::Slice { list, from, to } => list
+                .element_read_effect()
+                .max(optional(from.as_deref()))
+                .max(optional(to.as_deref())),
+            Self::Range { start, end, step } => start
+                .element_read_effect()
+                .max(end.element_read_effect())
+                .max(optional(step.as_deref())),
+            Self::Reduce { init, list, expr } => init
+                .element_read_effect()
+                .max(list.element_read_effect())
+                .max(expr.element_read_effect()),
+            Self::MapLiteral { values, guard, .. } => many(values).max(optional(guard.as_deref())),
             Self::MapOverlay { base, values, .. } | Self::Let { body: base, values } => {
-                base.may_read_element_properties()
-                    || values.iter().any(Self::may_read_element_properties)
+                base.element_read_effect().max(many(values))
             }
-            Self::Case { arms, otherwise } => {
-                arms.iter().any(|(condition, value)| {
-                    condition.may_read_element_properties() || value.may_read_element_properties()
-                }) || otherwise
-                    .as_deref()
-                    .is_some_and(Self::may_read_element_properties)
-            }
+            Self::Case { arms, otherwise } => arms
+                .iter()
+                .map(|(condition, value)| {
+                    condition
+                        .element_read_effect()
+                        .max(value.element_read_effect())
+                })
+                .max()
+                .unwrap_or(ElementReadEffect::None)
+                .max(optional(otherwise.as_deref())),
         }
     }
 
