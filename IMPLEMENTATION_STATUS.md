@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-22 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-24 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,38 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Relationship MERGE actions combine row and relationship values — qualification pending
+
+Relationship MERGE actions can assign to a carried endpoint using both the
+selected relationship's properties and values imported by the incoming row.
+The compiler builds the same typed mixed input frame already used by
+relationship-target assignments; the shared native and authorized action
+evaluator consumes that frame before staging the clause's assignments.
+
+This closes the refusal of shapes such as:
+
+```gql
+MATCH (a:Person), (b:Person)
+WITH a,b,2 AS bonus
+MERGE (a)-[r:KNOWS]->(b)
+ON MATCH SET a.score = r.weight + bonus
+```
+
+Row-only actions retain their existing canonical transcript. Mixed frames
+carry an explicit transcript arm, validate their property/column schema, and
+translate fresh-endpoint provenance back to the original row. The change
+retains simultaneous-assignment preimages, cumulative work and scratch
+admission, selected-edge read witnesses, and atomic rollback on a failed
+action. It does not create another evaluator or transaction owner.
+
+Regression sources cover preparation, frame validation, existing and new
+relationships, endpoint provenance, and the native and capability-scoped
+write paths. Independent source review, pinned formatting of the changed Rust sources,
+and whitespace checks passed. Rust compilation and runtime
+qualification, Clippy, UBS and exact-tree gates remain incomplete in this
+execution environment. The broader relationship-MERGE and integrated
+qualification work remains open.
 
 ### Authorized external variable paths, aggregates and historical reads — qualification pending
 

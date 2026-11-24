@@ -125,10 +125,11 @@ enum ParsedUpsertAction<'a> {
     },
     /// A relationship MERGE step's assignment to a vertex its row carries
     /// in `column` (`ON CREATE SET b.created = 1`, fgdb-at06q), by the
-    /// shared value compiler over the row.
+    /// shared value compiler over the row and selected relationship's fields.
     RowVertex {
         column: usize,
         key: Name<'a>,
+        inputs: Option<Vec<UpsertInput<'a>>>,
         value: ReadValueTemplate,
         at: usize,
     },
@@ -596,7 +597,8 @@ impl<'a> Parser<'a> {
                 // `b.key = value` on a vertex the row carries. Computed
                 // endpoints (head/list access/UNWIND) have an open type;
                 // the native action evaluator checks their actual identity.
-                // Its value reads the row and not the merged relationship.
+                // A target-dependent value freezes the selected relationship's
+                // fields with the carried row before any clause write.
                 let carried = row.filter(|_| row_vertices).and_then(|row| {
                     row[..self.visible_width(row)]
                         .iter()
@@ -620,19 +622,20 @@ impl<'a> Parser<'a> {
                 let key = self.schema_name()?;
                 self.punct(b'=', "=")?;
                 let at = self.current.at;
-                if self.value_reads(row, Some(variable.text))?.1 {
-                    return Err(error(
-                        at,
-                        GraphPatternTextErrorKind::Expected(
-                            "a value that does not read the MERGE relationship",
-                        ),
-                    )
-                    .into());
-                }
-                let value = self.merge_row_value(row)?;
+                let (inputs, value) = if self.value_reads(row, Some(variable.text))?.1 {
+                    let mut inputs = Vec::new();
+                    let mut resolve = |parser: &mut Parser<'a>| {
+                        parser.upsert_value_input(variable, Some(row), true, &mut inputs)
+                    };
+                    let value = self.read_resolved_item(&mut resolve, 0)?;
+                    (Some(inputs), value)
+                } else {
+                    (None, self.merge_row_value(row)?)
+                };
                 target.push(ParsedUpsertAction::RowVertex {
                     column,
                     key,
+                    inputs,
                     value,
                     at,
                 });
@@ -909,6 +912,79 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// One input of a clause-local target/row value frame. Both relationship
+    /// and carried-vertex assignments use this resolver so parameter scopes,
+    /// hidden preimages and dynamic map reads retain their original ownership.
+    fn upsert_value_input(
+        &mut self,
+        variable: Name<'a>,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        mixed: bool,
+        inputs: &mut Vec<UpsertInput<'a>>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(None);
+        };
+        let next = self.lexer.clone().next()?.kind;
+        // An element's completed boundary read keeps its row position.
+        // Otherwise the shared value reader may dereference a carried map.
+        let column = match row {
+            Some(row) if word != variable.text => {
+                let column = self.merge_row_column(row)?;
+                if column.is_none() && mixed && matches!(next, TokenKind::Punct(b'.')) {
+                    let visible = self.visible_width(row);
+                    let column = row[..visible].iter().position(|(name, kind)| {
+                        name.text == word
+                            && matches!(
+                                kind,
+                                GraphSetColumnType::Scalar
+                                    | GraphSetColumnType::Stored
+                                    | GraphSetColumnType::List
+                                    | GraphSetColumnType::Any
+                            )
+                    });
+                    if column.is_some() {
+                        self.advance()?;
+                    }
+                    column
+                } else {
+                    column
+                }
+            }
+            _ => None,
+        };
+        let input = if let Some(column) = column {
+            UpsertInput::Column(column)
+        } else {
+            if !matches!(next, TokenKind::Punct(b'.')) {
+                return Ok(None);
+            }
+            let source = self.name()?;
+            if source.text != variable.text {
+                return Err(error(
+                    source.at,
+                    GraphPatternTextErrorKind::Expected("the MERGE variable"),
+                ));
+            }
+            self.punct(b'.', ".")?;
+            UpsertInput::Property(self.schema_name()?)
+        };
+        if let Some(column) = inputs.iter().position(|known| match (known, input) {
+            (UpsertInput::Property(old), UpsertInput::Property(new)) => old.text == new.text,
+            (UpsertInput::Column(old), UpsertInput::Column(new)) => *old == new,
+            _ => false,
+        }) {
+            return Ok(Some(column));
+        }
+        self.capacity(
+            inputs.len(),
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        inputs.push(input);
+        Ok(Some(inputs.len() - 1))
+    }
+
     /// The right-hand side of `n.key = value`.
     fn upsert_value(
         &mut self,
@@ -965,73 +1041,7 @@ impl<'a> Parser<'a> {
         } else {
             let mut inputs: Vec<UpsertInput<'a>> = Vec::new();
             let mut resolve = |parser: &mut Parser<'a>| {
-                let TokenKind::Word(word) = parser.current.kind else {
-                    return Ok(None);
-                };
-                let next = parser.lexer.clone().next()?.kind;
-                // A vertex MERGE step's row (fgdb-cpny9): `a.key` of an
-                // element it carries is that row's hidden read, and a
-                // scalar column reads by name.
-                let column = match row {
-                    Some(row) if word != variable.text => {
-                        let column = parser.merge_row_column(row)?;
-                        if column.is_none() && mixed && matches!(next, TokenKind::Punct(b'.')) {
-                            // A completed boundary cell keeps its old binding.
-                            // Otherwise bind the actual carried value and let
-                            // the shared resolved reader consume its map entry.
-                            let visible = parser.visible_width(row);
-                            let column = row[..visible].iter().position(|(name, kind)| {
-                                name.text == word
-                                    && matches!(
-                                        kind,
-                                        GraphSetColumnType::Scalar
-                                            | GraphSetColumnType::Stored
-                                            | GraphSetColumnType::List
-                                            | GraphSetColumnType::Any
-                                    )
-                            });
-                            if column.is_some() {
-                                parser.advance()?;
-                            }
-                            column
-                        } else {
-                            column
-                        }
-                    }
-                    _ => None,
-                };
-                let input = if let Some(column) = column {
-                    UpsertInput::Column(column)
-                } else {
-                    if !matches!(next, TokenKind::Punct(b'.')) {
-                        return Ok(None);
-                    }
-                    let source = parser.name()?;
-                    if source.text != variable.text {
-                        return Err(error(
-                            source.at,
-                            GraphPatternTextErrorKind::Expected("the MERGE variable"),
-                        ));
-                    }
-                    parser.punct(b'.', ".")?;
-                    UpsertInput::Property(parser.schema_name()?)
-                };
-                if let Some(column) = inputs.iter().position(|known| match (known, input) {
-                    (UpsertInput::Property(old), UpsertInput::Property(new)) => {
-                        old.text == new.text
-                    }
-                    (UpsertInput::Column(old), UpsertInput::Column(new)) => *old == new,
-                    _ => false,
-                }) {
-                    return Ok(Some(column));
-                }
-                parser.capacity(
-                    inputs.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                inputs.push(input);
-                Ok(Some(inputs.len() - 1))
+                parser.upsert_value_input(variable, row, mixed, &mut inputs)
             };
             let operand = if mixed || row.is_none() || target_list {
                 // One parse admits both domains. Scalar templates retain the
@@ -1195,11 +1205,15 @@ fn resolve_row_actions<'a>(
             ParsedUpsertAction::RowVertex {
                 column,
                 key,
+                inputs,
                 value,
                 at,
             } => VertexMergeRowActionTemplate::RowVertex {
                 column,
                 key: property_symbol(symbol, key)?,
+                inputs: inputs
+                    .map(|inputs| resolve_upsert_inputs(inputs, symbol))
+                    .transpose()?,
                 value: Box::new(value),
                 at,
             },

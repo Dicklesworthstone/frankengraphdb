@@ -4054,3 +4054,143 @@ fn staged_relationship_merges_run_their_on_and_set_clauses() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// Carried vertices in a relationship MERGE read the selected relationship's
+/// pre-clause properties. Native text must retain branch selection, simultaneous
+/// assignments, owned lists, and atomic publication through this mixed frame.
+#[test]
+fn carried_vertex_merge_actions_read_relationship_preimages_and_reopen() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b6, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(10), vec![SOURCE], vec![(P, CanonicalScalar::Int(10))]);
+        seed.create_vertex(VId(20), vec![SOURCE], vec![(P, CanonicalScalar::Int(20))]);
+        seed.add_edge(
+            EId(30),
+            VId(10),
+            VId(20),
+            vec![(Q, CanonicalScalar::Int(30))],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let write = async |db: &mut Database<MemVfs>, text: &str, params: &GqlParameters| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                params,
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let int = |value| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+        let parameters = GqlParameters::new().with_int64("amount", 2).unwrap();
+        let branches = "MATCH (a:Source {p:10}), (b:Source {p:20}) WITH a,b \
+                        MERGE (a)-[r:T]->(b) \
+                        ON CREATE SET a.q=coalesce(r.q,3)+$amount,r.q=30 \
+                        ON MATCH SET b.q=r.q+$amount,r.q=r.q+1";
+        for (round, expected_edge) in [30, 31, 32].into_iter().enumerate() {
+            let before = db.frontier().unwrap();
+            write(&mut db, branches, &parameters).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert_eq!(
+                db.vertex(VId(10)).unwrap().unwrap().props,
+                vec![(P, int(10)), (Q, int(5))]
+            );
+            let expected_b = if round == 0 {
+                vec![(P, int(20))]
+            } else {
+                vec![(P, int(20)), (Q, int(expected_edge + 1))]
+            };
+            assert_eq!(db.vertex(VId(20)).unwrap().unwrap().props, expected_b);
+            let merged: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == T)
+                .collect();
+            assert_eq!(merged.len(), 1);
+            assert_eq!(
+                (merged[0].entry.src, merged[0].entry.dst),
+                (VId(10), VId(20))
+            );
+            assert_eq!(merged[0].props, vec![(Q, int(expected_edge))]);
+            assert_eq!(db.edge(EId(30)).unwrap().unwrap().props, vec![(Q, int(30))]);
+        }
+
+        let lists = "MATCH (a:Source {p:10}), (b:Source {p:20}) WITH a,b,[1,2] AS prefix \
+                     MERGE (a)-[r:R]->(b) \
+                     ON MATCH SET a.q=prefix+[r.q],a.born=r.q > 0 AND r.q IS NOT NULL,r.q=31";
+        write(&mut db, lists, &GqlParameters::new()).await.unwrap();
+        assert_eq!(
+            db.vertex(VId(10)).unwrap().unwrap().props,
+            vec![
+                (P, int(10)),
+                (
+                    Q,
+                    CanonicalPropertyValue::List(
+                        fgdb_types::CanonicalList::try_new(vec![int(1), int(2), int(30)]).unwrap()
+                    )
+                ),
+                (BORN, CanonicalScalar::Bool(true).into()),
+            ]
+        );
+        assert_eq!(db.edge(EId(30)).unwrap().unwrap().props, vec![(Q, int(31))]);
+
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        // The first action succeeds, but a later selected-edge RHS fails.
+        // Neither action nor the otherwise successful MERGE may publish.
+        let refused = "MATCH (a:Source {p:10}), (b:Source {p:20}) WITH a,b \
+                       MERGE (a)-[r:R]->(b) \
+                       ON MATCH SET a.q=r.q+1,b.q=1 / (r.q-r.q)";
+        assert!(
+            write(&mut db, refused, &GqlParameters::new())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -544,6 +544,7 @@ pub(crate) enum VertexMergeRowActionTemplate {
     RowVertex {
         column: usize,
         key: PropertyKeyId,
+        inputs: Option<Vec<crate::GraphVertexMergeRowInput>>,
         value: Box<crate::set_text::ReadValueTemplate>,
         at: usize,
     },
