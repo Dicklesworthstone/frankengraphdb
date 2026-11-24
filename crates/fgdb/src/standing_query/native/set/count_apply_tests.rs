@@ -452,11 +452,14 @@ fn grouped_call_text(optional: bool, filtered: bool) -> String {
     )
 }
 
+// Owner, nullable category, bucket, degree, sum, and smallest vertex.
+type ExpectedOwnerGroup = (u128, Option<i64>, i64, i64, i64, u128);
+
 // All group values are fixture literals. This only places them in the public
 // schema and restores the specified two outer occurrences per active owner.
 fn grouped_call_bag(
     owners: &[u128],
-    groups: &[(u128, Option<i64>, i64, i64, i64, u128)],
+    groups: &[ExpectedOwnerGroup],
     optional: bool,
     filtered: bool,
 ) -> Bag {

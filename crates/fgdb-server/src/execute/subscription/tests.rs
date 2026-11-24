@@ -2203,6 +2203,7 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
                 ("Hidden", CatalogSymbol::Relation(RelationId(2))),
                 ("selected", CatalogSymbol::Property(PropertyKeyId(1))),
                 ("secret", CatalogSymbol::Property(PropertyKeyId(2))),
+                ("score", CatalogSymbol::Property(PropertyKeyId(3))),
             ])
             .unwrap();
         {
@@ -2212,8 +2213,12 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
                 .await
                 .unwrap();
             let mut seed = WriteBatch::new(RelationId(1));
-            for owner in [1, 3] {
-                seed.create_vertex(VId(owner), vec![LabelId(1)], vec![]);
+            for (owner, score) in [(1, 6), (3, 9)] {
+                seed.create_vertex(
+                    VId(owner),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(3), CanonicalScalar::Int(score))],
+                );
             }
             for target in [2, 4, 5] {
                 seed.create_vertex(
@@ -2237,7 +2242,10 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
             .unwrap()
             .attenuate(Restriction::Relations(Scope::only([RelationId(1)])))
             .unwrap()
-            .attenuate(Restriction::Properties(Scope::only([PropertyKeyId(1)])))
+            .attenuate(Restriction::Properties(Scope::only([
+                PropertyKeyId(1),
+                PropertyKeyId(3),
+            ])))
             .unwrap()
             .attenuate(Restriction::MaxNodes(40_000))
             .unwrap()
@@ -2245,18 +2253,34 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
             .unwrap()
             .attenuate(Restriction::MaxRows(8))
             .unwrap();
-        let statement = request(concat!(
+        let identity = request(concat!(
             "SUBSCRIBE TO MATCH (a:Owner) UNWIND [7,7] AS token WITH a,token ",
             "OPTIONAL CALL (a) { MATCH (a)-[:R]->(b:Target {selected:1}) ",
             "RETURN id(b) % 2 AS bucket,count(*) AS degree,sum(id(b)) AS total } ",
             "RETURN a,bucket,degree,total"
+        ));
+        for denied in [
+            identity,
+            request("SUBSCRIBE TO MATCH (b:Target) RETURN elementId(b) AS raw"),
+        ] {
+            refused(
+                subscribe(&root, db, &scoped, &denied).await,
+                ErrorCode::PermissionDenied,
+            );
+            assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
+        }
+        let statement = request(concat!(
+            "SUBSCRIBE TO MATCH (a:Owner) WITH a,a.score AS score ",
+            "UNWIND [7,7] AS token WITH a,token,score OPTIONAL CALL (a,score) { ",
+            "MATCH (a)-[:R]->(b:Target {selected:1}) RETURN b AS bucket,",
+            "count(*) AS degree,sum(score) AS total } RETURN a,bucket,degree,total"
         ));
         let mut subscription = success(subscribe(&root, db, &scoped, &statement).await);
         assert_eq!(subscription.columns, ["a", "bucket", "degree", "total"]);
         let row = |owner, bucket, degree, total| {
             vec![
                 WireValue::Vertex(owner),
-                WireValue::Int(bucket),
+                WireValue::Vertex(bucket),
                 WireValue::Int(degree),
                 WireValue::Int(total),
             ]
@@ -2271,15 +2295,17 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
         };
         let baseline = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
         assert!(baseline.batch.is_snapshot());
-        assert_eq!(baseline.entries.len(), 3);
-        assert!(baseline.entries.contains(&(2, row(1, 0, 3, 8))));
-        assert!(baseline.entries.contains(&(2, row(1, 1, 1, 5))));
+        assert_eq!(baseline.entries.len(), 4);
+        assert!(baseline.entries.contains(&(2, row(1, 2, 2, 12))));
+        assert!(baseline.entries.contains(&(2, row(1, 4, 1, 6))));
+        assert!(baseline.entries.contains(&(2, row(1, 5, 1, 6))));
         assert!(baseline.entries.contains(&(2, absent(3))));
 
-        // A property changes group membership before the client acknowledges
-        // its baseline. Neither its bytes nor its receipt may be replaced.
+        // Before acknowledgement, a property excludes one target and a parallel
+        // edge disappears from another group. The pending baseline is stable.
         let mut changed = WriteBatch::new(RelationId(1));
         changed.set_vertex_property(VId(4), PropertyKeyId(1), Some(CanonicalScalar::Int(0)));
+        changed.delete_edge(EId(2));
         db.db
             .write(&root)
             .await
@@ -2301,9 +2327,10 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
             changed.batch.frontier(),
             CommitSeq(baseline.batch.frontier().0 + 1)
         );
-        assert_eq!(changed.entries.len(), 2);
-        assert!(changed.entries.contains(&(-2, row(1, 0, 3, 8))));
-        assert!(changed.entries.contains(&(2, row(1, 0, 2, 4))));
+        assert_eq!(changed.entries.len(), 3);
+        assert!(changed.entries.contains(&(-2, row(1, 4, 1, 6))));
+        assert!(changed.entries.contains(&(-2, row(1, 2, 2, 12))));
+        assert!(changed.entries.contains(&(2, row(1, 2, 1, 6))));
         subscription
             .consumer
             .acknowledge(changed.batch.receipt())
@@ -2313,7 +2340,6 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
         // not manufacture a zero-count row while another group still exists.
         let mut deleted = WriteBatch::new(RelationId(1));
         deleted.delete_edge(EId(1));
-        deleted.delete_edge(EId(2));
         db.db
             .write(&root)
             .await
@@ -2323,7 +2349,7 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
             .unwrap();
         let removed = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
         assert_eq!(removed.batch.from(), Some(changed.batch.frontier()));
-        assert_eq!(removed.entries, [(-2, row(1, 0, 2, 4))]);
+        assert_eq!(removed.entries, [(-2, row(1, 2, 1, 6))]);
         subscription
             .consumer
             .acknowledge(removed.batch.receipt())
@@ -2340,7 +2366,7 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
         let empty = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
         assert_eq!(empty.batch.from(), Some(removed.batch.frontier()));
         assert_eq!(empty.entries.len(), 2);
-        assert!(empty.entries.contains(&(-2, row(1, 1, 1, 5))));
+        assert!(empty.entries.contains(&(-2, row(1, 5, 1, 6))));
         assert!(empty.entries.contains(&(2, absent(1))));
         subscription
             .consumer
@@ -2378,7 +2404,7 @@ fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts
         assert_eq!(active.batch.from(), Some(empty.batch.frontier()));
         assert_eq!(active.entries.len(), 2);
         assert!(active.entries.contains(&(-2, absent(3))));
-        assert!(active.entries.contains(&(2, row(3, 1, 1, 5))));
+        assert!(active.entries.contains(&(2, row(3, 5, 1, 9))));
         subscription
             .consumer
             .acknowledge(active.batch.receipt())
