@@ -31,7 +31,7 @@ pub use spool::{
     NativeSpoolDifference, NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
     PreparedBufferedSealedAggregate, PreparedBufferedSealedOrder,
 };
-pub(crate) use spool::{SpoolInput, SpoolRow, ordered_input, ordered_stages};
+pub(crate) use spool::{SpoolInput, SpoolRow, ordered_input, ordered_stages, spool_input};
 
 impl EmbeddedReadView {
     /// Set an explicit host calendar authority for future statement bindings

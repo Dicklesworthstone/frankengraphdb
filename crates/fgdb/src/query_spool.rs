@@ -346,7 +346,7 @@ impl SpoolRow {
             tracked_encoding: false,
         }
     }
-    fn buffered((row, charge): (GraphValueRow, MemoryCharge)) -> Self {
+    pub(crate) fn buffered((row, charge): (GraphValueRow, MemoryCharge)) -> Self {
         Self {
             row,
             _charge: Some(charge),
@@ -485,6 +485,42 @@ where
             self.evaluator_stats(),
         )
     }
+}
+
+/// Complete a host-admitted native source with the shared frame writer and
+/// cumulative physical encoding allowance. Source ordering is unchanged; its
+/// enclosing relational stages retain every canonical order/window barrier.
+pub(crate) async fn spool_input<I, F>(
+    cx: &QueryCx,
+    columns: Vec<String>,
+    cursor: I,
+    scratch: &mut SpillFile<F>,
+    page_bytes: usize,
+    max_row_bytes: usize,
+    max_work: u64,
+) -> Result<(NativeResultSpool, u64), NativeSpoolError>
+where
+    I: SpoolInput,
+    F: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+{
+    let encoded_columns = columns.len();
+    let mut work = sort::Work {
+        cx,
+        used: 0,
+        limit: max_work,
+    };
+    let spool = drain(
+        cx,
+        columns,
+        encoded_columns,
+        cursor,
+        scratch,
+        page_bytes,
+        max_row_bytes,
+        Some(&mut work),
+    )
+    .await?;
+    Ok((spool, work.used))
 }
 
 #[allow(clippy::too_many_arguments)]

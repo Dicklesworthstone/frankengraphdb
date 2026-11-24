@@ -17,6 +17,8 @@ use std::task::{Context, Waker};
 
 #[path = "tests/imported.rs"]
 mod imported;
+#[path = "tests/procedure.rs"]
+mod procedure;
 #[path = "tests/terminal_aggregate.rs"]
 mod terminal_aggregate;
 #[path = "tests/vertex_probes.rs"]

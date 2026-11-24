@@ -106,7 +106,9 @@ fn observe(cx: &QueryCx, raw: Raw, id: EId, key: PropertyKeyId, limit: u64) -> O
         samples.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         100
     };
-    let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
+    let execution = Shared(Arc::new(Mutex::new(Some(Execution::new(
+        cx, permit, &mut clock,
+    )))));
     let source = ScopedSource {
         inner: raw,
         execution: execution.clone(),
@@ -234,7 +236,9 @@ fn repeated_edge_fields_share_a_single_terminal_node_allowance() {
         let verified = issuer.verify_at(&token, BRANCH, 100).unwrap();
         let permit = verified.begin_read_at(BRANCH, 100).unwrap();
         let mut clock = || 100;
-        let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
+        let execution = Shared(Arc::new(Mutex::new(Some(Execution::new(
+            cx, permit, &mut clock,
+        )))));
         let source = ScopedSource {
             inner: Raw::new(vec![(PropertyKeyId(17), CanonicalScalar::Int(7))]),
             execution: execution.clone(),
