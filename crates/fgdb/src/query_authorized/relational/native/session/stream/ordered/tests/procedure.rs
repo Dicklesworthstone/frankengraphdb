@@ -208,8 +208,8 @@ fn fnx_arguments_stay_lazy_but_reached_errors_survive_limit_zero() {
                 .unwrap()
                 .await;
             if active {
-                assert!(matches!(result,
-                    Err(NativeSpoolError::Authorized(error)) if matches!(*error,
+                assert!(matches!(result.err(),
+                    Some(NativeSpoolError::Authorized(error)) if matches!(*error,
                         QueryError::Set(GqlQueryError::Source(
                             GraphSetExecutionError::Projection { error, .. }
                         )) if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
@@ -255,8 +255,8 @@ fn cancelling_pending_fnx_spool_drops_kernel_rows_and_affine_reservations() {
         let Poll::Ready(result) = future.as_mut().poll(&mut context) else {
             panic!("cancelled FnX spool stayed pending");
         };
-        assert!(matches!(result,
-            Err(NativeSpoolError::Authorized(error))
+        assert!(matches!(result.err(),
+            Some(NativeSpoolError::Authorized(error))
                 if matches!(*error, QueryError::Pattern(GqlQueryError::Interrupted(_)))
         ));
         drop(future);

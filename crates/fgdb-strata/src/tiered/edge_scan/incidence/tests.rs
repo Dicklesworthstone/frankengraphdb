@@ -1242,7 +1242,11 @@ fn incidence_candidate_admission_precedes_sidecar_faults_on_every_cursor() {
                         BufferedEdgeScanEvent::Work => Ok(()),
                         BufferedEdgeScanEvent::Identity(eid) => {
                             identities.push(eid);
-                            if admit { Ok(()) } else { Err("candidate quota") }
+                            if admit {
+                                Ok(())
+                            } else {
+                                Err("candidate quota")
+                            }
                         }
                     };
                     let result = if retained {
@@ -1308,19 +1312,18 @@ fn incidence_candidate_admission_precedes_sidecar_faults_on_every_cursor() {
                 let mut scan = view
                     .edge_scan(&cx, CommitSeq(cut))
                     .unwrap()
-                    .into_incidence_scan(
-                        VId(10),
-                        Some(R),
-                        BufferedEdgeDirection::Incoming,
-                        None,
-                    );
+                    .into_incidence_scan(VId(10), Some(R), BufferedEdgeDirection::Incoming, None);
                 let mut identities = Vec::new();
                 let result = scan
                     .next_candidate_with(&cx, &mut |event| match event {
                         BufferedEdgeScanEvent::Work => Ok(()),
                         BufferedEdgeScanEvent::Identity(eid) => {
                             identities.push(eid);
-                            if admit { Ok(()) } else { Err("candidate quota") }
+                            if admit {
+                                Ok(())
+                            } else {
+                                Err("candidate quota")
+                            }
                         }
                     })
                     .await;
@@ -1348,10 +1351,7 @@ fn incidence_candidate_admission_precedes_sidecar_faults_on_every_cursor() {
                 drop(scan);
                 if !admit {
                     let after = view.stats();
-                    assert_eq!(
-                        after.hits + after.misses,
-                        before.hits + before.misses + 1
-                    );
+                    assert_eq!(after.hits + after.misses, before.hits + before.misses + 1);
                 }
                 drop(view.reserve_scan_bytes(&cx, pool.limit()));
                 assert_eq!(pool.used(), baseline);
@@ -1539,7 +1539,10 @@ fn active_join_conversion_keeps_root_position_and_final_root_children() {
         }
         assert_eq!(
             remaining,
-            TOPOLOGY[1..].iter().map(|row| EId(row.0)).collect::<Vec<_>>()
+            TOPOLOGY[1..]
+                .iter()
+                .map(|row| EId(row.0))
+                .collect::<Vec<_>>()
         );
         assert!(!scan.is_closed());
         let child = scan

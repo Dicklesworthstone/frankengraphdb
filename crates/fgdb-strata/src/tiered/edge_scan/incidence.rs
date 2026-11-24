@@ -733,7 +733,14 @@ impl<V: Vfs> Driver<'_, V> {
             // path upgrades this topology image after that admission, keeping
             // the same original row positions and retained permutation.
             self.root
-                .load(&mut state, cx, block, None, EdgePropertyAccess::Skip, observe)
+                .load(
+                    &mut state,
+                    cx,
+                    block,
+                    None,
+                    EdgePropertyAccess::Skip,
+                    observe,
+                )
                 .await?;
             let active = state.active.as_ref().ok_or_else(invalid_load)?;
             let mut ordinal = 0;

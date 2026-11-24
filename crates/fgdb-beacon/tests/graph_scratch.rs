@@ -549,10 +549,7 @@ fn filtered_disabled_and_zero_output_fusion_retains_only_admitted_entries() {
         let rows = check_fusion_scratch(6, |work| {
             snapshot.hybrid_search_exact_fusion(enabled, |_| true, work)
         });
-        assert_eq!(
-            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
-            expected
-        );
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), expected);
     }
     assert!(
         check_fusion_scratch(0, |work| {
@@ -584,9 +581,18 @@ fn graph_fusion_shares_indexed_evidence_admission_with_all_three_lanes() {
         graph_weight: 100,
     };
     let graph = [
-        GraphHit { id: VId(2), hops: 0 },
-        GraphHit { id: VId(3), hops: 1 },
-        GraphHit { id: VId(9), hops: 1 },
+        GraphHit {
+            id: VId(2),
+            hops: 0,
+        },
+        GraphHit {
+            id: VId(3),
+            hops: 1,
+        },
+        GraphHit {
+            id: VId(9),
+            hops: 1,
+        },
     ];
     // Three validated graph IDs + three eligible ranks + four UNION evidence
     // entries + four heap slots + four results. IDs 2/3 are not charged twice.
@@ -613,7 +619,10 @@ fn graph_fusion_shares_indexed_evidence_admission_with_all_three_lanes() {
         graph_weight: 0,
         ..query
     };
-    let duplicate = [GraphHit { id: VId(9), hops: 0 }; 4];
+    let duplicate = [GraphHit {
+        id: VId(9),
+        hops: 0,
+    }; 4];
     let rows = check_fusion_scratch(9, |work| {
         snapshot.hybrid_search_graph_filtered(disabled, &duplicate, |_| true, work)
     });
