@@ -14,11 +14,13 @@
 </div>
 
 ```bash
-# What runs today, from a source checkout (there are no releases or installer yet — see Installation):
+# Run the embedded example from a source checkout
 git clone https://github.com/Dicklesworthstone/frankengraphdb
 cd frankengraphdb
 cargo run -p fgdb --example open_a_database
 ```
+
+The CLI and server can write a graph, query the new state, and recover it after restart. On a 176 MB test database, `fgdb query --buffered` streamed 6,144 rows under a 60 MiB memory limit. An ordinary local query exhausted that limit while opening the same database, even with `LIMIT 0`. The [reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) records the tested revisions, commands, and open qualification work.
 
 > **A note on tense (read this first).** This README is written in the **present tense, as if the entire design in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md`](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md) is fully realized**: the 1.0 target state where every performance gate is green and every subsystem is live. This is a deliberate choice. It lets the document describe the *finished* system so it gets **trued-up in place as milestones land** (§19's gates G1→G4) rather than rewritten from scratch later. Where the plan itself stages something as genuinely future work (horizontal sharding, covered under [Limitations](#limitations)), the README says so plainly. Everything else below is the spec of the system this repository builds.
 
@@ -1053,7 +1055,7 @@ The same TLS options apply to remote writes and subscriptions. HTTP clients use 
 
 ## Installation
 
-**1. Install script — not yet available.** There are no git tags, no GitHub Releases, no signed binaries, and no fgdb installer script in this repository today; `fgdb-epic-w10-mhq.1` owns shipping them. The curl one-liner returns here when the artifact it fetches exists (a claims-lint tripwire fails the gate if that instruction reappears before the script is a tracked file).
+**1. Installer and release binaries.** Build from source using the commands below. The `archive/*` tags preserve development history. Issue `fgdb-epic-w10-mhq.1` tracks the installer and signed release binaries.
 
 **2. From source** (requires the pinned nightly toolchain, which `rust-toolchain.toml` auto-selects). This is the path that runs today:
 
