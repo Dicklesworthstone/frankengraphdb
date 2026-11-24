@@ -31,7 +31,7 @@ pub struct BufferedReadConfig {
 impl BufferedReadConfig {
     #[must_use]
     pub fn new(memory_bytes: usize) -> Self {
-        let root = (memory_bytes / 64).min(1024 * 1024);
+        let root = BufferedReadLimits::root_bytes_for_pool(memory_bytes);
         Self {
             memory_bytes,
             max_concurrent: 4,
@@ -112,5 +112,24 @@ impl BufferedReads {
             self.config.limits,
             BufferedLease(Arc::clone(&self.active)),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn larger_read_pools_admit_larger_roots_under_the_same_source_ceiling() {
+        let normal = BufferedReadConfig::new(64 << 20);
+        let larger = BufferedReadConfig::new(256 << 20);
+        assert_eq!(normal.limits.max_root_bytes, 1 << 20);
+        assert_eq!(larger.limits.max_root_bytes, 4 << 20);
+        assert_eq!(
+            larger.limits.max_source_bytes,
+            normal.limits.max_source_bytes
+        );
+        assert_eq!(larger.limits.max_work, normal.limits.max_work);
+        assert!(larger.limits.metadata_bytes().unwrap() < larger.memory_bytes);
     }
 }

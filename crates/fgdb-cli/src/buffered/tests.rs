@@ -26,6 +26,25 @@ fn keys() -> DatabaseKeys {
     )
 }
 
+#[test]
+fn buffered_root_admission_scales_with_the_requested_pool() {
+    let policy = options(&["MATCH (n) RETURN n"]).budget.policy();
+    for (memory, expected_root) in [
+        (Some(8 * 1024 * 1024), 128 * 1024),
+        (None, 1024 * 1024),
+        (Some(256 * 1024 * 1024), 4 * 1024 * 1024),
+    ] {
+        let buffered = BufferedOptions {
+            memory,
+            ..Default::default()
+        };
+        let (pool, limits) = okay(buffered.admission(policy));
+        assert_eq!(limits.max_root_bytes, expected_root);
+        assert!(limits.metadata_bytes().unwrap() < pool.limit());
+        assert_eq!(limits.max_source_bytes, DEFAULT_SOURCE as usize);
+    }
+}
+
 fn options(extra: &[&str]) -> Options {
     let mut args = [
         "--db",

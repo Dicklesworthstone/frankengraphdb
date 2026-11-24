@@ -129,7 +129,7 @@ impl BufferedOptions {
             self.memory.unwrap_or(DEFAULT_MEMORY),
             "--buffer-memory-bytes",
         )?;
-        let root = (memory / 64).min(1024 * 1024);
+        let root = BufferedReadLimits::root_bytes_for_pool(memory);
         let source = size(
             self.source.unwrap_or(DEFAULT_SOURCE),
             "--buffer-source-bytes",

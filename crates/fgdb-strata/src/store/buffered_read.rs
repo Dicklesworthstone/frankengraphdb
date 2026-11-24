@@ -83,6 +83,15 @@ pub struct BufferedReadLimits {
 }
 
 impl BufferedReadLimits {
+    const ROOT_DECODE_MULTIPLIER: usize = 16;
+
+    /// Encoded root budget for a host that gives root decoding one quarter
+    /// of its read pool. Cache-policy bookkeeping is charged separately.
+    #[must_use]
+    pub const fn root_bytes_for_pool(memory_bytes: usize) -> usize {
+        (memory_bytes / 4) / Self::ROOT_DECODE_MULTIPLIER
+    }
+
     /// Validate an explicit native-run decoder profile before opening a source.
     /// This checks representable capacity only and performs no allocation or
     /// I/O. Pool admission remains lazy, when a query selects a durable run.
@@ -103,7 +112,7 @@ impl BufferedReadLimits {
     pub fn metadata_bytes(self) -> Result<usize, BufferedReadError> {
         let policy = self.metadata_policy_bytes()?;
         self.max_root_bytes
-            .checked_mul(16)
+            .checked_mul(Self::ROOT_DECODE_MULTIPLIER)
             .and_then(|bytes| bytes.checked_add(policy))
             .ok_or(BufferedReadError::SizeOverflow)
     }
