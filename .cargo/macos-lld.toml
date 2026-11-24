@@ -8,6 +8,12 @@
 #
 #   cargo --config .cargo/macos-lld.toml test -p fgdb --lib
 #
+# On Apple Silicon with Xcode 27, the pinned ld64.lld rejects the
+# arm64e.x1-macos target in the SDK's libSystem.tbd. Setting SDKROOT to an
+# installed Apple 26.2 SDK selects compatible link stubs (fgdb-dhipo).
+#
+#   SDKROOT=/path/to/MacOSX26.2.sdk cargo --config .cargo/macos-lld.toml test -p fgdb --lib
+#
 # link-self-contained=+linker puts the toolchain's gcc-ld directory (which
 # holds ld64.lld) on clang's search path, so no machine-specific path appears
 # here. Target rustflags replace [build] rustflags, so threads=4 is repeated.
