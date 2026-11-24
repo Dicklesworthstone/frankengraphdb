@@ -260,6 +260,8 @@ pub enum GraphPatternTextErrorKind {
     InvalidToken,
     NameTooLong,
     Expected(&'static str),
+    /// The operand parsed successfully, but its literal type rules out the operation.
+    InvalidArgumentType(&'static str),
     /// Syntax was accepted, but a native catalog CALL cannot bind the host's
     /// missing or invalid complete reverse catalog.
     Catalog(&'static str),
@@ -343,7 +345,7 @@ impl core::fmt::Display for GraphPatternTextErrorKind {
             Self::TooManyTokens => f.write_str("statement has too many tokens"),
             Self::InvalidToken => f.write_str("invalid token"),
             Self::NameTooLong => f.write_str("name is too long"),
-            Self::Expected(item) => write_expected(f, item),
+            Self::Expected(item) | Self::InvalidArgumentType(item) => write_expected(f, item),
             Self::Catalog(constraint) => write!(f, "catalog requires {constraint}"),
             Self::IntegerOutOfRange => f.write_str("integer literal is out of range"),
             Self::InvalidPageValue => {
@@ -397,6 +399,7 @@ impl GraphPatternTextErrorKind {
         match self {
             Self::InvalidToken
             | Self::Expected(_)
+            | Self::InvalidArgumentType(_)
             | Self::BooleanExpression
             | Self::UnknownVariable => C::Syntax,
             Self::UnsupportedBooleanScope => C::Unsupported,
@@ -1154,6 +1157,9 @@ struct Parser<'a> {
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
     elements: Vec<&'a str>,
+    /// Lexical element slots whose source contains only values that cannot
+    /// be multiplied, divided or raised to a power. Names may be shadowed.
+    nonnumeric_elements: Vec<usize>,
     /// The byte offsets of WITH aliases known to hold maps: literals, map
     /// projections, declared map parameters and aliases of those bindings.
     /// Such a binding is a map, never a node, although its column type is the
@@ -1392,6 +1398,7 @@ impl<'a> Parser<'a> {
             optional_body: false,
             read_elements: false,
             elements: Vec::new(),
+            nonnumeric_elements: Vec::new(),
             map_aliases: Vec::new(),
             lets: None,
             let_base: 0,

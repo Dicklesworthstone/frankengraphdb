@@ -80,6 +80,89 @@ const CASES: &[(&str, NativeReadClass, &str)] = &[
 ];
 
 #[test]
+fn literal_operand_refusals_keep_the_type_and_callers_byte() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let view = db.pinned_read_view().unwrap();
+        let mut params = GqlParameters::new();
+        params
+            .insert(
+                "m",
+                GqlParameterValue::Map(
+                    GqlMapParameter::new(vec![(
+                        "long_field".into(),
+                        fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(1)),
+                    )])
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        for (body, marker, requirement, expected_facade) in [
+            (
+                "MATCH (n) RETURN properties('λ')",
+                "'λ'",
+                "a vertex, edge, map or NULL",
+                NativeReadClass::Set,
+            ),
+            (
+                "MATCH (n {p: $m.long_field}) RETURN properties(42)",
+                "42",
+                "a vertex, edge, map or NULL",
+                NativeReadClass::Set,
+            ),
+            (
+                "MATCH (n) RETURN 1 IN {x: 2}",
+                "{x",
+                "a list or NULL after IN",
+                NativeReadClass::Set,
+            ),
+            (
+                "RETURN any(x IN ['λ'] WHERE x % 2 = 0)",
+                "%",
+                "an arithmetic operand",
+                NativeReadClass::PipelineAggregate,
+            ),
+        ] {
+            for prefix in ["", "EXPLAIN ", "\u{2003}explain (CERTIFICATE)\n "] {
+                let text = format!("{prefix}{body}");
+                for error in [
+                    db.query(&contexts.query(), &text, &params, symbols, policy())
+                        .unwrap_err(),
+                    view.query(&contexts.query(), &text, &params, symbols, policy())
+                        .unwrap_err(),
+                ] {
+                    let QueryError::Refused { facade, source } = error else {
+                        panic!("expected classified refusal for {text}: {error:?}");
+                    };
+                    assert_eq!(facade, expected_facade, "{text}");
+                    let (offset, kind) = match *source {
+                        QueryError::SetText(e) => (e.offset, e.kind),
+                        QueryError::PipelineText(GraphPipelineAggregateTextError {
+                            offset,
+                            kind: GraphPipelineAggregateTextErrorKind::Input(kind),
+                        }) => (offset, kind),
+                        other => panic!("expected a parsed operand refusal for {text}: {other:?}"),
+                    };
+                    assert_eq!(offset, text.find(marker).unwrap(), "{text}");
+                    assert_eq!(
+                        kind,
+                        GraphSetTextErrorKind::Pattern(
+                            GraphPatternTextErrorKind::InvalidArgumentType(requirement)
+                        ),
+                        "{text}"
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn refusal_names_furthest_progressing_facade_error() {
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);

@@ -88,12 +88,12 @@ fn refuse_element_identity(statement: &str) -> Result<(), QueryError> {
 // binds the snapshot sequence, which hidden commits advance, so it refuses.
 // Invalidation is checked after preparation even when preparation fails.
 fn explain_authorized(
-    explain: Result<(&str, bool), QueryError>,
+    explain: Result<(&str, bool, usize), QueryError>,
     params: &GqlParameters,
     resolver: impl GraphSymbolResolver,
     checkpoint: impl FnOnce() -> Result<(), QueryError>,
 ) -> Result<QueryResult, QueryError> {
-    let (statement, certificate) = explain?;
+    let (statement, certificate, prefix) = explain?;
     if certificate {
         return Err(QueryError::Unsupported {
             diagnostics: vec![
@@ -103,7 +103,9 @@ fn explain_authorized(
     }
     let prepared = PreparedNativeRead::prepare(statement, params, resolver);
     checkpoint()?;
-    let listing = crate::query::explain::explain_rows(&prepared?);
+    let listing = crate::query::explain::explain_rows(
+        &prepared.map_err(|error| error.original_text(prefix, None))?,
+    );
     crate::query::explain::explain_result(listing, None)
 }
 

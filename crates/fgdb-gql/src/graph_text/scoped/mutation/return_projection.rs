@@ -3941,6 +3941,7 @@ impl<'a> Parser<'a> {
         } else {
             self.advance()?;
             self.punct(b'(', "(")?;
+            let argument_at = self.current.at;
             self.infer_collection_parameter(GqlParameterType::Map, schema)?;
             let source = match self.current.kind {
                 TokenKind::Word(word)
@@ -3986,6 +3987,21 @@ impl<'a> Parser<'a> {
                 )
             };
             self.punct(b')', ")")?;
+            // A literal scalar or list cannot acquire element metadata from a
+            // row. Check the complete argument so a subscript can still
+            // yield an element or map, and preserve NULL propagation.
+            if matches!(&map, ReadValueTemplate::List(_))
+                || matches!(&map, ReadValueTemplate::Literal(value) if !matches!(value.value(), CanonicalScalar::Null))
+            {
+                return Err(GraphSetTextError {
+                    offset: argument_at,
+                    kind: GraphSetTextErrorKind::Pattern(
+                        GraphPatternTextErrorKind::InvalidArgumentType(
+                            "a vertex, edge, map or NULL",
+                        ),
+                    ),
+                });
+            }
             (map, graph)
         };
         let value = if graph || stored_map {
@@ -4697,9 +4713,25 @@ impl<'a> Parser<'a> {
         self.word("IN")?;
         self.infer_collection_parameter(GqlParameterType::List, schema)?;
         let list = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+        // Refine an element only when every member is known to be
+        // incompatible. Mixed and computed sources keep their runtime checks.
+        let nonnumeric = matches!(&list, ReadValueTemplate::List(items)
+        if !items.is_empty() && items.iter().all(|item| match item {
+            ReadValueTemplate::Literal(value) => matches!(
+                value.value(), CanonicalScalar::Text(_) | CanonicalScalar::Bool(_)
+            ),
+            ReadValueTemplate::List(_) | ReadValueTemplate::MapLiteral { guard: None, .. } => true,
+            _ => false,
+        }));
+        if nonnumeric {
+            self.nonnumeric_elements.push(self.elements.len());
+        }
         self.elements.push(element.text);
         let parts = self.element_parts(inputs, schema, resolve, depth, projection);
         self.elements.pop();
+        if nonnumeric {
+            self.nonnumeric_elements.pop();
+        }
         let (filter, map) = parts?;
         Ok((list, filter, map))
     }

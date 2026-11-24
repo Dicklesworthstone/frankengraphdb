@@ -118,11 +118,16 @@ impl EmbeddedReadView {
                 (lowered.text(), derived)
             });
         if let Some(explain) = explain_prefix(text) {
-            let (statement, certificate) = explain?;
-            let (listing, certificate) = self.explain(statement, params, resolver, certificate)?;
+            let (statement, certificate, prefix) = explain?;
+            let (listing, certificate) = self
+                .explain(statement, params, resolver, certificate)
+                .map_err(|error| {
+                    error.original_text(prefix, lowered.as_ref().map(|(text, _)| text))
+                })?;
             return explain_result(listing, certificate).map(|result| (result, self.frontier()));
         }
-        PreparedNativeRead::prepare(text, params, resolver)?
+        PreparedNativeRead::prepare(text, params, resolver)
+            .map_err(|error| error.original_text(0, lowered.as_ref().map(|(text, _)| text)))?
             .execute_in_view_with_snapshot(self, cx, params, policy)
     }
 }

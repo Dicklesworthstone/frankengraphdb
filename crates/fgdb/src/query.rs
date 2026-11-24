@@ -279,6 +279,31 @@ pub enum QueryError {
     TransactionAggregate(Box<GqlQueryError<GraphAggregateError<WriteTxnError>, Cancel>>),
     TransactionSet(Box<GqlQueryError<GraphSetExecutionError<WriteTxnError>, Cancel>>),
 }
+impl QueryError {
+    /// Parser positions refer to the text passed to preparation. Restore the
+    /// EXPLAIN prefix first, then any host map-field substitutions in that text.
+    fn original_text(mut self, prefix: usize, lowered: Option<&GqlMapArgumentText>) -> Self {
+        if prefix == 0 && lowered.is_none() {
+            return self;
+        }
+        let mut source = &mut self;
+        while let Self::Refused { source: inner, .. } = source {
+            source = inner;
+        }
+        let offset = match source {
+            Self::PatternText(e) => &mut e.offset,
+            Self::SetText(e) => &mut e.offset,
+            Self::PipelineText(e) => &mut e.offset,
+            Self::TemporalText(e) => &mut e.offset,
+            Self::TemporalSetText(e) => &mut e.offset,
+            _ => return self,
+        };
+        let generated = prefix + *offset;
+        *offset = lowered.map_or(generated, |text| text.original_offset(generated));
+        self
+    }
+}
+
 impl core::fmt::Display for QueryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -693,11 +718,17 @@ impl<V: Vfs + Clone> Database<V> {
                 (lowered.text(), derived)
             });
         if let Some(explain) = explain_prefix(text) {
-            let (statement, certificate) = explain?;
-            let (listing, certificate) = self.explain(statement, params, resolver, certificate)?;
+            let (statement, certificate, prefix) = explain?;
+            let (listing, certificate) = self
+                .explain(statement, params, resolver, certificate)
+                .map_err(|error| {
+                    error.original_text(prefix, lowered.as_ref().map(|(text, _)| text))
+                })?;
             return explain_result(listing, certificate);
         }
-        PreparedNativeRead::prepare(text, params, resolver)?.execute(self, cx, params, budget)
+        PreparedNativeRead::prepare(text, params, resolver)
+            .map_err(|error| error.original_text(0, lowered.as_ref().map(|(text, _)| text)))?
+            .execute(self, cx, params, budget)
     }
 
     /// Prepare a supported native aggregate without collecting its input rows.

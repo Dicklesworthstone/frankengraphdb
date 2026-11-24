@@ -1041,10 +1041,60 @@ fn dynamic_metadata_keeps_null_map_wrong_type_and_lazy_branch_semantics() {
         )]],
     );
     assert_eq!(reads.get(), 2);
+    for (value, invalid_operand) in [
+        ("properties([1])", "[1]"),
+        ("properties(1)", "1"),
+        ("properties('Cypher')", "'Cypher'"),
+        ("keys([true, false])", "[true, false]"),
+        ("1 IN {x: []}", "{x: []}"),
+        ("any(x IN ['a'] WHERE x % 2 = 0)", "%"),
+        ("single(x IN [true] WHERE 2 / x > 1)", "/"),
+        ("none(x IN [[1]] WHERE x * 2 = 0)", "*"),
+        ("all(x IN [{}] WHERE 2 ^ x = 1)", "^"),
+    ] {
+        for prefix in ["RETURN ", "MATCH (n) RETURN "] {
+            let statement = format!("{prefix}{value} AS bad");
+            let error = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+                &statement,
+                &[],
+                &mut Catalog("p"),
+            )
+            .map(|_| ())
+            .expect_err("an invalid literal must fail before any input rows are read");
+            assert_eq!(
+                error.offset,
+                statement.find(invalid_operand).unwrap(),
+                "{statement}"
+            );
+            assert_eq!(
+                error.class(),
+                fgdb_gql::GqlRefusalClass::Syntax,
+                "{statement}"
+            );
+        }
+    }
+    for (expression, expected) in [
+        ("any(x IN ['a'] WHERE x + x = 'aa')", true),
+        ("all(x IN [1,2] WHERE x % 1 = 0)", true),
+        ("none(x IN [] WHERE x % 2 = 0)", true),
+        ("any(x IN [2,null] WHERE x % 2 = 0)", true),
+        ("any(x IN [2,'later'] WHERE x = 2)", true),
+        ("all(x IN ['a'] WHERE any(x IN [2] WHERE x % 2 = 0))", true),
+        ("any(x IN ['1'] WHERE toInteger(x) * 2 = 2)", true),
+    ] {
+        assert_eq!(
+            source
+                .dynamic(&format!("RETURN {expression} AS result"), &reads)
+                .unwrap(),
+            vec![vec![GraphValue::Scalar(CanonicalScalar::Bool(expected))]],
+            "{expression}",
+        );
+    }
     for statement in [
         "RETURN labels(42) AS bad",
         "RETURN type({}) AS bad",
-        "RETURN properties([1]) AS bad",
+        "RETURN any(x IN [2,'later'] WHERE x % 2 = 0) AS bad",
+        "UNWIND [[1]] AS xs RETURN properties(xs) AS bad",
         "MATCH (n) WITH collect(n) AS ns RETURN type(ns[0]) AS bad",
         "MATCH ()-[r:R]->() WITH collect(r) AS rs RETURN labels(rs[0]) AS bad",
     ] {

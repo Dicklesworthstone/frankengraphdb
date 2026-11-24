@@ -126,7 +126,8 @@ impl PreparedNativeRead {
     /// Resolution, including misses, is frozen across all grammar probes.
     /// Catalog binding refusals from a validated grammar take precedence over
     /// unrelated syntax failures. Other refusals select the largest typed byte
-    /// offset. Ties prefer temporal
+    /// offset. At that byte, a literal that parsed with the wrong type is
+    /// more specific than an alternative grammar's missing token. Other ties prefer temporal
     /// pattern, aggregate, then set when the native selector parser recognizes
     /// a system-time clause; otherwise pattern, aggregate, pipeline, then set.
     /// MissingSystemTimeClause is not a candidate. A failed pattern probe is
@@ -172,9 +173,30 @@ impl PreparedNativeRead {
         };
         let mut best = None;
         let mut consider = |offset, priority, facade, source: QueryError| {
+            use GraphPatternTextErrorKind::InvalidArgumentType;
+            let typed_operand = match &source {
+                QueryError::SetText(error) => matches!(
+                    error.kind,
+                    GraphSetTextErrorKind::Pattern(InvalidArgumentType(_))
+                ),
+                QueryError::TemporalSetText(error) => matches!(
+                    error.kind,
+                    GraphTemporalSetTextErrorKind::Set(GraphSetTextErrorKind::Pattern(
+                        InvalidArgumentType(_)
+                    ))
+                ),
+                QueryError::PipelineText(error) => matches!(
+                    error.kind,
+                    GraphPipelineAggregateTextErrorKind::Input(GraphSetTextErrorKind::Pattern(
+                        InvalidArgumentType(_)
+                    ))
+                ),
+                _ => false,
+            };
             let rank = (
                 catalog_binding_refusal(&source),
                 offset,
+                typed_operand,
                 std::cmp::Reverse(priority),
             );
             if best
@@ -1041,11 +1063,11 @@ fn explain_at(
     Ok((rows, cert))
 }
 
-/// `Some((statement, certificate))` when `text` is `EXPLAIN [(CERTIFICATE)]
+/// The inner statement, certificate flag and original starting byte when `text` is `EXPLAIN [(CERTIFICATE)]
 /// <statement>`, a refusal for a malformed option, and `None` for any other
 /// text. Shared by the database's and the view's `query`, so both classify and
 /// refuse the prefix identically.
-pub(super) fn explain_prefix(text: &str) -> Option<Result<(&str, bool), QueryError>> {
+pub(super) fn explain_prefix(text: &str) -> Option<Result<(&str, bool, usize), QueryError>> {
     let trimmed = text.trim_start();
     let explain = trimmed
         .get(..7)
@@ -1059,7 +1081,7 @@ pub(super) fn explain_prefix(text: &str) -> Option<Result<(&str, bool), QueryErr
     }
     let statement = trimmed[7..].trim_start();
     let Some(options) = statement.strip_prefix('(') else {
-        return Some(Ok((statement, false)));
+        return Some(Ok((statement, false, text.len() - statement.len())));
     };
     let Some((option, rest)) = options.split_once(')') else {
         return Some(Err(QueryError::Unsupported {
@@ -1071,7 +1093,8 @@ pub(super) fn explain_prefix(text: &str) -> Option<Result<(&str, bool), QueryErr
             diagnostics: vec!["expected EXPLAIN (CERTIFICATE)".to_owned()],
         }));
     }
-    Some(Ok((rest.trim_start(), true)))
+    let statement = rest.trim_start();
+    Some(Ok((statement, true, text.len() - statement.len())))
 }
 
 /// The EXPLAIN answer as `operator`/`detail` rows: the listing, then the

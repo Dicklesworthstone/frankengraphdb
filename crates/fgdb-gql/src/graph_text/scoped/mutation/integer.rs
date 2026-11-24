@@ -666,10 +666,20 @@ impl<'a> Parser<'a> {
         }
         // Only the value read that starts here is bounded: it takes the flag
         // on entry, so nothing nested inside the operand inherits it.
+        let operand_at = self.current.at;
         self.membership_list = true;
         let list = self.composite_value(columns, nesting);
         self.membership_list = false;
-        list
+        let list = list?;
+        if matches!(list, ReadValueTemplate::MapLiteral { guard: None, .. }) {
+            return Err(failure(
+                operand_at,
+                GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::InvalidArgumentType(
+                    "a list or NULL after IN",
+                )),
+            ));
+        }
+        Ok(list)
     }
 
     /// One condition or result of a list CASE: a lone list operand read as
@@ -2067,6 +2077,27 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn require_numeric_local(
+        &self,
+        operand: Option<&ParsedOp>,
+        at: usize,
+    ) -> Result<(), GraphMutationTextError> {
+        if let Some(ParsedOp::Bound(GraphIntegerOp::Local(offset))) = operand
+            && *offset < self.elements.len()
+            && self
+                .nonnumeric_elements
+                .contains(&(self.elements.len() - 1 - offset))
+        {
+            return Err(failure(
+                at,
+                GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::InvalidArgumentType(
+                    "an arithmetic operand",
+                )),
+            ));
+        }
+        Ok(())
+    }
+
     /// The `*`, `/` and `%` operands after a product level's first factor.
     #[inline(never)]
     fn product_tail(
@@ -2086,10 +2117,12 @@ impl<'a> Parser<'a> {
             } else {
                 break;
             };
+            self.require_numeric_local(program.last(), at)?;
             self.integer_unary(columns, depth, program)?;
             if self.is_punct(b'^') {
                 self.power_tail(columns, depth, program)?;
             }
+            self.require_numeric_local(program.last(), at)?;
             emit(program, ParsedOp::Binary(op), at)?;
         }
         Ok(())
@@ -2108,8 +2141,10 @@ impl<'a> Parser<'a> {
     ) -> Result<(), GraphMutationTextError> {
         while self.is_punct(b'^') {
             let at = self.current.at;
+            self.require_numeric_local(program.last(), at)?;
             self.advance()?;
             self.integer_unary(columns, depth, program)?;
+            self.require_numeric_local(program.last(), at)?;
             emit(program, ParsedOp::Bound(GraphIntegerOp::Power), at)?;
         }
         Ok(())
