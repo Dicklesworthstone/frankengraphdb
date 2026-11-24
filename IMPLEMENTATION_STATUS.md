@@ -12,6 +12,52 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Maintained correlated UNWIND and argument-only summaries — qualification pending
+
+Returning CALL and OPTIONAL CALL aggregate bodies can now begin with imported
+arguments or a source-free singleton. Reader-free UNWIND expressions, including
+range(), run among the original projections, filters and DISTINCT barriers,
+both before aggregation and after the completed summary.
+
+```gql
+MATCH (a:Owner) WITH a,a.score AS score
+OPTIONAL CALL (score) {
+  UNWIND range(1,score) AS item
+  RETURN item % 2 AS bucket, count(*) AS members, sum(item) AS total
+}
+RETURN a,bucket,members,total
+```
+
+The compiler activates distinct argument tuples before evaluating the body.
+Each expansion retains its private invocation key, restores the public column
+positions, and preserves repeated list members. The original outer bag is
+restored only after the full body and summary tail. Empty outer input therefore
+does not execute a failing body; global empty summaries are completed before
+post-summary UNWIND, and OPTIONAL null extension occurs only after that tail.
+Argument-only calls own a fixed zero-column unit source through the existing
+constant owner. Graph-backed bodies retain the original source-effect proof.
+
+No new interpreter or standing-query owner is introduced. Existing expansion,
+projection, join and group owners supply maintenance, private intermediate
+admission, final public quotas, registration rollback and rebuild. Logical
+reconstruction preserves the original range expression rather than expanding
+its bound carrier as ordinary list members. Reader-dependent source stages
+and unsupported pages remain outside this recipe.
+
+Regression sources add 2,048 weighted transitions; conditional and repeated
+members; ascending, descending and empty ranges; inactive and discarded
+expression errors; optional empty tails; real property/edge/label/vertex
+updates; every registration/rebuild interruption point; and 128 private
+members under a two-row public quota. A served subscription law checks import
+replacement, empty expansion, capability masking and exact pending receipts.
+
+Pinned formatting and whitespace checks passed, and independent source reviews
+found no blocker. Compilation, Rust runtime tests, Clippy, UBS and exact-tree
+qualification remain UNRUN in this environment: the dependency caches are
+absent, with insufficient workspace and memory to rebuild them safely.
+The original circuit and integrated qualification work remains open under
+`fgdb-w6-zset-circuits-kjv` and `fgdb-qualify-integrated-nov22-maz0p`.
+
 ### Stored collection payloads in maintained rows — qualification pending
 
 Counted native row sources now preserve the same bounded Stored property domain

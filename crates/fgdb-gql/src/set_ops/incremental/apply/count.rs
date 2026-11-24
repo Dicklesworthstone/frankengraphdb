@@ -8,6 +8,7 @@ use crate::{
     GraphAggregate, GraphAggregateFunction, GraphIntegerExpression, GraphIntegerOp,
     PreparedGraphSetAggregate,
 };
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 /// A native COUNT recipe over complete original sources.
@@ -32,7 +33,9 @@ pub struct MaintainedCountJoin<'a> {
 ///
 /// Project the original left bag through outer, then DISTINCT its arguments.
 /// Join those arguments with the complete right source and apply body in
-/// order, including each relational DISTINCT with its invocation key retained.
+/// order, including each relational DISTINCT and UNWIND with its invocation
+/// key retained. Argument-only bodies own a fixed zero-column unit source;
+/// source-free expression stages also run only after invocation activation.
 /// Group by that private key followed by the original grouping keys. Join
 /// through complete to the DISTINCT argument bag, then apply summary and every
 /// ordered post-group projection/filter. Only a global aggregate uses a Left
@@ -46,7 +49,7 @@ pub struct MaintainedCountJoin<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaintainedFilteredAggregate<'a> {
     pub left: &'a PreparedGraphSet,
-    pub right: &'a PreparedGraphSet,
+    pub right: Cow<'a, PreparedGraphSet>,
     pub outer: RowProjectionSpec,
     pub arguments: RowProjectionSpec,
     pub join: RowJoinSpec,
@@ -151,6 +154,7 @@ enum SummaryStage<'a> {
     ),
     Filter(&'a [GraphSetPredicateOp]),
     Restore(&'a PreparedGraphSet, Vec<usize>),
+    Unwind(&'a PreparedGraphSet, &'a GraphSetValue),
 }
 
 /// Peel row stages on either side of the aggregate without moving them across
@@ -168,6 +172,12 @@ fn summary_stages<'a, E>(
     }
     let (input, stage) = match &query.node {
         SetNode::Scope(input) => return summary_stages(input, imports, stages, control),
+        SetNode::Unwind { input, value } => {
+            if !value.is_scan_local() {
+                return Ok(None);
+            }
+            (input, SummaryStage::Unwind(query, value))
+        }
         SetNode::Project {
             input,
             projection,
@@ -229,6 +239,37 @@ fn summary_steps<E>(
                     return Ok(None);
                 };
                 steps.push(step);
+                continue;
+            }
+            SummaryStage::Unwind(query, value) => {
+                // Expansion appends one public cell after the private suffix.
+                // Move that cell in front of the suffix immediately, before
+                // any later expression, filter, DISTINCT or aggregate reads
+                // the original body's column positions. The two ordinary
+                // owners preserve element multiplicity without expanding the
+                // outer bag's repeated invocation occurrences.
+                charge(types.len() + private_width + 1, control)?;
+                let Ok(expansion) = RowProjectionSpec::unwind(
+                    types.to_vec(),
+                    names(types.len()),
+                    format!("__fg_apply_{}", types.len()),
+                    value.clone(),
+                ) else {
+                    return Ok(None);
+                };
+                let values = (0..width)
+                    .chain(core::iter::once(types.len()))
+                    .chain(width..types.len())
+                    .map(GraphSetValue::Column)
+                    .collect();
+                let Some(reordered) = project(expansion.column_types(), values, control)? else {
+                    return Ok(None);
+                };
+                if reordered.column_types().get(..width + 1) != Some(query.types.as_slice()) {
+                    return Ok(None);
+                }
+                steps.push(expansion);
+                steps.push(reordered);
                 continue;
             }
             SummaryStage::Project(query, cells, quantifier) => {
@@ -306,6 +347,13 @@ impl PreparedGraphSet {
     /// admits any nonempty tuple of COUNT, integer SUM/AVG (including argument
     /// DISTINCT), and typed MIN/MAX, including imported values. Relational
     /// DISTINCT retains the private invocation key at every body barrier.
+    /// Reader-free list/range UNWIND may appear before and after the summary.
+    /// Its appended member is placed before the private suffix so subsequent
+    /// expressions keep their original column addresses. NULL/empty lists
+    /// remove body rows; scalar/type/range failures remain conditional on an
+    /// active invocation and their exact position among filters/projections.
+    /// Bodies beginning at Arguments or the source-free unit require no graph
+    /// source and never invent an invocation from that unit alone.
     /// The independent RHS keeps the conditional source-effect proof: no
     /// property reader or uninvoked fallible source is
     /// moved into eager maintenance.
@@ -366,13 +414,31 @@ impl PreparedGraphSet {
         let Some(source) = summary_stages(summary.input(), imports, &mut stages, control)? else {
             return Ok(None);
         };
-        let Some(base) = body_base(source, imports.is_empty()) else {
-            return Ok(None);
+        let (argument_source, right, source_join) = match &source.node {
+            // Arguments have one row per invocation, including NULL imports.
+            // A fixed zero-column unit supplies the ordinary RHS owner; all
+            // body expressions stay AFTER the active invocation join. Owning
+            // that unit in the recipe avoids borrowing a temporary definition.
+            SetNode::Arguments => {
+                charge(1, control)?;
+                (
+                    Some(source),
+                    Cow::Owned(PreparedGraphSet::singleton()),
+                    None,
+                )
+            }
+            SetNode::Values => (None, Cow::Borrowed(source), None),
+            _ => {
+                let Some(base) = body_base(source, imports.is_empty()) else {
+                    return Ok(None);
+                };
+                if !independent(base.right, control)? {
+                    return Ok(None);
+                }
+                (base.arguments, Cow::Borrowed(base.right), base.spec)
+            }
         };
-        if !independent(base.right, control)? {
-            return Ok(None);
-        }
-        let slots = match base.arguments {
+        let slots = match argument_source {
             Some(input) => {
                 let Some(slots) = argument_slots(input, imports, control)? else {
                     return Ok(None);
@@ -405,7 +471,7 @@ impl PreparedGraphSet {
         let argument_width = slots.len();
         let key_width = outer.column_types().len() - left_width;
         let private_width = key_width + restored.len();
-        let right_width = base.right.types.len();
+        let right_width = right.types.len();
         charge(argument_width + private_width, control)?;
         let mut values: Vec<_> = slots.into_iter().map(GraphSetValue::Column).collect();
         values.extend((left_width..left_width + key_width).map(GraphSetValue::Column));
@@ -419,17 +485,17 @@ impl PreparedGraphSet {
         else {
             return Ok(None);
         };
-        let joined = if let Some(spec) = base.spec
+        let joined = if let Some(spec) = source_join
             && !spec.keys().is_empty()
         {
-            RowJoinSpec::new(arguments.column_types(), &base.right.types, spec.keys())
+            RowJoinSpec::new(arguments.column_types(), &right.types, spec.keys())
         } else {
-            RowJoinSpec::cross(arguments.column_types(), &base.right.types)
+            RowJoinSpec::cross(arguments.column_types(), &right.types)
         };
         let Ok(mut join) = joined else {
             return Ok(None);
         };
-        if let Some(code) = base.spec.and_then(RowJoinSpec::predicate) {
+        if let Some(code) = source_join.and_then(RowJoinSpec::predicate) {
             charge(argument_width + right_width, control)?;
             let positions: Vec<_> = (0..argument_width)
                 .chain((0..right_width).map(|column| argument_width + private_width + column))
@@ -458,14 +524,14 @@ impl PreparedGraphSet {
         let width = body.last().expect("body frame").column_types().len() - private_width;
         // Grouping retains the actual complete relational input. The host
         // builds this same shared-source circuit, not a same-schema surrogate.
-        charge(left.types.len() + base.right.types.len(), control)?;
+        charge(left.types.len() + right.types.len(), control)?;
         let Some(active) = (**left).clone().project_incremental_spec(&outer) else {
             return Ok(None);
         };
         let Some(active) = active.project_incremental_spec(&arguments) else {
             return Ok(None);
         };
-        let Ok(mut active) = active.join(base.right.clone(), join.clone()) else {
+        let Ok(mut active) = active.join(right.as_ref().clone(), join.clone()) else {
             return Ok(None);
         };
         for step in &body {
@@ -667,7 +733,7 @@ impl PreparedGraphSet {
         control(GlaExecutionEvent::Work)?;
         Ok(Some(MaintainedFilteredAggregate {
             left,
-            right: base.right,
+            right,
             outer,
             arguments,
             join,

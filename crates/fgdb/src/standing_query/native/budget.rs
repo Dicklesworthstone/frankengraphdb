@@ -191,7 +191,8 @@ fn circuit(
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
     })? {
         // Match the shared invocation-domain circuit exactly: outer keys,
-        // DISTINCT arguments, argument/RHS join, ordered body stages, Group,
+        // DISTINCT arguments, argument/RHS join, ordered body stages (including
+        // UNWIND and its frame-restoring projection), Group,
         // key-only invocation projection, empty-summary completion, post-group
         // stages, restoration join, and the public output projections.
         let stages = plan
@@ -202,7 +203,8 @@ fn circuit(
             .and_then(|count| count.checked_add(7))
             .and_then(|count| u64::try_from(count).ok())
             .ok_or(StandingQueryError::Unsupported)?;
-        return circuit(cx, plan.left, scoped)?.combine(circuit(cx, plan.right, scoped)?, stages);
+        return circuit(cx, plan.left, scoped)?
+            .combine(circuit(cx, plan.right.as_ref(), scoped)?, stages);
     }
     if let Some(plan) = query.incremental_apply_distinct_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)

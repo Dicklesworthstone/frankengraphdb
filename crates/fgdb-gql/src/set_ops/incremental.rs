@@ -13,7 +13,7 @@ pub use apply::{
 
 impl PreparedGraphSet {
     /// Retain a complete logical input through an already validated ordinary
-    /// projection. Only the specification can supply precise domains, including
+    /// projection or unfiltered UNWIND. Only the specification supplies domains, including
     /// its same-domain NULL defaults; no caller can assert a narrower type.
     fn project_incremental_spec(
         mut self,
@@ -21,6 +21,19 @@ impl PreparedGraphSet {
     ) -> Option<Self> {
         if self.types.as_slice() != spec.input_types() {
             return None;
+        }
+        if let Some((name, value)) = spec.unwind_value() {
+            if !self
+                .columns
+                .iter()
+                .map(String::as_str)
+                .eq(spec.columns().take(self.types.len()))
+            {
+                return None;
+            }
+            let mut expanded = self.unwind(name.to_owned(), value).ok()?;
+            expanded.types = spec.column_types().to_vec();
+            return Some(expanded);
         }
         let (projection, filter) = spec.ordinary_parts()?;
         if !filter.is_empty() {

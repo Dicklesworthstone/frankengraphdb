@@ -963,7 +963,10 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             // then restore each surviving invocation's original occurrences.
             let left = self.compile(cx, plan.left, policy, checkpoint)?;
             let input_policy = group::input_policy(policy);
-            let right = self.compile_group_input(cx, plan.right, input_policy, checkpoint)?;
+            // Argument-only bodies use the recipe's immutable unit source.
+            // Its expressions still run downstream of active invocations.
+            let right =
+                self.compile_group_input(cx, plan.right.as_ref(), input_policy, checkpoint)?;
             let state = self.database.prepare_standing_projection(
                 cx,
                 left,
@@ -991,6 +994,8 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             )?;
             let mut input = self.append_private(StandingQuery::Join(Box::new(state)));
             checkpoint()?;
+            // Expansion and its frame-restoring projection are ordinary
+            // private stages, with no public-row charge on their fanout.
             for spec in plan.body {
                 let state = self.database.prepare_standing_projection(
                     cx,
