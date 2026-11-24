@@ -2588,3 +2588,280 @@ fn repeated_imports_keep_the_existing_complete_summary_width_boundary() {
     expected.extend((0..8).map(|_| scalar(Some(3))));
     assert_eq!(plain(circuit.rows()), BTreeMap::from([(row(expected), 2)]));
 }
+
+fn grouped_filtered_summary(optional: bool, profile: usize) -> PreparedGraphSet {
+    let SetNode::Apply {
+        left,
+        right,
+        imports,
+        ..
+    } = filtered_count(0).node
+    else {
+        unreachable!()
+    };
+    let SetNode::Aggregate(summary) = right.node else {
+        unreachable!()
+    };
+    let mut body = summary.input().clone();
+    if profile == 1 {
+        body = body
+            .project(
+                (0..3)
+                    .map(|column| {
+                        GraphSetProjection::new(
+                            format!("body{column}"),
+                            GraphSetValue::Column(column),
+                        )
+                    })
+                    .collect(),
+                GraphSetQuantifier::Distinct,
+            )
+            .unwrap();
+    }
+    // Both user keys can be NULL. Neither is the private, non-null invocation
+    // key; grouping and invocation restoration have distinct equality owners.
+    let mut body = body
+        .group_by(
+            &[1, 0],
+            &[
+                GraphAggregate::count_rows("rows"),
+                GraphAggregate::count("nonnull", 1),
+                GraphAggregate::count_distinct("unique", 0),
+                GraphAggregate::sum_int("total", 1),
+                GraphAggregate::min("first", 0),
+            ],
+        )
+        .unwrap();
+    if profile >= 2 {
+        body = body
+            .project(
+                vec![
+                    GraphSetProjection::new("nonnull", GraphSetValue::Column(3)),
+                    GraphSetProjection::new("total", GraphSetValue::Column(5)),
+                ],
+                if profile == 3 {
+                    GraphSetQuantifier::Distinct
+                } else {
+                    GraphSetQuantifier::All
+                },
+            )
+            .unwrap();
+    }
+    if optional {
+        (*left).optional_apply(body, imports).unwrap()
+    } else {
+        (*left).apply(body, imports).unwrap()
+    }
+}
+
+// Independent scalar/bag arithmetic. No compiler recipe, join kernel, group
+// owner or batch executor participates in these expected values.
+fn grouped_summary_oracle(
+    left: &ZSet<GraphValueRow>,
+    right: &ZSet<GraphValueRow>,
+    optional: bool,
+    profile: usize,
+) -> Bag {
+    let mut output = Bag::new();
+    for (outer, multiplicity) in left.iter() {
+        let threshold = &outer.values()[0];
+        let other = &outer.values()[2];
+        let mut groups = BTreeMap::<GraphValue, i128>::new();
+        if threshold.is_null() || threshold == &scalar(Some(3)) {
+            for (inner, weight) in right.iter() {
+                let candidate = &inner.values()[1];
+                if other.is_null() || (!candidate.is_null() && candidate != other) {
+                    *groups.entry(candidate.clone()).or_default() += weight.to_i128().unwrap();
+                }
+            }
+        }
+        let mut selected = BTreeMap::<Vec<GraphValue>, i128>::new();
+        for (key, count) in groups {
+            let count = if profile == 1 { 1 } else { count };
+            let nonnull = if threshold.is_null() { 0 } else { count };
+            let total = if threshold.is_null() {
+                scalar(None)
+            } else {
+                scalar(Some(i64::try_from(3 * count).unwrap()))
+            };
+            let cells = if profile >= 2 {
+                vec![scalar(Some(i64::try_from(nonnull).unwrap())), total]
+            } else {
+                vec![
+                    threshold.clone(),
+                    key.clone(),
+                    scalar(Some(i64::try_from(count).unwrap())),
+                    scalar(Some(i64::try_from(nonnull).unwrap())),
+                    scalar(Some(i64::from(!key.is_null()))),
+                    total,
+                    key,
+                ]
+            };
+            let weight = selected.entry(cells).or_default();
+            if profile == 3 {
+                *weight = 1;
+            } else {
+                *weight += 1;
+            }
+        }
+        if optional && selected.is_empty() {
+            selected.insert(vec![scalar(None); if profile >= 2 { 2 } else { 7 }], 1);
+        }
+        for (values, weight) in selected {
+            let mut cells = outer.values().to_vec();
+            cells.extend(values);
+            output.insert(row(cells), weight * multiplicity.to_i128().unwrap());
+        }
+    }
+    output
+}
+
+#[test]
+fn grouped_summaries_match_2048_weighted_transitions_with_null_keys_and_optional_calls() {
+    for optional in [false, true] {
+        for profile in 0..4 {
+            let query = grouped_filtered_summary(optional, profile);
+            let recipe = query
+                .incremental_filtered_aggregate_with_control(&mut allow)
+                .unwrap()
+                .unwrap();
+            assert_eq!(recipe.complete.kind(), RowJoinKind::Inner);
+            assert_eq!(
+                recipe.restore.kind(),
+                if optional {
+                    RowJoinKind::Left
+                } else {
+                    RowJoinKind::Inner
+                }
+            );
+            for before in 0..16 {
+                for after in 0..16 {
+                    let old_left = filtered_left(before & 3);
+                    let old_right = filtered_right(before >> 2);
+                    let next_left = filtered_left(after & 3);
+                    let next_right = filtered_right(after >> 2);
+                    let old = grouped_summary_oracle(&old_left, &old_right, optional, profile);
+                    let next = grouped_summary_oracle(&next_left, &next_right, optional, profile);
+                    let mut circuit = FilteredCircuit::new(&query);
+                    circuit.tick(&old_left, &old_right).unwrap();
+                    assert_eq!(plain(circuit.rows()), old, "{optional}/{profile}/{before}");
+                    let delta = circuit
+                        .tick(
+                            &difference(&next_left, &old_left),
+                            &difference(&next_right, &old_right),
+                        )
+                        .unwrap();
+                    assert_eq!(plain(circuit.rows()), next, "{optional}/{profile}/{after}");
+                    assert_eq!(
+                        delta,
+                        bag(next
+                            .into_iter()
+                            .chain(old.into_iter().map(|(row, weight)| (row, -weight)))),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn grouped_no_import_calls_distinguish_real_null_groups_from_absent_groups() {
+    let body = arguments(Vec::new())
+        .cross_join(right())
+        .unwrap()
+        .group_by(&[1], &[GraphAggregate::count_rows("n")])
+        .unwrap();
+    let query = outer().optional_apply(body, Vec::new()).unwrap();
+    // A grouped COUNT must not enter the scalar count fast path.
+    assert!(
+        query
+            .incremental_apply_count_with_control(&mut allow)
+            .unwrap()
+            .is_none()
+    );
+    let mut circuit = FilteredCircuit::new(&query);
+    let left = bag([(row(vec![scalar(None), vertex(1), vertex(8)]), 2)]);
+    circuit.tick(&left, &ZSet::new()).unwrap();
+    let absent = BTreeMap::from([(
+        row(vec![
+            scalar(None),
+            vertex(1),
+            vertex(8),
+            scalar(None),
+            scalar(None),
+        ]),
+        2,
+    )]);
+    assert_eq!(plain(circuit.rows()), absent);
+    let right = bag([(row(vec![vertex(7), scalar(None)]), 5)]);
+    circuit.tick(&ZSet::new(), &right).unwrap();
+    assert_eq!(
+        plain(circuit.rows()),
+        BTreeMap::from([(
+            row(vec![
+                scalar(None),
+                vertex(1),
+                vertex(8),
+                scalar(None),
+                scalar(Some(5))
+            ]),
+            2,
+        )]),
+    );
+    circuit
+        .tick(&ZSet::new(), &difference(&ZSet::new(), &right))
+        .unwrap();
+    assert_eq!(plain(circuit.rows()), absent);
+    circuit
+        .tick(&difference(&ZSet::new(), &left), &right)
+        .unwrap();
+    assert!(circuit.rows().is_empty());
+}
+
+#[test]
+fn native_grouped_recipes_preserve_definition_cancellation_and_source_boundaries() {
+    for text in [
+        "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b:L) RETURN b AS bucket,count(*) AS degree } RETURN a,bucket,degree",
+        "MATCH (a:L) WITH a OPTIONAL CALL (a) { MATCH (a)-[:R]->(b:L {p:1}) RETURN id(b)%2 AS bucket,count(*) AS degree,sum(id(b)) AS total } RETURN a,bucket,degree,total",
+        "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (a)-[:R]->(b) WITH b,threshold,count(*) AS n WHERE n>1 RETURN DISTINCT threshold AS category,n+1 AS degree } RETURN a,category,degree",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(has_filtered_aggregate(&query), "{text}");
+    }
+    for text in [
+        "MATCH (a:L) WITH a OPTIONAL CALL (a) { MATCH (a)-[:R]->(b) RETURN b.p AS bucket,count(*) AS degree } RETURN a,bucket,degree",
+        "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b) RETURN b AS bucket,count(*) AS degree LIMIT 1 } RETURN a,bucket,degree",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(!has_filtered_aggregate(&query), "{text}");
+    }
+    let query = grouped_filtered_summary(true, 3);
+    let original = query.canonical_bytes();
+    let mut calls = 0;
+    query
+        .incremental_filtered_aggregate_with_control(&mut |_| {
+            calls += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap()
+        .unwrap();
+    assert!(calls > 0);
+    for stop in 1..=calls {
+        let mut seen = 0;
+        assert!(matches!(
+            query.incremental_filtered_aggregate_with_control(&mut |_| {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            }),
+            Err(at) if at == stop
+        ));
+        assert_eq!(seen, stop);
+        assert_eq!(query.canonical_bytes(), original);
+    }
+}

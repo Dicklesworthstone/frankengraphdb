@@ -12,6 +12,48 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Maintained grouped correlated summaries — qualification pending
+
+Returning CALL and OPTIONAL CALL bodies can now maintain multiple groups per
+invocation through the existing native aggregate circuit. The compiler groups
+by the private invocation identity followed by the original user keys, retains
+the keys in their declared order, and restores the original outer bag only
+after the complete body and post-group tail. Repeated outer rows therefore
+repeat a result without multiplying its aggregate. COUNT, integer SUM/AVG,
+their supported DISTINCT arguments, and typed MIN/MAX retain their native
+value domains and deletion behavior.
+
+Unlike a global aggregate, a grouped body has no result when its last group
+disappears. Inner completion preserves that absence; OPTIONAL CALL then owns
+the final NULL extension. A real NULL-key group remains distinct from this
+absent-body result. Body and post-group DISTINCT retain invocation identity,
+including when separate groups project to the same exported values.
+
+```gql
+MATCH (a:Owner) WITH a
+OPTIONAL CALL (a) {
+  MATCH (a)-[:R]->(b:Target {selected:1})
+  RETURN id(b) % 2 AS bucket, count(*) AS degree, sum(id(b)) AS total
+}
+RETURN a,bucket,degree,total
+```
+
+The existing source-effect admission remains mandatory: property-reading or
+otherwise fallible independent sources cannot run eagerly for an absent
+invocation. Pages and unsupported aggregate transforms retain their refusal.
+Capability masking, private intermediate admission, public row allowances and
+staged registration/rebuild rollback still use their existing owners.
+
+Regression sources include 2,048 weighted before/after transitions, nullable
+and reordered group keys, no-import calls, optional absence, DISTINCT,
+cancellation, native maintenance and served subscription receipts. Independent
+source review found no blocker. The first pinned offline Cargo check exited
+101 because the exact asupersync revision was absent from the recovered cache,
+before project compilation. Compilation, Rust tests, Clippy and exact-tree
+qualification remain UNRUN; this is not a passing runtime verdict. The original
+`fgdb-w6-zset-circuits-kjv` and integrated qualification
+`fgdb-qualify-integrated-nov22-maz0p` remain open.
+
 ### Authorized transactions continue at their original basis — qualification pending
 
 An authorized explicit write owner can prepare and execute later statements

@@ -2180,3 +2180,212 @@ fn filtered_counts_subscribe_with_property_deltas_zero_rows_and_exact_receipts()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts() {
+    use fgdb::WriteBatch;
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+    use fgdb_warden::Scope;
+
+    let ((), report) = run_async_under_lab(0x79a0_c018, |root| async move {
+        let (server, token, _) = served(&root, "subscription-grouped-calls").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut names = SymbolCatalog::default();
+        names
+            .bind_all([
+                ("Owner", CatalogSymbol::Label(LabelId(1))),
+                ("Target", CatalogSymbol::Label(LabelId(2))),
+                ("Secret", CatalogSymbol::Label(LabelId(3))),
+                ("R", CatalogSymbol::Relation(RelationId(1))),
+                ("Hidden", CatalogSymbol::Relation(RelationId(2))),
+                ("selected", CatalogSymbol::Property(PropertyKeyId(1))),
+                ("secret", CatalogSymbol::Property(PropertyKeyId(2))),
+            ])
+            .unwrap();
+        {
+            let mut writer = db.db.write(&root).await.unwrap();
+            writer
+                .register_symbols(&contexts.commit(), &names)
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for owner in [1, 3] {
+                seed.create_vertex(VId(owner), vec![LabelId(1)], vec![]);
+            }
+            for target in [2, 4, 5] {
+                seed.create_vertex(
+                    VId(target),
+                    vec![LabelId(2)],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+                );
+            }
+            seed.create_vertex(
+                VId(9),
+                vec![LabelId(3)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+            );
+            for (id, target) in [(1, 2), (2, 2), (3, 4), (4, 5), (5, 9)] {
+                seed.add_edge(EId(id), VId(1), VId(target), vec![]);
+            }
+            writer.write(&contexts.commit(), seed).await.unwrap();
+        }
+        let scoped = token
+            .attenuate(Restriction::Labels(Scope::only([LabelId(1), LabelId(2)])))
+            .unwrap()
+            .attenuate(Restriction::Relations(Scope::only([RelationId(1)])))
+            .unwrap()
+            .attenuate(Restriction::Properties(Scope::only([PropertyKeyId(1)])))
+            .unwrap()
+            .attenuate(Restriction::MaxNodes(40_000))
+            .unwrap()
+            .attenuate(Restriction::MaxWork(800_000))
+            .unwrap()
+            .attenuate(Restriction::MaxRows(8))
+            .unwrap();
+        let statement = request(concat!(
+            "SUBSCRIBE TO MATCH (a:Owner) UNWIND [7,7] AS token WITH a,token ",
+            "OPTIONAL CALL (a) { MATCH (a)-[:R]->(b:Target {selected:1}) ",
+            "RETURN id(b) % 2 AS bucket,count(*) AS degree,sum(id(b)) AS total } ",
+            "RETURN a,bucket,degree,total"
+        ));
+        let mut subscription = success(subscribe(&root, db, &scoped, &statement).await);
+        assert_eq!(subscription.columns, ["a", "bucket", "degree", "total"]);
+        let row = |owner, bucket, degree, total| {
+            vec![
+                WireValue::Vertex(owner),
+                WireValue::Int(bucket),
+                WireValue::Int(degree),
+                WireValue::Int(total),
+            ]
+        };
+        let absent = |owner| {
+            vec![
+                WireValue::Vertex(owner),
+                WireValue::Null,
+                WireValue::Null,
+                WireValue::Null,
+            ]
+        };
+        let baseline = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert!(baseline.batch.is_snapshot());
+        assert_eq!(baseline.entries.len(), 3);
+        assert!(baseline.entries.contains(&(2, row(1, 0, 3, 8))));
+        assert!(baseline.entries.contains(&(2, row(1, 1, 1, 5))));
+        assert!(baseline.entries.contains(&(2, absent(3))));
+
+        // A property changes group membership before the client acknowledges
+        // its baseline. Neither its bytes nor its receipt may be replaced.
+        let mut changed = WriteBatch::new(RelationId(1));
+        changed.set_vertex_property(VId(4), PropertyKeyId(1), Some(CanonicalScalar::Int(0)));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), changed)
+            .await
+            .unwrap();
+        let repeated = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert!(Arc::ptr_eq(&baseline.batch, &repeated.batch));
+        assert_eq!(repeated.entries, baseline.entries);
+        assert_eq!(subscription.consumer.acknowledged_frontier(), None);
+        subscription
+            .consumer
+            .acknowledge(baseline.batch.receipt())
+            .unwrap();
+        let changed = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert_eq!(changed.batch.from(), Some(baseline.batch.frontier()));
+        assert_eq!(
+            changed.batch.frontier(),
+            CommitSeq(baseline.batch.frontier().0 + 1)
+        );
+        assert_eq!(changed.entries.len(), 2);
+        assert!(changed.entries.contains(&(-2, row(1, 0, 3, 8))));
+        assert!(changed.entries.contains(&(2, row(1, 0, 2, 4))));
+        subscription
+            .consumer
+            .acknowledge(changed.batch.receipt())
+            .unwrap();
+
+        // Removing a group's last occurrences removes that group. It must
+        // not manufacture a zero-count row while another group still exists.
+        let mut deleted = WriteBatch::new(RelationId(1));
+        deleted.delete_edge(EId(1));
+        deleted.delete_edge(EId(2));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), deleted)
+            .await
+            .unwrap();
+        let removed = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert_eq!(removed.batch.from(), Some(changed.batch.frontier()));
+        assert_eq!(removed.entries, [(-2, row(1, 0, 2, 4))]);
+        subscription
+            .consumer
+            .acknowledge(removed.batch.receipt())
+            .unwrap();
+        let mut last = WriteBatch::new(RelationId(1));
+        last.delete_edge(EId(4));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), last)
+            .await
+            .unwrap();
+        let empty = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert_eq!(empty.batch.from(), Some(removed.batch.frontier()));
+        assert_eq!(empty.entries.len(), 2);
+        assert!(empty.entries.contains(&(-2, row(1, 1, 1, 5))));
+        assert!(empty.entries.contains(&(2, absent(1))));
+        subscription
+            .consumer
+            .acknowledge(empty.batch.receipt())
+            .unwrap();
+
+        let mut hidden = WriteBatch::new(RelationId(2));
+        hidden.add_edge(EId(50), VId(1), VId(2), vec![]);
+        hidden.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(99)));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), hidden)
+            .await
+            .unwrap();
+        assert!(success(poll(&root, db, &scoped, &mut subscription).await).is_none());
+        assert_eq!(
+            subscription.consumer.acknowledged_frontier(),
+            Some(empty.batch.frontier())
+        );
+
+        // A formerly empty invocation gains its own group, without affecting
+        // the other owner's NULL extension or multiplying its aggregate.
+        let mut added = WriteBatch::new(RelationId(1));
+        added.add_edge(EId(6), VId(3), VId(5), vec![]);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), added)
+            .await
+            .unwrap();
+        let active = success(poll(&root, db, &scoped, &mut subscription).await).unwrap();
+        assert_eq!(active.batch.from(), Some(empty.batch.frontier()));
+        assert_eq!(active.entries.len(), 2);
+        assert!(active.entries.contains(&(-2, absent(3))));
+        assert!(active.entries.contains(&(2, row(3, 1, 1, 5))));
+        subscription
+            .consumer
+            .acknowledge(active.batch.receipt())
+            .unwrap();
+        assert!(success(poll(&root, db, &scoped, &mut subscription).await).is_none());
+        drop(subscription);
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -28,14 +28,16 @@ pub struct MaintainedCountJoin<'a> {
     pub output: Vec<RowProjectionSpec>,
 }
 
-/// Per-invocation global aggregate tuples through the existing native row operators.
+/// Per-invocation aggregate tuples through the existing native row operators.
 ///
 /// Project the original left bag through outer, then DISTINCT its arguments.
 /// Join those arguments with the complete right source and apply body in
 /// order, including each relational DISTINCT with its invocation key retained.
-/// Group by that private key, Left-join through complete to the DISTINCT
-/// argument bag, then apply summary for COUNT's zero-fill and every ordered
-/// post-group projection/filter. Restore the ORIGINAL keyed outer bag only
+/// Group by that private key followed by the original grouping keys. Join
+/// through complete to the DISTINCT argument bag, then apply summary and every
+/// ordered post-group projection/filter. Only a global aggregate uses a Left
+/// completion and COUNT's zero-fill; a grouped aggregate has no empty group.
+/// Restore the ORIGINAL keyed outer bag only
 /// after the complete invocation succeeds. Optional calls null-extend only
 /// after their complete post-group tail. Other aggregates retain their native
 /// empty/NULL and value domains; a filtered summary is absent, never zero-filled
@@ -73,7 +75,7 @@ pub struct MaintainedCollectedCount {
     pub output: Vec<RowProjectionSpec>,
 }
 
-fn scalar_summary<'a, E>(
+fn aggregate_summary<'a, E>(
     query: &'a PreparedGraphSet,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<&'a PreparedGraphSetAggregate>, E> {
@@ -82,7 +84,7 @@ fn scalar_summary<'a, E>(
         return Ok(None);
     }
     match &query.node {
-        SetNode::Scope(input) => scalar_summary(input, control),
+        SetNode::Scope(input) => aggregate_summary(input, control),
         SetNode::Project {
             input,
             projection,
@@ -97,11 +99,10 @@ fn scalar_summary<'a, E>(
                     return Ok(None);
                 }
             }
-            scalar_summary(input, control)
+            aggregate_summary(input, control)
         }
         SetNode::Aggregate(summary) => {
-            if !summary.group_key_columns().is_empty()
-                || !summary.having().is_empty()
+            if !summary.having().is_empty()
                 || summary.having_expression().is_some()
                 || summary.has_incremental_output_transform()
                 || summary.has_computed_ordering()
@@ -111,7 +112,9 @@ fn scalar_summary<'a, E>(
                 return Ok(None);
             }
             let specs = summary.aggregate_specs();
-            if specs.len() == 0 || specs.len() != query.types.len() {
+            if specs.len() == 0
+                || summary.group_key_columns().len() + specs.len() != query.types.len()
+            {
                 return Ok(None);
             }
             for spec in specs {
@@ -272,9 +275,14 @@ fn count_summary<'a, E>(
     query: &'a PreparedGraphSet,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<&'a PreparedGraphSetAggregate>, E> {
-    let Some(summary) = scalar_summary(query, control)? else {
+    let Some(summary) = aggregate_summary(query, control)? else {
         return Ok(None);
     };
+    // The source-restriction fast path restores one scalar count, not the
+    // original group domain. Grouped summaries use the invocation recipe.
+    if !summary.group_key_columns().is_empty() {
+        return Ok(None);
+    }
     let mut specs = summary.aggregate_specs();
     if !matches!(
         specs.next(),
@@ -291,7 +299,7 @@ fn count_summary<'a, E>(
 }
 
 impl PreparedGraphSet {
-    /// Prove a reader-free global aggregate tuple with exact invocation identity.
+    /// Prove a reader-free aggregate tuple with exact invocation identity.
     ///
     /// This fallback retains every ordered body projection and filter rather
     /// than tracing an aggregate argument through discarded computation. It
@@ -305,7 +313,10 @@ impl PreparedGraphSet {
     /// Argument tuples use the existing NULL-safe canonical key proof.
     /// DISTINCT arguments prevent duplicate outer occurrences from multiplying
     /// aggregates; the final restoration preserves those occurrences.
-    /// Empty bodies produce zero for each COUNT and NULL for other aggregates.
+    /// Empty global bodies produce zero for each COUNT and NULL for other
+    /// aggregates. Grouped bodies instead produce only their actual groups,
+    /// including a real NULL-key group when its input contains NULL values;
+    /// they never fabricate a zero-count group after the last input retracts.
     /// NULL is an invocation value, not a missing invocation. Body evaluation
     /// happens only for active argument tuples, and native grouping owns
     /// NULL/distinct support, checked output conversion and retractions. A
@@ -319,7 +330,7 @@ impl PreparedGraphSet {
     /// global COUNT remains zero, including under Optional Apply.
     /// AVG and extrema retain their native output domains.
     ///
-    /// Pages, grouped summaries, internal exact-domain HAVING/output transforms,
+    /// Pages, internal exact-domain HAVING/output transforms,
     /// unsupported key domains and reader/ordinal effects retain their refusal.
     /// The optimized existing source-restriction recipe remains preferred.
     pub fn incremental_filtered_aggregate_with_control<E>(
@@ -346,9 +357,11 @@ impl PreparedGraphSet {
         let Some(group_input) = summary_stages(body_query, imports, &mut tail, control)? else {
             return Ok(None);
         };
-        let Some(summary) = scalar_summary(group_input, control)? else {
+        let Some(summary) = aggregate_summary(group_input, control)? else {
             return Ok(None);
         };
+        let original_keys = summary.group_key_columns();
+        let grouped_width = original_keys.len();
         let mut stages = Vec::new();
         let Some(source) = summary_stages(summary.input(), imports, &mut stages, control)? else {
             return Ok(None);
@@ -524,8 +537,13 @@ impl PreparedGraphSet {
             };
             aggregates.push(aggregate);
         }
-        charge(key_width, control)?;
-        let keys: Vec<_> = (width..width + key_width).collect();
+        // Invocation identity partitions each original group independently.
+        // Its columns live in the private suffix, so they cannot alias a user
+        // grouping position even when that position copies an imported value.
+        charge(key_width + grouped_width, control)?;
+        let keys: Vec<_> = (width..width + key_width)
+            .chain(original_keys.iter().copied())
+            .collect();
         let Ok(grouped) = active.group_by(&keys, &aggregates) else {
             return Ok(None);
         };
@@ -538,10 +556,12 @@ impl PreparedGraphSet {
         else {
             return Ok(None);
         };
-        // An empty global aggregate still has one row for EACH active
-        // invocation. Complete it against distinct arguments before applying
-        // any post-group filter; a rejected completed row must not be mistaken
-        // for an absent body and zero-filled again during outer restoration.
+        // Only an empty GLOBAL aggregate has one row for each active invocation.
+        // A grouped aggregate's last retraction removes its group. Complete
+        // globally with Left, or retain only existing groups with Inner, before
+        // post-group filters. Optional Apply's later restoration owns NULL
+        // extension; neither empty groups nor filtered summaries are zero-filled
+        // there or evaluated again on fabricated rows.
         // Retain raw values only for explicit argument reattachment. Other
         // signatures, including repeated imports, need only their join key.
         charge(private_width, control)?;
@@ -556,18 +576,26 @@ impl PreparedGraphSet {
         let Ok(complete) = RowJoinSpec::new(invocations.column_types(), &group_types, &keys) else {
             return Ok(None);
         };
-        let complete = complete.with_kind(RowJoinKind::Left);
-        let aggregate_start = private_width + key_width;
+        let complete = complete.with_kind(if grouped_width == 0 {
+            RowJoinKind::Left
+        } else {
+            RowJoinKind::Inner
+        });
+        let group_start = private_width + key_width;
+        let aggregate_start = group_start + grouped_width;
         let mut values = Vec::new();
+        charge(grouped_width, control)?;
+        values.extend((group_start..aggregate_start).map(GraphSetValue::Column));
         for (column, (function, _)) in summary.aggregate_specs().enumerate() {
             charge(4, control)?;
             let aggregate_column = aggregate_start + column;
-            let restored = if matches!(
-                function,
-                GraphAggregateFunction::CountRows
-                    | GraphAggregateFunction::Count
-                    | GraphAggregateFunction::CountDistinct
-            ) {
+            let restored = if grouped_width == 0
+                && matches!(
+                    function,
+                    GraphAggregateFunction::CountRows
+                        | GraphAggregateFunction::Count
+                        | GraphAggregateFunction::CountDistinct
+                ) {
                 let Ok(zero_filled) = GraphIntegerExpression::prepare(&[
                     GraphIntegerOp::Column(aggregate_column),
                     GraphIntegerOp::Literal(Some(0)),
