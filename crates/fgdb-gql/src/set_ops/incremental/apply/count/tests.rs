@@ -4305,12 +4305,7 @@ fn ranked_collection_pages_preserve_lists_completion_and_optional_absence() {
     }
 }
 
-
-fn ordered_collected_summary(
-    optional: bool,
-    grouped: bool,
-    descending: bool,
-) -> PreparedGraphSet {
+fn ordered_collected_summary(optional: bool, grouped: bool, descending: bool) -> PreparedGraphSet {
     let frame = || arguments(vec![GraphSetColumnType::Stored, GraphSetColumnType::Vertex]);
     let args = frame();
     let source = right();
@@ -4506,11 +4501,7 @@ fn ordered_collections_keep_hidden_rank_ties_and_restored_imports() {
                         let next_left = filtered_left(after & 3);
                         let next_right = ordered_collected_right(after >> 2);
                         let old = ordered_collected_oracle(
-                            &old_left,
-                            &old_right,
-                            optional,
-                            grouped,
-                            descending,
+                            &old_left, &old_right, optional, grouped, descending,
                         );
                         let next = ordered_collected_oracle(
                             &next_left,
@@ -4562,7 +4553,13 @@ fn ordered_collection_recipes_preserve_identity_and_every_cancellation_checkpoin
             .unwrap()
             .unwrap();
         assert_eq!(
-            recipe.group.input().incremental_result_order().unwrap().0.len(),
+            recipe
+                .group
+                .input()
+                .incremental_result_order()
+                .unwrap()
+                .0
+                .len(),
             1
         );
         for stop in 1..=calls {

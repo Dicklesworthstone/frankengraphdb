@@ -1091,7 +1091,9 @@ fn ordered_correlated_collections_replay_hidden_ranks_and_distinct_refills() {
             }
             expected_replay.push((
                 at,
-                db.standing_native_bag(&cx, &handles[0], policy()).unwrap().1,
+                db.standing_native_bag(&cx, &handles[0], policy())
+                    .unwrap()
+                    .1,
             ));
         }
         // Consume only after all five commits. Every frame must reconstruct

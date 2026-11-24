@@ -2,9 +2,7 @@
 //! Aggregates use RHS weights, never an outer-multiplied join.
 
 use super::*;
-use crate::algebra::{
-    BindingSlot, GlaPlan, GraphValueOrder, GraphValueRow, PreparedGraphPattern,
-};
+use crate::algebra::{BindingSlot, GlaPlan, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
 use crate::row_aggregate::definition::GroupDefinition;
 use crate::row_window::RowWindowSpec;
 use crate::{
