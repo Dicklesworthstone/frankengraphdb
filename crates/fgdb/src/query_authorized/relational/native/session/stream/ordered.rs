@@ -10,7 +10,9 @@ use crate::query::view::{
 use crate::{NativeResultSpool, NativeSpoolCursor, NativeSpoolError};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use fgdb_delta_types::ElementId;
-use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanSource, EdgeScanState};
+use fgdb_gql::edge_stream::{
+    AsyncGraphWalkCursor, AsyncGraphWalkSource, EdgeScanCursor, EdgeScanSource, EdgeScanState,
+};
 use fgdb_gql::scan_stream::{ScanKind, ScanSortTail, ScanState};
 use fgdb_gql::spill_set::{AsyncSpillElementSource, AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
 use fgdb_gql::{GlaExecutionStats, GqlBudgetDimension, GqlExecutionBudget, GqlExecutionStats};
@@ -468,6 +470,51 @@ impl SpoolInput for OrderedInput<'_> {
     }
 }
 
+// A variable path keeps the native asynchronous traversal owner, while its
+// complete occurrences enter the same external sort as ordinary graph rows.
+// Resident record guards are explicit units; spill files alone own their
+// physical byte reservations. No resident-graph memory bound is implied.
+struct WalkInput<S: AsyncGraphWalkSource, F>(AsyncGraphWalkCursor<S, F>);
+impl<S, F> SpoolInput for WalkInput<S, F>
+where
+    S: AsyncGraphWalkSource<Error = QueryError, OutputGuard = ()>,
+    F: FnMut() -> core::result::Result<(), QueryError> + Send,
+{
+    fn pull(&mut self) -> impl Future<Output = Option<Result<SpoolRow>>> + Send {
+        let pulled: crate::SendFuture<'_, _> = Box::pin(async move {
+            self.0.next().await.map(|row| {
+                row.map(|row| SpoolRow::governed(row.into_parts().0))
+                    .map_err(|error| authorized(aggregate::edge::row_error(error)))
+            })
+        });
+        pulled
+    }
+    fn spool_state(&self) -> ScanState {
+        match self.0.state() {
+            EdgeScanState::Open => ScanState::Open,
+            EdgeScanState::Exhausted => ScanState::Exhausted,
+            EdgeScanState::Closed => ScanState::Closed,
+            EdgeScanState::Failed => ScanState::Failed,
+        }
+    }
+    fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
+        (
+            self.0.snapshot_seq(),
+            ScanKind::Edge,
+            self.0.row_stats(),
+            self.0.evaluator_stats(),
+        )
+    }
+}
+
+fn has_walk(query: &PreparedGraphPattern<GraphValueRow>) -> bool {
+    query
+        .plan()
+        .operators()
+        .iter()
+        .any(|operator| matches!(operator, GlaOperator::VarLengthExpand { .. }))
+}
+
 fn compile_ordered(
     query: &PreparedGraphPattern<GraphValueRow>,
 ) -> core::result::Result<(RowPlan, ScanSortTail), QueryError> {
@@ -577,12 +624,15 @@ enum BoundExternalOrder {
 // a resident evaluator after a sibling has already consumed private input.
 fn admit_external_sources(plan: &AsyncSpillSetPlan) -> core::result::Result<(), QueryError> {
     match plan.source() {
-        AsyncSpillSetSourcePlan::Procedure(_) | AsyncSpillSetSourcePlan::Walk(_) => {
-            Err(QueryError::StreamingUnsupported {
-                facade: crate::NativeReadClass::Set,
-            })
-        }
-        AsyncSpillSetSourcePlan::Values(_) | AsyncSpillSetSourcePlan::Arguments(_) => Ok(()),
+        AsyncSpillSetSourcePlan::Procedure(_) => Err(QueryError::StreamingUnsupported {
+            facade: crate::NativeReadClass::Set,
+        }),
+        // Walk is already sealed by its native compiler, including finite
+        // occurrence modes and shortest-path eligibility. Its source below
+        // implements roots and independent incidences at this same scoped cut.
+        AsyncSpillSetSourcePlan::Walk(_)
+        | AsyncSpillSetSourcePlan::Values(_)
+        | AsyncSpillSetSourcePlan::Arguments(_) => Ok(()),
         AsyncSpillSetSourcePlan::Vertex(_)
         | AsyncSpillSetSourcePlan::VertexProbe(_)
         | AsyncSpillSetSourcePlan::Edge(_)
@@ -622,6 +672,26 @@ fn bind_external_order(
     default: CommitSeq,
 ) -> core::result::Result<BoundExternalOrder, QueryError> {
     let (query, at) = match prepared {
+        PreparedNativeRead::Pattern(pattern) => {
+            let bound = pattern
+                .bind_parameters(params)
+                .map_err(QueryError::PatternText)?;
+            if !has_walk(&bound) {
+                return bind_ordered(prepared, params, default)
+                    .map(|bound| BoundExternalOrder::Linear(Box::new(bound)));
+            }
+            (bound.into(), default)
+        }
+        PreparedNativeRead::TemporalPattern(pattern) => {
+            let bound = pattern
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalText)?;
+            if !has_walk(bound.pattern()) {
+                return bind_ordered(prepared, params, default)
+                    .map(|bound| BoundExternalOrder::Linear(Box::new(bound)));
+            }
+            (bound.pattern().clone().into(), bound.as_of())
+        }
         PreparedNativeRead::Set(set) => (
             set.bind_parameters(params).map_err(QueryError::SetText)?,
             default,
@@ -641,20 +711,23 @@ fn bind_external_order(
     if query
         .ordered_row_pull()
         .or_else(|| query.ordered_graph_row_pull())
-        .is_some()
+        .is_some_and(|(pull, _)| !has_walk(pull.pattern()))
     {
         return bind_projected_order(&query, at, prepared.facade_class())
             .map(|bound| BoundExternalOrder::Linear(Box::new(bound)));
     }
     // This compiler retains finite semi/anti probes inside graph leaves.
     // The recursive fence below admits only sources implemented by this
-    // authorized host; an outer walk or procedure still refuses before I/O.
+    // authorized host; unsupported walks and procedures refuse before I/O.
     let plan = AsyncSpillSetPlan::compile_with_bounded_walks(&query).map_err(|_| {
         QueryError::StreamingUnsupported {
             facade: prepared.facade_class(),
         }
     })?;
     admit_external_sources(&plan)?;
+    if matches!(plan.source(), AsyncSpillSetSourcePlan::Walk(_)) {
+        return Ok(BoundExternalOrder::Relation(Box::new(plan), at));
+    }
     if let Some(pattern) = plan.source_pattern() {
         let (input, tail) = compile_ordered(pattern)?;
         let columns = pattern.columns().to_vec();
@@ -1198,6 +1271,37 @@ impl<C: FnMut() -> u64 + Send> ExternalOrderHost for ScopedOrderHost<'_, C> {
         Box::pin(async move {
             self.check_snapshot(snapshot)?;
             let pattern = plan.source_pattern().ok_or(SpillError::InvalidRun)?;
+            if let AsyncSpillSetSourcePlan::Walk(walk) = plan.source() {
+                let source = aggregate::edge::ordered_walk_source(
+                    snapshot,
+                    &self.view,
+                    self.cx,
+                    self.execution.clone(),
+                )
+                .map_err(authorized)?;
+                let control = self.execution.clone();
+                let input = WalkInput(AsyncGraphWalkCursor::new(
+                    source,
+                    walk.clone(),
+                    policy,
+                    move || control.borrow_mut().checkpoint(),
+                ));
+                return ordered_input(
+                    cx,
+                    pattern.columns().to_vec(),
+                    input,
+                    plan.source_tail().ok_or(SpillError::InvalidRun)?.clone(),
+                    policy,
+                    scratch,
+                    destination,
+                    limits.run_rows,
+                    limits.max_runs,
+                    limits.page_bytes,
+                    limits.max_row_bytes,
+                    limits.max_sort_work,
+                )
+                .await;
+            }
             let (input, tail) = compile_ordered(pattern).map_err(authorized)?;
             let input = scoped_ordered_input(
                 input,

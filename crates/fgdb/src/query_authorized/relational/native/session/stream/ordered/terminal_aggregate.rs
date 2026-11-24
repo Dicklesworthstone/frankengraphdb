@@ -16,6 +16,22 @@ struct BoundAggregateOrder {
     at: CommitSeq,
 }
 
+fn compile_graph_input(
+    definition: &fgdb_gql::PreparedGraphAggregate,
+) -> core::result::Result<
+    AsyncSpillAggregatePlan,
+    fgdb_gql::spill_aggregate::SpillAggregateBuildError,
+> {
+    // Complete relation inputs can contain walks in any branch. A direct
+    // variable-path aggregate also normalizes through the native complete
+    // relation, preserving occurrence order before COUNT or COLLECT.
+    if definition.input_relation().is_some() || has_walk(definition.input_pattern()) {
+        AsyncSpillAggregatePlan::compile_with_bounded_walks(definition)
+    } else {
+        AsyncSpillAggregatePlan::compile_complete_relation(definition)
+    }
+}
+
 fn bind_aggregate_order(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
@@ -30,7 +46,7 @@ fn bind_aggregate_order(
                 .bind_parameters(params)
                 .map_err(QueryError::PatternText)?;
             (
-                AsyncSpillAggregatePlan::compile_complete_relation(&definition),
+                compile_graph_input(&definition),
                 template.columns(),
                 template.output_slots(),
                 default,
@@ -41,7 +57,7 @@ fn bind_aggregate_order(
                 .bind_relation_parameters(params)
                 .map_err(QueryError::PipelineText)?;
             (
-                AsyncSpillAggregatePlan::compile_relation(&definition),
+                AsyncSpillAggregatePlan::compile_relation_with_bounded_walks(&definition),
                 template.columns(),
                 template.output_slots(),
                 default,
@@ -53,10 +69,10 @@ fn bind_aggregate_order(
                 .map_err(QueryError::TemporalText)?;
             let plan = match selected.aggregate() {
                 fgdb_gql::TemporalAggregatePlan::Graph(definition) => {
-                    AsyncSpillAggregatePlan::compile_complete_relation(definition)
+                    compile_graph_input(definition)
                 }
                 fgdb_gql::TemporalAggregatePlan::Relation(definition) => {
-                    AsyncSpillAggregatePlan::compile_relation(definition)
+                    AsyncSpillAggregatePlan::compile_relation_with_bounded_walks(definition)
                 }
             };
             (

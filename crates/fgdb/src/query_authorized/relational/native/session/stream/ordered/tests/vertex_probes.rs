@@ -210,7 +210,8 @@ fn unsupported_walk_siblings_refuse_before_any_probe_or_scratch_is_opened() {
                 &cx,
                 "MATCH (n:L) WHERE EXISTS { MATCH (n)-[:R]->(m) } \
                  RETURN n.p+1 AS value UNION ALL \
-                 MATCH (a:L)-[:R*1..2]->(b) RETURN b.p+1 AS value LIMIT 0",
+                 MATCH p = ANY SHORTEST (a:L)-[:R*2..3]->(b) \
+                 RETURN b.p+1 AS value LIMIT 0",
                 &params,
             )
             .unwrap();

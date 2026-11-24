@@ -89,6 +89,176 @@ pub(super) async fn empty_scratch(directory: &std::path::Path) {
 }
 
 #[test]
+fn external_walks_preserve_scope_path_bags_prepared_history_and_aggregate_counts() {
+    run(async |cx| {
+        let (addr, shutdown, mut task, directory) =
+            start_ordered(cx, "external-walk-results", 100).await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {age:1,name:'a'}), (b:Person {age:2,name:'b'}), \
+                 (c:Person {age:3,name:'c'}), (d:Person {age:4,name:'d'}), \
+                 (:Person {age:8,name:'isolate'}), (h:Company {age:99,name:'hidden'}), \
+                 (a)-[:KNOWS]->(b), (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c), \
+                 (c)-[:KNOWS]->(a), (d)-[:KNOWS]->(d), \
+                 (b)-[:KNOWS]->(h), (h)-[:KNOWS]->(d), (b)-[:WORKS_AT]->(d)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut scope = grant(Rights::Read);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.relations = Scope::only([RelationId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+
+        // Literal WALK occurrences: five zero-hop roots, parallel routes,
+        // a three-cycle and the twice-used self-loop. Neither hidden bridge
+        // nor hidden relationship can create a path to the fourth vertex.
+        let expected = |changed: bool| {
+            let mut pairs = vec![
+                (1, 1),
+                (1, 2),
+                (1, 2),
+                (1, 3),
+                (1, 3),
+                (2, 1),
+                (2, 2),
+                (2, 3),
+                (3, 1),
+                (3, 2),
+                (3, 2),
+                (3, 3),
+                (4, 4),
+                (4, 4),
+                (4, 4),
+                (8, 8),
+            ];
+            if changed {
+                for (from, to) in &mut pairs {
+                    if *from == 4 {
+                        *from = 40;
+                    }
+                    if *to == 4 {
+                        *to = 40;
+                    }
+                }
+            }
+            pairs.sort_unstable();
+            pairs
+                .into_iter()
+                .map(|(from, to)| vec![WireValue::Int(from), WireValue::Int(to), WireValue::Null])
+                .collect::<Vec<_>>()
+        };
+        let statement = "MATCH REPEATABLE ELEMENTS WALK (a:Person)-[:KNOWS*0..2]->(b:Person) \
+            RETURN a.age AS source,b.age AS target,a.name AS hidden ORDER BY source,target";
+        let eager = reader
+            .execute(cx, ExecuteMode::Read, statement, vec![])
+            .await
+            .unwrap();
+        let external = reader
+            .execute(cx, ExecuteMode::ReadOrdered, statement, vec![])
+            .await
+            .unwrap();
+        assert_eq!(external, eager);
+        assert_eq!(external.rows, expected(false));
+        assert_eq!(external.outcome, Outcome::Rows { seq: 1 });
+
+        // Default different-edge paths retain TRAIL semantics: the physical
+        // self-loop cannot be reused at depth two, unlike the WALK above.
+        let aggregate = "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) \
+            RETURN b.age AS age,COUNT(*) AS routes ORDER BY age";
+        let eager = reader
+            .execute(cx, ExecuteMode::Read, aggregate, vec![])
+            .await
+            .unwrap();
+        let external = reader
+            .execute(cx, ExecuteMode::ReadOrdered, aggregate, vec![])
+            .await
+            .unwrap();
+        assert_eq!(external, eager);
+        assert_eq!(
+            external.rows,
+            [(1, 2), (2, 4), (3, 3), (4, 1)]
+                .map(|(age, routes)| vec![WireValue::Int(age), WireValue::Count(routes)])
+        );
+
+        let historical = "MATCH REPEATABLE ELEMENTS WALK (a:Person)-[:KNOWS*0..2]->(b:Person) \
+            FOR SYSTEM_TIME AS OF SEQ $cut \
+            RETURN a.age AS source,b.age AS target,a.name AS hidden ORDER BY source,target";
+        let arguments = |cut| vec![("cut".into(), WireValue::Count(cut))];
+        let handle = reader
+            .prepare_read(cx, historical, arguments(1))
+            .await
+            .unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) WHERE n.age=4 SET n.age=40",
+                vec![],
+            )
+            .await
+            .unwrap();
+        for cut in [1, 2, 1] {
+            let mut columns = Vec::new();
+            let mut rows = Vec::new();
+            let outcome = reader
+                .execute_prepared_streaming(
+                    cx,
+                    PreparedReadMode::OrderedStream,
+                    handle,
+                    arguments(cut),
+                    |names| {
+                        columns = names.to_vec();
+                        Ok(())
+                    },
+                    |row| {
+                        rows.push(row);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(columns, ["source", "target", "hidden"]);
+            assert_eq!(rows, expected(cut == 2));
+            assert_eq!(outcome, Outcome::Rows { seq: cut });
+        }
+        reader.release_prepared(cx, handle).await.unwrap();
+
+        // Complete source evaluation precedes the final page. A reached
+        // expression failure cannot be turned into successful empty output.
+        assert_eq!(
+            server_code(
+                reader
+                    .execute(
+                        cx,
+                        ExecuteMode::ReadOrdered,
+                        "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) \
+                         RETURN 1/(b.age-b.age) AS invalid ORDER BY invalid LIMIT 0",
+                        vec![],
+                    )
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Execution
+        );
+        reader.ping(cx, 0x7761_6c6b).await.unwrap();
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+        empty_scratch(&directory).await;
+    });
+}
+
+#[test]
 fn external_order_preserves_masked_keys_distinct_prepared_history_and_join_bags() {
     run(async |cx| {
         let (addr, shutdown, mut task, directory) =
