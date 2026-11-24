@@ -536,7 +536,7 @@ impl PreparedGraphPattern<GraphValueRow> {
             control(GlaExecutionEvent::Work)?;
             let valid = match projection {
                 ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => {
-                    matches!(value, GraphValue::Scalar(_))
+                    crate::GraphSetColumnType::Stored.accepts(value) && value.validate_bounds()
                 }
                 ValueProjection::Vertex { .. } => {
                     matches!(value, GraphValue::Vertex(_)) || value.is_null()
@@ -895,6 +895,122 @@ mod tests {
                         vec![GraphAggregateValue::Count(1)],
                     )
                     .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn stored_property_tuples_preserve_nested_values_and_reject_graph_entities() {
+        let mut builder = GraphPatternBuilder::new();
+        builder.vertex("n").unwrap();
+        let pattern = builder
+            .prepare_values(
+                &[
+                    GraphColumn::vertex("id", "n"),
+                    GraphColumn::property("value", "n", PropertyKeyId(1)),
+                ],
+                0,
+                None,
+            )
+            .unwrap()
+            .with_duplicates();
+        let source = pattern.incremental_row_source_definition().unwrap();
+        let nested = GraphValue::map(vec![(
+            "items".into(),
+            GraphValue::List(
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(7)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ]
+                .into(),
+            ),
+        )])
+        .unwrap();
+        for value in [
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Int(9)),
+            GraphValue::List(vec![nested.clone()].into()),
+            nested,
+        ] {
+            let values = vec![GraphValue::Vertex(VId(1)), value];
+            let counted = source
+                .materialize_incremental_row(values.clone(), vec![GraphAggregateValue::Count(3)])
+                .unwrap();
+            let (row, count) = pattern
+                .materialize_incremental_values(&counted, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.values(), values);
+            assert_eq!(count, 3);
+        }
+        let mut too_deep = GraphValue::Scalar(CanonicalScalar::Null);
+        for _ in 0..=GraphValue::MAX_LIST_DEPTH {
+            too_deep = GraphValue::List(vec![too_deep].into());
+        }
+        for invalid in [
+            GraphValue::Vertex(VId(1)),
+            GraphValue::List(vec![GraphValue::Vertex(VId(1))].into()),
+            GraphValue::map(vec![(
+                "entity".into(),
+                GraphValue::Edge(fgdb_types::EId(1)),
+            )])
+            .unwrap(),
+            too_deep,
+        ] {
+            let values = vec![GraphValue::Vertex(VId(1)), invalid];
+            assert!(
+                source
+                    .materialize_incremental_row(
+                        values.clone(),
+                        vec![GraphAggregateValue::Count(1)],
+                    )
+                    .is_none()
+            );
+            // A physical reducer can construct a row directly. The ordinary
+            // output adapter must independently reject an invalid Stored cell.
+            let counted =
+                GraphAggregateRow::from_group_values(values, vec![GraphAggregateValue::Count(1)]);
+            assert!(
+                pattern
+                    .materialize_incremental_values(&counted, &mut |_| Ok::<_, ()>(()))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let payload = GraphValue::List(
+            vec![GraphValue::Scalar(
+                CanonicalScalar::bytes(vec![7; 4096]).unwrap(),
+            )]
+            .into(),
+        );
+        let counted = source
+            .materialize_incremental_row(
+                vec![GraphValue::Vertex(VId(1)), payload],
+                vec![GraphAggregateValue::Count(2)],
+            )
+            .unwrap();
+        let mut calls = 0;
+        let expected = pattern
+            .materialize_incremental_values(&counted, &mut |_| {
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+        assert!(calls > 32);
+        for stop in 1..=calls {
+            let mut seen = 0;
+            assert_eq!(
+                pattern.materialize_incremental_values(&counted, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(stop)
+            );
+            assert_eq!(
+                pattern
+                    .materialize_incremental_values(&counted, &mut |_| Ok::<_, usize>(()))
+                    .unwrap(),
+                expected
             );
         }
     }

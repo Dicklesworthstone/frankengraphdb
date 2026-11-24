@@ -12,6 +12,27 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Stored collection payloads in maintained rows — qualification pending
+
+Counted native row sources now preserve the same bounded Stored property domain
+as their aggregate carrier: scalar values, NULL, lists and maps. Previously the
+final row adapter rejected list/map property cells even after the source had
+accepted them. Vertex and edge property outputs share the repaired conversion;
+graph entities inside property collections and values beyond collection bounds
+remain refused. Payload copies retain cancellation and resource checkpoints.
+
+The focused regression covers nested collections, exact multiplicities,
+invalid nested entities/depth and every cancellation point during a collection
+copy. Independent source review found no blocker. Pinned Rustfmt and whitespace
+checks passed for the changed source. A limited one-file UBS scan exited 0 with
+zero critical findings, 36 warnings and five informational findings; its Cargo
+and AST rule-pack phases were unavailable. The full `scripts/check.sh` attempt
+timed out after 40 seconds (exit 124), with missing-tool and scanner-baseline
+failures already recorded. Compilation and Rust tests remain unrun; the exact
+foundation dependency is also unavailable. This does not establish full-tree
+qualification or close the Ripple and integrated qualification Beads.
+
+
 ### Maintained bounded WALK reachability — qualification pending
 
 Native standing queries and authorized subscriptions can now maintain finite
