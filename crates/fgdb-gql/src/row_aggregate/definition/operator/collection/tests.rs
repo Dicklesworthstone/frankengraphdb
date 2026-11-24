@@ -502,7 +502,11 @@ fn unproved_sequences_refuse_but_complete_definition_and_other_aggregate_profile
     )
     .unwrap();
     assert!(matches!(
-        IncrementalGroupAggregate::new(graph, &[GraphSetColumnType::Scalar; 3]),
+        IncrementalGroupAggregate::new(graph.clone(), &[GraphSetColumnType::Scalar; 3]),
+        Err(GroupBuildError::InputSchema { column: 0 })
+    ));
+    assert!(matches!(
+        IncrementalGroupAggregate::new(graph, input.column_types()),
         Err(GroupBuildError::UnsupportedAggregate { aggregate: 0 })
     ));
     let positional = input.clone().cross_join(input).unwrap();

@@ -41,7 +41,8 @@ fn policy(effects: u64, vertices: u64, edges: u64) -> GraphWriteProgramPolicy {
 fn run(test: impl AsyncFnOnce(&Cx)) {
     let runtime = fgdb::runtime_builder().build().unwrap();
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
-    runtime.block_on(test(&cx));
+    // Keep the client scenario at one address through the runtime's polling layers.
+    runtime.block_on(Box::pin(test(&cx)));
 }
 
 struct Fixture {
