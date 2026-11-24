@@ -2458,6 +2458,10 @@ fn correlated_page_subscriptions_rank_each_owner_and_mask_hidden_candidates() {
             }
         }
         drop(subscriptions);
+        // Closing queues the private circuits. A writer drains their retirement
+        // before the registration slots can be reused.
+        drop(clean_db.db.write(&root).await.unwrap());
+        drop(noisy_db.db.write(&root).await.unwrap());
         assert_eq!(clean_db.subscriptions.load(Ordering::Acquire), 0);
         assert_eq!(noisy_db.subscriptions.load(Ordering::Acquire), 0);
         clean.finish_shutdown(&root).await;
@@ -2666,41 +2670,33 @@ fn grouped_page_subscriptions_rerank_refill_and_mask_hidden_groups() {
                     *expected.entry(*key).or_default() -= weight;
                 }
                 expected.retain(|_, weight| *weight != 0);
-                let a = success(poll(&root, clean_db, &clean_token, left).await);
-                let b = success(poll(&root, noisy_db, &noisy_token, right).await);
-                if expected.is_empty() {
+                // Every visible graph change advances the scoped frontier.
+                // The ranked result can stay unchanged at that new frontier.
+                let a = success(poll(&root, clean_db, &clean_token, left).await).unwrap();
+                let b = success(poll(&root, noisy_db, &noisy_token, right).await).unwrap();
+                assert_eq!(a.batch.is_snapshot(), tick == 0);
+                assert_eq!(
+                    a.entries.len(),
+                    expected.len(),
+                    "optional={optional}, tick={tick}"
+                );
+                for ((owner, selected), weight) in expected {
                     assert!(
-                        a.is_none() && b.is_none(),
-                        "empty grouped delta at tick {tick}"
+                        a.entries.contains(&(weight, row(owner, selected))),
+                        "optional={optional}, tick={tick}: {:?}",
+                        a.entries
                     );
-                } else {
-                    let a = a.unwrap();
-                    let b = b.unwrap();
-                    assert_eq!(a.batch.is_snapshot(), tick == 0);
-                    assert_eq!(
-                        a.entries.len(),
-                        expected.len(),
-                        "optional={optional}, tick={tick}"
-                    );
-                    for ((owner, selected), weight) in expected {
-                        assert!(
-                            a.entries.contains(&(weight, row(owner, selected))),
-                            "optional={optional}, tick={tick}: {:?}",
-                            a.entries
-                        );
-                    }
-                    assert_eq!(
-                        a.entries, b.entries,
-                        "hidden groups must not change local ranks"
-                    );
-                    assert_eq!(a.batch.from(), b.batch.from());
-                    assert_eq!(a.batch.frontier(), b.batch.frontier());
-                    let repeated =
-                        success(poll(&root, noisy_db, &noisy_token, right).await).unwrap();
-                    assert!(Arc::ptr_eq(&b.batch, &repeated.batch));
-                    left.consumer.acknowledge(a.batch.receipt()).unwrap();
-                    right.consumer.acknowledge(b.batch.receipt()).unwrap();
                 }
+                assert_eq!(
+                    a.entries, b.entries,
+                    "hidden groups must not change local ranks"
+                );
+                assert_eq!(a.batch.from(), b.batch.from());
+                assert_eq!(a.batch.frontier(), b.batch.frontier());
+                let repeated = success(poll(&root, noisy_db, &noisy_token, right).await).unwrap();
+                assert!(Arc::ptr_eq(&b.batch, &repeated.batch));
+                left.consumer.acknowledge(a.batch.receipt()).unwrap();
+                right.consumer.acknowledge(b.batch.receipt()).unwrap();
                 *previous = current;
             }
             let mut hidden = WriteBatch::new(RelationId(1));
@@ -2719,6 +2715,8 @@ fn grouped_page_subscriptions_rerank_refill_and_mask_hidden_groups() {
             }
         }
         drop(subscriptions);
+        drop(clean_db.db.write(&root).await.unwrap());
+        drop(noisy_db.db.write(&root).await.unwrap());
         assert_eq!(clean_db.subscriptions.load(Ordering::Acquire), 0);
         assert_eq!(noisy_db.subscriptions.load(Ordering::Acquire), 0);
         clean.finish_shutdown(&root).await;

@@ -252,8 +252,16 @@ pub(crate) fn vertex(id: u128) -> WriteBatch {
 }
 
 pub(crate) async fn fail_after_marker(cx: &Cx, db: &Served, id: u128) -> WriteError {
+    let guard = db.db.write(cx).await.unwrap();
+    fail_after_marker_with_guard(cx, guard, id).await
+}
+
+pub(crate) async fn fail_after_marker_with_guard(
+    cx: &Cx,
+    mut guard: WriteGuard<'_>,
+    id: u128,
+) -> WriteError {
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let mut guard = db.db.write(cx).await.unwrap();
     let prepared = guard.prepare_atomic_writes(vec![vertex(id)]).unwrap();
     let error = guard
         .commit_prepared_with_crash(

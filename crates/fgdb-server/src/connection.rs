@@ -1227,7 +1227,21 @@ impl Lane {
             .await
     }
 
-    async fn execute_statement(
+    // Keep the statement future out of the connection's frame across every
+    // dispatch arm. The connection owns at most one admitted statement.
+    fn execute_statement<'a>(
+        &'a mut self,
+        cx: &'a Cx,
+        waiter: &'a Waiter,
+        db: &'a Served,
+        token: &'a CapabilityToken,
+        request: u64,
+        statement: Statement,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Stop>> + Send + 'a>> {
+        Box::pin(self.run_statement(cx, waiter, db, token, request, statement))
+    }
+
+    async fn run_statement(
         &mut self,
         cx: &Cx,
         waiter: &Waiter,

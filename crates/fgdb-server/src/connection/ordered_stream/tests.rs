@@ -304,10 +304,15 @@ fn pending_admission_releases_on_disconnect_drain_shutdown_and_recovery_before_s
 #[test]
 fn buffered_source_admission_releases_writer_borrow_and_services_cancel_or_recovery() {
     let ((), report) = run_async_under_lab(0x79a0_b002, |root| async move {
-        for stop in ["cancel", "recovery"] {
+        for (stop, before_capture) in [
+            ("cancel", true),
+            ("cancel", false),
+            ("recovery", true),
+            ("recovery", false),
+        ] {
             let (server, token, _) = crate::recovery::tests::served_with_config(
                 &root,
-                &format!("buffered-admission-{stop}"),
+                &format!("buffered-admission-{stop}-{before_capture}"),
                 |config| {
                     let mut buffered = crate::BufferedReadConfig::new(8 * 1024 * 1024);
                     buffered.max_concurrent = 1;
@@ -326,11 +331,16 @@ fn buffered_source_admission_releases_writer_borrow_and_services_cancel_or_recov
                 .await
                 .unwrap();
             let (mut lane, wire, stream) = lane(&root, db, &token);
+            lane.initial_window.rows = 0;
             let binding = lane.conn.binding();
             let waiter = server.shutdown.waiter();
-            // Exercise real cold setup through source_read, before any schema
-            // or graph candidate is delivered. Cancellation must not depend on
-            // advancing its pending filesystem future first.
+            // Hold the writer to make capture pending, or withhold row credit
+            // to hold a successfully opened source after its schema frame.
+            let held = if before_capture {
+                Some(db.db.write(&root).await.unwrap())
+            } else {
+                None
+            };
             let mut execution = Box::pin(lane.source_read(
                 &root,
                 &waiter,
@@ -342,9 +352,28 @@ fn buffered_source_admission_releases_writer_borrow_and_services_cancel_or_recov
                 SourceStatement::Text("MATCH (n) RETURN n"),
                 &[],
             ));
-            assert!(poll_once(execution.as_mut()).is_pending());
-            assert!(wire.lock().unwrap().outgoing.is_empty());
-            {
+            if before_capture {
+                assert!(poll_once(execution.as_mut()).is_pending());
+                assert!(wire.lock().unwrap().outgoing.is_empty());
+            } else {
+                std::future::poll_fn(|task| {
+                    assert!(execution.as_mut().poll(task).is_pending());
+                    if wire.lock().unwrap().outgoing.is_empty() {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+                let bytes = wire.lock().unwrap().outgoing.clone();
+                let mut decoder = fgdb_protocol::Decoder::new(FrameLimits::new(4096).unwrap());
+                let first = decoder.decode(&bytes, |_| Ok(())).unwrap();
+                assert_eq!(first.consumed, bytes.len());
+                let frame = first.frame.unwrap();
+                assert_eq!(frame.header().kind(), FrameKind::SnapshotResultChunk);
+                let chunk = ResultChunk::decode(frame.payload()).unwrap();
+                assert_eq!(chunk.columns.as_deref(), Some(&[String::from("n")][..]));
+                assert!(chunk.rows.is_empty());
                 let mut writer = Box::pin(db.db.write(&root));
                 let held = match poll_once(writer.as_mut()) {
                     Poll::Ready(Ok(held)) => held,
@@ -355,13 +384,20 @@ fn buffered_source_admission_releases_writer_borrow_and_services_cancel_or_recov
             if stop == "cancel" {
                 inject(&wire, FrameKind::QueryCancel, stream, binding, &Empty);
                 assert!(matches!(execution.await, Err(Stop::Cancelled)));
+                drop(held);
             } else {
-                crate::recovery::tests::fail_after_marker(&root, db, 2).await;
+                // The pending capture is queued behind our writer. Fence its
+                // generation before waking it, then let it release the read wait.
+                let writer = match held {
+                    Some(writer) => writer,
+                    None => db.db.write(&root).await.unwrap(),
+                };
+                crate::recovery::tests::fail_after_marker_with_guard(&root, writer, 2).await;
+                assert!(matches!(execution.await, Err(Stop::Recovery(_))));
                 assert!(matches!(
                     crate::recovery::tests::settled(db).await,
                     crate::DatabaseStatus::Ready { .. }
                 ));
-                assert!(matches!(execution.await, Err(Stop::Recovery(_))));
             }
             assert_eq!(db.buffered_reads.as_ref().unwrap().pool().used(), 0);
             // With one source slot, a new admission proves the cancelled or

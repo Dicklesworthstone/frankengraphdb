@@ -987,36 +987,61 @@ fn buffered_sources_preserve_prepared_pages_and_refuse_unsupported_profiles() {
         }
         reader.release_prepared(cx, handle).await.unwrap();
         let any_relation = "MATCH (a)-[r]->(b) RETURN r AS id";
+        let expected = owner
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN r AS id",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(expected.columns, ["id"]);
+        assert_eq!(expected.outcome, Outcome::Rows { seq: 3 });
+        assert_eq!(expected.rows.len(), 2);
+        assert!(matches!((&expected.rows[0][..], &expected.rows[1][..]),
+            ([WireValue::Edge(first)], [WireValue::Edge(second)]) if first != second));
         let handle = reader.prepare_read(cx, any_relation, vec![]).await.unwrap();
-        assert_eq!(
-            server_code(
+        for mode in [ExecuteMode::Read, ExecuteMode::ReadStream] {
+            assert_eq!(
                 reader
-                    .execute(cx, ExecuteMode::ReadStream, any_relation, vec![])
+                    .execute(cx, mode, any_relation, vec![])
                     .await
-                    .unwrap_err()
-            ),
-            ErrorCode::Statement
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            reader.execute_prepared(cx, handle, vec![]).await.unwrap(),
+            expected
         );
         assert_eq!(
-            server_code(
-                prepared_source(cx, &mut reader, handle, vec![])
-                    .await
-                    .unwrap_err()
-            ),
-            ErrorCode::Statement
-        );
-        assert_eq!(
-            reader
-                .execute_prepared(cx, handle, vec![])
+            prepared_source(cx, &mut reader, handle, vec![])
                 .await
-                .unwrap()
-                .rows
-                .len(),
-            2
+                .unwrap(),
+            expected
         );
         reader.release_prepared(cx, handle).await.unwrap();
         reader.ping(cx, 121).await.unwrap();
         reader.close(cx).await.unwrap();
+        scope.relations = Scope::only([]);
+        let mut denied = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        denied.select(cx, "social").await.unwrap();
+        let empty = denied
+            .execute(cx, ExecuteMode::ReadStream, any_relation, vec![])
+            .await
+            .unwrap();
+        assert_eq!(empty.columns, expected.columns);
+        assert_eq!(empty.outcome, expected.outcome);
+        assert!(empty.rows.is_empty());
+        denied.close(cx).await.unwrap();
+        let all = owner
+            .execute(cx, ExecuteMode::ReadStream, any_relation, vec![])
+            .await
+            .unwrap();
+        assert_eq!(all.outcome, expected.outcome);
+        assert_eq!(all.rows.len(), 4);
+        assert!(expected.rows.iter().all(|row| all.rows.contains(row)));
         owner.close(cx).await.unwrap();
         shutdown.trigger();
         task.join(cx).await.unwrap();

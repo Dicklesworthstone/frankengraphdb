@@ -108,10 +108,7 @@ async fn seed_people(cx: &Cx, owner: &mut Client) {
         )
         .await
         .unwrap();
-    assert!(matches!(
-        outcome.outcome,
-        Outcome::WriteCommitted { seq: 2, .. }
-    ));
+    assert!(matches!(outcome, Outcome::WriteCommitted { seq: 2, .. }));
 }
 
 fn reader_grant() -> Grant {
@@ -1344,20 +1341,34 @@ fn buffered_ordered_credit_cancel_and_refusal_release_cold_and_scratch_owners() 
         // The ordinary resident path accepts these statements. Cold ordering
         // must preserve recursive native admission even with no final rows,
         // rather than silently switching to a resident execution owner.
+        let carried =
+            "MATCH (n:Person) WITH n AS item RETURN properties([item][0]) AS fields LIMIT 0";
+        // The resident WITH retains twelve bindings and reads their properties.
+        // Its input work still counts beneath LIMIT 0.
+        let limited = reader.execute(cx, ExecuteMode::Read, carried, vec![]).await;
+        assert_eq!(server_code(limited.unwrap_err()), ErrorCode::Budget);
+        let mut resident_scope = scope.clone();
+        resident_scope.limits.max_nodes = 24;
+        let mut resident = Client::connect(cx, addr, token(&resident_scope))
+            .await
+            .unwrap();
+        resident.select(cx, "social").await.unwrap();
         for unsupported in [
             "MATCH (n:Person) RETURN n,properties(n) AS fields LIMIT 0",
-            "MATCH (n:Person) WITH n AS item RETURN properties([item][0]) AS fields LIMIT 0",
+            carried,
             "MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) RETURN a,r,b,s,c LIMIT 0",
         ] {
-            assert!(
-                reader
-                    .execute(cx, ExecuteMode::Read, unsupported, vec![])
-                    .await
-                    .unwrap()
-                    .rows
-                    .is_empty(),
-                "resident statement: {unsupported}"
-            );
+            let allowed = if unsupported == carried {
+                &mut resident
+            } else {
+                &mut reader
+            };
+            let answer = allowed
+                .execute(cx, ExecuteMode::Read, unsupported, vec![])
+                .await
+                .unwrap();
+            assert_eq!(answer.outcome, Outcome::Rows { seq: 2 }, "{unsupported}");
+            assert!(answer.rows.is_empty(), "resident statement: {unsupported}");
             let mut schemas = 0;
             let mut delivered = 0;
             let error = reader
@@ -1382,6 +1393,7 @@ fn buffered_ordered_credit_cancel_and_refusal_release_cold_and_scratch_owners() 
             reader.ping(cx, 633).await.unwrap();
             super::ordered_stream::empty_scratch(&directory).await;
         }
+        resident.close(cx).await.unwrap();
         assert_eq!(
             reader
                 .execute(
