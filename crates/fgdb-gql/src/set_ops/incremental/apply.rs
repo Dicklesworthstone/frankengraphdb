@@ -108,14 +108,18 @@ fn body_with_window<'a, E>(
         return Ok(None);
     }
     match &query.node {
-        SetNode::Scope(input) => body_with_window(input, no_imports, allow_distinct, terminal, stages, control),
+        SetNode::Scope(input) => {
+            body_with_window(input, no_imports, allow_distinct, terminal, stages, control)
+        }
         SetNode::Project {
             input,
             projection,
             quantifier,
             ..
         } if *quantifier == GraphSetQuantifier::All || allow_distinct => {
-            let Some(base) = body_with_window(input, no_imports, allow_distinct, terminal, stages, control)? else {
+            let Some(base) =
+                body_with_window(input, no_imports, allow_distinct, terminal, stages, control)?
+            else {
                 return Ok(None);
             };
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -126,7 +130,9 @@ fn body_with_window<'a, E>(
             let Some((_, code)) = query.incremental_filter() else {
                 return Ok(None);
             };
-            let Some(base) = body_with_window(input, no_imports, allow_distinct, terminal, stages, control)? else {
+            let Some(base) =
+                body_with_window(input, no_imports, allow_distinct, terminal, stages, control)?
+            else {
                 return Ok(None);
             };
             control(GlaExecutionEvent::ScratchEntry)?;

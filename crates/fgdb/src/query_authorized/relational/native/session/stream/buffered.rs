@@ -8,9 +8,11 @@ use crate::{
     BufferedReadView, MemoryPool, SymbolCatalogError,
 };
 use asupersync::fs::Vfs;
-use fgdb_delta_types::catalog::SymbolCatalog;
 use fgdb_delta_types::PropertySelection;
-use fgdb_gql::edge_stream::{AsyncEdgeScanCursor, AsyncEdgeScanPlan, EdgeScanPropertyDemand, EdgeScanState};
+use fgdb_delta_types::catalog::SymbolCatalog;
+use fgdb_gql::edge_stream::{
+    AsyncEdgeScanCursor, AsyncEdgeScanPlan, EdgeScanPropertyDemand, EdgeScanState,
+};
 use fgdb_gql::stream::{AsyncVertexScanCursor, AsyncVertexScanPlan, VertexScanPropertyDemand};
 use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
 use fgdb_strata::tiered::memory::MemoryCharge;
@@ -18,8 +20,8 @@ use fgdb_types::CommitCx;
 
 #[path = "buffered/source.rs"]
 mod source;
-use source::{Position, Source};
 pub use source::OutputGuard as AuthorizedBufferedOutputGuard;
+use source::{Position, Source};
 
 /// Typed refusal at the authorized buffered boundary. Query/credential failures
 /// retain the canonical QueryError; opening, catalog and cold storage failures
@@ -31,7 +33,10 @@ pub enum AuthorizedBufferedError {
     Catalog(SymbolCatalogError),
     Read(BufferedReadError),
     /// This initial source profile binds its catalog and graph to one cut.
-    DifferentCut { requested: CommitSeq, bound: CommitSeq },
+    DifferentCut {
+        requested: CommitSeq,
+        bound: CommitSeq,
+    },
 }
 
 impl core::fmt::Display for AuthorizedBufferedError {
@@ -42,7 +47,9 @@ impl core::fmt::Display for AuthorizedBufferedError {
             Self::Catalog(error) => error.fmt(f),
             Self::Read(error) => error.fmt(f),
             Self::DifferentCut { requested, bound } => write!(
-                f, "buffered session binds cut {}, requested {}", bound.0, requested.0
+                f,
+                "buffered session binds cut {}, requested {}",
+                bound.0, requested.0
             ),
         }
     }
@@ -61,10 +68,14 @@ impl core::error::Error for AuthorizedBufferedError {
 }
 
 impl From<QueryError> for AuthorizedBufferedError {
-    fn from(error: QueryError) -> Self { Self::Query(error) }
+    fn from(error: QueryError) -> Self {
+        Self::Query(error)
+    }
 }
 impl From<BufferedReadError> for AuthorizedBufferedError {
-    fn from(error: BufferedReadError) -> Self { Self::Read(error) }
+    fn from(error: BufferedReadError) -> Self {
+        Self::Read(error)
+    }
 }
 
 impl AuthorizedBufferedError {
@@ -140,18 +151,25 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
         policy: GqlQueryPolicy,
         mut clock: C,
     ) -> Result<
-        AuthorizedReadSession<'a, impl GraphSymbolResolver + use<V, C>, C, AuthorizedBufferedReadSource<V>>,
+        AuthorizedReadSession<
+            'a,
+            impl GraphSymbolResolver + use<V, C>,
+            C,
+            AuthorizedBufferedReadSource<V>,
+        >,
         AuthorizedBufferedError,
     > {
         if authority.namespace() != self.security_namespace() {
             return Err(QueryError::Authorization(AuthorizationError::WrongAuthority).into());
         }
         let now = clock();
-        let capability = authority.verify_at(token, branch, now)
+        let capability = authority
+            .verify_at(token, branch, now)
             .map_err(QueryError::Authorization)?;
         let mut last_now_ms = now;
         let (view, catalog) = {
-            let permit = capability.begin_read_at(branch, now)
+            let permit = capability
+                .begin_read_at(branch, now)
                 .map_err(QueryError::Authorization)?;
             let mut tracked = || {
                 let now = clock();
@@ -162,8 +180,10 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
             execution.checkpoint()?;
             if at > self.frontier() {
                 return Err(BufferedReadError::BeyondPublication {
-                    requested: at, publication: self.frontier(),
-                }.into());
+                    requested: at,
+                    publication: self.frontier(),
+                }
+                .into());
             }
             let catalog_result = self.symbol_catalog(commit_cx).await;
             execution.poll_fresh()?;
@@ -198,7 +218,8 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
 /// A delivered row retains both its copy reservation and the evaluator's
 /// allocation reservation. Projected payloads remain charged after their
 /// source record, cursor and session are gone.
-pub type AuthorizedBufferedQueryRow = BufferedQueryRow<GraphValueRow, AuthorizedBufferedOutputGuard>;
+pub type AuthorizedBufferedQueryRow =
+    BufferedQueryRow<GraphValueRow, AuthorizedBufferedOutputGuard>;
 
 type Checkpoint<'q> = Box<dyn FnMut() -> Result<(), QueryError> + Send + 'q>;
 type Returned<V> = Arc<Mutex<Option<AuthorizedBufferedReadSource<V>>>>;
@@ -206,7 +227,9 @@ type Returned<V> = Arc<Mutex<Option<AuthorizedBufferedReadSource<V>>>>;
 // The return slot never calls user code or drops a backend under its lock.
 // Poison recovery only retrieves the affine owner; it cannot restore authority.
 fn take_returned<V: Vfs>(slot: &Returned<V>) -> Option<AuthorizedBufferedReadSource<V>> {
-    slot.lock().unwrap_or_else(|error| error.into_inner()).take()
+    slot.lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
 }
 
 struct ReturnGuard<'q, V: Vfs> {
@@ -244,7 +267,9 @@ struct PollFence<'g, 'q, V: Vfs> {
 }
 impl<V: Vfs> Drop for PollFence<'_, '_, V> {
     fn drop(&mut self) {
-        if self.armed { self.guard.fail(); }
+        if self.armed {
+            self.guard.fail();
+        }
     }
 }
 
@@ -266,14 +291,20 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
         }
     }
 
-    async fn next(&mut self) -> Option<Result<AuthorizedBufferedQueryRow, AuthorizedBufferedError>> {
+    async fn next(
+        &mut self,
+    ) -> Option<Result<AuthorizedBufferedQueryRow, AuthorizedBufferedError>> {
         match self {
-            Self::Vertex(cursor) => cursor.next().await.map(|result| result
-                .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
-                .map_err(source::vertex_error)),
-            Self::Edge(cursor) => cursor.next().await.map(|result| result
-                .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
-                .map_err(source::edge_error)),
+            Self::Vertex(cursor) => cursor.next().await.map(|result| {
+                result
+                    .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
+                    .map_err(source::vertex_error)
+            }),
+            Self::Edge(cursor) => cursor.next().await.map(|result| {
+                result
+                    .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
+                    .map_err(source::edge_error)
+            }),
         }
     }
 }
@@ -308,25 +339,47 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> core::fmt::Debug
 }
 
 impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> AuthorizedBufferedRowCursor<'_, V, C> {
-    pub fn columns(&self) -> &[String] { &self.columns }
-    pub fn snapshot_seq(&self) -> CommitSeq { self.at }
-    pub fn state(&self) -> VertexScanState { self.state }
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.at
+    }
+    pub fn state(&self) -> VertexScanState {
+        self.state
+    }
 
     pub fn close(&mut self) {
-        if self.state == VertexScanState::Open { self.state = VertexScanState::Closed; }
+        if self.state == VertexScanState::Open {
+            self.state = VertexScanState::Closed;
+        }
         self.inner.take();
     }
 
-    pub async fn next(&mut self) -> Option<Result<AuthorizedBufferedQueryRow, AuthorizedBufferedError>> {
-        if self.state != VertexScanState::Open { return None; }
+    pub async fn next(
+        &mut self,
+    ) -> Option<Result<AuthorizedBufferedQueryRow, AuthorizedBufferedError>> {
+        if self.state != VertexScanState::Open {
+            return None;
+        }
         self.state = VertexScanState::Failed;
         // Declaration order is essential: cancellation drops the native source
         // into its return slot BEFORE the fence discards that slot and pin.
-        let mut fence = PollFence { guard: &mut self.guard, armed: true };
-        let mut inner = self.inner.take().expect("open buffered cursor owns its source");
+        let mut fence = PollFence {
+            guard: &mut self.guard,
+            armed: true,
+        };
+        let mut inner = self
+            .inner
+            .take()
+            .expect("open buffered cursor owns its source");
         let before = self.execution.borrow_mut().poll_fresh();
         let result = match before {
-            Ok(()) => self.cx.with_restriction_async(inner.next()).await.transpose(),
+            Ok(()) => self
+                .cx
+                .with_restriction_async(inner.next())
+                .await
+                .transpose(),
             Err(error) => Err(error.into()),
         };
         let result = match self.execution.borrow_mut().poll_fresh() {
@@ -334,7 +387,9 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> AuthorizedBufferedRowCursor<'_, V
             Err(error) => Err(error.into()),
         };
         let result = result.and_then(|row| {
-            self.execution.borrow_mut().deliver(usize::from(row.is_some()))?;
+            self.execution
+                .borrow_mut()
+                .deliver(usize::from(row.is_some()))?;
             Ok(row)
         });
         match result {
@@ -345,7 +400,9 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> AuthorizedBufferedRowCursor<'_, V
                 } else {
                     VertexScanState::Open
                 };
-                if self.state == VertexScanState::Open { self.inner = Some(inner); }
+                if self.state == VertexScanState::Open {
+                    self.inner = Some(inner);
+                }
                 row.map(Ok)
             }
             Err(error) => {
@@ -370,21 +427,30 @@ fn compile(
         let mut visible = PropertySelection::EMPTY;
         for &key in keys.keys() {
             if scope.allows_property(key) {
-                visible.insert(key).expect("a subset of a bounded selection");
+                visible
+                    .insert(key)
+                    .expect("a subset of a bounded selection");
             }
         }
         visible
     };
-    if matches!(pattern.plan().operators().first(), Some(GlaOperator::ScanEdges { .. })) {
-        let plan = AsyncEdgeScanPlan::compile(pattern.plan()).map_err(|error|
-            QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(error))))?;
-        let relation = plan.root_relation().one()
+    if matches!(
+        pattern.plan().operators().first(),
+        Some(GlaOperator::ScanEdges { .. })
+    ) {
+        let plan = AsyncEdgeScanPlan::compile(pattern.plan()).map_err(|error| {
+            QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(error)))
+        })?;
+        let relation = plan
+            .root_relation()
+            .one()
             .ok_or(QueryError::StreamingUnsupported { facade })?;
         let keys = match plan.property_demand() {
             EdgeScanPropertyDemand::Topology => PropertySelection::EMPTY,
             EdgeScanPropertyDemand::Properties(keys) => select(keys),
-            EdgeScanPropertyDemand::Complete => return Err(
-                QueryError::StreamingUnsupported { facade }.into()),
+            EdgeScanPropertyDemand::Complete => {
+                return Err(QueryError::StreamingUnsupported { facade }.into());
+            }
         };
         Ok(Plan::Edge(plan, keys, relation))
     } else {
@@ -392,8 +458,9 @@ fn compile(
         let keys = match plan.property_demand() {
             VertexScanPropertyDemand::Topology => PropertySelection::EMPTY,
             VertexScanPropertyDemand::Properties(keys) => select(keys),
-            VertexScanPropertyDemand::Complete => return Err(
-                QueryError::StreamingUnsupported { facade }.into()),
+            VertexScanPropertyDemand::Complete => {
+                return Err(QueryError::StreamingUnsupported { facade }.into());
+            }
         };
         Ok(Plan::Vertex(plan, keys))
     }
@@ -407,18 +474,29 @@ fn bind(
 ) -> Result<(Plan, Vec<String>), AuthorizedBufferedError> {
     let (pattern, selected) = match prepared {
         PreparedNativeRead::Pattern(prepared) => (
-            prepared.bind_parameters(params).map_err(QueryError::PatternText)?, at
+            prepared
+                .bind_parameters(params)
+                .map_err(QueryError::PatternText)?,
+            at,
         ),
         PreparedNativeRead::TemporalPattern(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::TemporalText)?;
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalText)?;
             (query.pattern().clone(), query.as_of())
         }
-        _ => return Err(QueryError::StreamingUnsupported {
-            facade: prepared.facade_class(),
-        }.into()),
+        _ => {
+            return Err(QueryError::StreamingUnsupported {
+                facade: prepared.facade_class(),
+            }
+            .into());
+        }
     };
     if selected != at {
-        return Err(AuthorizedBufferedError::DifferentCut { requested: selected, bound: at });
+        return Err(AuthorizedBufferedError::DifferentCut {
+            requested: selected,
+            bound: at,
+        });
     }
     let plan = compile(&pattern, scope, prepared.facade_class())?;
     Ok((plan, pattern.columns().to_vec()))
@@ -438,44 +516,82 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
         params: &GqlParameters,
     ) -> Result<AuthorizedBufferedRowCursor<'q, V, C>, AuthorizedBufferedError> {
         let owner = &self.owner;
-        let state = self.state.as_mut().ok_or(
-            QueryError::Authorization(AuthorizationError::ExecutionStopped))?;
-        let State { view, capability, branch, policy, clock, last_now_ms, .. } = state;
+        let state = self.state.as_mut().ok_or(QueryError::Authorization(
+            AuthorizationError::ExecutionStopped,
+        ))?;
+        let State {
+            view,
+            capability,
+            branch,
+            policy,
+            clock,
+            last_now_ms,
+            ..
+        } = state;
         let returned = Arc::new(Mutex::new(None));
-        let mut guard = ReturnGuard { session: view, returned: returned.clone(), terminal: true };
+        let mut guard = ReturnGuard {
+            session: view,
+            returned: returned.clone(),
+            terminal: true,
+        };
         let outcome: Result<_, AuthorizedBufferedError> = (|| {
-            let backend = guard.session.as_ref().ok_or(
-                QueryError::Authorization(AuthorizationError::ExecutionStopped))?;
+            let backend = guard.session.as_ref().ok_or(QueryError::Authorization(
+                AuthorizationError::ExecutionStopped,
+            ))?;
             let now = clock();
             if now < *last_now_ms {
-                return Err(QueryError::Authorization(AuthorizationError::ClockWentBackwards).into());
+                return Err(
+                    QueryError::Authorization(AuthorizationError::ClockWentBackwards).into(),
+                );
             }
             *last_now_ms = now;
-            let permit = capability.begin_read_at(branch, now).map_err(QueryError::Authorization)?;
+            let permit = capability
+                .begin_read_at(branch, now)
+                .map_err(QueryError::Authorization)?;
             let execution = Shared(Arc::new(Mutex::new(Some(Execution::tracking(
-                cx, permit, clock, last_now_ms,
+                cx,
+                permit,
+                clock,
+                last_now_ms,
             )))));
             execution.borrow_mut().checkpoint()?;
             let selected = (|| {
                 prepared.admit_input(owner, params, &mut execution.borrow_mut())?;
-                let selected = prepared.selector.bind_parameters(params).map_err(selector_error)?;
+                let selected = prepared
+                    .selector
+                    .bind_parameters(params)
+                    .map_err(selector_error)?;
                 check_branch(&selected, branch)?;
                 let params = prepared.parameters(selected.parameters())?;
-                bind(&prepared.native, &params, backend.at, capability.predicates())
+                bind(
+                    &prepared.native,
+                    &params,
+                    backend.at,
+                    capability.predicates(),
+                )
             })();
             execution.borrow_mut().checkpoint()?;
             let (plan, columns) = selected?;
             let at = backend.at;
             let pool = backend.view.memory_pool().clone();
-            let metadata = pool.reserve(cx, 1024 + size_of::<Source<'q, V, C>>())
+            let metadata = pool
+                .reserve(cx, 1024 + size_of::<Source<'q, V, C>>())
                 .map_err(BufferedReadError::Memory)?;
             let mut backend = guard.session.take().expect("admitted backend is pinned");
             let position = match &plan {
-                Plan::Vertex(..) => backend.view.partition_mut().vertex_scan(cx, at)
+                Plan::Vertex(..) => backend
+                    .view
+                    .partition_mut()
+                    .vertex_scan(cx, at)
                     .map(|scan| Position::Vertex(Some(scan.into_state()))),
-                Plan::Edge(_, _, relation) if !capability.predicates().allows_relation(*relation) =>
-                    Ok(Position::Edge(None)),
-                Plan::Edge(_, _, relation) => backend.view.partition_mut()
+                Plan::Edge(_, _, relation)
+                    if !capability.predicates().allows_relation(*relation) =>
+                {
+                    Ok(Position::Edge(None))
+                }
+                Plan::Edge(_, _, relation) => backend
+                    .view
+                    .partition_mut()
                     .edge_scan_relation(cx, at, *relation)
                     .map(|scan| Position::Edge(Some(scan.into_state()))),
             };
@@ -486,15 +602,26 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
                     return Err(error.into());
                 }
             };
-            let keys = match &plan { Plan::Vertex(_, keys) | Plan::Edge(_, keys, _) => *keys };
-            let source = Source::new(backend, returned.clone(), position, keys, cx, execution.clone());
+            let keys = match &plan {
+                Plan::Vertex(_, keys) | Plan::Edge(_, keys, _) => *keys,
+            };
+            let source = Source::new(
+                backend,
+                returned.clone(),
+                position,
+                keys,
+                cx,
+                execution.clone(),
+            );
             let control = execution.clone();
             let checkpoint: Checkpoint<'q> = Box::new(move || control.borrow_mut().checkpoint());
             let inner = match plan {
-                Plan::Vertex(plan, _) => Native::Vertex(
-                    AsyncVertexScanCursor::new(source, plan, *policy, checkpoint)),
-                Plan::Edge(plan, _, _) => Native::Edge(
-                    AsyncEdgeScanCursor::new(source, plan, *policy, checkpoint)),
+                Plan::Vertex(plan, _) => Native::Vertex(AsyncVertexScanCursor::new(
+                    source, plan, *policy, checkpoint,
+                )),
+                Plan::Edge(plan, _, _) => {
+                    Native::Edge(AsyncEdgeScanCursor::new(source, plan, *policy, checkpoint))
+                }
             };
             Ok((inner, execution, columns, at, metadata))
         })();
@@ -502,8 +629,14 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
             Ok((inner, execution, columns, at, metadata)) => {
                 guard.terminal = false;
                 Ok(AuthorizedBufferedRowCursor {
-                    inner: Some(inner), guard, execution, cx, columns, at,
-                    state: VertexScanState::Open, _metadata: metadata,
+                    inner: Some(inner),
+                    guard,
+                    execution,
+                    cx,
+                    columns,
+                    at,
+                    state: VertexScanState::Open,
+                    _metadata: metadata,
                 })
             }
             Err(error) => {

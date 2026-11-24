@@ -1100,7 +1100,8 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         } else if let Some((plan, window)) =
             match query.incremental_apply_window_with_control(&mut |_| checkpoint())? {
                 Some(plan) => Some((plan.invocation, Some(plan.window))),
-                None => query.incremental_apply_distinct_with_control(&mut |_| checkpoint())?
+                None => query
+                    .incremental_apply_distinct_with_control(&mut |_| checkpoint())?
                     .map(|plan| (plan, None)),
             }
         {

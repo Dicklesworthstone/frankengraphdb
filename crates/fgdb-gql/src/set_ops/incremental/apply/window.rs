@@ -65,15 +65,17 @@ pub(super) fn independent_window<E>(
                     let total = match column {
                         ValueProjection::Vertex { .. }
                         | ValueProjection::Path {
-                            function: GraphPathFunction::Value
+                            function:
+                                GraphPathFunction::Value
                                 | GraphPathFunction::Length
                                 | GraphPathFunction::Nodes
                                 | GraphPathFunction::Edges
                                 | GraphPathFunction::Edge,
                             ..
                         } => true,
-                        ValueProjection::Property { slot, key } =>
-                            scalar_guard(&operators[..at], *slot, *key, control)?,
+                        ValueProjection::Property { slot, key } => {
+                            scalar_guard(&operators[..at], *slot, *key, control)?
+                        }
                         _ => false,
                     };
                     if !total {
@@ -83,14 +85,22 @@ pub(super) fn independent_window<E>(
             }
             Ok(true)
         }
-        SetNode::Scope(input) | SetNode::Filter { input, .. } =>
-            independent_window(input, control),
-        SetNode::Project { input, projection, quantifier: GraphSetQuantifier::All, .. } => {
+        SetNode::Scope(input) | SetNode::Filter { input, .. } => independent_window(input, control),
+        SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            ..
+        } => {
             for cell in projection {
                 control(GlaExecutionEvent::Work)?;
-                if !matches!(cell.value(), GraphSetValue::Column(_)
-                    | GraphSetValue::Literal(_) | GraphSetValue::TypedNull(_) | GraphSetValue::Value(_))
-                {
+                if !matches!(
+                    cell.value(),
+                    GraphSetValue::Column(_)
+                        | GraphSetValue::Literal(_)
+                        | GraphSetValue::TypedNull(_)
+                        | GraphSetValue::Value(_)
+                ) {
                     return Ok(false);
                 }
             }
@@ -181,8 +191,11 @@ impl PreparedGraphSet {
             order.to_vec(),
             GraphSetQuantifier::All,
             terminal.offset,
-            terminal.count.expect("terminal admission requires a finite page"),
-        ).and_then(|window| window.with_partition_columns((width..width + keys).collect())) else {
+            terminal
+                .count
+                .expect("terminal admission requires a finite page"),
+        )
+        .and_then(|window| window.with_partition_columns((width..width + keys).collect())) else {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work)?;

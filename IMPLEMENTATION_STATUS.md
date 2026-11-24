@@ -51,10 +51,16 @@ signed budgets, old catalogs and cuts, denied rights and namespace mismatch,
 admission before damaged sidecars, pending-pull cancellation, late expiry and
 retained output charges. Additional Strata regressions cover staged admission,
 original edge ordinals, source-owner isolation and fused failure. Independent
-source reviews found no remaining concrete blocker. Compilation, formatting,
-runtime tests, Clippy, UBS and exact-tree qualification for this integration are
-UNRUN; source review is not a passing native verdict. The executor and integrated
-qualification work remain open under `fgdb-w5-executor-olp` and
+source reviews found no remaining concrete blocker. Pinned nightly-2026-08-31
+Rustfmt parsed and formatted all 34 Rust files changed by this integration and
+the maintained-page work; the focused check returned exit 0. A locked,
+single-job `cargo check -p fgdb --test authorized_buffered_read` against source
+tree `d4491f891017724ae2c432c259f98dd5d8fc4e32` reached the pinned asupersync
+dependency, whose compiler process received SIGKILL. Cargo exited 101 before
+reaching any fgdb crate. The kill's cause is unproven; no type-check or runtime
+verdict follows. Compilation, runtime tests, Clippy, UBS and exact-tree
+qualification remain UNRUN. The executor and integrated qualification work
+remain open under `fgdb-w5-executor-olp` and
 `fgdb-qualify-integrated-nov22-maz0p`.
 
 ### Maintained per-invocation ordered pages — qualification pending
@@ -102,12 +108,13 @@ inactive oversized collections and every registration/rebuild checkpoint.
 A served FGP subscription regression checks literal deltas, hidden candidate
 masking, pending-receipt reuse and acknowledgement through six successive cuts.
 
-Independent source review found no remaining blocker. The underlying three-file
-partitioned TopK kernel passed pinned Rustfmt; formatting of this complete
-integration, compilation, runtime tests, Clippy, UBS and exact-tree gates remain
-UNRUN after executor loss and exhausted workspace capacity. These are regression
-sources, not a passing runtime verdict. The executor and integrated qualification
-work remain open under `fgdb-w5-executor-olp` and
+Independent source review found no remaining blocker. Pinned nightly-2026-08-31
+Rustfmt now passes across all changed Rust files, including the kernel, compiler,
+native executor and served subscription regression. The restored native check
+described above stopped at a SIGKILL in the pinned asupersync dependency before
+any fgdb crate. Compilation, runtime tests, Clippy, UBS and exact-tree gates remain
+UNRUN. These are regression sources, not a passing runtime verdict. The executor
+and integrated qualification work remain open under `fgdb-w5-executor-olp` and
 `fgdb-qualify-integrated-nov22-maz0p`.
 
 ### Scoped graph algorithms enter external relational ordering — qualification pending

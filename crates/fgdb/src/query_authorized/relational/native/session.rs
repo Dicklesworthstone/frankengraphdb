@@ -7,12 +7,13 @@
 #[path = "session/stream.rs"]
 mod stream;
 pub use stream::{
-    AuthorizedBufferedError, AuthorizedBufferedOutputGuard, AuthorizedBufferedQueryRow, AuthorizedBufferedReadSource, AuthorizedBufferedRowCursor,
     AuthorizedAggregateCursor, AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor,
-    AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor, AuthorizedDifferenceCursor,
-    AuthorizedDifferenceExecution, AuthorizedOrderExecution, AuthorizedOrderedReadSession,
-    AuthorizedRowCursor, AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
-    AuthorizedSortLimits, AuthorizedSpoolCursor,
+    AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor, AuthorizedBufferedError,
+    AuthorizedBufferedOutputGuard, AuthorizedBufferedQueryRow, AuthorizedBufferedReadSource,
+    AuthorizedBufferedRowCursor, AuthorizedDifferenceCursor, AuthorizedDifferenceExecution,
+    AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedRowCursor,
+    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
+    AuthorizedSpoolCursor,
 };
 
 use super::*;
@@ -317,45 +318,50 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64, B> AuthorizedReadSession<'_, R, 
         params: &GqlParameters,
     ) -> Result<AuthorizedPreparedRead, QueryError> {
         let owner = Arc::clone(&self.owner);
-        self.run_scoped_with_backend(cx, None, |_, branch, _, resolver, _, execution| {
-            admit_text_input(&mut execution.borrow_mut(), text, params)?;
-            let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
-            let (text, params) = lowered
-                .as_ref()
-                .map_or((text, params), |(lowered, derived)| {
-                    (lowered.text(), derived)
+        self.run_scoped_with_backend(
+            cx,
+            None,
+            |_, branch, _, resolver, _, execution| {
+                admit_text_input(&mut execution.borrow_mut(), text, params)?;
+                let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
+                let (text, params) = lowered
+                    .as_ref()
+                    .map_or((text, params), |(lowered, derived)| {
+                        (lowered.text(), derived)
+                    });
+                let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
+                let selected = selector.bind_parameters(params).map_err(selector_error)?;
+                check_branch(&selected, branch)?;
+                refuse_element_identity(selected.statement())?;
+                execution.borrow_mut().checkpoint()?;
+                let native = PreparedNativeRead::prepare(
+                    selected.statement(),
+                    selected.parameters(),
+                    BorrowedResolver(resolver),
+                );
+                execution.borrow_mut().checkpoint()?;
+                let native = native?;
+                let lowered = lowered.map(|(lowered, _)| Arc::new(lowered));
+                let parameter_schema = lowered.as_ref().map(|lowered| {
+                    lowered
+                        .field_parameter_schema(native.parameter_schema())
+                        .into_boxed_slice()
                 });
-            let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
-            let selected = selector.bind_parameters(params).map_err(selector_error)?;
-            check_branch(&selected, branch)?;
-            refuse_element_identity(selected.statement())?;
-            execution.borrow_mut().checkpoint()?;
-            let native = PreparedNativeRead::prepare(
-                selected.statement(),
-                selected.parameters(),
-                BorrowedResolver(resolver),
-            );
-            execution.borrow_mut().checkpoint()?;
-            let native = native?;
-            let lowered = lowered.map(|(lowered, _)| Arc::new(lowered));
-            let parameter_schema = lowered.as_ref().map(|lowered| {
-                lowered
-                    .field_parameter_schema(native.parameter_schema())
-                    .into_boxed_slice()
-            });
-            Ok((
-                AuthorizedPreparedRead {
-                    owner,
-                    selector: Arc::new(selector),
-                    native: Arc::new(native),
-                    lowered,
-                    parameter_schema,
-                },
-                0,
-            ))
-        }, |error| error, terminal)
+                Ok((
+                    AuthorizedPreparedRead {
+                        owner,
+                        selector: Arc::new(selector),
+                        native: Arc::new(native),
+                        lowered,
+                        parameter_schema,
+                    },
+                    0,
+                ))
+            },
+            |error| error,
+            terminal,
+        )
     }
-
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {

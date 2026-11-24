@@ -649,7 +649,8 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         cx: &QueryCx,
         properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<(BufferedEdgeCandidate, Option<WinningLocation>)>, BufferedScanError<C>> {
+    ) -> Result<Option<(BufferedEdgeCandidate, Option<WinningLocation>)>, BufferedScanError<C>>
+    {
         if !state.initialized {
             self.prepare_published_run(state, cx, observe).await?;
         }

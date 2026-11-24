@@ -150,7 +150,15 @@ impl PreparedGraphSet {
             return Ok(None);
         }
         let mut stages = Vec::new();
-        let Some(base) = body_with_window(right, imports.is_empty(), true, terminal, &mut stages, control)? else {
+        let Some(base) = body_with_window(
+            right,
+            imports.is_empty(),
+            true,
+            terminal,
+            &mut stages,
+            control,
+        )?
+        else {
             return Ok(None);
         };
         let mut has_distinct = false;

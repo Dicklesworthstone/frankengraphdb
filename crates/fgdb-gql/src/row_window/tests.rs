@@ -408,26 +408,57 @@ fn partitioned_rows_keep_null_keys_duplicates_and_independent_refill() {
             GraphValue::Scalar(CanonicalScalar::Int(rank)),
         ])
     };
-    let input = [make(None, 1, 9), make(None, 2, 8), make(Some(7), 3, 7), make(Some(7), 4, 6)];
+    let input = [
+        make(None, 1, 9),
+        make(None, 2, 8),
+        make(Some(7), 3, 7),
+        make(Some(7), 4, 6),
+    ];
     for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
         let spec = RowWindowSpec::new(
-            vec![GraphSetColumnType::Scalar, GraphSetColumnType::Vertex, GraphSetColumnType::Scalar],
-            vec![GraphValueOrder { column: 2, descending: true, nulls_first: false }],
+            vec![
+                GraphSetColumnType::Scalar,
+                GraphSetColumnType::Vertex,
+                GraphSetColumnType::Scalar,
+            ],
+            vec![GraphValueOrder {
+                column: 2,
+                descending: true,
+                nulls_first: false,
+            }],
             quantifier,
             1,
             1,
-        ).unwrap().with_partition_columns(vec![0]).unwrap();
+        )
+        .unwrap()
+        .with_partition_columns(vec![0])
+        .unwrap();
         let mut stage = IncrementalRowWindow::new(spec);
-        let seed = z(&[(input[0].clone(), 3), (input[1].clone(), 1), (input[2].clone(), 2), (input[3].clone(), 1)]);
+        let seed = z(&[
+            (input[0].clone(), 3),
+            (input[1].clone(), 1),
+            (input[2].clone(), 2),
+            (input[3].clone(), 1),
+        ]);
         stage.apply(&seed, LIMBS, Some(2), &mut allow).unwrap();
-        let selected = if quantifier == GraphSetQuantifier::All { [0, 2] } else { [1, 3] };
-        assert_eq!(compressed(&stage), selected.map(|at| (input[at].clone(), 1)).to_vec());
+        let selected = if quantifier == GraphSetQuantifier::All {
+            [0, 2]
+        } else {
+            [1, 3]
+        };
+        assert_eq!(
+            compressed(&stage),
+            selected.map(|at| (input[at].clone(), 1)).to_vec()
+        );
         let change = z(&[(input[0].clone(), -3), (input[2].clone(), -1)]);
         let pending = stage.prepare(&change, LIMBS, Some(1), &mut allow).unwrap();
         assert_eq!(pending.total(), &ZWeight::ONE);
         assert_eq!(pending.rows().len(), 1);
         assert_eq!(pending.rows().next().map(|(row, _)| row), Some(&input[3]));
-        assert_eq!(pending.rows().next_back().map(|(row, _)| row), Some(&input[3]));
+        assert_eq!(
+            pending.rows().next_back().map(|(row, _)| row),
+            Some(&input[3])
+        );
         pending.commit();
         assert_eq!(compressed(&stage), vec![(input[3].clone(), 1)]);
     }
@@ -436,7 +467,8 @@ fn partitioned_rows_keep_null_keys_duplicates_and_independent_refill() {
 #[test]
 fn every_partitioned_row_reservation_is_atomic_and_partition_columns_are_checked() {
     let definition = spec(GraphSetQuantifier::All, false, false, 0, 1)
-        .with_partition_columns(vec![1]).unwrap();
+        .with_partition_columns(vec![1])
+        .unwrap();
     let seed = z(&[(row(0, None), 2), (row(1, None), 1), (row(2, Some(7)), 1)]);
     let changes = z(&[(row(0, None), -2), (row(3, Some(8)), 1)]);
     let seeded = || {
@@ -446,7 +478,12 @@ fn every_partitioned_row_reservation_is_atomic_and_partition_columns_are_checked
     };
     let mut complete = seeded();
     let mut events = 0;
-    complete.apply(&changes, LIMBS, None, &mut |_| { events += 1; Ok::<_, usize>(()) }).unwrap();
+    complete
+        .apply(&changes, LIMBS, None, &mut |_| {
+            events += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap();
     for stop in 1..=events {
         let mut stage = seeded();
         let mut at = 0;
@@ -454,13 +491,25 @@ fn every_partitioned_row_reservation_is_atomic_and_partition_columns_are_checked
             at += 1;
             if at == stop { Err(stop) } else { Ok(()) }
         });
-        assert!(matches!(result, Err(RowWindowError::Delta(ZSetError::Control(error))) if error == stop));
+        assert!(
+            matches!(result, Err(RowWindowError::Delta(ZSetError::Control(error))) if error == stop)
+        );
         assert_eq!(stage, seeded());
         stage.apply(&changes, LIMBS, None, &mut allow).unwrap();
         assert_eq!(stage, complete);
     }
-    assert!(matches!(definition.clone().with_partition_columns(vec![2]), Err(RowWindowBuildError::Partition(GraphOrderError::UnknownColumn { column: 2 }))));
-    assert!(matches!(definition.with_partition_columns(vec![0, 0]), Err(RowWindowBuildError::Partition(GraphOrderError::DuplicateColumn { column: 0 }))));
+    assert!(matches!(
+        definition.clone().with_partition_columns(vec![2]),
+        Err(RowWindowBuildError::Partition(
+            GraphOrderError::UnknownColumn { column: 2 }
+        ))
+    ));
+    assert!(matches!(
+        definition.with_partition_columns(vec![0, 0]),
+        Err(RowWindowBuildError::Partition(
+            GraphOrderError::DuplicateColumn { column: 0 }
+        ))
+    ));
 }
 
 #[test]

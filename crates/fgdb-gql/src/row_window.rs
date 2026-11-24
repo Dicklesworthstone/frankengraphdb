@@ -11,8 +11,8 @@
 use crate::algebra::{GraphOrderError, GraphValueOrder, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::{GlaExecutionEvent, GraphSetColumnType, GraphSetQuantifier};
 use fgdb_delta_types::zset::incremental::topk::{
-    IncrementalPartitionedTopK, IncrementalTopK, PartitionedKey, PartitionedTopKUpdate,
-    TopKError, TopKUpdate,
+    IncrementalPartitionedTopK, IncrementalTopK, PartitionedKey, PartitionedTopKUpdate, TopKError,
+    TopKUpdate,
 };
 use fgdb_delta_types::zset::incremental::{DistinctUpdate, IncrementalDistinct};
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
@@ -109,17 +109,23 @@ impl RowWindowSpec {
         columns: Vec<usize>,
     ) -> Result<Self, RowWindowBuildError> {
         if columns.len() > MAX_PATTERN_VERTICES {
-            return Err(RowWindowBuildError::Partition(GraphOrderError::TooManyColumns {
-                limit: MAX_PATTERN_VERTICES,
-                observed: columns.len(),
-            }));
+            return Err(RowWindowBuildError::Partition(
+                GraphOrderError::TooManyColumns {
+                    limit: MAX_PATTERN_VERTICES,
+                    observed: columns.len(),
+                },
+            ));
         }
         for (at, &column) in columns.iter().enumerate() {
             if column >= self.input.len() {
-                return Err(RowWindowBuildError::Partition(GraphOrderError::UnknownColumn { column }));
+                return Err(RowWindowBuildError::Partition(
+                    GraphOrderError::UnknownColumn { column },
+                ));
             }
             if columns[..at].contains(&column) {
-                return Err(RowWindowBuildError::Partition(GraphOrderError::DuplicateColumn { column }));
+                return Err(RowWindowBuildError::Partition(
+                    GraphOrderError::DuplicateColumn { column },
+                ));
             }
         }
         self.partition = columns.into();
@@ -188,10 +194,13 @@ impl Ord for OrderedRow {
     fn cmp(&self, other: &Self) -> Ordering {
         // Each live operator has one immutable definition. Still define an
         // honest total order across definitions for Eq/Ord consistency.
-        self.partition.cmp(&other.partition).then_with(|| self.order.cmp(&other.order)).then_with(|| {
-            self.row
-                .compare_incremental_window_order(&other.row, &self.order)
-        })
+        self.partition
+            .cmp(&other.partition)
+            .then_with(|| self.order.cmp(&other.order))
+            .then_with(|| {
+                self.row
+                    .compare_incremental_window_order(&other.row, &self.order)
+            })
     }
 }
 impl PartialOrd for OrderedRow {
@@ -214,24 +223,37 @@ struct PartitionKey {
 impl Ord for PartitionKey {
     fn cmp(&self, other: &Self) -> Ordering {
         self.columns.cmp(&other.columns).then_with(|| {
-            self.columns.iter()
+            self.columns
+                .iter()
                 .map(|&column| &self.row.values()[column])
-                .cmp(other.columns.iter().map(|&column| &other.row.values()[column]))
+                .cmp(
+                    other
+                        .columns
+                        .iter()
+                        .map(|&column| &other.row.values()[column]),
+                )
         })
     }
 }
 impl PartialOrd for PartitionKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl PartialEq for PartitionKey {
-    fn eq(&self, other: &Self) -> bool { self.cmp(other).is_eq() }
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
 }
 impl Eq for PartitionKey {}
 impl PartitionedKey for OrderedRow {
     type Partition = PartitionKey;
 
     fn partition(&self) -> PartitionKey {
-        PartitionKey { row: Arc::clone(&self.row), columns: Arc::clone(&self.partition) }
+        PartitionKey {
+            row: Arc::clone(&self.row),
+            columns: Arc::clone(&self.partition),
+        }
     }
 }
 
@@ -242,7 +264,10 @@ enum Window {
 }
 impl Window {
     fn rows(&self) -> &ZSet<OrderedRow> {
-        match self { Self::Global(window) => window.rows(), Self::Partitioned(window) => window.rows() }
+        match self {
+            Self::Global(window) => window.rows(),
+            Self::Partitioned(window) => window.rows(),
+        }
     }
     fn weight(&self, key: &OrderedRow) -> Option<&ZWeight> {
         match self {
@@ -257,8 +282,12 @@ impl Window {
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<WindowUpdate<'_>, TopKError<E>> {
         match self {
-            Self::Global(window) => window.prepare(changes, limbs, control).map(WindowUpdate::Global),
-            Self::Partitioned(window) => window.prepare(changes, limbs, control).map(WindowUpdate::Partitioned),
+            Self::Global(window) => window
+                .prepare(changes, limbs, control)
+                .map(WindowUpdate::Global),
+            Self::Partitioned(window) => window
+                .prepare(changes, limbs, control)
+                .map(WindowUpdate::Partitioned),
         }
     }
 }
@@ -269,7 +298,10 @@ enum WindowUpdate<'a> {
 }
 impl WindowUpdate<'_> {
     fn delta(&self) -> &ZSet<OrderedRow> {
-        match self { Self::Global(window) => window.delta(), Self::Partitioned(window) => window.delta() }
+        match self {
+            Self::Global(window) => window.delta(),
+            Self::Partitioned(window) => window.delta(),
+        }
     }
     fn rows(&self) -> impl DoubleEndedIterator<Item = (&OrderedRow, &ZWeight)> + ExactSizeIterator {
         match self {
@@ -278,26 +310,46 @@ impl WindowUpdate<'_> {
         }
     }
     fn commit(self) -> ZSet<OrderedRow> {
-        match self { Self::Global(window) => window.commit(), Self::Partitioned(window) => window.commit() }
+        match self {
+            Self::Global(window) => window.commit(),
+            Self::Partitioned(window) => window.commit(),
+        }
     }
 }
 
-enum EitherRows<A, B> { Left(A), Right(B) }
+enum EitherRows<A, B> {
+    Left(A),
+    Right(B),
+}
 impl<T, A: Iterator<Item = T>, B: Iterator<Item = T>> Iterator for EitherRows<A, B> {
     type Item = T;
     fn next(&mut self) -> Option<T> {
-        match self { Self::Left(rows) => rows.next(), Self::Right(rows) => rows.next() }
+        match self {
+            Self::Left(rows) => rows.next(),
+            Self::Right(rows) => rows.next(),
+        }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match self { Self::Left(rows) => rows.size_hint(), Self::Right(rows) => rows.size_hint() }
+        match self {
+            Self::Left(rows) => rows.size_hint(),
+            Self::Right(rows) => rows.size_hint(),
+        }
     }
 }
-impl<T, A: DoubleEndedIterator<Item = T>, B: DoubleEndedIterator<Item = T>> DoubleEndedIterator for EitherRows<A, B> {
+impl<T, A: DoubleEndedIterator<Item = T>, B: DoubleEndedIterator<Item = T>> DoubleEndedIterator
+    for EitherRows<A, B>
+{
     fn next_back(&mut self) -> Option<T> {
-        match self { Self::Left(rows) => rows.next_back(), Self::Right(rows) => rows.next_back() }
+        match self {
+            Self::Left(rows) => rows.next_back(),
+            Self::Right(rows) => rows.next_back(),
+        }
     }
 }
-impl<T, A: ExactSizeIterator<Item = T>, B: ExactSizeIterator<Item = T>> ExactSizeIterator for EitherRows<A, B> {}
+impl<T, A: ExactSizeIterator<Item = T>, B: ExactSizeIterator<Item = T>> ExactSizeIterator
+    for EitherRows<A, B>
+{
+}
 
 fn charge<E>(
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
@@ -405,10 +457,10 @@ impl IncrementalRowWindow {
                 order: Arc::clone(&self.spec.order),
                 partition: Arc::clone(&self.spec.partition),
             };
-            let previous = self
-                .distinct
-                .as_ref()
-                .map_or_else(|| self.window.weight(&key), |distinct| distinct.counts().weight(&key));
+            let previous = self.distinct.as_ref().map_or_else(
+                || self.window.weight(&key),
+                |distinct| distinct.counts().weight(&key),
+            );
             let next = match previous {
                 Some(old) => old.checked_add(weight, limbs),
                 None => weight.checked_clone(limbs),
@@ -430,7 +482,8 @@ impl IncrementalRowWindow {
         let window = self.window.prepare(changes, limbs, control)?;
         let next_total = match &window {
             WindowUpdate::Global(window) => window.rows().total_weight(limbs, control)?,
-            WindowUpdate::Partitioned(window) => self.total
+            WindowUpdate::Partitioned(window) => self
+                .total
                 .checked_add(&window.delta().total_weight(limbs, control)?, limbs)
                 .map_err(ZSetError::Arithmetic)?,
         };

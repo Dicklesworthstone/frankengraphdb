@@ -2721,13 +2721,20 @@ mod tests {
             let state = scan.into_state();
             let mut scan = view.resume_vertex_scan(&query, state).unwrap();
             assert_eq!(scan.work_used(), used);
-            assert_eq!(scan.next(&query).await.unwrap().unwrap().vid, VId(u128::MAX));
+            assert_eq!(
+                scan.next(&query).await.unwrap().unwrap().vid,
+                VId(u128::MAX)
+            );
             let state = scan.into_state();
             let mut scan = view.resume_vertex_scan(&query, state).unwrap();
-            assert!(scan.next_candidate_with(
-                &query,
-                &mut |_| -> Result<(), ()> { panic!("exhausted state cannot read again") },
-            ).await.unwrap().is_none());
+            assert!(
+                scan.next_candidate_with(&query, &mut |_| -> Result<(), ()> {
+                    panic!("exhausted state cannot read again")
+                },)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
             drop(scan);
 
             let selected = view
@@ -3164,16 +3171,18 @@ mod tests {
                 // observed until the visible topology passes caller admission.
                 for rejected in [false, true] {
                     let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
-                    let result = scan.next_admitted_properties_candidate_with(
-                        &query,
-                        PropertySelection::one(PropertyKeyId(1)),
-                        &mut |vid, labels| {
-                            assert_eq!(vid, VId(101));
-                            assert!(labels.is_empty());
-                            if rejected { Err("quota") } else { Ok(false) }
-                        },
-                        &mut |_| Ok(()),
-                    ).await;
+                    let result = scan
+                        .next_admitted_properties_candidate_with(
+                            &query,
+                            PropertySelection::one(PropertyKeyId(1)),
+                            &mut |vid, labels| {
+                                assert_eq!(vid, VId(101));
+                                assert!(labels.is_empty());
+                                if rejected { Err("quota") } else { Ok(false) }
+                            },
+                            &mut |_| Ok(()),
+                        )
+                        .await;
                     if rejected {
                         assert!(matches!(result, Err(BufferedScanError::Control("quota"))));
                     } else {
@@ -3184,12 +3193,19 @@ mod tests {
                     let state = scan.into_state();
                     let mut scan = view.resume_vertex_scan(&query, state).unwrap();
                     assert_eq!(scan.work_used(), used);
-                    assert!(scan.next_admitted_properties_candidate_with(
-                        &query,
-                        PropertySelection::one(PropertyKeyId(1)),
-                        &mut |_, _| -> Result<bool, &str> { panic!("terminal admission cannot repeat") },
-                        &mut |_| panic!("terminal source cannot read"),
-                    ).await.unwrap().is_none());
+                    assert!(
+                        scan.next_admitted_properties_candidate_with(
+                            &query,
+                            PropertySelection::one(PropertyKeyId(1)),
+                            &mut |_, _| -> Result<bool, &str> {
+                                panic!("terminal admission cannot repeat")
+                            },
+                            &mut |_| panic!("terminal source cannot read"),
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                    );
                 }
                 let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
                 assert!(matches!(
@@ -3198,7 +3214,8 @@ mod tests {
                         PropertySelection::one(PropertyKeyId(1)),
                         &mut |_, _| Ok::<_, ()>(true),
                         &mut |_| Ok(()),
-                    ).await,
+                    )
+                    .await,
                     Err(BufferedScanError::Read(_)),
                 ));
                 assert!(resolver.calls.load(Ordering::Relaxed) > 0);

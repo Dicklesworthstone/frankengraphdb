@@ -2430,8 +2430,7 @@ fn correlated_page_subscriptions_rank_each_owner_and_mask_hidden_candidates() {
                 );
                 assert_eq!(a.batch.from(), b.batch.from());
                 assert_eq!(a.batch.frontier(), b.batch.frontier());
-                let repeated =
-                    success(poll(&root, noisy_db, &noisy_token, right).await).unwrap();
+                let repeated = success(poll(&root, noisy_db, &noisy_token, right).await).unwrap();
                 assert!(Arc::ptr_eq(&b.batch, &repeated.batch));
                 left.consumer.acknowledge(a.batch.receipt()).unwrap();
                 right.consumer.acknowledge(b.batch.receipt()).unwrap();
@@ -2443,11 +2442,7 @@ fn correlated_page_subscriptions_rank_each_owner_and_mask_hidden_candidates() {
                 PropertyKeyId(1),
                 Some(CanonicalScalar::Int(2000 + tick)),
             );
-            hidden.set_vertex_property(
-                VId(1),
-                PropertyKeyId(2),
-                Some(CanonicalScalar::Int(tick)),
-            );
+            hidden.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(tick)));
             hidden.add_edge(EId(100 + tick as u128), VId(1), VId(99), vec![]);
             noisy_db
                 .db
