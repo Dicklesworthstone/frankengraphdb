@@ -992,7 +992,7 @@ mod tests {
             // The concurrent insertion overlaps MATCH's complete vertex domain,
             // so the unchanged strict commit validator still rejects publication.
             let error = transaction.commit(&cx).await.err().expect("scan conflict");
-            assert_eq!(error.code, ErrorCode::Execution);
+            assert_eq!(error.code, ErrorCode::Conflict);
             assert_eq!(state(&cx, db).await, committed);
             server.join_database_workers(&cx).await;
         });

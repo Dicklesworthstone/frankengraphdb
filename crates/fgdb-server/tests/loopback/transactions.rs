@@ -990,7 +990,7 @@ fn explicit_transactions_continue_on_the_begin_snapshot_across_other_clients_com
                     .await
                     .unwrap_err()
             ),
-            ErrorCode::Execution
+            ErrorCode::Conflict
         );
         let published = concurrent
             .execute(

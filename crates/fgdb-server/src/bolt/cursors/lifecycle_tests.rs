@@ -1496,7 +1496,7 @@ fn explicit_preparation_refusals_abort_the_prefix_before_any_result_escapes() {
 }
 
 #[test]
-fn explicit_write_owners_release_idle_locks_and_fail_on_stale_or_recovered_bases() {
+fn explicit_write_owners_release_idle_locks_and_refuse_conflicting_or_recovered_commits() {
     let ((), report) = run_async_under_lab(0xb017_e007, |root| async move {
         let (server, token) = explicit_fixture(&root, "bolt-explicit-stale-generation").await;
         let db = &server.databases["test"];
@@ -1525,18 +1525,43 @@ fn explicit_write_owners_release_idle_locks_and_fail_on_stale_or_recovered_bases
             .await
             .unwrap();
         writer.pull(&root, &mut io, -1, true).await.unwrap();
-        let refused = send(
+        assert_committed_vertices(&root, db, 1, 1).await;
+        let marker =
+            stage_explicit(&root, &mut client, &mut io, "RETURN 7 AS marker", vec![]).await;
+        let result = send(
             &root,
             &mut client,
             &mut io,
-            Request::Run {
-                query: "RETURN 7 AS marker".into(),
-                parameters: vec![],
-                extra: vec![],
-            },
+            Request::Pull { n: -1, qid: marker },
         )
         .await;
-        summary(&refused, 0x7f);
+        assert_eq!(records(&result), [vec![Value::Int(7)]]);
+        assert!(get(summary(&result, 0x70), "bookmark").is_none());
+
+        // The scan covers the other writer's insertion but sees only the
+        // original snapshot plus this owner's provisional vertex.
+        let scan = stage_explicit(
+            &root,
+            &mut client,
+            &mut io,
+            "MATCH (n) RETURN n.p AS p",
+            vec![],
+        )
+        .await;
+        let rows = send(
+            &root,
+            &mut client,
+            &mut io,
+            Request::Pull { n: -1, qid: scan },
+        )
+        .await;
+        assert_eq!(records(&rows), [vec![Value::Int(1)]]);
+        assert!(get(summary(&rows, 0x70), "bookmark").is_none());
+        let refused = send(&root, &mut client, &mut io, Request::Commit).await;
+        assert_eq!(
+            get(summary(&refused, 0x7f), "code").and_then(Value::as_str),
+            Some("Neo.DatabaseError.Statement.ExecutionFailed")
+        );
         assert!(client.transaction.is_none());
         assert_committed_vertices(&root, db, 1, 1).await;
         let mut recovered = connection(&server, token);
@@ -1562,7 +1587,10 @@ fn explicit_write_owners_release_idle_locks_and_fail_on_stale_or_recovered_bases
             crate::DatabaseStatus::Ready { generation: 2 }
         ));
         let refused = send(&root, &mut recovered, &mut io, Request::Commit).await;
-        summary(&refused, 0x7f);
+        assert_eq!(
+            get(summary(&refused, 0x7f), "code").and_then(Value::as_str),
+            Some("Neo.TransientError.General.DatabaseUnavailable")
+        );
         assert!(recovered.transaction.is_none());
         assert_committed_vertices(&root, db, 2, 2).await;
         server.join_database_workers(&root).await;
