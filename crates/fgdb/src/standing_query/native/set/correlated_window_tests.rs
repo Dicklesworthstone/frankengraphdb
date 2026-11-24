@@ -42,6 +42,17 @@ fn text(optional: bool, distinct: bool, predicate: &str) -> String {
         if distinct { "DISTINCT " } else { "" }
     )
 }
+fn grouped_text(optional: bool, tail: bool) -> String {
+    let summary = if tail {
+        "WITH b,count(*) AS n WHERE n>0 RETURN b AS candidate,n AS score"
+    } else {
+        "RETURN b AS candidate,count(*) AS score"
+    };
+    format!(
+        "MATCH (a:L) UNWIND [7,7] AS token WITH a,token {}CALL (a) {{ MATCH (a)-[:R]->(b) {summary} ORDER BY score DESC,candidate ASC SKIP 1 LIMIT 1 }} RETURN a AS owner,candidate,score",
+        if optional { "OPTIONAL " } else { "" },
+    )
+}
 fn bind(text: &str) -> PreparedGraphSet {
     PreparedGraphSetText::prepare(text, symbols)
         .unwrap()
@@ -278,6 +289,155 @@ fn native_correlated_pages_refill_and_rerank_independently_with_outer_bags() {
 }
 
 #[test]
+fn native_grouped_pages_rerank_refill_and_keep_large_private_group_inputs() {
+    let ((), report) = run_async_under_lab(0x7061_6704, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys(0xe4)).await.unwrap();
+        let mut initial = seed();
+        // These retained tail groups exceed the final six-row allowance. They
+        // are private aggregate/window input and cannot spend delivery quota.
+        for id in 20..32 {
+            initial.create_vertex(VId(id), vec![], vec![]);
+            initial.add_edge(EId(1_000 + id), VId(2), VId(id), vec![]);
+        }
+        db.write(&commit, initial).await.unwrap();
+        let delivery = GqlQueryPolicy::new(1_000, 6, 50_000_000, 50_000_000);
+        let params = GqlParameters::new();
+        let mut queries = Vec::new();
+        for optional in [false, true] {
+            for tail in [false, true] {
+                let source = grouped_text(optional, tail);
+                let prepared = PreparedNativeRead::prepare(&source, &params, symbols).unwrap();
+                let (nodes, _) = prepared.subscription_footprint(&cx, &params).unwrap();
+                let first = db.standing_queries.len();
+                let handle = prepared
+                    .register_standing(&mut db, &cx, &params, delivery)
+                    .unwrap();
+                assert!(u64::try_from(db.standing_queries.len() - first).unwrap() <= nodes);
+                assert!(
+                    db.standing_queries[first..]
+                        .iter()
+                        .any(|node| matches!(node, StandingQuery::Window(_)))
+                );
+                let query = bind(&source);
+                let initial = expected(
+                    &[(1, Some((11, 1))), (2, Some((12, 1))), (3, None)],
+                    optional,
+                );
+                check(&db, &cx, &query, &handle, &initial, delivery);
+                queries.push((optional, query, handle, initial));
+            }
+        }
+        for phase in 0..8 {
+            let from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(R);
+            match phase {
+                0 => {
+                    change.delete_edge(EId(101));
+                }
+                1 => {
+                    change.add_edge(EId(105), VId(1), VId(12), vec![]);
+                }
+                2 => {
+                    change.delete_edge(EId(102));
+                }
+                3 => {
+                    change.delete_edge(EId(104));
+                }
+                4 => {
+                    change.delete_edge(EId(105));
+                }
+                5 => {
+                    change.add_edge(EId(301), VId(3), VId(10), vec![]);
+                    change.add_edge(EId(302), VId(3), VId(10), vec![]);
+                    change.add_edge(EId(303), VId(3), VId(11), vec![]);
+                }
+                6 => {
+                    change.add_edge(EId(203), VId(2), VId(12), vec![]);
+                }
+                7 => {
+                    change.set_vertex_label(VId(1), L, false);
+                }
+                _ => unreachable!(),
+            }
+            db.write(&commit, change).await.unwrap();
+            let selected = match phase {
+                0 => vec![(1, Some((11, 1))), (2, Some((12, 1))), (3, None)],
+                1 => vec![(1, Some((10, 1))), (2, Some((12, 1))), (3, None)],
+                2 => vec![(1, Some((11, 1))), (2, Some((12, 1))), (3, None)],
+                3 => vec![(1, Some((12, 1))), (2, Some((12, 1))), (3, None)],
+                4 => vec![(1, None), (2, Some((12, 1))), (3, None)],
+                5 => vec![(1, None), (2, Some((12, 1))), (3, Some((11, 1)))],
+                6 => vec![(1, None), (2, Some((11, 1))), (3, Some((11, 1)))],
+                7 => vec![(2, Some((11, 1))), (3, Some((11, 1)))],
+                _ => unreachable!(),
+            };
+            for (optional, query, handle, previous) in &mut queries {
+                let next = expected(&selected, *optional);
+                check(&db, &cx, query, handle, &next, delivery);
+                check_delta(&db, &cx, handle, from, previous, &next);
+                if phase == 2 || phase == 7 {
+                    db.rebuild_standing_query(&cx, handle, delivery).unwrap();
+                    check(&db, &cx, query, handle, &next, delivery);
+                }
+                *previous = next;
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_global_count_pages_select_before_optional_null_completion() {
+    let ((), report) = run_async_under_lab(0x7061_6705, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys(0xe5)).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let delivery = GqlQueryPolicy::new(1_000, 6, 50_000_000, 50_000_000);
+        for optional in [false, true] {
+            for (offset, count) in [(0, 1), (1, 1), (0, 0)] {
+                let source = format!(
+                    "MATCH (a:L) UNWIND [7,7] AS token WITH a,token {}CALL () {{ UNWIND [] AS item RETURN count(*) AS hits ORDER BY hits DESC SKIP {offset} LIMIT {count} }} RETURN a AS owner,hits",
+                    if optional { "OPTIONAL " } else { "" },
+                );
+                let query = bind(&source);
+                let handle = db
+                    .register_standing_relation(&cx, &query, delivery)
+                    .unwrap();
+                let visible_zero = offset == 0 && count == 1;
+                let expected: Bag = if optional || visible_zero {
+                    (1..=3)
+                        .map(|id| {
+                            (
+                                GraphValueRow::from_owned_values(vec![
+                                    GraphValue::Vertex(VId(id)),
+                                    GraphValue::Scalar(if visible_zero {
+                                        CanonicalScalar::Int(0)
+                                    } else {
+                                        CanonicalScalar::Null
+                                    }),
+                                ]),
+                                2,
+                            )
+                        })
+                        .collect()
+                } else {
+                    Bag::new()
+                };
+                check(&db, &cx, &query, &handle, &expected, delivery);
+                db.rebuild_standing_query(&cx, &handle, delivery).unwrap();
+                check(&db, &cx, &query, &handle, &expected, delivery);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn bounded_property_pages_exclude_inactive_huge_collections_and_refuse_unsound_guards() {
     let ((), report) = run_async_under_lab(0x7061_6702, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -395,27 +555,93 @@ fn correlated_page_admission_and_rebuild_keep_prior_owners_atomic_on_every_check
             policy(),
         )
         .unwrap();
-        let query = bind(&text(true, false, "WHERE b.p >= 0"));
-        let delivery = GqlQueryPolicy::new(1_000, 6, 50_000_000, 50_000_000);
-        let before = saved(&db.standing_queries);
-        let mut calls = 0;
-        {
-            let mut staged = Staging::new(&mut db);
-            staged
-                .compile(&cx, &query, delivery, &mut || {
-                    calls += 1;
-                    Ok(())
-                })
-                .unwrap();
-        }
-        assert_eq!(saved(&db.standing_queries), before);
-        for stop in 1..=calls {
-            let mut at = 0;
+        for (query, selected) in [
+            (
+                bind(&text(true, false, "WHERE b.p >= 0")),
+                [(1, Some((10, 9))), (2, Some((12, 7))), (3, None)],
+            ),
+            (
+                bind(&grouped_text(true, true)),
+                [(1, Some((11, 1))), (2, Some((12, 1))), (3, None)],
+            ),
+        ] {
+            let delivery = GqlQueryPolicy::new(1_000, 6, 50_000_000, 50_000_000);
+            let before = saved(&db.standing_queries);
+            let mut calls = 0;
             {
                 let mut staged = Staging::new(&mut db);
+                staged
+                    .compile(&cx, &query, delivery, &mut || {
+                        calls += 1;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            assert_eq!(saved(&db.standing_queries), before);
+            for stop in 1..=calls {
+                let mut at = 0;
+                {
+                    let mut staged = Staging::new(&mut db);
+                    assert!(
+                        staged
+                            .compile(&cx, &query, delivery, &mut || {
+                                at += 1;
+                                if at == stop {
+                                    Err(StandingQueryError::Maintenance(
+                                        StandingQueryFailure::Interrupted,
+                                    ))
+                                } else {
+                                    Ok(())
+                                }
+                            })
+                            .is_err()
+                    );
+                }
+                assert_eq!(at, stop);
+                assert_eq!(saved(&db.standing_queries), before);
+            }
+            for refused in [
+                GqlQueryPolicy::new(0, 6, 50_000_000, 50_000_000),
+                GqlQueryPolicy::new(1_000, 5, 50_000_000, 50_000_000),
+                GqlQueryPolicy::new(1_000, 6, 0, 50_000_000),
+                GqlQueryPolicy::new(1_000, 6, 50_000_000, 0),
+            ] {
+                assert!(db.register_standing_relation(&cx, &query, refused).is_err());
+                assert_eq!(saved(&db.standing_queries), before);
+            }
+            let handle = db
+                .register_standing_relation(&cx, &query, delivery)
+                .unwrap();
+            let Layout::Circuit { first, .. } = handle.native.as_deref().unwrap() else {
+                panic!("a page retains the complete invocation circuit");
+            };
+            let first = *first;
+            let mut calls = 0;
+            rebuild_checked(
+                &mut db,
+                &cx,
+                first,
+                handle.index,
+                handle.native.as_deref().unwrap().private_inputs().unwrap(),
+                delivery,
+                &mut || {
+                    calls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let accepted = saved(&db.standing_queries);
+            for stop in 1..=calls {
+                let mut at = 0;
                 assert!(
-                    staged
-                        .compile(&cx, &query, delivery, &mut || {
+                    rebuild_checked(
+                        &mut db,
+                        &cx,
+                        first,
+                        handle.index,
+                        handle.native.as_deref().unwrap().private_inputs().unwrap(),
+                        delivery,
+                        &mut || {
                             at += 1;
                             if at == stop {
                                 Err(StandingQueryError::Maintenance(
@@ -424,78 +650,22 @@ fn correlated_page_admission_and_rebuild_keep_prior_owners_atomic_on_every_check
                             } else {
                                 Ok(())
                             }
-                        })
-                        .is_err()
-                );
-            }
-            assert_eq!(at, stop);
-            assert_eq!(saved(&db.standing_queries), before);
-        }
-        for refused in [
-            GqlQueryPolicy::new(0, 6, 50_000_000, 50_000_000),
-            GqlQueryPolicy::new(1_000, 5, 50_000_000, 50_000_000),
-            GqlQueryPolicy::new(1_000, 6, 0, 50_000_000),
-            GqlQueryPolicy::new(1_000, 6, 50_000_000, 0),
-        ] {
-            assert!(db.register_standing_relation(&cx, &query, refused).is_err());
-            assert_eq!(saved(&db.standing_queries), before);
-        }
-        let handle = db
-            .register_standing_relation(&cx, &query, delivery)
-            .unwrap();
-        let Layout::Circuit { first, .. } = handle.native.as_deref().unwrap() else {
-            panic!("a page retains the complete invocation circuit");
-        };
-        let first = *first;
-        let mut calls = 0;
-        rebuild_checked(
-            &mut db,
-            &cx,
-            first,
-            handle.index,
-            handle.native.as_deref().unwrap().private_inputs().unwrap(),
-            delivery,
-            &mut || {
-                calls += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-        let accepted = saved(&db.standing_queries);
-        for stop in 1..=calls {
-            let mut at = 0;
-            assert!(
-                rebuild_checked(
-                    &mut db,
-                    &cx,
-                    first,
-                    handle.index,
-                    handle.native.as_deref().unwrap().private_inputs().unwrap(),
-                    delivery,
-                    &mut || {
-                        at += 1;
-                        if at == stop {
-                            Err(StandingQueryError::Maintenance(
-                                StandingQueryFailure::Interrupted,
-                            ))
-                        } else {
-                            Ok(())
                         }
-                    }
-                )
-                .is_err()
+                    )
+                    .is_err()
+                );
+                assert_eq!(at, stop);
+                assert_eq!(saved(&db.standing_queries), accepted);
+            }
+            check(
+                &db,
+                &cx,
+                &query,
+                &handle,
+                &expected(&selected, true),
+                delivery,
             );
-            assert_eq!(at, stop);
-            assert_eq!(saved(&db.standing_queries), accepted);
         }
-        check(
-            &db,
-            &cx,
-            &query,
-            &handle,
-            &expected(&[(1, Some((10, 9))), (2, Some((12, 7))), (3, None)], true),
-            delivery,
-        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

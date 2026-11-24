@@ -1076,6 +1076,20 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 input = self.append_private(StandingQuery::Projection(Box::new(state)));
                 checkpoint()?;
             }
+            if let Some(spec) = plan.window {
+                // The page consumes completed groups from each invocation,
+                // including post-group filters and empty global summaries.
+                // Original outer occurrences rejoin only after selection.
+                let state = self.database.prepare_standing_window(
+                    cx,
+                    input,
+                    spec,
+                    input_policy,
+                    self.database.standing_queries.len(),
+                )?;
+                input = self.append_private(StandingQuery::Window(Box::new(state)));
+                checkpoint()?;
+            }
             let state = self.database.prepare_standing_join_spec(
                 cx,
                 [outer, input],

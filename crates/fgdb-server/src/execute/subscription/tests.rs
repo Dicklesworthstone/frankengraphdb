@@ -2467,6 +2467,267 @@ fn correlated_page_subscriptions_rank_each_owner_and_mask_hidden_candidates() {
 }
 
 #[test]
+fn grouped_page_subscriptions_rerank_refill_and_mask_hidden_groups() {
+    use fgdb::WriteBatch;
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, RelationId};
+    use fgdb_types::{EId, VId};
+    use fgdb_warden::Scope;
+    use std::collections::BTreeMap;
+
+    let ((), report) = run_async_under_lab(0x79a0_c025, |root| async move {
+        let (clean, clean_token, _) = served(&root, "group-page-visible").await;
+        let (noisy, noisy_token, _) = served(&root, "group-page-hidden").await;
+        let clean_db = &clean.databases["test"];
+        let noisy_db = &noisy.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let mut names = SymbolCatalog::default();
+        names
+            .bind_all([
+                ("Owner", CatalogSymbol::Label(LabelId(1))),
+                ("Target", CatalogSymbol::Label(LabelId(2))),
+                ("Secret", CatalogSymbol::Label(LabelId(3))),
+                ("R", CatalogSymbol::Relation(RelationId(1))),
+                ("Hidden", CatalogSymbol::Relation(RelationId(2))),
+            ])
+            .unwrap();
+        for db in [clean_db, noisy_db] {
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .register_symbols(&commit, &names)
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for owner in [1, 3, 5] {
+                seed.create_vertex(VId(owner), vec![LabelId(1)], vec![]);
+            }
+            for target in [10, 11, 12, 13, 14] {
+                seed.create_vertex(VId(target), vec![LabelId(2)], vec![]);
+            }
+            for (edge, owner, target) in [
+                (1, 1, 10),
+                (2, 1, 10),
+                (3, 1, 10),
+                (4, 1, 11),
+                (5, 1, 11),
+                (6, 1, 12),
+                (7, 3, 13),
+                (8, 3, 13),
+                (9, 3, 14),
+            ] {
+                seed.add_edge(EId(edge), VId(owner), VId(target), vec![]);
+            }
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit, seed)
+                .await
+                .unwrap();
+        }
+        // Neither a high-count hidden endpoint nor a denied relation may
+        // affect group support, rank, visible quota or subscription frontier.
+        let mut hidden = WriteBatch::new(RelationId(1));
+        hidden.create_vertex(VId(99), vec![LabelId(3)], vec![]);
+        for edge in 90..100 {
+            hidden.add_edge(EId(edge), VId(1), VId(99), vec![]);
+        }
+        noisy_db
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&commit, hidden)
+            .await
+            .unwrap();
+        let mut hidden = WriteBatch::new(RelationId(2));
+        for edge in 1000..1006 {
+            hidden.add_edge(EId(edge), VId(1), VId(12), vec![]);
+        }
+        noisy_db
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&commit, hidden)
+            .await
+            .unwrap();
+        let narrow = |token: &CapabilityToken| {
+            token
+                .attenuate(Restriction::Labels(Scope::only([LabelId(1), LabelId(2)])))
+                .unwrap()
+                .attenuate(Restriction::Relations(Scope::only([RelationId(1)])))
+                .unwrap()
+                .attenuate(Restriction::MaxNodes(40_000))
+                .unwrap()
+                .attenuate(Restriction::MaxWork(800_000))
+                .unwrap()
+                .attenuate(Restriction::MaxRows(8))
+                .unwrap()
+        };
+        let clean_token = narrow(&clean_token);
+        let noisy_token = narrow(&noisy_token);
+        let mut subscriptions = Vec::new();
+        for optional in [false, true] {
+            let call = if optional { "OPTIONAL CALL" } else { "CALL" };
+            let statement = request(&format!(
+                "SUBSCRIBE TO MATCH (a:Owner) UNWIND [7,7] AS token WITH a,token \
+                 {call} (a) {{ MATCH (a)-[:R]->(b) \
+                 RETURN b AS candidate,count(*) AS hits \
+                 ORDER BY hits DESC,candidate ASC SKIP 1 LIMIT 1 }} \
+                 RETURN a AS owner,candidate,hits"
+            ));
+            let left = success(subscribe(&root, clean_db, &clean_token, &statement).await);
+            let right = success(subscribe(&root, noisy_db, &noisy_token, &statement).await);
+            assert_eq!(left.columns, ["owner", "candidate", "hits"]);
+            assert_eq!(left.columns, right.columns);
+            assert_eq!(left.registration_nodes, right.registration_nodes);
+            assert_eq!(left.registration_work, right.registration_work);
+            subscriptions.push((
+                optional,
+                left,
+                right,
+                BTreeMap::<(u128, Option<(u128, i64)>), i128>::new(),
+            ));
+        }
+        let row = |owner, selected: Option<(u128, i64)>| match selected {
+            Some((target, hits)) => vec![
+                WireValue::Vertex(owner),
+                WireValue::Vertex(target),
+                WireValue::Int(hits),
+            ],
+            None => vec![WireValue::Vertex(owner), WireValue::Null, WireValue::Null],
+        };
+        for tick in 0..6 {
+            if tick != 0 {
+                for (index, db) in [clean_db, noisy_db].into_iter().enumerate() {
+                    let mut change = WriteBatch::new(RelationId(1));
+                    match tick {
+                        1 => {
+                            change.delete_edge(EId(1));
+                            change.delete_edge(EId(2));
+                        }
+                        2 => {
+                            change.add_edge(EId(10), VId(1), VId(12), vec![]);
+                            change.add_edge(EId(11), VId(1), VId(12), vec![]);
+                            change.add_edge(EId(12), VId(3), VId(14), vec![]);
+                        }
+                        3 => {
+                            change.delete_edge(EId(4));
+                            change.delete_edge(EId(5));
+                            change.delete_edge(EId(9));
+                            change.delete_edge(EId(12));
+                        }
+                        4 => {
+                            change.delete_edge(EId(3));
+                            change.add_edge(EId(13), VId(5), VId(13), vec![]);
+                            change.add_edge(EId(14), VId(5), VId(13), vec![]);
+                            change.add_edge(EId(15), VId(5), VId(14), vec![]);
+                        }
+                        _ if index == 0 => {
+                            change.delete_vertex(VId(3));
+                        }
+                        _ => {
+                            change.set_vertex_label(VId(3), LabelId(1), false);
+                        }
+                    }
+                    db.db
+                        .write(&root)
+                        .await
+                        .unwrap()
+                        .write(&commit, change)
+                        .await
+                        .unwrap();
+                }
+            }
+            // Literal second GROUP rows, ranked by count descending and
+            // vertex identity ascending. Duplicate outer rows affect only
+            // the final weight, never the group's count or page positions.
+            let selected = match tick {
+                0 => vec![(1, Some((11, 2))), (3, Some((14, 1))), (5, None)],
+                1 => vec![(1, Some((10, 1))), (3, Some((14, 1))), (5, None)],
+                2 => vec![(1, Some((11, 2))), (3, Some((14, 2))), (5, None)],
+                3 => vec![(1, Some((10, 1))), (3, None), (5, None)],
+                4 => vec![(1, None), (3, None), (5, Some((14, 1)))],
+                _ => vec![(1, None), (5, Some((14, 1)))],
+            };
+            for (optional, left, right, previous) in &mut subscriptions {
+                let current: BTreeMap<_, _> = selected
+                    .iter()
+                    .copied()
+                    .filter(|(_, candidate)| *optional || candidate.is_some())
+                    .map(|key| (key, 2))
+                    .collect();
+                let mut expected = current.clone();
+                for (key, weight) in previous.iter() {
+                    *expected.entry(*key).or_default() -= weight;
+                }
+                expected.retain(|_, weight| *weight != 0);
+                let a = success(poll(&root, clean_db, &clean_token, left).await);
+                let b = success(poll(&root, noisy_db, &noisy_token, right).await);
+                if expected.is_empty() {
+                    assert!(
+                        a.is_none() && b.is_none(),
+                        "empty grouped delta at tick {tick}"
+                    );
+                } else {
+                    let a = a.unwrap();
+                    let b = b.unwrap();
+                    assert_eq!(a.batch.is_snapshot(), tick == 0);
+                    assert_eq!(
+                        a.entries.len(),
+                        expected.len(),
+                        "optional={optional}, tick={tick}"
+                    );
+                    for ((owner, selected), weight) in expected {
+                        assert!(
+                            a.entries.contains(&(weight, row(owner, selected))),
+                            "optional={optional}, tick={tick}: {:?}",
+                            a.entries
+                        );
+                    }
+                    assert_eq!(
+                        a.entries, b.entries,
+                        "hidden groups must not change local ranks"
+                    );
+                    assert_eq!(a.batch.from(), b.batch.from());
+                    assert_eq!(a.batch.frontier(), b.batch.frontier());
+                    let repeated =
+                        success(poll(&root, noisy_db, &noisy_token, right).await).unwrap();
+                    assert!(Arc::ptr_eq(&b.batch, &repeated.batch));
+                    left.consumer.acknowledge(a.batch.receipt()).unwrap();
+                    right.consumer.acknowledge(b.batch.receipt()).unwrap();
+                }
+                *previous = current;
+            }
+            let mut hidden = WriteBatch::new(RelationId(1));
+            hidden.add_edge(EId(100 + tick as u128), VId(1), VId(99), vec![]);
+            noisy_db
+                .db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit, hidden)
+                .await
+                .unwrap();
+            for (_, left, right, _) in &mut subscriptions {
+                assert!(success(poll(&root, clean_db, &clean_token, left).await).is_none());
+                assert!(success(poll(&root, noisy_db, &noisy_token, right).await).is_none());
+            }
+        }
+        drop(subscriptions);
+        assert_eq!(clean_db.subscriptions.load(Ordering::Acquire), 0);
+        assert_eq!(noisy_db.subscriptions.load(Ordering::Acquire), 0);
+        clean.finish_shutdown(&root).await;
+        noisy.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn grouped_correlated_subscriptions_preserve_bags_empty_calls_scope_and_receipts() {
     use fgdb::WriteBatch;
     use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};

@@ -6,6 +6,7 @@ use crate::algebra::{GraphValueOrder, GraphValueRow, IntegerComparison};
 use crate::row_aggregate::definition::operator::IncrementalGroupAggregate;
 use crate::row_join::IncrementalRowJoin;
 use crate::row_projection::IncrementalRowProjection;
+use crate::row_window::IncrementalRowWindow;
 use crate::spill_set::SpillSetAggregateRowError;
 use crate::{
     GqlParameters, GraphAggregateError, GraphIntegerBinary, GraphIntegerError,
@@ -894,6 +895,7 @@ struct FilteredCircuit {
     invocations: IncrementalRowProjection,
     complete: IncrementalRowJoin,
     summary: Vec<IncrementalRowProjection>,
+    window: Option<IncrementalRowWindow>,
     restore: IncrementalRowJoin,
     output: Vec<IncrementalRowProjection>,
 }
@@ -922,6 +924,7 @@ impl FilteredCircuit {
                 .into_iter()
                 .map(IncrementalRowProjection::new)
                 .collect(),
+            window: recipe.window.map(IncrementalRowWindow::new),
             restore: IncrementalRowJoin::new(recipe.restore),
             output: recipe
                 .output
@@ -984,6 +987,12 @@ impl FilteredCircuit {
             .commit();
         for stage in &mut self.summary {
             delta = stage
+                .prepare(&delta, LIMBS, None, &mut |_| Ok::<_, ()>(()))
+                .map_err(|_| ())?
+                .commit();
+        }
+        if let Some(window) = &mut self.window {
+            delta = window
                 .prepare(&delta, LIMBS, None, &mut |_| Ok::<_, ()>(()))
                 .map_err(|_| ())?
                 .commit();
@@ -3368,6 +3377,322 @@ fn native_correlated_unwind_profiles_keep_reader_page_and_cancellation_boundarie
             matches!(query.incremental_filtered_aggregate_with_control(&mut |_| {
             seen += 1;
             if seen == stop { Err(stop) } else { Ok(()) }
+        }), Err(at) if at == stop)
+        );
+        assert_eq!(seen, stop);
+        assert_eq!(query.canonical_bytes(), original);
+    }
+}
+
+fn grouped_page(optional: bool, profile: usize, offset: u64, count: u64) -> PreparedGraphSet {
+    let SetNode::Apply {
+        left,
+        right,
+        imports,
+        ..
+    } = grouped_filtered_summary(optional, profile).node
+    else {
+        unreachable!()
+    };
+    let order = if profile < 2 {
+        [
+            GraphValueOrder::descending(2),
+            GraphValueOrder::ascending(1),
+        ]
+    } else {
+        [
+            GraphValueOrder::descending(0),
+            GraphValueOrder::ascending(1),
+        ]
+    };
+    let body = (*right)
+        .with_order_by(&order)
+        .unwrap()
+        .with_page(offset, Some(count));
+    if optional {
+        (*left).optional_apply(body, imports).unwrap()
+    } else {
+        (*left).apply(body, imports).unwrap()
+    }
+}
+
+// Apply literal occurrence slicing to the independent grouped-summary oracle.
+// No native comparator, window, recipe or maintained operator constructs this
+// expected page. Outer weights are removed before selection and restored after.
+fn grouped_page_oracle(
+    left: &ZSet<GraphValueRow>,
+    right: &ZSet<GraphValueRow>,
+    optional: bool,
+    profile: usize,
+    offset: u64,
+    count: u64,
+) -> Bag {
+    let summaries = grouped_summary_oracle(left, right, false, profile);
+    let mut output = Bag::new();
+    for (outer, weight) in left.iter() {
+        let weight = weight.to_i128().unwrap();
+        let mut candidates: Vec<_> = summaries
+            .iter()
+            .filter_map(|(row, n)| {
+                (row.values().get(..3) == Some(outer.values())).then(|| {
+                    assert_eq!(n % weight, 0);
+                    (row.values()[3..].to_vec(), n / weight)
+                })
+            })
+            .collect();
+        candidates.sort_by(|(a, _), (b, _)| {
+            let rank = if profile < 2 { 2 } else { 0 };
+            let integer = |value: &GraphValue| match value {
+                GraphValue::Scalar(CanonicalScalar::Int(value)) => *value,
+                _ => panic!("the fixture's ranking count is a nonnull integer"),
+            };
+            integer(&b[rank])
+                .cmp(&integer(&a[rank]))
+                .then_with(|| match (a[1].is_null(), b[1].is_null()) {
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ => a[1].cmp(&b[1]),
+                })
+                .then_with(|| a.cmp(b))
+        });
+        let mut skip = i128::from(offset);
+        let mut remaining = i128::from(count);
+        let mut selected = false;
+        for (cells, n) in candidates {
+            let skipped = skip.min(n);
+            skip -= skipped;
+            let emitted = remaining.min(n - skipped);
+            remaining -= emitted;
+            if emitted != 0 {
+                selected = true;
+                let mut result = outer.values().to_vec();
+                result.extend(cells);
+                output.insert(row(result), weight * emitted);
+            }
+        }
+        if optional && !selected {
+            let mut result = outer.values().to_vec();
+            result.extend(vec![scalar(None); if profile < 2 { 7 } else { 2 }]);
+            output.insert(row(result), weight);
+        }
+    }
+    output
+}
+
+#[test]
+fn grouped_invocation_pages_match_4096_weighted_transitions() {
+    for optional in [false, true] {
+        for profile in 0..4 {
+            for (offset, count) in [(0, 1), (1, 2)] {
+                let query = grouped_page(optional, profile, offset, count);
+                let recipe = query
+                    .incremental_filtered_aggregate_with_control(&mut allow)
+                    .unwrap()
+                    .unwrap();
+                let window = recipe.window.as_ref().unwrap();
+                assert!(!window.partition_columns().is_empty());
+                assert!(query.incremental_window_sequence_compatible());
+                for before in 0..16 {
+                    for after in 0..16 {
+                        let old_left = filtered_left(before & 3);
+                        let old_right = filtered_right(before >> 2);
+                        let next_left = filtered_left(after & 3);
+                        let next_right = filtered_right(after >> 2);
+                        let old = grouped_page_oracle(
+                            &old_left, &old_right, optional, profile, offset, count,
+                        );
+                        let next = grouped_page_oracle(
+                            &next_left,
+                            &next_right,
+                            optional,
+                            profile,
+                            offset,
+                            count,
+                        );
+                        let mut circuit = FilteredCircuit::new(&query);
+                        circuit.tick(&old_left, &old_right).unwrap();
+                        assert_eq!(plain(circuit.rows()), old);
+                        let delta = circuit
+                            .tick(
+                                &difference(&next_left, &old_left),
+                                &difference(&next_right, &old_right),
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            plain(circuit.rows()),
+                            next,
+                            "{optional}/{profile}/{offset}: {before}->{after}"
+                        );
+                        assert_eq!(
+                            delta,
+                            bag(next
+                                .into_iter()
+                                .chain(old.into_iter().map(|(row, n)| (row, -n))))
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_global_counts_are_completed_before_pages_and_optional_restoration() {
+    let left = bag([
+        (row(vec![scalar(None), vertex(1), vertex(8)]), 2),
+        (
+            row(vec![
+                GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                vertex(2),
+                vertex(9),
+            ]),
+            3,
+        ),
+    ]);
+    let unit = bag([(row(vec![]), 1)]);
+    for imported in [false, true] {
+        for optional in [false, true] {
+            for (offset, count) in [(0, 1), (1, 1), (0, 0)] {
+                let body = arguments(if imported {
+                    vec![GraphSetColumnType::Stored]
+                } else {
+                    vec![]
+                })
+                .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                .unwrap()
+                .group_by(&[], &[GraphAggregate::count_rows("n")])
+                .unwrap()
+                .with_order_by(&[GraphValueOrder::descending(0)])
+                .unwrap()
+                .with_page(offset, Some(count));
+                let imports = if imported { vec![0] } else { vec![] };
+                let query = if optional {
+                    outer().optional_apply(body, imports).unwrap()
+                } else {
+                    outer().apply(body, imports).unwrap()
+                };
+                let mut circuit = FilteredCircuit::new(&query);
+                circuit.tick(&ZSet::new(), &unit).unwrap();
+                assert!(
+                    circuit.rows().is_empty(),
+                    "a unit never creates an invocation"
+                );
+                circuit.tick(&left, &ZSet::new()).unwrap();
+                let emits_zero = offset == 0 && count == 1;
+                let expected = if emits_zero || optional {
+                    left.iter()
+                        .map(|(r, n)| {
+                            let mut cells = r.values().to_vec();
+                            cells.push(scalar(emits_zero.then_some(0)));
+                            (row(cells), n.to_i128().unwrap())
+                        })
+                        .collect()
+                } else {
+                    Bag::new()
+                };
+                assert_eq!(plain(circuit.rows()), expected);
+                circuit
+                    .tick(&difference(&ZSet::new(), &left), &ZSet::new())
+                    .unwrap();
+                assert!(circuit.rows().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn grouped_pages_preserve_tail_errors_and_exact_sequence_boundaries() {
+    let divide = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Literal(Some(1)),
+            GraphIntegerOp::Literal(Some(0)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+        ])
+        .unwrap(),
+    );
+    for filter_first in [false, true] {
+        let mut body = arguments(vec![])
+            .group_by(&[], &[GraphAggregate::count_rows("n")])
+            .unwrap();
+        if filter_first {
+            body = body
+                .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                .unwrap();
+        }
+        body = body
+            .project(
+                vec![GraphSetProjection::new("discarded", divide.clone())],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        if !filter_first {
+            body = body
+                .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+                .unwrap();
+        }
+        let body = body
+            .with_order_by(&[GraphValueOrder::ascending(0)])
+            .unwrap()
+            .with_page(0, Some(0));
+        let query = outer().optional_apply(body, vec![]).unwrap();
+        let mut circuit = FilteredCircuit::new(&query);
+        circuit
+            .tick(&ZSet::new(), &bag([(row(vec![]), 1)]))
+            .unwrap();
+        let result = circuit.tick(&left_rows(1), &ZSet::new());
+        assert_eq!(
+            result.is_ok(),
+            filter_first,
+            "LIMIT zero cannot suppress a reached expression"
+        );
+    }
+    for text in [
+        "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[:R]->(b) RETURN b AS bucket,count(*) AS degree ORDER BY degree DESC,bucket LIMIT 2 } RETURN a,bucket,degree",
+        "MATCH (a:L) WITH a OPTIONAL CALL(a) { MATCH (a)-[:R]->(b) WITH b,count(*) AS n WHERE n>1 RETURN DISTINCT n AS degree ORDER BY degree DESC SKIP 1 LIMIT 2 } RETURN a,degree",
+        "MATCH (a:L) WITH a CALL() { UNWIND [1,1,2] AS item WITH item,count(*) AS n UNWIND [n,n] AS copy RETURN copy ORDER BY copy DESC SKIP 1 LIMIT 2 } RETURN a,copy",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let recipe = filtered_aggregate_recipe(&query).unwrap();
+        assert!(recipe.window.is_some(), "{text}");
+        assert!(query.incremental_window_sequence_compatible(), "{text}");
+        assert!(
+            !query
+                .clone()
+                .with_page(0, Some(1))
+                .incremental_window_sequence_compatible(),
+            "an unrelated outer positional page is not consumed"
+        );
+    }
+    for text in [
+        "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[:R]->(b) RETURN b AS bucket,count(*) AS degree ORDER BY degree DESC } RETURN a,bucket,degree",
+        "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[:R]->(b) WITH b LIMIT 1 RETURN b AS bucket,count(*) AS degree ORDER BY degree DESC LIMIT 2 } RETURN a,bucket,degree",
+        "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[:R]->(b) WITH b,count(*) AS n ORDER BY n DESC LIMIT 1 RETURN n ORDER BY n DESC LIMIT 2 } RETURN a,n",
+        "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[:R]->(b) RETURN b.p AS bucket,count(*) AS degree ORDER BY degree DESC LIMIT 2 } RETURN a,bucket,degree",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(!has_filtered_aggregate(&query), "{text}");
+    }
+    let query = grouped_page(true, 3, 1, 2);
+    let original = query.canonical_bytes();
+    let mut calls = 0;
+    query
+        .incremental_filtered_aggregate_with_control(&mut |_| {
+            calls += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap()
+        .unwrap();
+    for stop in 1..=calls {
+        let mut seen = 0;
+        assert!(
+            matches!(query.incremental_filtered_aggregate_with_control(&mut |_| {
+            seen += 1; if seen == stop { Err(stop) } else { Ok(()) }
         }), Err(at) if at == stop)
         );
         assert_eq!(seen, stop);

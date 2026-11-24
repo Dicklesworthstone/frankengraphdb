@@ -4,6 +4,7 @@
 use super::*;
 use crate::algebra::{BindingSlot, GlaPlan, GraphValueRow, PreparedGraphPattern};
 use crate::row_aggregate::definition::GroupDefinition;
+use crate::row_window::RowWindowSpec;
 use crate::{
     GraphAggregate, GraphAggregateFunction, GraphIntegerExpression, GraphIntegerOp,
     PreparedGraphSetAggregate,
@@ -45,6 +46,8 @@ pub struct MaintainedCountJoin<'a> {
 /// after their complete post-group tail. Other aggregates retain their native
 /// empty/NULL and value domains; a filtered summary is absent, never zero-filled
 /// a second time. The private key survives post-group DISTINCT.
+/// An optional terminal page selects each completed invocation independently,
+/// after every post-group stage and before outer multiplicity restoration.
 /// The host must share sources and publish all stages atomically.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaintainedFilteredAggregate<'a> {
@@ -60,6 +63,7 @@ pub struct MaintainedFilteredAggregate<'a> {
     pub invocations: RowProjectionSpec,
     pub complete: RowJoinSpec,
     pub summary: Vec<RowProjectionSpec>,
+    pub window: Option<RowWindowSpec>,
     pub restore: RowJoinSpec,
     pub output: Vec<RowProjectionSpec>,
 }
@@ -80,14 +84,17 @@ pub struct MaintainedCollectedCount {
 
 fn aggregate_summary<'a, E>(
     query: &'a PreparedGraphSet,
+    terminal: Option<&PreparedGraphSet>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<&'a PreparedGraphSetAggregate>, E> {
     control(GlaExecutionEvent::Work)?;
-    if !query.unadorned_incremental_node() {
+    if !query.unadorned_incremental_node()
+        && !terminal.is_some_and(|page| core::ptr::eq(page, query))
+    {
         return Ok(None);
     }
     match &query.node {
-        SetNode::Scope(input) => aggregate_summary(input, control),
+        SetNode::Scope(input) => aggregate_summary(input, terminal, control),
         SetNode::Project {
             input,
             projection,
@@ -102,7 +109,7 @@ fn aggregate_summary<'a, E>(
                     return Ok(None);
                 }
             }
-            aggregate_summary(input, control)
+            aggregate_summary(input, terminal, control)
         }
         SetNode::Aggregate(summary) => {
             if !summary.having().is_empty()
@@ -163,15 +170,20 @@ enum SummaryStage<'a> {
 fn summary_stages<'a, E>(
     query: &'a PreparedGraphSet,
     imports: &[usize],
+    terminal: Option<&PreparedGraphSet>,
     stages: &mut Vec<SummaryStage<'a>>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<&'a PreparedGraphSet>, E> {
     control(GlaExecutionEvent::Work)?;
-    if !query.unadorned_incremental_node() {
+    if !query.unadorned_incremental_node()
+        && !terminal.is_some_and(|page| core::ptr::eq(page, query))
+    {
         return Ok(None);
     }
     let (input, stage) = match &query.node {
-        SetNode::Scope(input) => return summary_stages(input, imports, stages, control),
+        SetNode::Scope(input) => {
+            return summary_stages(input, imports, terminal, stages, control);
+        }
         SetNode::Unwind { input, value } => {
             if !value.is_scan_local() {
                 return Ok(None);
@@ -206,7 +218,7 @@ fn summary_stages<'a, E>(
         }
         _ => return Ok(Some(query)),
     };
-    let Some(base) = summary_stages(input, imports, stages, control)? else {
+    let Some(base) = summary_stages(input, imports, terminal, stages, control)? else {
         return Ok(None);
     };
     control(GlaExecutionEvent::ScratchEntry)?;
@@ -316,7 +328,7 @@ fn count_summary<'a, E>(
     query: &'a PreparedGraphSet,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<&'a PreparedGraphSetAggregate>, E> {
-    let Some(summary) = aggregate_summary(query, control)? else {
+    let Some(summary) = aggregate_summary(query, None, control)? else {
         return Ok(None);
     };
     // The source-restriction fast path restores one scalar count, not the
@@ -378,7 +390,13 @@ impl PreparedGraphSet {
     /// global COUNT remains zero, including under Optional Apply.
     /// AVG and extrema retain their native output domains.
     ///
-    /// Pages, internal exact-domain HAVING/output transforms,
+    /// One terminal finite page may follow the complete post-group tail. Its
+    /// exact invocation key partitions the existing weighted row window;
+    /// deleted winners refill from retained groups and outer duplicates do not
+    /// consume page positions. Empty global completion still precedes the
+    /// page, so SKIP can remove a zero COUNT before Optional null extension.
+    /// Intermediate or nested pages, unbounded ordering, internal exact-domain
+    /// HAVING/output transforms,
     /// unsupported key domains and reader/ordinal effects retain their refusal.
     /// The optimized existing source-restriction recipe remains preferred.
     pub fn incremental_filtered_aggregate_with_control<E>(
@@ -401,17 +419,20 @@ impl PreparedGraphSet {
         if matches!(kind, ApplyKind::Collect { .. }) {
             return Ok(None);
         }
+        let terminal = bounded_window_input(self);
         let mut tail = Vec::new();
-        let Some(group_input) = summary_stages(body_query, imports, &mut tail, control)? else {
+        let Some(group_input) = summary_stages(body_query, imports, terminal, &mut tail, control)?
+        else {
             return Ok(None);
         };
-        let Some(summary) = aggregate_summary(group_input, control)? else {
+        let Some(summary) = aggregate_summary(group_input, terminal, control)? else {
             return Ok(None);
         };
         let original_keys = summary.group_key_columns();
         let grouped_width = original_keys.len();
         let mut stages = Vec::new();
-        let Some(source) = summary_stages(summary.input(), imports, &mut stages, control)? else {
+        let Some(source) = summary_stages(summary.input(), imports, None, &mut stages, control)?
+        else {
             return Ok(None);
         };
         let (argument_source, right, source_join) = match &source.node {
@@ -692,6 +713,25 @@ impl PreparedGraphSet {
         if types.get(..width) != Some(body_query.types.as_slice()) {
             return Ok(None);
         }
+        let window = if let Some(terminal) = terminal {
+            let Some((order, _)) = terminal.incremental_result_order() else {
+                return Ok(None);
+            };
+            charge(types.len() + order.len() + key_width, control)?;
+            let Ok(window) = RowWindowSpec::new(
+                types.to_vec(),
+                order.to_vec(),
+                GraphSetQuantifier::All,
+                terminal.offset,
+                terminal.count.expect("terminal page is finite"),
+            )
+            .and_then(|window| window.with_partition_columns((width..width + key_width).collect())) else {
+                return Ok(None);
+            };
+            Some(window)
+        } else {
+            None
+        };
         // All tail stages ran once per invocation. Inner restoration drops
         // filtered summaries; Optional restoration null-extends them without
         // evaluating a fabricated summary. Both preserve duplicate outer rows.
@@ -744,6 +784,7 @@ impl PreparedGraphSet {
             invocations,
             complete,
             summary: post_group,
+            window,
             restore,
             output: vec![public, named],
         }))

@@ -164,9 +164,10 @@ fn body_base(query: &PreparedGraphSet, no_imports: bool) -> Option<Base<'_>> {
     }
 }
 
-/// Locate only the finite terminal page owned by the keyed window recipe.
+/// Locate only the finite terminal page owned by a keyed invocation recipe.
 /// This is sequence-shape analysis, not derivative or source admission. The
-/// complete Apply must still pass incremental_apply_window_with_control.
+/// complete Apply must still pass the row-window or correlated-aggregate
+/// derivative, including independent admission of every source and stage.
 pub(super) fn bounded_window_input(query: &PreparedGraphSet) -> Option<&PreparedGraphSet> {
     if !query.unadorned_incremental_node() {
         return None;

@@ -12,6 +12,48 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Maintained pages over correlated aggregates — qualification pending
+
+Returning CALL and OPTIONAL CALL bodies can maintain one terminal finite page
+after a grouped or global aggregate and its supported post-group stages. The
+existing correlated aggregate recipe now feeds the partitioned native window
+before restoring the original outer bag. This supports ranked summaries such as:
+
+```gql
+MATCH (a:Owner)
+OPTIONAL CALL (a) {
+  MATCH (a)-[:R]->(b)
+  RETURN b AS candidate,count(*) AS hits
+  ORDER BY hits DESC,candidate ASC SKIP 1 LIMIT 1
+}
+RETURN a,candidate,hits
+```
+
+Each exact imported tuple owns its groups and page. Count changes rerank groups;
+deleting a selected group can promote retained support. Duplicate outer rows
+repeat the selected result without multiplying the aggregate input or consuming
+page positions. Post-group filters, DISTINCT and supported UNWIND stages finish
+before selection. An empty global COUNT is completed as zero before paging;
+SKIP or LIMIT zero can remove that row, after which OPTIONAL restoration owns
+NULL extension. A grouped aggregate with no groups is never fabricated as zero.
+
+The exact consumed page is the only sequence exemption. Intermediate input or
+post-group pages, unbounded ordering, unsupported aggregate transforms and
+independent source effects retain their refusal. The window uses the existing
+private-input allowance and atomic native circuit staging; only final public
+rows spend the signed delivery quota. Registration, maintenance and rebuild
+retain the same grouped and window owners.
+
+Regression sources include 4,096 independently modeled weighted transitions,
+NULL and no-import invocations, zero-count pages, reached expression failures,
+group deletion/refill, tie reranking, private group inputs larger than the final
+quota, and every registration/rebuild checkpoint. A served subscription law
+compares literal deltas across six cuts in clean and hidden-data fixtures,
+including duplicate outer rows, denied relations and pending receipt reuse.
+Independent source review and focused pinned Rustfmt passed. Compilation and
+runtime qualification remain UNRUN after the earlier pinned asupersync compiler
+SIGKILL; no runtime pass or bead closure follows from these regression sources.
+
 ### Capability-authorized buffered reads — qualification pending
 
 `BufferedReadPublication::into_authorized_read_session` now opens the public
