@@ -89,6 +89,11 @@ impl BufferedReads {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> &MemoryPool {
+        &self.pool
+    }
+
     /// Authentication precedes this admission; requests cannot replace any
     /// physical limit or select a separate pool to evade retained charges.
     pub(crate) fn admit(&self) -> Result<(MemoryPool, BufferedReadLimits, BufferedLease), Refusal> {

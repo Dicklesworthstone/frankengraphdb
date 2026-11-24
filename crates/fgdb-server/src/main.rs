@@ -2075,6 +2075,76 @@ mod tests {
     }
 
     #[test]
+    fn buffered_read_memory_is_opt_in_positive_and_per_database() {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "first=first-db",
+            "--key-file",
+            "first.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let parse = |extra: &[&str]| {
+            let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+            ServeOptions::parse(&args)
+        };
+        let defaults = parse(&[]).unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(defaults.databases[0].buffered_reads_memory_bytes.is_none());
+        let flag = "--buffered-reads-memory-bytes";
+        let second = [
+            "--database",
+            "second=second-db",
+            "--key-file",
+            "second.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let args: Vec<&str> = [flag, "67108864"].into_iter().chain(second).collect();
+        let configured = parse(&args).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            configured.databases[0]
+                .buffered_reads_memory_bytes
+                .unwrap()
+                .get(),
+            64 * 1024 * 1024
+        );
+        assert!(
+            configured.databases[1]
+                .buffered_reads_memory_bytes
+                .is_none()
+        );
+        let args: Vec<&str> = args.into_iter().chain([flag, "134217728"]).collect();
+        let configured = parse(&args).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            configured.databases[0]
+                .buffered_reads_memory_bytes
+                .unwrap()
+                .get(),
+            64 * 1024 * 1024
+        );
+        assert_eq!(
+            configured.databases[1]
+                .buffered_reads_memory_bytes
+                .unwrap()
+                .get(),
+            128 * 1024 * 1024
+        );
+        assert!(parse(&[flag]).is_err());
+        for invalid in ["0", "-1", "+1", "1.5", "", "18446744073709551616"] {
+            assert!(parse(&[flag, invalid]).is_err(), "{flag}={invalid}");
+        }
+        assert!(parse(&[flag, "67108864", flag, "134217728"]).is_err());
+        let misplaced: Vec<String> = [flag, "67108864"]
+            .iter()
+            .chain(&base)
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert!(ServeOptions::parse(&misplaced).is_err());
+    }
+
+    #[test]
     fn subscription_coalescing_is_explicit_positive_and_per_database() {
         let base = [
             "--listen",

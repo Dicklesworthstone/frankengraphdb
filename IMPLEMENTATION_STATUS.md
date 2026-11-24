@@ -94,6 +94,39 @@ was terminated. `fgdb-w5-executor-olp` and
 modes, startup and the live writer retain their existing resident owners; this
 does not qualify whole-server out-of-core operation.
 
+Additional regression sources exercise cancellation and recovery during actual
+cold setup, shared-pool exhaustion/refund, tight late budgets, unsupported
+profiles with a rebound `LIMIT 0`, and repeated prepared execution after writes.
+Wrapped cold-storage interruptions and resource refusals retain their public
+error classes while storage diagnostics remain private. The current offline
+targeted check exits 101 at missing `aes 0.9.2`, after dependency acquisition
+exhausted workspace storage. The mandatory `scripts/check.sh` attempt ended at
+its 50-second limit (exit 124); Cargo checks were UNRUN offline, and shellcheck
+and UBS were missing. These additions do not supply runtime qualification.
+
+### Maintained correlated collections — qualification pending
+
+Returning `CALL` and `OPTIONAL CALL` bodies can maintain `COLLECT` and
+`COLLECT(DISTINCT)` alongside the existing aggregate tuple. The compiler uses
+the existing native collection owner and keyed invocation circuit. Admission
+requires proven canonical complete-row input order both before and after
+invocation reconstruction, so duplicate occurrences and DISTINCT first-occurrence
+order survive deletion and refill. Unknown enumeration and explicit input
+comparators retain their refusal.
+
+Empty global collections become a typed empty list before post-group expressions
+or a terminal ranked page run. Grouped emptiness produces no fabricated group;
+optional restoration supplies NULL only after the completed body is absent.
+Duplicate outer rows repeat the completed result without multiplying the body.
+
+Regression sources enumerate 2,048 independently modeled weighted transitions,
+including NULL imports, reverse-valued payloads, nested list entries, body
+DISTINCT, first-support deletion and empty global/grouped bodies. Additional
+laws cover lazy failures, list-type preservation, order refusal, native query
+admission, cancellation and composition with ranked aggregate pages. Pinned
+formatting and independent source review passed; compilation and runtime
+qualification remain UNRUN under the dependency blocker above.
+
 ### Maintained pages over correlated aggregates — qualification pending
 
 Returning CALL and OPTIONAL CALL bodies can maintain one terminal finite page

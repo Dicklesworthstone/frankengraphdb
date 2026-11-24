@@ -190,22 +190,6 @@ pub(crate) async fn read_buffered_session_for<'a>(
 /// Physical failures keep a stable public class and never disclose a path,
 /// object id, corrupt hidden vertex id or unscoped storage diagnostic.
 pub(crate) fn refusal(error: AuthorizedBufferedError) -> Refusal {
-    fn read_code(error: &BufferedReadError) -> ErrorCode {
-        match error {
-            BufferedReadError::Interrupted(_) => ErrorCode::Cancelled,
-            BufferedReadError::Memory(_)
-            | BufferedReadError::Limit { .. }
-            | BufferedReadError::SizeOverflow => ErrorCode::Budget,
-            BufferedReadError::Buffer(BufferError::Cancelled(_)) => ErrorCode::Cancelled,
-            BufferedReadError::Buffer(
-                BufferError::Memory(_)
-                | BufferError::CacheSlotsExhausted { .. }
-                | BufferError::ExtentTooLarge { .. },
-            ) => ErrorCode::Budget,
-            BufferedReadError::BeyondPublication { .. } => ErrorCode::Statement,
-            _ => ErrorCode::Execution,
-        }
-    }
     let code = match error {
         AuthorizedBufferedError::Query(error) => return query_refusal(error),
         AuthorizedBufferedError::DifferentCut { .. } => ErrorCode::Statement,
@@ -216,9 +200,11 @@ pub(crate) fn refusal(error: AuthorizedBufferedError) -> Refusal {
         AuthorizedBufferedError::Open(BufferedOpenError::RecoveryRequired) => {
             ErrorCode::DatabaseRecovering
         }
-        AuthorizedBufferedError::Catalog(_) | AuthorizedBufferedError::Open(_) => {
-            ErrorCode::Execution
+        AuthorizedBufferedError::Open(BufferedOpenError::Open(ref error)) => open_code(error),
+        AuthorizedBufferedError::Catalog(fgdb::SymbolCatalogError::Storage(ref error)) => {
+            rebuild_code(error)
         }
+        AuthorizedBufferedError::Catalog(_) => ErrorCode::Execution,
     };
     Refusal::new(
         code,
@@ -231,6 +217,88 @@ pub(crate) fn refusal(error: AuthorizedBufferedError) -> Refusal {
             _ => "buffered source read failed",
         },
     )
+}
+
+// OpenError, RebuildError and ExtentError do not expose a
+// generic source() chain. Inspect their typed wrappers explicitly so a nested
+// physical allowance or interruption cannot become an execution failure.
+fn open_code(error: &fgdb::OpenError) -> ErrorCode {
+    match error {
+        fgdb::OpenError::Io(error) => io_code(error),
+        fgdb::OpenError::Store(error) => store_code(error),
+        fgdb::OpenError::Rebuild(error) => rebuild_code(error),
+        _ => ErrorCode::Execution,
+    }
+}
+
+fn rebuild_code(error: &fgdb::RebuildError) -> ErrorCode {
+    match error {
+        fgdb::RebuildError::Interrupted(_) => ErrorCode::Cancelled,
+        fgdb::RebuildError::Store(error) => store_code(error),
+        _ => ErrorCode::Execution,
+    }
+}
+
+fn io_code(error: &std::io::Error) -> ErrorCode {
+    if error.kind() == std::io::ErrorKind::Interrupted {
+        ErrorCode::Cancelled
+    } else {
+        ErrorCode::Execution
+    }
+}
+
+fn read_code(error: &BufferedReadError) -> ErrorCode {
+    match error {
+        BufferedReadError::Interrupted(_) => ErrorCode::Cancelled,
+        BufferedReadError::Memory(_)
+        | BufferedReadError::Limit { .. }
+        | BufferedReadError::SizeOverflow => ErrorCode::Budget,
+        BufferedReadError::Buffer(BufferError::Cancelled(_)) => ErrorCode::Cancelled,
+        BufferedReadError::Buffer(
+            BufferError::Memory(_)
+            | BufferError::CacheSlotsExhausted { .. }
+            | BufferError::ExtentTooLarge { .. },
+        ) => ErrorCode::Budget,
+        BufferedReadError::Buffer(BufferError::Load(error)) => io_code(error),
+        BufferedReadError::Store(error) => store_code(error),
+        BufferedReadError::BeyondPublication { .. } => ErrorCode::Statement,
+        _ => ErrorCode::Execution,
+    }
+}
+
+fn store_code(error: &fgdb_strata::store::StoreError) -> ErrorCode {
+    use fgdb_strata::store::{ExtentError, StoreError};
+    use fgdb_strata::tiered::sealed::AdjRunError;
+    match error {
+        StoreError::Io(error) => io_code(error),
+        StoreError::ObjectTooLarge { .. }
+        | StoreError::RootReferenceLimit { .. }
+        | StoreError::Extent(ExtentError::Memory(_) | ExtentError::PlaintextTooLarge { .. }) => {
+            ErrorCode::Budget
+        }
+        StoreError::RootBlockLoad { error, .. }
+        | StoreError::RootPatchLoad { error, .. }
+        | StoreError::ManifestRootLoad { error, .. }
+        | StoreError::BlockPatchLoad { error, .. } => store_code(error),
+        StoreError::MalformedAdjRun(error) => match error.as_ref() {
+            AdjRunError::Sealed(error) => sealed_code(error),
+            _ => ErrorCode::Execution,
+        },
+        _ => ErrorCode::Execution,
+    }
+}
+
+fn sealed_code(error: &fgdb_strata::tiered::sealed::SealedError) -> ErrorCode {
+    use fgdb_strata::tiered::sealed::SealedError;
+    if error.is_admission_limit() {
+        return ErrorCode::Budget;
+    }
+    match error {
+        SealedError::Interrupted(_) => ErrorCode::Cancelled,
+        SealedError::Store(error) => store_code(error),
+        SealedError::BufferedSource(error) => read_code(error),
+        _ => ErrorCode::Execution,
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +316,240 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("expected refusal"),
         }
+    }
+
+    #[test]
+    fn wrapped_storage_refusals_preserve_resource_classes_and_hide_diagnostics() {
+        use fgdb_strata::store::{ExtentError, StoreError};
+        use fgdb_strata::tiered::sealed::{AdjRunError, SealedError};
+
+        let open = |error| AuthorizedBufferedError::Open(BufferedOpenError::Open(error));
+        let catalog = |error| {
+            AuthorizedBufferedError::Catalog(fgdb::SymbolCatalogError::Storage(Box::new(error)))
+        };
+        let memory = fgdb::MemoryError::ResourceExhausted {
+            requested: 4096,
+            available: 0,
+            limit: 1024,
+        };
+        let private = "private-object-path-and-hidden-identity";
+        let cases = [
+            (
+                open(fgdb::OpenError::Store(StoreError::Extent(
+                    ExtentError::Memory(memory),
+                ))),
+                ErrorCode::Budget,
+            ),
+            (
+                open(fgdb::OpenError::Rebuild(fgdb::RebuildError::Store(
+                    StoreError::ObjectTooLarge {
+                        limit: 8,
+                        observed: 9,
+                    },
+                ))),
+                ErrorCode::Budget,
+            ),
+            (
+                catalog(fgdb::RebuildError::Store(StoreError::RootPatchLoad {
+                    at: 99,
+                    error: Box::new(StoreError::RootReferenceLimit {
+                        resource: private,
+                        requested: 2,
+                        limit: 1,
+                    }),
+                })),
+                ErrorCode::Budget,
+            ),
+            (
+                AuthorizedBufferedError::Read(BufferedReadError::Store(Box::new(
+                    StoreError::MalformedAdjRun(Box::new(AdjRunError::Sealed(SealedError::Store(
+                        Box::new(StoreError::Extent(ExtentError::Memory(memory))),
+                    )))),
+                ))),
+                ErrorCode::Budget,
+            ),
+            (
+                open(fgdb::OpenError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    private,
+                ))),
+                ErrorCode::Cancelled,
+            ),
+            (
+                catalog(fgdb::RebuildError::Store(StoreError::RootBlockLoad {
+                    at: 99,
+                    error: Box::new(StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        private,
+                    ))),
+                })),
+                ErrorCode::Cancelled,
+            ),
+            (
+                AuthorizedBufferedError::Read(BufferedReadError::Buffer(BufferError::Load(
+                    std::io::Error::new(std::io::ErrorKind::Interrupted, private),
+                ))),
+                ErrorCode::Cancelled,
+            ),
+            (
+                AuthorizedBufferedError::Read(BufferedReadError::VertexHistoryConflict {
+                    vid: fgdb_types::VId(0xdead_beef),
+                }),
+                ErrorCode::Execution,
+            ),
+            (
+                open(fgdb::OpenError::Store(StoreError::Io(
+                    std::io::Error::other(private),
+                ))),
+                ErrorCode::Execution,
+            ),
+            (
+                AuthorizedBufferedError::CatalogBinding(private.to_owned()),
+                ErrorCode::Conflict,
+            ),
+        ];
+        for (error, code) in cases {
+            let refusal = refusal(error);
+            assert_eq!(refusal.code, code);
+            assert_eq!(
+                refusal.message,
+                match code {
+                    ErrorCode::Budget => "buffered source physical allowance exceeded",
+                    ErrorCode::Cancelled => "buffered source read cancelled",
+                    ErrorCode::Conflict =>
+                        "buffered source bindings do not match the selected catalog",
+                    _ => "buffered source read failed",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_pool_refusals_refund_slots_and_authentication_precedes_stale_generations() {
+        let ((), report) = run_async_under_lab(0x79a0_b003, |root| async move {
+            let (server, token, _) = served_with_config(&root, "buffered-pool-auth", |config| {
+                let mut buffered = crate::BufferedReadConfig::new(8 * 1024 * 1024);
+                buffered.max_concurrent = 1;
+                config.buffered_reads = Some(buffered);
+            })
+            .await;
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let query = crate::query_cx(&contexts);
+            let parameters = GqlParameters::new();
+            let statement = "MATCH (n) RETURN n";
+            let pool = db.buffered_reads.as_ref().unwrap().pool();
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), vertex(1))
+                .await
+                .unwrap();
+            let generation = accepted(ordered::ordered_generation(db, &token));
+            let held = pool.reserve(&query, pool.available()).unwrap();
+            let error = refused(
+                read_buffered_session_for(
+                    &root,
+                    db,
+                    &token,
+                    None,
+                    generation.clone(),
+                    statement,
+                    &parameters,
+                )
+                .await,
+            );
+            assert_eq!(error.code, ErrorCode::Budget);
+            assert_eq!(error.message, "buffered source physical allowance exceeded");
+            assert_eq!(pool.used(), pool.limit());
+            drop(held);
+            assert_eq!(pool.used(), 0);
+            let opened = accepted(
+                read_buffered_session_for(
+                    &root,
+                    db,
+                    &token,
+                    None,
+                    generation.clone(),
+                    statement,
+                    &parameters,
+                )
+                .await,
+            );
+            assert!(pool.used() > 0);
+            drop(opened);
+            assert_eq!(pool.used(), 0);
+
+            fail_after_marker(&root, db, 2).await;
+            assert!(matches!(
+                settled(db).await,
+                crate::DatabaseStatus::Ready { .. }
+            ));
+            let expired = db
+                .authority
+                .issue_at(
+                    &fgdb_warden::Grant::read_only(
+                        TRUNK,
+                        1,
+                        fgdb_warden::QueryLimits {
+                            max_nodes: 100,
+                            max_work: 100,
+                            max_rows: 100,
+                        },
+                    ),
+                    0,
+                )
+                .unwrap();
+            assert_eq!(
+                refused(
+                    read_buffered_session_for(
+                        &root,
+                        db,
+                        &expired,
+                        None,
+                        generation.clone(),
+                        statement,
+                        &parameters,
+                    )
+                    .await
+                )
+                .code,
+                ErrorCode::PermissionDenied
+            );
+            assert_eq!(
+                refused(
+                    read_buffered_session_for(
+                        &root,
+                        db,
+                        &token,
+                        None,
+                        generation,
+                        statement,
+                        &parameters,
+                    )
+                    .await
+                )
+                .code,
+                ErrorCode::DatabaseRecovering
+            );
+            let opened = accepted(
+                read_buffered_session_for(
+                    &root,
+                    db,
+                    &token,
+                    None,
+                    accepted(ordered::ordered_generation(db, &token)),
+                    statement,
+                    &parameters,
+                )
+                .await,
+            );
+            drop(opened);
+            assert_eq!(pool.used(), 0);
+            server.finish_shutdown(&root).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

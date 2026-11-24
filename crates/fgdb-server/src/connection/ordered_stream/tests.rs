@@ -302,6 +302,92 @@ fn pending_admission_releases_on_disconnect_drain_shutdown_and_recovery_before_s
 }
 
 #[test]
+fn buffered_source_admission_releases_writer_borrow_and_services_cancel_or_recovery() {
+    let ((), report) = run_async_under_lab(0x79a0_b002, |root| async move {
+        for stop in ["cancel", "recovery"] {
+            let (server, token, _) = crate::recovery::tests::served_with_config(
+                &root,
+                &format!("buffered-admission-{stop}"),
+                |config| {
+                    let mut buffered = crate::BufferedReadConfig::new(8 * 1024 * 1024);
+                    buffered.max_concurrent = 1;
+                    buffered.limits.max_root_bytes = 64 * 1024;
+                    config.buffered_reads = Some(buffered);
+                },
+            )
+            .await;
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), crate::recovery::tests::vertex(1))
+                .await
+                .unwrap();
+            let (mut lane, wire, stream) = lane(&root, db, &token);
+            let binding = lane.conn.binding();
+            let waiter = server.shutdown.waiter();
+            // Exercise real cold setup through source_read, before any schema
+            // or graph candidate is delivered. Cancellation must not depend on
+            // advancing its pending filesystem future first.
+            let mut execution = Box::pin(lane.source_read(
+                &root,
+                &waiter,
+                db,
+                &token,
+                1,
+                stream,
+                binding,
+                SourceStatement::Text("MATCH (n) RETURN n"),
+                &[],
+            ));
+            assert!(poll_once(execution.as_mut()).is_pending());
+            assert!(wire.lock().unwrap().outgoing.is_empty());
+            {
+                let mut writer = Box::pin(db.db.write(&root));
+                let held = match poll_once(writer.as_mut()) {
+                    Poll::Ready(Ok(held)) => held,
+                    _ => panic!("cold admission must release the publication capture borrow"),
+                };
+                drop(held);
+            }
+            if stop == "cancel" {
+                inject(&wire, FrameKind::QueryCancel, stream, binding, &Empty);
+                assert!(matches!(execution.await, Err(Stop::Cancelled)));
+            } else {
+                crate::recovery::tests::fail_after_marker(&root, db, 2).await;
+                assert!(matches!(
+                    crate::recovery::tests::settled(db).await,
+                    crate::DatabaseStatus::Ready { .. }
+                ));
+                assert!(matches!(execution.await, Err(Stop::Recovery(_))));
+            }
+            assert_eq!(db.buffered_reads.as_ref().unwrap().pool().used(), 0);
+            // With one source slot, a new admission proves the cancelled or
+            // fenced opening returned its concurrency lease as well as bytes.
+            let parameters = fgdb_gql::GqlParameters::new();
+            let (reopened, _) = accepted(
+                crate::execute::buffered::read_buffered_session_for(
+                    &root,
+                    db,
+                    &token,
+                    None,
+                    accepted(crate::execute::ordered::ordered_generation(db, &token)),
+                    "MATCH (n) RETURN n",
+                    &parameters,
+                )
+                .await,
+            );
+            drop(reopened);
+            assert_eq!(db.buffered_reads.as_ref().unwrap().pool().used(), 0);
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn native_aggregate_announces_and_services_controls_during_input_without_scratch() {
     let ((), report) = run_async_under_lab(0x79a0_0610, |root| async move {
         let (server, token, _) = served(&root, "native-aggregate-controls").await;

@@ -735,6 +735,425 @@ async fn prepared_source(
     })
 }
 
+/// A one-frame cold source behind the same four-row FGP credit window used
+/// by the resident-source tests. Explicit read modes still use resident reads.
+async fn start_buffered_sources(
+    cx: &Cx,
+    name: &str,
+) -> (
+    SocketAddr,
+    fgdb_server::Shutdown,
+    asupersync::runtime::TaskHandle<()>,
+) {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+
+    let path = scratch(name);
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let mut database = Database::create(&contexts.commit(), &path, keys())
+        .await
+        .unwrap();
+    let mut catalog = SymbolCatalog::default();
+    catalog
+        .bind_all([
+            ("Person", CatalogSymbol::Label(LabelId(1))),
+            ("Company", CatalogSymbol::Label(LabelId(2))),
+            ("KNOWS", CatalogSymbol::Relation(RelationId(1))),
+            ("WORKS_AT", CatalogSymbol::Relation(RelationId(2))),
+            ("name", CatalogSymbol::Property(PropertyKeyId(1))),
+            ("age", CatalogSymbol::Property(PropertyKeyId(2))),
+        ])
+        .unwrap();
+    assert_eq!(
+        database
+            .register_symbols(&contexts.commit(), &catalog)
+            .await
+            .unwrap()
+            .0,
+        1
+    );
+    drop(database);
+    let mut server = Server::new(
+        cx,
+        ServerLimits {
+            max_frame_len: 4096,
+            initial_window_bytes: 8192,
+            initial_window_rows: 4,
+            max_window_bytes: 1 << 20,
+            max_window_rows: 1 << 10,
+            max_connections: 8,
+        },
+    )
+    .unwrap();
+    let mut config = DatabaseConfig::new("social", keys(), issuer_key());
+    config.symbols = symbols();
+    let mut buffered = fgdb_server::BufferedReadConfig::new(16 * 1024 * 1024);
+    buffered.max_concurrent = 1;
+    buffered.limits = fgdb::BufferedReadLimits {
+        max_root_bytes: 64 * 1024,
+        max_source_bytes: 4 * 1024 * 1024,
+        max_blocks: 512,
+        max_vertex_patches: 512,
+        max_work: 1_000_000,
+        buffer: fgdb::BufferLimits {
+            max_frames: 1,
+            max_ghost_entries: 2,
+            max_extent_bytes: 16 * 1024,
+        },
+    };
+    config.buffered_reads = Some(buffered);
+    server.open_database(cx, &path, config).await.unwrap();
+    let server = Arc::new(server);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = server.shutdown();
+    let handle = cx
+        .spawn(move |child| async move {
+            server.serve(&child, listener).await.unwrap();
+        })
+        .unwrap();
+    (addr, shutdown, handle)
+}
+
+#[test]
+fn buffered_sources_preserve_prepared_pages_and_refuse_unsupported_profiles() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start_buffered_sources(cx, "buffered-source-pages").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed(cx, &mut owner).await;
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (a:Person {age:0}), (b:Person {age:1}) \
+                 CREATE (h:Company {age:99,name:'hidden'}), \
+                 (a)-[:KNOWS {age:7,name:'masked'}]->(b), \
+                 (a)-[:KNOWS {age:8,name:'masked'}]->(b), \
+                 (a)-[:WORKS_AT {age:900}]->(b), \
+                 (a)-[:KNOWS {age:900}]->(h)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut scope = grant(Rights::Read);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.relations = Scope::only([RelationId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let statement = "MATCH (n) RETURN n AS id,n.age AS age,n.name AS hidden";
+        let visible = reader
+            .execute(cx, ExecuteMode::ReadStream, statement, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            visible,
+            reader
+                .execute(cx, ExecuteMode::Read, statement, vec![])
+                .await
+                .unwrap()
+        );
+        assert_eq!(visible.columns, ["id", "age", "hidden"]);
+        assert_eq!(visible.outcome, Outcome::Rows { seq: 3 });
+        assert!(visible.rows.iter().all(|row| row[2] == WireValue::Null));
+        let mut ages: Vec<_> = visible
+            .rows
+            .iter()
+            .map(|row| match row[1] {
+                WireValue::Int(age) => age,
+                ref other => panic!("expected an integer age, got {other:?}"),
+            })
+            .collect();
+        ages.sort_unstable();
+        assert_eq!(ages, (0..12).collect::<Vec<i64>>());
+
+        let page = "AT BRANCH $route MATCH (n) WHERE n.age >= $min \
+                    RETURN n AS id,n.age AS age,n.name AS hidden SKIP $skip LIMIT $take";
+        let page_args = |minimum, skip, take, route: &str| {
+            vec![
+                ("min".into(), WireValue::Int(minimum)),
+                ("skip".into(), WireValue::Count(skip)),
+                ("take".into(), WireValue::Count(take)),
+                ("route".into(), text(route)),
+            ]
+        };
+        let handle = reader
+            .prepare_read(cx, page, page_args(0, 0, 4, "main"))
+            .await
+            .unwrap();
+        for (minimum, skip, take) in [(0, 0, 4), (4, 1, 5), (0, 12, 2), (10, 0, 0)] {
+            let result = prepared_source(
+                cx,
+                &mut reader,
+                handle,
+                page_args(minimum, skip, take, "main"),
+            )
+            .await
+            .unwrap();
+            let expected: Vec<_> = visible
+                .rows
+                .iter()
+                .filter(|row| matches!(row[1], WireValue::Int(age) if age >= minimum))
+                .skip(usize::try_from(skip).unwrap())
+                .take(usize::try_from(take).unwrap())
+                .cloned()
+                .collect();
+            assert_eq!(result.columns, visible.columns);
+            assert_eq!(result.rows, expected);
+            assert_eq!(result.outcome, Outcome::Rows { seq: 3 });
+            assert_eq!(
+                result,
+                reader
+                    .execute(
+                        cx,
+                        ExecuteMode::ReadStream,
+                        page,
+                        page_args(minimum, skip, take, "main"),
+                    )
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            server_code(
+                prepared_source(cx, &mut reader, handle, page_args(0, 0, 4, "elsewhere"))
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            server_code(
+                prepared_source(cx, &mut reader, handle, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement
+        );
+        assert_eq!(
+            prepared_source(cx, &mut reader, handle, page_args(0, 0, 12, "main"))
+                .await
+                .unwrap()
+                .rows,
+            visible.rows
+        );
+        reader.release_prepared(cx, handle).await.unwrap();
+
+        // Aggregates work on the resident source, so refusal here detects an
+        // accidental fallback. Even a freshly bound LIMIT 0 keeps the profile
+        // contract. The ordinary read modes on the same template still work.
+        let aggregate = "MATCH (n) RETURN count(*) AS count LIMIT $take";
+        let args = |take| vec![("take".into(), WireValue::Count(take))];
+        let handle = reader.prepare_read(cx, aggregate, args(1)).await.unwrap();
+        for take in [1, 0] {
+            assert_eq!(
+                server_code(
+                    reader
+                        .execute(cx, ExecuteMode::ReadStream, aggregate, args(take))
+                        .await
+                        .unwrap_err()
+                ),
+                ErrorCode::Statement
+            );
+            assert_eq!(
+                server_code(
+                    prepared_source(cx, &mut reader, handle, args(take))
+                        .await
+                        .unwrap_err()
+                ),
+                ErrorCode::Statement
+            );
+            let resident = reader
+                .execute_prepared(cx, handle, args(take))
+                .await
+                .unwrap();
+            assert_eq!(
+                resident.rows,
+                if take == 0 {
+                    vec![]
+                } else {
+                    vec![vec![WireValue::Count(12)]]
+                }
+            );
+            assert_eq!(
+                resident,
+                reader
+                    .execute(cx, ExecuteMode::Read, aggregate, args(take))
+                    .await
+                    .unwrap()
+            );
+        }
+        reader.release_prepared(cx, handle).await.unwrap();
+        let any_relation = "MATCH (a)-[r]->(b) RETURN r AS id";
+        let handle = reader.prepare_read(cx, any_relation, vec![]).await.unwrap();
+        assert_eq!(
+            server_code(
+                reader
+                    .execute(cx, ExecuteMode::ReadStream, any_relation, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement
+        );
+        assert_eq!(
+            server_code(
+                prepared_source(cx, &mut reader, handle, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement
+        );
+        assert_eq!(
+            reader
+                .execute_prepared(cx, handle, vec![])
+                .await
+                .unwrap()
+                .rows
+                .len(),
+            2
+        );
+        reader.release_prepared(cx, handle).await.unwrap();
+        reader.ping(cx, 121).await.unwrap();
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn buffered_prepared_sources_release_cancelled_and_budgeted_executions_before_reuse() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start_buffered_sources(cx, "buffered-source-limits").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed(cx, &mut owner).await;
+        let statement = "MATCH (n) RETURN n AS id,n.age AS age,n.name AS hidden LIMIT $take";
+        let args = |take| vec![("take".into(), WireValue::Count(take))];
+        let mut scope = grant(Rights::Read);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        // A resident evaluation of all twelve rows cannot pass this allowance;
+        // one source window can, and Cancel must stop before a second window.
+        scope.limits.max_nodes = 4;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let handle = reader.prepare_read(cx, statement, args(100)).await.unwrap();
+        let mut first = Vec::new();
+        let error = reader
+            .execute_prepared_streaming(
+                cx,
+                PreparedReadMode::SourceStream,
+                handle,
+                args(100),
+                |_| Ok(()),
+                |row| {
+                    first.push(row);
+                    Err(ClientError::Protocol("stop after one cold prepared row"))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Protocol("stop after one cold prepared row")
+        ));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0][2], WireValue::Null);
+        reader.ping(cx, 122).await.unwrap();
+        assert_eq!(
+            prepared_source(cx, &mut reader, handle, args(1))
+                .await
+                .unwrap()
+                .rows,
+            first
+        );
+
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) SET n.age=n.age+100",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let WireValue::Int(age) = &mut first[0][1] else {
+            panic!("an integer age")
+        };
+        *age += 100;
+        let reused = prepared_source(cx, &mut reader, handle, args(1))
+            .await
+            .unwrap();
+        assert_eq!(reused.rows, first);
+        assert_eq!(reused.outcome, Outcome::Rows { seq: 3 });
+        reader.release_prepared(cx, handle).await.unwrap();
+        reader.close(cx).await.unwrap();
+
+        scope.limits.max_nodes = 1_000;
+        scope.limits.max_rows = 4;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let handle = reader.prepare_read(cx, statement, args(100)).await.unwrap();
+        let mut prepared_prefix = Vec::new();
+        let error = reader
+            .execute_prepared_streaming(
+                cx,
+                PreparedReadMode::SourceStream,
+                handle,
+                args(100),
+                |_| Ok(()),
+                |row| {
+                    prepared_prefix.push(row);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(error), ErrorCode::Budget);
+        assert_eq!(prepared_prefix.len(), 4);
+        assert_eq!(&prepared_prefix[..1], first.as_slice());
+        assert!(prepared_prefix.iter().all(|row| row[2] == WireValue::Null));
+        reader.ping(cx, 123).await.unwrap();
+        assert_eq!(
+            prepared_source(cx, &mut reader, handle, args(1))
+                .await
+                .unwrap()
+                .rows,
+            first
+        );
+        reader.release_prepared(cx, handle).await.unwrap();
+        reader.close(cx).await.unwrap();
+
+        scope.limits.max_nodes = 0;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let handle = reader.prepare_read(cx, statement, args(0)).await.unwrap();
+        let empty = prepared_source(cx, &mut reader, handle, args(0))
+            .await
+            .unwrap();
+        assert_eq!(empty.columns, ["id", "age", "hidden"]);
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.outcome, Outcome::Rows { seq: 3 });
+        assert_eq!(
+            empty,
+            reader
+                .execute(cx, ExecuteMode::ReadStream, statement, args(0))
+                .await
+                .unwrap()
+        );
+        reader.release_prepared(cx, handle).await.unwrap();
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
 #[test]
 fn prepared_source_reads_preserve_scope_and_rebind_unsigned_historical_cuts() {
     run(async |cx| {
