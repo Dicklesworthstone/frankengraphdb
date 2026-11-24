@@ -1283,6 +1283,50 @@ fn lifecycle_across_processes_has_exact_query_and_history_ndjson() {
 }
 
 #[test]
+fn historical_rows_and_sequence_agree_across_robot_delivery_modes() {
+    let db = TestDb::new("historical-delivery");
+    db.create();
+    let cut = db.write(&["INSERT (:Person {name:'Ada'})"]);
+    let head = db.write(&["MATCH (p:Person) SET p.name='Grace'"]);
+    assert!(head > cut);
+
+    let directory = scratch("historical-delivery-spill");
+    std::fs::create_dir(&directory).unwrap();
+    let parameter = format!("cut=uint:{cut}");
+    let literal = cut.to_string();
+    for (selector, bindings) in [
+        (literal.as_str(), &[][..]),
+        ("$cut", &["--param", parameter.as_str()][..]),
+    ] {
+        for mode in [
+            &[][..],
+            &["--stream"][..],
+            &["--spill-dir", directory.to_str().unwrap()][..],
+        ] {
+            let mut text = format!(
+                "MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {selector} RETURN p AS node, p.name AS name"
+            );
+            if mode.first() == Some(&"--spill-dir") {
+                text.push_str(" ORDER BY name");
+            }
+            let mut args = mode.to_vec();
+            args.extend_from_slice(bindings);
+            args.push(&text);
+            let output = db.command("query", &args);
+            assert_eq!(output.sequence("rows"), cut, "{args:?}");
+            assert_eq!(output.terminal().get("count").unsigned(), 1);
+            let cells = output.events[2].get("cells").array();
+            assert_eq!(cells[0].get("type").string(), "vertex");
+            assert_eq!(cells[1], json(r#"{"type":"text","value":"Ada"}"#));
+            if !mode.is_empty() {
+                assert_eq!(output.events[1].get("seq").unsigned(), cut);
+                assert_eq!(output.terminal().get("stream"), &Json::Bool(true));
+            }
+        }
+    }
+}
+
+#[test]
 fn certify_to_never_silently_replaces_an_existing_certificate() {
     // fgdb-vuyw5: a certificate is an audit artifact.
     let db = TestDb::new("certificate-no-clobber");
