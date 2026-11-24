@@ -14,6 +14,12 @@ The four affected transaction, write-session, diagnostic and streaming suites pa
 
 The independent exact-tree verifier confirmed a stable red result on `dbedd6c72`. Eight of ten core checks passed. Of forty registered checks, twenty passed, one failed and nineteen did not run. The workspace `cargo test` exited 137 during compilation. UBS counted 250 panic sites against the ceiling of 232 and 47 comparison sites against 38. A separate determinism prebuild was interrupted after the workspace failure, leaving its two-run comparison unexecuted. The archived `proof-dbedd6c72` bundle records the complete verdict.
 
+The fresh CLI at `70a15d317` produced a byte-identical report on all 3,897 upstream scenarios. Two of the four raw mismatches are the owner's documented choice to return canonical order when the final RETURN omits ORDER BY (`fgdb-9bu1s`). Aggregation inside a list comprehension remains an open language decision (`fgdb-8sut2`). The fourth is the Stockholm timezone case above.
+
+At `b65e99073`, all 289 server library tests passed. The original signed correlated subscription expands each owner twice, imports its nullable score, and maintains grouped counts and sums as visible properties change. The test checks the exact baseline, deltas and receipts through hidden writes. The property now comes from the maintained vertex scan at the same commit. Empty or dynamic outer expansions remain outside that rewrite. The explicit-transaction tests also verify successful snapshot reads followed by a real commit conflict on FGP and Bolt.
+
+The supported sixteen-relation union now runs on the default test thread stack and still rejects a seventeenth relation. At commit 9 of a separate history, a valid list-valued vertex property stopped five maintained reachability queries at frontier 8. Debugging traced this first to group-key copying and then to the aggregate input schema treating every property as scalar. At `d372eb5f7` all 21 native standing-set cases passed, including the full 17-tick history, exact deltas, rebuilds and the independent public two-row cap. The focused property-domain test also exercised nested maps, graph-identity rejection, depth and cancellation (`fgdb-xgtt8`, `fgdb-eeo5g`).
+
 The executable hashes, raw client output, per-case reports, scratch patches and test transcripts are under `/data/tmp/fgdb-final-canonical-jEFRr7wz`. The fourteen-goal matrix below records the remaining product gates.
 
 ## November 23, 2026 — query results, compatibility and the workspace gate
