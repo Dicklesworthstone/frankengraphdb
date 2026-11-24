@@ -2200,12 +2200,39 @@ fn bolt_explicit_hybrid_reads_track_the_staged_graph_and_rollback() {
                  YIELD node RETURN node.name AS name",
                 "quiet",
             ),
+            (
+                "MATCH (seed:Person {name:'stagedneedle'}) \
+                 CALL hybrid.search(seeds => [seed], relation => 'KNOWS', \
+                 max_hops => 1, graph_access => 'demand', graph_candidates => 1, k => 1) \
+                 YIELD node RETURN node.name AS name",
+                "quiet",
+            ),
+            (
+                "MATCH (seed:Person {name:'stagedneedle'}) \
+                 CALL hybrid.search(seeds => [seed], relation => 'KNOWS', \
+                 max_hops => 1, graph_access => 'indexed', graph_candidates => 1, k => 1) \
+                 YIELD node RETURN node.name AS name",
+                "quiet",
+            ),
+            (
+                "MATCH (seed:Person {name:'stagedneedle'}) \
+                 CALL hybrid.search(text => 'quiet', text_property => 'name', \
+                 vector => [2], vector_properties => ['age'], \
+                 seeds => [seed], relation => 'KNOWS', max_hops => 1, \
+                 graph_access => 'indexed', candidates => 1, graph_candidates => 1, k => 1) \
+                 YIELD node RETURN node.name AS name",
+                "quiet",
+            ),
         ] {
             client
                 .expect(0x10, request(query, vec![], vec![]), SUCCESS)
                 .await;
             let (rows, provisional) = client.pull_all().await;
             assert_eq!(rows, [vec![Value::string(expected)]], "{query}");
+            assert_eq!(
+                get(&provisional, "fgdb_transaction_local"),
+                Some(&Value::Bool(true))
+            );
             assert!(get(&provisional, "bookmark").is_none());
         }
         let before = observer
@@ -2307,8 +2334,8 @@ fn bolt_explicit_hybrid_reads_track_the_staged_graph_and_rollback() {
         );
         client.expect(0x13, vec![], SUCCESS).await;
 
-        // A requested access profile cannot retry the privileged snapshot
-        // host. Its refusal aborts all previous statements in this owner.
+        // Mixed demand still has no staged text/vector generation. Its typed
+        // refusal aborts all previous statements in this owner.
         client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
         client
             .expect(
@@ -2326,9 +2353,9 @@ fn bolt_explicit_hybrid_reads_track_the_staged_graph_and_rollback() {
             .expect(
                 0x10,
                 request(
-                    "CALL hybrid.search(seeds => [1], max_hops => 0, \
-                     include_seeds => true, graph_access => 'demand') \
-                     YIELD node RETURN node.name AS name",
+                    "CALL hybrid.search(text => 'refusedneedle', text_property => 'name', \
+                     seeds => [1], max_hops => 0, include_seeds => true, \
+                     graph_access => 'demand') YIELD node RETURN node.name AS name",
                     vec![],
                     vec![],
                 ),

@@ -542,3 +542,123 @@ fn fgp_demand_graph_writes_follow_staged_edges_and_rebind_prepared_values() {
         task.join(cx).await.unwrap();
     });
 }
+
+#[test]
+fn fgp_indexed_hybrid_writes_fuse_staged_properties_and_topology() {
+    run(async |cx| {
+        let (address, shutdown, mut task) = start(cx, "conditional-indexed-hybrid").await;
+        let mut owner = connected(cx, address, &grant(Rights::ReadWrite)).await;
+        let seeded = owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (root:Person {name:'root',age:0}), \
+                    (target:Person {name:'obsolete',age:99}), \
+                    (:Person {name:'side',age:10}), \
+                    (hidden:Company {name:'needle',age:'malformed vector'}), \
+                    (root)-[:KNOWS]->(hidden), (hidden)-[:KNOWS]->(target), \
+                    (root)-[:WORKS_AT]->(target)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            seeded.outcome,
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1
+            }
+        );
+        let mut permitted = grant(Rights::ReadWrite);
+        permitted.labels = Scope::only([LabelId(1)]);
+        permitted.relations = Scope::only([RelationId(1)]);
+        let mut client = connected(cx, address, &permitted).await;
+
+        // All three lanes must read the same effective staged graph. Neither
+        // the matching text/vector values nor this permitted edge exist at
+        // the statement's pinned frontier.
+        let statement = "MATCH (root:Person {name:'root'}), \
+                (target:Person {name:'obsolete'}) \
+            SET target.name='needle',target.age=7 WITH root,target \
+            CREATE (root)-[:KNOWS]->(target) WITH root,target \
+            CALL hybrid.search(text => 'needle', text_property => 'name', \
+                vector => [7.0], vector_properties => ['age'], seeds => [root], \
+                max_hops => 1, graph_access => 'indexed', eligible => [target], \
+                candidates => 1, graph_candidates => 1, k => 1) \
+            YIELD node,text_rank,vector_rank,graph_rank,graph_hops \
+            SET node.age=node.age+1 \
+            RETURN node.name AS name,node.age AS age,text_rank,vector_rank,graph_rank,graph_hops";
+        let result = client
+            .execute_write_if_current(cx, 1, statement, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            result.columns,
+            [
+                "name",
+                "age",
+                "text_rank",
+                "vector_rank",
+                "graph_rank",
+                "graph_hops"
+            ]
+        );
+        assert_eq!(
+            result.rows,
+            [vec![
+                text("needle"),
+                WireValue::Int(8),
+                WireValue::Int(1),
+                WireValue::Int(1),
+                WireValue::Int(1),
+                WireValue::Int(1),
+            ]]
+        );
+        assert_eq!(
+            result.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1
+            }
+        );
+
+        let failing = "MATCH (root:Person {name:'root'}),(target:Person {name:'needle'}) \
+            SET target.name='rollback',target.age=0 WITH root,target \
+            CALL hybrid.search(text => 'rollback', text_property => 'name', \
+                vector => [0.0], vector_properties => ['age'], seeds => [root], \
+                max_hops => 1, graph_access => 'indexed', eligible => [target], \
+                candidates => 1, graph_candidates => 1, k => 1) \
+            YIELD node RETURN 1/node.age AS invalid LIMIT 0";
+        assert!(matches!(
+            server_code(
+                client
+                    .execute_write_if_current(cx, 2, failing, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement | ErrorCode::Execution
+        ));
+        let observed = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.name AS name,n.age AS age ORDER BY name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            observed.rows,
+            [
+                vec![text("needle"), WireValue::Int(8)],
+                vec![text("root"), WireValue::Int(0)],
+                vec![text("side"), WireValue::Int(10)],
+            ]
+        );
+        assert_eq!(observed.outcome, Outcome::Rows { seq: 2 });
+        client.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}

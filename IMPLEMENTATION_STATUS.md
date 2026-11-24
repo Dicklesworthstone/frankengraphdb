@@ -2161,12 +2161,43 @@ vector validation and routing, or graph expansion. Native work, scratch and
 source limits share the original signed permit and retain the first typed
 refusal. Private search rows do not consume the final delivery allowance.
 The surrounding statement owns rollback and its single final publication.
-Explicit indexed and demand graph profiles refuse before overlay acquisition;
-this adapter does not substitute a materialized scan for those requests.
+Explicit indexed and graph-only demand retrieval are supported by the
+extensions below. A demand request combining text or vectors still refuses
+instead of changing profiles.
 
 Source extended 2026-11-13 requires exact vector retrieval: explicit ANN
 requests refuse before source acquisition because these private rows can feed
 later mutation. The retained permit is revalidated after result conversion.
+
+Source extended 2026-11-23 adds `graph_access => 'demand'` for graph-only
+retrieval in authorized staged write chains. Membership probes borrow the
+pinned history through the canonical sparse overlay; adjacency follows only
+reached incoming, outgoing or undirected incidences. Earlier staged CREATE,
+label changes and DELETE effects are visible, including newly created edges
+and deleted seeds. This path does not build a complete vertex corpus or
+materialize the graph's unrelated edges. It retains full-width identities,
+parallel edges and self-loop semantics from the canonical adjacency source.
+
+Authority is resolved before visible node, edge, work and scratch admission.
+Authorized vertices rejected by a user label selector still spend their
+ordinary probe allowance; forbidden labels and hidden transit do not affect
+observable receipts. Membership, incidence, BFS, eligibility, fusion and result
+conversion share the original statement allowances. Empty and refused probes
+retain a conservative all-change conflict witness; this is not a claim of
+precise predicate SSI or a process-memory bound. The surrounding transaction
+still publishes once, after the entire continuation succeeds.
+
+The same extension adds `graph_access => 'indexed'` for staged graph-only and
+mixed text/vector/graph retrieval. It builds the existing masked vertex corpus
+and exact search index, then visits only reached adjacency through the shared
+canonical source. The full visible vertex corpus still spends its ordinary
+allowance; disconnected edge populations are not materialized or admitted.
+Text statistics, vector distances, per-lane ranks, endpoint eligibility and
+fusion retain their existing semantics. The selected directory resolves
+endpoint visibility before incidence admission without charging nodes twice.
+Ordinary corpus observations and the global edge insertion-gap witness remain
+conservative transaction dependencies. The default materialized profile and
+the exact-vector requirement are unchanged.
 
 Regression sources cover staged multimodal retrieval, hidden malformed data,
 exact native and signed resource boundaries, private rows with zero public
@@ -2177,12 +2208,32 @@ cover raw and freshly rebound prepared write chains; Bolt explicit transactions
 cover staged text, vectors, topology, property hydration, commit, rollback and
 failed-transaction reset after a refused search profile.
 
-Pinned-nightly formatting of the changed Rust files and whitespace checks pass.
-Workspace formatting reports existing differences in untouched files. Two
-focused build attempts, including single-job compilation without debug info or
-incremental state, were SIGKILLed in the pinned asupersync dependency before
-first-party compilation. Product compilation, runtime tests, Clippy, UBS and
-exact-tree qualification remain **UNRUN**; the bead stays in progress.
+Demand regression sources additionally compare all three graph directions
+with literal expected hops and materialized results, exercise sparse staged
+topology and label changes, and compare complete receipts with hidden rows
+present or physically absent. Exact allowance tests cover a small reached
+component amid unrelated visible data. FGP loopback coverage exercises a
+conditional create/search/update, prepared values rebound on each execution,
+late-result rollback and stale-frontier rejection.
+
+Indexed regression sources assert literal lane ranks and exact parity with
+materialized outputs in all three directions. A fixed visible corpus with 256
+additional disconnected edges checks unchanged indexed receipts and separate
+native record/work refusals for materialized access. Additional cases cover
+one-less source allowances and successful write publication under LIMIT 0
+with no public row allowance. FGP covers staged mixed-lane search/update and
+late-result rollback; Bolt explicit transactions exercise demand, indexed and
+mixed indexed reads before commit, plus rollback after an unsupported mixed
+demand request.
+
+Earlier qualification attempts were SIGKILLed in the pinned asupersync
+dependency before first-party compilation. During the 2026-11-23 extension,
+the locked dependency fetch completed and the pinned compiler progressed
+through dependencies, but repeated executor losses prevented a first-party
+verdict. Independent source/API reviews, pinned formatting of all changed Rust
+files and whitespace checks passed for both increments. At landing, integrated
+compilation, runtime tests, Clippy, UBS and exact-tree qualification remain
+**UNRUN**; the bead stays in progress.
 
 ### UNION inside write-bearing CALL — qualification pending
 

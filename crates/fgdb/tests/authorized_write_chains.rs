@@ -1915,10 +1915,6 @@ mod staged_hybrid {
                     "seeds need an explicit max_hops",
                 ),
                 (
-                    "text => 'graph', text_property => 'p', seeds => [1], max_hops => 2, graph_access => 'indexed'",
-                    "requires materialized graph_access",
-                ),
-                (
                     "text => 'graph', text_property => 'body', seeds => [1], max_hops => 2, graph_access => 'demand'",
                     "demand graph access requires a graph-only read",
                 ),
@@ -2048,7 +2044,7 @@ mod staged_hybrid {
                         db.edges().unwrap()
                     ),
                     before,
-                    "a refused demand read must roll back its complete write prefix"
+                    "a refused graph read must roll back its complete write prefix"
                 ),
             }
             assert_eq!(txn.outstanding_obligations(), 0);
@@ -2088,7 +2084,7 @@ mod staged_hybrid {
                     let mut expected_values = None;
                     let mut expected_demand = None;
                     for hidden in [false, true] {
-                        for access in ["demand", "materialized"] {
+                        for access in ["demand", "indexed", "materialized"] {
                             let mut db = source(&contexts, hidden, 0).await;
                             let mut extra = WriteBatch::new(R);
                             extra.create_vertex(
@@ -2203,7 +2199,7 @@ mod staged_hybrid {
                 for (prefix, lanes, tail, expected) in cases {
                     let mut reference = None;
                     for hidden in [false, true] {
-                        for access in ["demand", "materialized"] {
+                        for access in ["demand", "indexed", "materialized"] {
                             let hops = if lanes.contains("max_hops") {
                                 ""
                             } else {
@@ -2236,6 +2232,258 @@ mod staged_hybrid {
             });
         }
 
+        #[test]
+        fn staged_indexed_fusion_keeps_exact_lane_ranks_and_masked_after_images() {
+            lab(0xc4a1_2131, |contexts| async move {
+                for direction in ["out", "in", "both"] {
+                    let mut expected_values = None;
+                    let mut expected_indexed = None;
+                    for hidden in [false, true] {
+                        for access in ["indexed", "materialized"] {
+                            let program = bound(
+                                &format!(
+                                    "{PREFIX}CALL hybrid.search({LANES}, graph_access => '{access}', \
+                                     direction => '{direction}') {OUTPUT}"
+                                ),
+                                &GqlParameters::new(),
+                            );
+                            let answer = execute_fresh(
+                                &contexts,
+                                &program,
+                                hidden,
+                                0,
+                                capability(3),
+                                policy(3),
+                            )
+                            .await
+                            .unwrap();
+                            assert_eq!(answer.0.created_edges, 1);
+                            let actual = values(&answer);
+                            assert_eq!(actual.len(), 3);
+                            for (at, row) in actual.iter().enumerate() {
+                                let rank = at as i64 + 1;
+                                let graph_reached = direction != "in" || at == 0;
+                                let missing = GraphValue::Scalar(CanonicalScalar::Null);
+                                assert_eq!(
+                                    &row[..8],
+                                    &[
+                                        GraphValue::Vertex(VId(rank as u128)),
+                                        int(rank * 10),
+                                        GraphValue::Scalar(text("graph")),
+                                        int(rank),
+                                        int(rank),
+                                        if graph_reached {
+                                            int(rank)
+                                        } else {
+                                            missing.clone()
+                                        },
+                                        if graph_reached {
+                                            int(at as i64)
+                                        } else {
+                                            missing
+                                        },
+                                        GraphValue::Scalar(CanonicalScalar::Float(
+                                            CanonicalF64::new((at * at) as f64,)
+                                        )),
+                                    ],
+                                    "{direction}/{access}"
+                                );
+                            }
+                            if let Some(reference) = &expected_values {
+                                assert_eq!(
+                                    &actual, reference,
+                                    "all lane evidence and fused scores"
+                                );
+                            } else {
+                                expected_values = Some(actual);
+                            }
+                            if access == "indexed" {
+                                if let Some(reference) = &expected_indexed {
+                                    assert_eq!(
+                                        &answer, reference,
+                                        "hidden malformed documents and shortcuts cannot affect indexed work"
+                                    );
+                                } else {
+                                    expected_indexed = Some(answer);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        async fn execute_with_disconnected_edges(
+            contexts: &PurposeContexts,
+            program: &PreparedGraphWriteChain,
+            hidden: bool,
+            parallel_edges: u128,
+            grant: Grant,
+            budget: GraphInsertPolicy,
+        ) -> Result<Receipt, Fault> {
+            // The visible vertex and property corpus is identical in both
+            // fixtures. Only incidence unreachable from the seed differs.
+            let mut db = source(contexts, hidden, 2).await;
+            if parallel_edges != 0 {
+                let mut extra = WriteBatch::new(R);
+                for at in 0..parallel_edges {
+                    extra.add_edge(EId(2_000 + at), VId(1_000), VId(1_001), vec![]);
+                }
+                db.write(&contexts.commit(), extra).await.unwrap();
+            }
+            execute_on(contexts, &mut db, program, grant, budget).await
+        }
+
+        #[test]
+        fn staged_indexed_mixed_search_ignores_disconnected_incidence_and_rolls_back_at_limits() {
+            lab(0xc4a1_2132, |contexts| async move {
+                const INDEXED: &str = "CREATE (marker:Visible {p:99}) WITH marker \
+                    CALL hybrid.search(text => 'graph', text_property => 'body', \
+                    vector => [0,0], vector_properties => ['x','y'], \
+                    seeds => [1], max_hops => 2, graph_access => 'indexed', \
+                    eligible => [3], candidates => 3, graph_candidates => 1, k => 1) \
+                    YIELD node,graph_hops RETURN node,graph_hops";
+                let program = bound(INDEXED, &GqlParameters::new());
+                let materialized = bound(
+                    &INDEXED.replace("'indexed'", "'materialized'"),
+                    &GqlParameters::new(),
+                );
+                let late_failure = bound(
+                    &INDEXED.replace("RETURN node,graph_hops", "RETURN 1 / 0 AS invalid LIMIT 0"),
+                    &GqlParameters::new(),
+                );
+                let mut scope = capability(1);
+                // CREATE admits two images; the exact mixed corpus contains
+                // the three reachable vertices, two unrelated vertices and marker.
+                scope.limits.max_nodes = 8;
+                let expected = execute_with_disconnected_edges(
+                    &contexts,
+                    &program,
+                    false,
+                    0,
+                    scope.clone(),
+                    policy(1),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    values(&expected),
+                    vec![vec![GraphValue::Vertex(VId(3)), int(2)]]
+                );
+                assert_eq!(expected.0.created_vertices, 1);
+                assert_eq!(expected.0.selection.snapshot_records, 8);
+                let measured = expected.0;
+                let exact = GraphInsertPolicy::new(
+                    GqlQueryPolicy::new(
+                        measured.selection.snapshot_records,
+                        1,
+                        measured.evaluator.work_units,
+                        measured.evaluator.scratch_entries,
+                    ),
+                    1,
+                    0,
+                );
+                for hidden in [false, true] {
+                    for extra_edges in [0, 256] {
+                        assert_eq!(
+                            execute_with_disconnected_edges(
+                                &contexts,
+                                &program,
+                                hidden,
+                                extra_edges,
+                                scope.clone(),
+                                exact,
+                            )
+                            .await
+                            .unwrap(),
+                            expected,
+                            "unreachable incidence and hidden data cannot change indexed receipts"
+                        );
+                        let materialized_answer = execute_with_disconnected_edges(
+                            &contexts,
+                            &materialized,
+                            hidden,
+                            extra_edges,
+                            scope.clone(),
+                            policy(1),
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(values(&materialized_answer), values(&expected));
+                    }
+                    // Isolate each native refusal: generous other dimensions
+                    // prevent one limit from disguising the other.
+                    let mut record_only = policy(1);
+                    record_only.query.rows =
+                        fgdb_gql::GqlExecutionBudget::new(measured.selection.snapshot_records, 1);
+                    let mut work_only = policy(1);
+                    work_only.query.evaluator.max_work_units = measured.evaluator.work_units;
+                    for budget in [record_only, work_only] {
+                        execute_with_disconnected_edges(
+                            &contexts,
+                            &materialized,
+                            hidden,
+                            256,
+                            scope.clone(),
+                            budget,
+                        )
+                        .await
+                        .expect_err("materialized graph access must pay for disconnected edges");
+                    }
+                    let mut fewer_nodes = scope.clone();
+                    fewer_nodes.limits.max_nodes -= 1;
+                    let error = execute_with_disconnected_edges(
+                        &contexts,
+                        &program,
+                        hidden,
+                        256,
+                        fewer_nodes,
+                        policy(1),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Nodes))
+                    );
+                    for dimension in 0..2 {
+                        let mut short = exact;
+                        if dimension == 0 {
+                            short.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                                measured.selection.snapshot_records - 1,
+                                1,
+                            );
+                        } else {
+                            short.query.evaluator.max_work_units -= 1;
+                        }
+                        execute_with_disconnected_edges(
+                            &contexts,
+                            &program,
+                            hidden,
+                            256,
+                            scope.clone(),
+                            short,
+                        )
+                        .await
+                        .expect_err(
+                            "one-less indexed source allowance must discard the write prefix",
+                        );
+                    }
+                    let error = execute_with_disconnected_edges(
+                        &contexts,
+                        &late_failure,
+                        hidden,
+                        256,
+                        scope.clone(),
+                        policy(1),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(format!("{error:?}").contains("DivisionByZero"), "{error:?}");
+                }
+            });
+        }
+
         const LOCAL: &str = "CREATE (marker:Visible {p:99}) WITH marker \
             CALL hybrid.search(seeds => [1], max_hops => 2, graph_access => 'demand', \
             eligible => [3], graph_candidates => 1, k => 1) \
@@ -2262,7 +2510,8 @@ mod staged_hybrid {
                         let mut scope = capability(0);
                         scope.labels = Scope::only([L, REACH]);
                         scope.limits.max_nodes = nodes;
-                        let result = execute_on(&contexts, &mut db, &selected, scope, policy(1)).await;
+                        let result =
+                            execute_on(&contexts, &mut db, &selected, scope, policy(1)).await;
                         if nodes == 3 {
                             assert_eq!(
                                 authorization(&result.unwrap_err()),
@@ -6241,6 +6490,32 @@ mod staged_hybrid_contracts {
     }
 
     #[test]
+    fn supported_graph_profiles_commit_the_write_prefix_with_limit_zero() {
+        lab(0xc4a1_2307, |contexts| async move {
+            for access in ["demand", "indexed", "materialized"] {
+                let statement = program(&format!(
+                    "{PREFIX}CALL hybrid.search(seeds => [1], max_hops => 2, \
+                     graph_access => '{access}', eligible => [3], graph_candidates => 1, k => 1) \
+                     YIELD node RETURN node LIMIT 0"
+                ));
+                let expected = execute(&contexts, &statement, false, capability(0), policy(1))
+                    .await
+                    .unwrap();
+                assert_eq!(expected.0.created_vertices, 0);
+                assert_eq!(expected.0.created_edges, 1);
+                assert!(expected.1.value.is_empty());
+                assert_eq!(
+                    execute(&contexts, &statement, true, capability(0), policy(1))
+                        .await
+                        .unwrap(),
+                    expected,
+                    "an empty delivery page must commit staged changes without hidden influence: {access}",
+                );
+            }
+        });
+    }
+
+    #[test]
     fn failed_projection_and_unavailable_profiles_rollback_even_with_limit_zero() {
         lab(0xc4a1_2305, |contexts| async move {
             for hidden in [false, true] {
@@ -6257,11 +6532,11 @@ mod staged_hybrid_contracts {
                         "{error:?}",
                     );
                 }
-                for access in ["indexed", "demand"] {
+                for page in ["", " LIMIT 0"] {
                     let statement = program(&format!(
-                        "{PREFIX}CALL hybrid.search(seeds => [1], max_hops => 2, \
-                         graph_access => '{access}', k => 1) \
-                         YIELD node RETURN node LIMIT 0"
+                        "{PREFIX}CALL hybrid.search(text => 'graph', text_property => 'body', \
+                         seeds => [1], max_hops => 2, graph_access => 'demand', k => 1) \
+                         YIELD node RETURN node{page}"
                     ));
                     let error = execute(&contexts, &statement, hidden, capability(0), policy(1))
                         .await
@@ -6270,10 +6545,10 @@ mod staged_hybrid_contracts {
                         matches!(
                             search_error(&error),
                             Some(fgdb::HybridCallError::Combination(
-                                "authorized staged graph search requires materialized graph_access"
+                                "demand graph access requires a graph-only read"
                             )),
                         ),
-                        "{access}: {error:?}",
+                        "{page}: {error:?}",
                     );
                 }
                 for page in ["", " LIMIT 0"] {

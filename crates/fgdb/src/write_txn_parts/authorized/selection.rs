@@ -1031,9 +1031,10 @@ impl<W: WorkControl> WorkControl for HybridWork<'_, W> {
 /// be made safe by filtering its final hits, because hidden documents would
 /// already have changed BM25 statistics, HNSW routing and graph reachability.
 ///
-/// The staged default remains materialized. Explicit graph-only demand uses
-/// the same canonical overlay with seeded membership/incidence access. Indexed
-/// and mixed demand requests refuse; no failed source is retried under another.
+/// The staged default remains materialized. Explicit indexed retrieval keeps
+/// its full masked corpus but reads only reached incidence; graph-only demand
+/// also resolves vertex membership on demand. Mixed demand refuses, and no
+/// failed or unsupported source is retried under another profile.
 #[allow(clippy::too_many_arguments)]
 fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &WriteTxn,
@@ -1053,14 +1054,6 @@ fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
     let (search, eligible) =
         crate::query::HybridSearch::bind_filtered(call, arguments, transaction.basis, policy)
             .map_err(|error| crate::query::hybrid_refusal(error).map_source(WriteTxnError::Gql))?;
-    if search.uses_indexed_graph() {
-        return Err(
-            crate::query::hybrid_refusal(crate::query::HybridCallError::Combination(
-                "authorized staged graph search requires materialized graph_access",
-            ))
-            .map_source(WriteTxnError::Gql),
-        );
-    }
     let options = search.options();
     let query = search.query();
     // This source can select later mutation targets; ANN cannot satisfy the
@@ -1225,45 +1218,65 @@ fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     None
                 };
                 let graph_hits = if let Some(mut graph) = graph {
-                    if reads_edges {
-                        overlay
-                            .visit_edges(None, &mut poll, |edge, _, _| {
-                                if !scope.allows_relation(edge.relation)
-                                    || expansion
-                                        .relation
-                                        .is_some_and(|relation| relation != edge.relation)
-                                    || !graph.contains(edge.src)
-                                    || !graph.contains(edge.dst)
-                                {
-                                    return Ok(());
-                                }
-                                work.borrow_mut().observe(SourceEvent::SnapshotRecord)?;
-                                // Retained arcs are separately admitted even when
-                                // parallel edges later collapse to one adjacency.
-                                let arcs = if expansion.direction == ExpansionDirection::Undirected
-                                {
-                                    2
-                                } else {
-                                    1
-                                };
-                                work.borrow_mut().reserve_scratch(arcs)?;
-                                graph.insert_edge(
-                                    edge.src,
-                                    edge.dst,
-                                    expansion.direction,
-                                    &mut HybridWork(&work),
-                                )
-                            })
-                            .expect("hybrid overlay retains requested edges")?;
+                    if search.uses_indexed_graph() {
+                        if reads_edges {
+                            // Preserve the ordinary directory profile's
+                            // global edge insertion-gap witness before the
+                            // first probe, even for an empty or failed read.
+                            transaction.scanned_edges.set(true);
+                        }
+                        hybrid_demand::expand_indexed(
+                            overlay,
+                            scope,
+                            &graph,
+                            selected,
+                            expansion,
+                            query.graph_candidates,
+                            &filter,
+                            &work,
+                            reads_edges,
+                        )?
+                    } else {
+                        if reads_edges {
+                            overlay
+                                .visit_edges(None, &mut poll, |edge, _, _| {
+                                    if !scope.allows_relation(edge.relation)
+                                        || expansion
+                                            .relation
+                                            .is_some_and(|relation| relation != edge.relation)
+                                        || !graph.contains(edge.src)
+                                        || !graph.contains(edge.dst)
+                                    {
+                                        return Ok(());
+                                    }
+                                    work.borrow_mut().observe(SourceEvent::SnapshotRecord)?;
+                                    // Retained arcs are separately admitted even when
+                                    // parallel edges later collapse to one adjacency.
+                                    let arcs =
+                                        if expansion.direction == ExpansionDirection::Undirected {
+                                            2
+                                        } else {
+                                            1
+                                        };
+                                    work.borrow_mut().reserve_scratch(arcs)?;
+                                    graph.insert_edge(
+                                        edge.src,
+                                        edge.dst,
+                                        expansion.direction,
+                                        &mut HybridWork(&work),
+                                    )
+                                })
+                                .expect("hybrid overlay retains requested edges")?;
+                        }
+                        graph.expand_filtered(
+                            expansion.seeds,
+                            expansion.max_hops,
+                            expansion.include_seeds,
+                            query.graph_candidates,
+                            |id, _| Ok(filter.admits(id, &work)),
+                            &mut HybridWork(&work),
+                        )?
                     }
-                    graph.expand_filtered(
-                        expansion.seeds,
-                        expansion.max_hops,
-                        expansion.include_seeds,
-                        query.graph_candidates,
-                        |id, _| Ok(filter.admits(id, &work)),
-                        &mut HybridWork(&work),
-                    )?
                 } else {
                     Vec::new()
                 };
