@@ -511,6 +511,13 @@ fn native_bounded_walks_maintain_intervals_cycles_parallel_support_and_endpoint_
 
 #[test]
 fn native_selected_endpoint_reachability_tracks_labels_witnesses_and_isolates() {
+    struct Case {
+        text: &'static str,
+        reflexive: bool,
+        labels: [&'static [LabelId]; 2],
+        columns: &'static [usize],
+        nodes: usize,
+    }
     let ((), report) = run_async_under_lab(0x6e73_7c13, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -531,61 +538,61 @@ fn native_selected_endpoint_reachability_tracks_labels_witnesses_and_isolates() 
             seed.add_edge(EId(id), VId(a), VId(b), vec![]);
         }
         db.write(&commit, seed).await.unwrap();
-        let cases: [(&str, bool, [&[LabelId]; 2], &[usize], usize); 7] = [
-            (
-                "MATCH (a:L)-[:R*]->(b:R) RETURN DISTINCT b AS node",
-                false,
-                [&[LabelId(1)], &[LabelId(2)]],
-                &[1],
-                7,
-            ),
-            (
-                "MATCH (a:L)-[:R*]->(b:R) RETURN DISTINCT a,b",
-                false,
-                [&[LabelId(1)], &[LabelId(2)]],
-                &[0, 1],
-                7,
-            ),
-            (
-                "MATCH (a:L)-[:R*0..]->(b:R) RETURN DISTINCT a,b",
-                true,
-                [&[LabelId(1)], &[LabelId(2)]],
-                &[0, 1],
-                9,
-            ),
-            (
-                "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT b AS first,b AS second",
-                false,
-                [&[LabelId(1)], &[]],
-                &[1, 1],
-                5,
-            ),
-            (
-                "MATCH (a)-[:R*]->(b:R) RETURN DISTINCT a",
-                false,
-                [&[], &[LabelId(2)]],
-                &[0],
-                5,
-            ),
-            (
-                "MATCH (a:L:R)-[:R*0..]->(b:R) RETURN DISTINCT a",
-                true,
-                [&[LabelId(1), LabelId(2)], &[LabelId(2)]],
-                &[0],
-                9,
-            ),
-            (
-                "MATCH (a)-[:R*]->(b) RETURN DISTINCT b AS first,b AS second",
-                false,
-                [&[], &[]],
-                &[1, 1],
-                3,
-            ),
+        let cases = [
+            Case {
+                text: "MATCH (a:L)-[:R*]->(b:R) RETURN DISTINCT b AS node",
+                reflexive: false,
+                labels: [&[LabelId(1)], &[LabelId(2)]],
+                columns: &[1],
+                nodes: 7,
+            },
+            Case {
+                text: "MATCH (a:L)-[:R*]->(b:R) RETURN DISTINCT a,b",
+                reflexive: false,
+                labels: [&[LabelId(1)], &[LabelId(2)]],
+                columns: &[0, 1],
+                nodes: 7,
+            },
+            Case {
+                text: "MATCH (a:L)-[:R*0..]->(b:R) RETURN DISTINCT a,b",
+                reflexive: true,
+                labels: [&[LabelId(1)], &[LabelId(2)]],
+                columns: &[0, 1],
+                nodes: 9,
+            },
+            Case {
+                text: "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT b AS first,b AS second",
+                reflexive: false,
+                labels: [&[LabelId(1)], &[]],
+                columns: &[1, 1],
+                nodes: 5,
+            },
+            Case {
+                text: "MATCH (a)-[:R*]->(b:R) RETURN DISTINCT a",
+                reflexive: false,
+                labels: [&[], &[LabelId(2)]],
+                columns: &[0],
+                nodes: 5,
+            },
+            Case {
+                text: "MATCH (a:L:R)-[:R*0..]->(b:R) RETURN DISTINCT a",
+                reflexive: true,
+                labels: [&[LabelId(1), LabelId(2)], &[LabelId(2)]],
+                columns: &[0],
+                nodes: 9,
+            },
+            Case {
+                text: "MATCH (a)-[:R*]->(b) RETURN DISTINCT b AS first,b AS second",
+                reflexive: false,
+                labels: [&[], &[]],
+                columns: &[1, 1],
+                nodes: 3,
+            },
         ];
         let small = GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000);
         let params = GqlParameters::new();
         let mut handles = Vec::new();
-        for (index, (text, _, _, _, nodes)) in cases.iter().enumerate() {
+        for (index, Case { text, nodes, .. }) in cases.iter().enumerate() {
             let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
             let (reserved, _) = prepared.subscription_footprint(&cx, &params).unwrap();
             let allowance = if index == 0 { small } else { policy() };
@@ -676,9 +683,14 @@ fn native_selected_endpoint_reachability_tracks_labels_witnesses_and_isolates() 
         for (tick, change) in changes.into_iter().enumerate() {
             let from = db.frontier().unwrap();
             db.write(&commit, change).await.unwrap();
-            for (index, ((text, reflexive, labels, columns, nodes), handle)) in
-                cases.iter().zip(&handles).enumerate()
-            {
+            for (index, (case, handle)) in cases.iter().zip(&handles).enumerate() {
+                let Case {
+                    text,
+                    reflexive,
+                    labels,
+                    columns,
+                    nodes,
+                } = case;
                 let expected =
                     selected_reachable_rows(&db, &[RelationId(1)], *reflexive, *labels, columns);
                 let (at, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
