@@ -7,6 +7,7 @@
 #[path = "session/stream.rs"]
 mod stream;
 pub use stream::{
+    AuthorizedBufferedError, AuthorizedBufferedOutputGuard, AuthorizedBufferedQueryRow, AuthorizedBufferedReadSource, AuthorizedBufferedRowCursor,
     AuthorizedAggregateCursor, AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor,
     AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor, AuthorizedDifferenceCursor,
     AuthorizedDifferenceExecution, AuthorizedOrderExecution, AuthorizedOrderedReadSession,
@@ -38,8 +39,8 @@ mod sealed;
 pub use sealed::AuthorizedSealedReadSession;
 use sealed::{check_selected_cut, selected_cut};
 
-struct State<'a, Resolver, Clock> {
-    view: Option<EmbeddedReadView>,
+struct State<'a, Resolver, Clock, Backend = EmbeddedReadView> {
+    view: Option<Backend>,
     capability: VerifiedCapability<'a>,
     branch: String,
     resolver: Resolver,
@@ -64,8 +65,8 @@ struct State<'a, Resolver, Clock> {
 /// release its pin. Explicit close/drop never evaluates an unused query.
 /// Resident mixed-scope source work remains observable through resource
 /// refusal; this is not descriptor/timing noninterference or a durable lease.
-pub struct AuthorizedReadSession<'a, Resolver, Clock> {
-    state: Option<State<'a, Resolver, Clock>>,
+pub struct AuthorizedReadSession<'a, Resolver, Clock, Backend = EmbeddedReadView> {
+    state: Option<State<'a, Resolver, Clock, Backend>>,
     owner: Arc<()>,
 }
 
@@ -85,7 +86,7 @@ impl core::fmt::Debug for AuthorizedPreparedRead {
         f.write_str("AuthorizedPreparedRead([REDACTED])")
     }
 }
-impl<R, C> core::fmt::Debug for AuthorizedReadSession<'_, R, C> {
+impl<R, C, B> core::fmt::Debug for AuthorizedReadSession<'_, R, C, B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedReadSession")
             .field("closed", &self.is_closed())
@@ -206,33 +207,16 @@ fn result_rows(
     Ok(((result, snapshot_seq), count))
 }
 
-impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
-    // Taking the state is the unwind guard: no callback runs while the caller
-    // can observe an open session without a completed return path. On ordinary
-    // errors we restore it, retaining the maximum clock sampled by this call.
-    fn run<T>(
-        &mut self,
-        cx: &QueryCx,
-        action: impl FnOnce(
-            &EmbeddedReadView,
-            &str,
-            &PlannerPredicates,
-            &mut R,
-            GqlQueryPolicy,
-            &Live<'_, '_, '_>,
-        ) -> Result<(T, usize), QueryError>,
-    ) -> Result<T, QueryError> {
-        self.run_scoped(cx, action, |error| error, terminal)
-    }
-
+impl<R: GraphSymbolResolver, C: FnMut() -> u64, B> AuthorizedReadSession<'_, R, C, B> {
     // Typed composition errors retain the SAME permit, lifecycle, post-error
     // validity check and delivery boundary. The mapper changes only the error
     // envelope; it cannot replace authority or supply an execution policy.
-    fn run_scoped<T, E>(
+    fn run_scoped_with_backend<T, E>(
         &mut self,
         cx: &QueryCx,
+        beacon_indexes: Option<crate::query::beacon::BeaconQueryIndexes>,
         action: impl FnOnce(
-            &EmbeddedReadView,
+            &B,
             &str,
             &PlannerPredicates,
             &mut R,
@@ -290,7 +274,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     AuthorizationError::ExecutionStopped,
                 ))
             })?;
-            execution.borrow_mut().beacon_indexes = Some(view.beacon_indexes.clone());
+            execution.borrow_mut().beacon_indexes = beacon_indexes;
             execution.borrow_mut().sealed = sealed.clone();
             let result = cx.with_restriction(|| {
                 action(
@@ -319,6 +303,102 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             self.state = Some(state);
         }
         result
+    }
+
+    /// Prepare once using only this session's fixed trusted catalog. Parameters
+    /// supply declared types; payloads are rebound on execute. The original
+    /// branch selector is retained, including shared/exclusive parameter rules.
+    /// Original UTF-8 source and canonical argument bytes spend signed work
+    /// before lowering or parsing; preparation never retains the payloads.
+    pub fn prepare(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+    ) -> Result<AuthorizedPreparedRead, QueryError> {
+        let owner = Arc::clone(&self.owner);
+        self.run_scoped_with_backend(cx, None, |_, branch, _, resolver, _, execution| {
+            admit_text_input(&mut execution.borrow_mut(), text, params)?;
+            let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
+            let (text, params) = lowered
+                .as_ref()
+                .map_or((text, params), |(lowered, derived)| {
+                    (lowered.text(), derived)
+                });
+            let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
+            let selected = selector.bind_parameters(params).map_err(selector_error)?;
+            check_branch(&selected, branch)?;
+            refuse_element_identity(selected.statement())?;
+            execution.borrow_mut().checkpoint()?;
+            let native = PreparedNativeRead::prepare(
+                selected.statement(),
+                selected.parameters(),
+                BorrowedResolver(resolver),
+            );
+            execution.borrow_mut().checkpoint()?;
+            let native = native?;
+            let lowered = lowered.map(|(lowered, _)| Arc::new(lowered));
+            let parameter_schema = lowered.as_ref().map(|lowered| {
+                lowered
+                    .field_parameter_schema(native.parameter_schema())
+                    .into_boxed_slice()
+            });
+            Ok((
+                AuthorizedPreparedRead {
+                    owner,
+                    selector: Arc::new(selector),
+                    native: Arc::new(native),
+                    lowered,
+                    parameter_schema,
+                },
+                0,
+            ))
+        }, |error| error, terminal)
+    }
+
+}
+
+impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
+    // Taking the state is the unwind guard: no callback runs while the caller
+    // can observe an open session without a completed return path. On ordinary
+    // errors we restore it, retaining the maximum clock sampled by this call.
+    fn run<T>(
+        &mut self,
+        cx: &QueryCx,
+        action: impl FnOnce(
+            &EmbeddedReadView,
+            &str,
+            &PlannerPredicates,
+            &mut R,
+            GqlQueryPolicy,
+            &Live<'_, '_, '_>,
+        ) -> Result<(T, usize), QueryError>,
+    ) -> Result<T, QueryError> {
+        self.run_scoped(cx, action, |error| error, terminal)
+    }
+
+    // Resident source pins decorate the shared permit runner; preparation
+    // against another backend uses the same authority/lifetime machinery.
+    fn run_scoped<T, E>(
+        &mut self,
+        cx: &QueryCx,
+        action: impl FnOnce(
+            &EmbeddedReadView,
+            &str,
+            &PlannerPredicates,
+            &mut R,
+            GqlQueryPolicy,
+            &Live<'_, '_, '_>,
+        ) -> Result<(T, usize), E>,
+        map_error: impl Fn(QueryError) -> E,
+        terminal: impl FnOnce(&Result<T, E>) -> bool,
+    ) -> Result<T, E> {
+        let indexes = self
+            .state
+            .as_ref()
+            .and_then(|state| state.view.as_ref())
+            .map(|view| view.beacon_indexes.clone());
+        self.run_scoped_with_backend(cx, indexes, action, map_error, terminal)
     }
 
     /// Execute all seven existing native read classes against this one pin.
@@ -407,57 +487,6 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             map_native,
             |_| terminal.get(),
         )
-    }
-
-    /// Prepare once using only this session's fixed trusted catalog. Parameters
-    /// supply declared types; payloads are rebound on execute. The original
-    /// branch selector is retained, including shared/exclusive parameter rules.
-    /// Original UTF-8 source and canonical argument bytes spend signed work
-    /// before lowering or parsing; preparation never retains the payloads.
-    pub fn prepare(
-        &mut self,
-        cx: &QueryCx,
-        text: &str,
-        params: &GqlParameters,
-    ) -> Result<AuthorizedPreparedRead, QueryError> {
-        let owner = Arc::clone(&self.owner);
-        self.run(cx, |_, branch, _, resolver, _, execution| {
-            admit_text_input(&mut execution.borrow_mut(), text, params)?;
-            let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
-            let (text, params) = lowered
-                .as_ref()
-                .map_or((text, params), |(lowered, derived)| {
-                    (lowered.text(), derived)
-                });
-            let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
-            let selected = selector.bind_parameters(params).map_err(selector_error)?;
-            check_branch(&selected, branch)?;
-            refuse_element_identity(selected.statement())?;
-            execution.borrow_mut().checkpoint()?;
-            let native = PreparedNativeRead::prepare(
-                selected.statement(),
-                selected.parameters(),
-                BorrowedResolver(resolver),
-            );
-            execution.borrow_mut().checkpoint()?;
-            let native = native?;
-            let lowered = lowered.map(|(lowered, _)| Arc::new(lowered));
-            let parameter_schema = lowered.as_ref().map(|lowered| {
-                lowered
-                    .field_parameter_schema(native.parameter_schema())
-                    .into_boxed_slice()
-            });
-            Ok((
-                AuthorizedPreparedRead {
-                    owner,
-                    selector: Arc::new(selector),
-                    native: Arc::new(native),
-                    lowered,
-                    parameter_schema,
-                },
-                0,
-            ))
-        })
     }
 
     /// Rebind an exact-session template without re-resolving its symbols.
@@ -642,7 +671,7 @@ fn prepared_at(
         at,
     )
 }
-impl<R, C> AuthorizedReadSession<'_, R, C> {
+impl<R, C, B> AuthorizedReadSession<'_, R, C, B> {
     /// Release the generation and trusted state, with no source reads or clock
     /// callbacks. Closing twice is harmless; subsequent operations refuse.
     pub fn close(&mut self) {

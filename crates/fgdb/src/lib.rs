@@ -183,6 +183,7 @@ pub use gql_cert::{
 pub use gql_exec::source::{SnapshotEdgeSource, SnapshotVertexSource};
 pub use query::AuthorizedAsyncRowCursor;
 pub use query::{
+    AuthorizedBufferedError, AuthorizedBufferedOutputGuard, AuthorizedBufferedQueryRow, AuthorizedBufferedReadSource, AuthorizedBufferedRowCursor,
     AuthorizedAggregateCursor, AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor,
     AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex, AuthorizedDifferenceCursor,
     AuthorizedDifferenceExecution, AuthorizedOrderExecution, AuthorizedOrderedReadSession,

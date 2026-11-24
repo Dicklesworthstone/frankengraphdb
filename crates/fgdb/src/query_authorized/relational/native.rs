@@ -5,6 +5,7 @@
 #[path = "native/session.rs"]
 mod session;
 pub use session::{
+    AuthorizedBufferedError, AuthorizedBufferedOutputGuard, AuthorizedBufferedQueryRow, AuthorizedBufferedReadSource, AuthorizedBufferedRowCursor,
     AuthorizedAggregateCursor, AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor,
     AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,

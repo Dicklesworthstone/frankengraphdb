@@ -1,0 +1,428 @@
+//! Private masked source for the canonical native asynchronous operators.
+//! Raw topology/history work is host-physical admission. A candidate enters
+//! native and signed visible budgets only after same-cut capability masking.
+
+use super::*;
+use fgdb_delta_types::LabelId;
+use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
+use fgdb_gql::edge_stream::{
+    AsyncEdgeCandidate, AsyncEdgeScanEvent, AsyncEdgeScanRecord, AsyncEdgeScanSource,
+    EdgeScanSourceError,
+};
+use fgdb_gql::stream::{
+    AsyncVertexCandidate, AsyncVertexScanEvent, AsyncVertexScanRecord, AsyncVertexScanSource,
+};
+use fgdb_strata::store::{BufferedScanError, BufferedVertexProperties, BufferedVertexScanState};
+use fgdb_strata::tiered::edge_scan::{
+    BufferedEdgePropertiesEndpoints, BufferedEdgeScanState,
+};
+use fgdb_strata::tiered::memory::MemoryError;
+
+pub(super) enum Position {
+    Vertex(Option<BufferedVertexScanState>),
+    Edge(Option<BufferedEdgeScanState>),
+}
+
+pub(super) struct Source<'q, V: Vfs, C> {
+    // Detached merge allocations drop before the backend returns to its owner.
+    position: Position,
+    backend: Option<AuthorizedBufferedReadSource<V>>,
+    returned: Returned<V>,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+    pool: MemoryPool,
+    keys: PropertySelection,
+}
+
+impl<'q, V: Vfs + Clone, C> Source<'q, V, C> {
+    pub(super) fn new(
+        backend: AuthorizedBufferedReadSource<V>,
+        returned: Returned<V>,
+        position: Position,
+        keys: PropertySelection,
+        cx: &'q QueryCx,
+        execution: Shared<'q, C>,
+    ) -> Self {
+        let pool = backend.view.memory_pool().clone();
+        Self { position, backend: Some(backend), returned, cx, execution, pool, keys }
+    }
+}
+
+impl<V: Vfs, C> Drop for Source<'_, V, C> {
+    fn drop(&mut self) {
+        match &mut self.position {
+            Position::Vertex(state) => { state.take(); }
+            Position::Edge(state) => { state.take(); }
+        }
+        if let Some(backend) = self.backend.take() {
+            let previous = {
+                let mut returned = self.returned.lock().unwrap_or_else(|error| error.into_inner());
+                returned.replace(backend)
+            };
+            // There is exactly one source. Do not run any backend destructor
+            // while holding even this uncontended, callback-free return lock.
+            debug_assert!(previous.is_none());
+            drop(previous);
+        }
+    }
+}
+
+enum Control<C> {
+    Query(QueryError),
+    Native(C),
+}
+
+fn vertex_control<C>(error: BufferedScanError<Control<C>>)
+    -> VertexScanSourceError<AuthorizedBufferedError, C>
+{
+    match error {
+        BufferedScanError::Read(error) => VertexScanSourceError::Source(error.into()),
+        BufferedScanError::Control(Control::Query(error)) =>
+            VertexScanSourceError::Source(error.into()),
+        BufferedScanError::Control(Control::Native(error)) => VertexScanSourceError::Control(error),
+    }
+}
+fn edge_control<C>(error: BufferedScanError<Control<C>>)
+    -> EdgeScanSourceError<AuthorizedBufferedError, C>
+{
+    match error {
+        BufferedScanError::Read(error) => EdgeScanSourceError::Source(error.into()),
+        BufferedScanError::Control(Control::Query(error)) =>
+            EdgeScanSourceError::Source(error.into()),
+        BufferedScanError::Control(Control::Native(error)) => EdgeScanSourceError::Control(error),
+    }
+}
+
+/// Opaque affine accounting retained by AuthorizedBufferedQueryRow. The
+/// record's evaluator grows the same reservation before allocating operands
+/// and projected payloads; its last output owner refunds it.
+pub struct OutputGuard {
+    _copy: MemoryCharge,
+    _evaluation: Arc<Mutex<MemoryCharge>>,
+}
+
+impl core::fmt::Debug for OutputGuard {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("AuthorizedBufferedOutputGuard([REDACTED])")
+    }
+}
+
+pub(super) struct VertexRecord {
+    labels: Vec<LabelId>,
+    fields: BufferedVertexProperties,
+    scratch: Arc<Mutex<MemoryCharge>>,
+}
+impl AsyncVertexScanRecord for VertexRecord {
+    fn as_row(&self) -> VertexScanRow<'_> {
+        VertexScanRow { labels: &self.labels, properties: self.fields.properties() }
+    }
+}
+
+pub(super) struct EdgeRecord {
+    source_labels: Vec<LabelId>,
+    target_labels: Vec<LabelId>,
+    fields: BufferedEdgePropertiesEndpoints,
+    scratch: Arc<Mutex<MemoryCharge>>,
+}
+impl AsyncEdgeScanRecord for EdgeRecord {
+    fn edge(&self) -> EdgeScanRow<'_> {
+        let edge = self.fields.edge();
+        EdgeScanRow {
+            source: edge.entry().src, target: edge.entry().dst,
+            relation: edge.entry().relation, properties: edge.properties(),
+        }
+    }
+    fn vertex(&self, vid: VId) -> Option<VertexScanRow<'_>> {
+        let edge = self.fields.edge().entry();
+        let labels = if vid == edge.src { &self.source_labels }
+            else if vid == edge.dst { &self.target_labels }
+            else { return None; };
+        Some(VertexScanRow { labels, properties: &[] })
+    }
+}
+
+fn labels<C: FnMut() -> u64>(
+    original: &[LabelId],
+    cx: &QueryCx,
+    execution: &Shared<'_, C>,
+    charge: &mut MemoryCharge,
+) -> Result<Vec<LabelId>, AuthorizedBufferedError> {
+    let count = {
+        let live = execution.borrow();
+        original.iter().filter(|label| live.permit.predicates().allows_label(**label)).count()
+    };
+    let bytes = count.checked_mul(size_of::<LabelId>())
+        .ok_or(BufferedReadError::SizeOverflow)?;
+    charge.grow(cx, bytes).map_err(BufferedReadError::Memory)?;
+    let mut result = Vec::new();
+    result.try_reserve_exact(count).map_err(|_| BufferedReadError::Memory(
+        MemoryError::AllocationFailed { requested: bytes }))?;
+    if result.capacity().checked_mul(size_of::<LabelId>())
+        .is_none_or(|capacity| capacity > bytes)
+    {
+        return Err(BufferedReadError::SizeOverflow.into());
+    }
+    let live = execution.borrow();
+    result.extend(original.iter().copied().filter(|label| live.permit.predicates().allows_label(*label)));
+    Ok(result)
+}
+
+fn scratch(
+    cx: &QueryCx,
+    charge: &Arc<Mutex<MemoryCharge>>,
+) -> Result<(), AuthorizedBufferedError> {
+    let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+    charge.lock().unwrap_or_else(|error| error.into_inner())
+        .grow(cx, bytes).map_err(BufferedReadError::Memory)?;
+    Ok(())
+}
+
+impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncVertexScanSource
+    for Source<'_, V, Clock>
+{
+    type Error = AuthorizedBufferedError;
+    type Record = VertexRecord;
+    type OutputGuard = OutputGuard;
+
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.backend.as_ref().expect("source owns backend").at
+    }
+
+    async fn next_candidate<C: Send>(
+        &mut self,
+        control: &mut (impl FnMut(AsyncVertexScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<AsyncVertexCandidate<VertexRecord>>, VertexScanSourceError<Self::Error, C>> {
+        let Position::Vertex(position) = &mut self.position else {
+            unreachable!("compiled vertex plan owns a vertex position")
+        };
+        loop {
+            let Some(state) = position.take() else { return Ok(None); };
+            let backend = self.backend.as_mut().expect("source owns backend");
+            let mut scan = backend.view.partition_mut().resume_vertex_scan(self.cx, state)
+                .map_err(|error| VertexScanSourceError::Source(error.into()))?;
+            let execution = &self.execution;
+            let mut admit = |vid, original: &[LabelId]| {
+                {
+                    let mut live = execution.borrow_mut();
+                    live.poll_fresh().map_err(Control::Query)?;
+                    if !live.permit.predicates().allows_vertex(original) { return Ok(false); }
+                    live.root_node(vid).map_err(Control::Query)?;
+                }
+                control(AsyncVertexScanEvent::Candidate(vid)).map_err(Control::Native)?;
+                Ok(true)
+            };
+            let mut observe = |_| execution.borrow_mut().reserve_work(0).map_err(Control::Query);
+            let result = self.cx.with_restriction_async(
+                scan.next_admitted_properties_candidate_with(
+                    self.cx, self.keys, &mut admit, &mut observe,
+                )
+            ).erase_send().await;
+            *position = Some(scan.into_state());
+            let Some(candidate) = result.map_err(vertex_control)? else { return Ok(None); };
+            let Some(fields) = candidate.row else { continue; };
+            let mut charge = self.pool.reserve(self.cx, 0)
+                .map_err(BufferedReadError::Memory)
+                .map_err(|error| VertexScanSourceError::Source(error.into()))?;
+            let labels = labels(fields.labels(), self.cx, execution, &mut charge)
+                .map_err(VertexScanSourceError::Source)?;
+            return Ok(Some(AsyncVertexCandidate {
+                vid: candidate.vid,
+                record: Some(VertexRecord { labels, fields, scratch: Arc::new(Mutex::new(charge)) }),
+            }));
+        }
+    }
+
+    fn evaluation_event(&self, record: &VertexRecord, event: VertexScanEvent)
+        -> Result<(), Self::Error>
+    {
+        if event == VertexScanEvent::ScratchEntry { scratch(self.cx, &record.scratch)?; }
+        Ok(())
+    }
+
+    fn reserve_output<C>(
+        &self,
+        record: &VertexRecord,
+        columns: usize,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<OutputGuard, VertexScanSourceError<Self::Error, C>> {
+        // Native controls precede every payload measurement, while the shared
+        // signed checkpoint remains the sole logical work owner.
+        let mut bytes = 1024usize;
+        for (_, value) in record.fields.properties() {
+            control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+            let payload = value.canonical_encoded_len()
+                .map_err(|_| VertexScanSourceError::Source(BufferedReadError::SizeOverflow.into()))?;
+            bytes = payload.checked_mul(4).and_then(|n| n.checked_add(256))
+                .and_then(|n| bytes.checked_add(n))
+                .ok_or_else(|| VertexScanSourceError::Source(BufferedReadError::SizeOverflow.into()))?;
+        }
+        let bytes = bytes.checked_mul(columns.max(1))
+            .ok_or_else(|| VertexScanSourceError::Source(BufferedReadError::SizeOverflow.into()))?;
+        control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+        let copy = self.pool.reserve(self.cx, bytes).map_err(BufferedReadError::Memory)
+            .map_err(|error| VertexScanSourceError::Source(error.into()))?;
+        Ok(OutputGuard { _copy: copy, _evaluation: record.scratch.clone() })
+    }
+}
+
+impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource
+    for Source<'_, V, Clock>
+{
+    type Error = AuthorizedBufferedError;
+    type Record = EdgeRecord;
+    type OutputGuard = OutputGuard;
+
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.backend.as_ref().expect("source owns backend").at
+    }
+
+    async fn next_candidate<C: Send>(
+        &mut self,
+        relation: EdgeRelation,
+        control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<AsyncEdgeCandidate<EdgeRecord>>, EdgeScanSourceError<Self::Error, C>> {
+        let Some(relation) = relation.one() else {
+            return Err(EdgeScanSourceError::Source(
+                QueryError::Authorization(AuthorizationError::ScopeDenied).into()));
+        };
+        if !self.execution.borrow().permit.predicates().allows_relation(relation) {
+            return Ok(None);
+        }
+        let Position::Edge(position) = &mut self.position else {
+            unreachable!("compiled edge plan owns an edge position")
+        };
+        loop {
+            let Some(state) = position.take() else { return Ok(None); };
+            let backend = self.backend.as_mut().expect("source owns backend");
+            let mut scan = backend.view.partition_mut().resume_edge_scan(self.cx, state)
+                .map_err(|error| EdgeScanSourceError::Source(error.into()))?;
+            let execution = &self.execution;
+            let mut admit = |row: &fgdb_strata::tiered::edge_scan::BufferedEdgeTopologyEndpoints| {
+                let edge = row.edge().entry();
+                {
+                    let mut live = execution.borrow_mut();
+                    live.poll_fresh().map_err(Control::Query)?;
+                    let scope = live.permit.predicates();
+                    if !scope.allows_relation(edge.relation)
+                        || !scope.allows_vertex(row.source_vertex().labels())
+                        || !scope.allows_vertex(row.target_vertex().labels())
+                    { return Ok(false); }
+                    live.vertex_node(edge.src).map_err(Control::Query)?;
+                    if edge.dst != edge.src { live.vertex_node(edge.dst).map_err(Control::Query)?; }
+                }
+                control(AsyncEdgeScanEvent::Candidate(edge.eid)).map_err(Control::Native)?;
+                Ok(true)
+            };
+            let mut observe = |_| execution.borrow_mut().reserve_work(0).map_err(Control::Query);
+            let result = self.cx.with_restriction_async(
+                scan.next_admitted_properties_with_endpoints(
+                    self.cx, Some(relation), self.keys, &mut admit, &mut observe,
+                )
+            ).erase_send().await;
+            *position = Some(scan.into_state());
+            let Some(candidate) = result.map_err(edge_control)? else { return Ok(None); };
+            let Some(fields) = candidate.row else { continue; };
+            let mut charge = self.pool.reserve(self.cx, 0)
+                .map_err(BufferedReadError::Memory)
+                .map_err(|error| EdgeScanSourceError::Source(error.into()))?;
+            let source_labels = labels(fields.source_vertex().labels(), self.cx, execution, &mut charge)
+                .map_err(EdgeScanSourceError::Source)?;
+            let target_labels = if fields.edge().entry().src == fields.edge().entry().dst {
+                Vec::new()
+            } else {
+                labels(fields.target_vertex().labels(), self.cx, execution, &mut charge)
+                    .map_err(EdgeScanSourceError::Source)?
+            };
+            return Ok(Some(AsyncEdgeCandidate {
+                eid: candidate.eid,
+                record: Some(EdgeRecord { source_labels, target_labels, fields, scratch: Arc::new(Mutex::new(charge)) }),
+            }));
+        }
+    }
+
+    fn evaluation_event(&self, record: &EdgeRecord, event: GlaExecutionEvent)
+        -> Result<(), Self::Error>
+    {
+        if event == GlaExecutionEvent::ScratchEntry { scratch(self.cx, &record.scratch)?; }
+        Ok(())
+    }
+
+    fn reserve_output<C>(
+        &self,
+        record: &EdgeRecord,
+        columns: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<OutputGuard, EdgeScanSourceError<Self::Error, C>> {
+        let mut bytes = 1024usize;
+        for (_, value) in record.fields.edge().properties() {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+            let payload = value.canonical_encoded_len()
+                .map_err(|_| EdgeScanSourceError::Source(BufferedReadError::SizeOverflow.into()))?;
+            bytes = payload.checked_mul(4).and_then(|n| n.checked_add(256))
+                .and_then(|n| bytes.checked_add(n))
+                .ok_or_else(|| EdgeScanSourceError::Source(BufferedReadError::SizeOverflow.into()))?;
+        }
+        let bytes = bytes.checked_mul(columns.max(1))
+            .ok_or_else(|| EdgeScanSourceError::Source(BufferedReadError::SizeOverflow.into()))?;
+        control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        let copy = self.pool.reserve(self.cx, bytes).map_err(BufferedReadError::Memory)
+            .map_err(|error| EdgeScanSourceError::Source(error.into()))?;
+        Ok(OutputGuard { _copy: copy, _evaluation: record.scratch.clone() })
+    }
+}
+
+// Preserve cold source failures without extending or laundering QueryError's
+// resident storage sum; all native structural/budget failures use its owners.
+fn edge_failure(error: EdgeScanError<AuthorizedBufferedError>)
+    -> Result<EdgeScanError<QueryError>, AuthorizedBufferedError>
+{
+    Ok(match error {
+        EdgeScanError::Source(error) => return Err(error),
+        EdgeScanError::Plan(error) => EdgeScanError::Plan(error),
+        EdgeScanError::NonIncreasingIdentity => EdgeScanError::NonIncreasingIdentity,
+        EdgeScanError::InvalidCandidateAdmission => EdgeScanError::InvalidCandidateAdmission,
+        EdgeScanError::DanglingEndpoint => EdgeScanError::DanglingEndpoint,
+        EdgeScanError::CounterExhausted => EdgeScanError::CounterExhausted,
+        EdgeScanError::ExpansionUnavailable => EdgeScanError::ExpansionUnavailable,
+        EdgeScanError::BoundEdgeUnavailable => EdgeScanError::BoundEdgeUnavailable,
+    })
+}
+
+pub(super) fn vertex_error(
+    error: GqlQueryError<VertexScanError<AuthorizedBufferedError>, QueryError>,
+) -> AuthorizedBufferedError {
+    let error = match error {
+        GqlQueryError::Interrupted(error) => return error.into(),
+        GqlQueryError::Source(VertexScanError::Source(error)) => return error,
+        GqlQueryError::Source(VertexScanError::Plan(error)) => GqlQueryError::Source(VertexScanError::Plan(error)),
+        GqlQueryError::Source(VertexScanError::NonIncreasingIdentity) => GqlQueryError::Source(VertexScanError::NonIncreasingIdentity),
+        GqlQueryError::Source(VertexScanError::InvalidCandidateAdmission) => GqlQueryError::Source(VertexScanError::InvalidCandidateAdmission),
+        GqlQueryError::Source(VertexScanError::CounterExhausted) => GqlQueryError::Source(VertexScanError::CounterExhausted),
+        GqlQueryError::Source(VertexScanError::Probe(error)) => match edge_failure(error) {
+            Ok(error) => GqlQueryError::Source(VertexScanError::Probe(error)),
+            Err(error) => return error,
+        },
+        GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
+        GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
+        GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+        GqlQueryError::Data(error) => GqlQueryError::Data(error),
+    };
+    scan_error(error).into()
+}
+
+pub(super) fn edge_error(
+    error: GqlQueryError<EdgeScanError<AuthorizedBufferedError>, QueryError>,
+) -> AuthorizedBufferedError {
+    let error = match error {
+        GqlQueryError::Interrupted(error) => return error.into(),
+        GqlQueryError::Source(error) => match edge_failure(error) {
+            Ok(error) => GqlQueryError::Source(error),
+            Err(error) => return error,
+        },
+        GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
+        GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
+        GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+        GqlQueryError::Data(error) => GqlQueryError::Data(error),
+    };
+    super::super::aggregate::edge::row_error(error).into()
+}

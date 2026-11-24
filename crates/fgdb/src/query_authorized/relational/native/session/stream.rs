@@ -25,6 +25,10 @@ pub use aggregate::{
 mod asynchronous;
 pub use asynchronous::AuthorizedAsyncRowCursor;
 
+#[path = "stream/buffered.rs"]
+mod buffered;
+pub use buffered::{AuthorizedBufferedError, AuthorizedBufferedOutputGuard, AuthorizedBufferedQueryRow, AuthorizedBufferedReadSource, AuthorizedBufferedRowCursor,};
+
 #[path = "stream/ordered.rs"]
 mod ordered;
 pub use ordered::{

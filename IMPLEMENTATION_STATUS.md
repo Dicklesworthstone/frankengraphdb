@@ -12,6 +12,51 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Capability-authorized buffered reads — qualification pending
+
+`BufferedReadPublication::into_authorized_read_session` now opens the public
+authorized session over bounded cold-storage history. The constructor validates
+the trusted database namespace and signed read grant before catalog or graph
+admission, then binds the catalog, graph publication and source to one historical
+commit. A prepared query selecting a different commit returns `DifferentCut`;
+callers open another session for that cut.
+
+The asynchronous cursor admits native vertex-local queries and typed single-edge
+queries with selected fields, native predicates, ordering and finite pages.
+Labels, relation authority and both endpoint lifetimes are checked before signed
+node admission and selected-property decoding. A denied explicit relation yields
+an empty cursor without opening a graph source. Unsupported joins, walks,
+aggregates, complete property maps and computed output profiles refuse before
+candidate I/O. The existing synchronous resident session remains source-compatible
+through its default backend; ordinary server requests still use that resident
+path.
+
+The public backend always uses the bounded-history profile. It cannot enable
+the complete-image native-run mode. Detached scan positions bind the exact
+publication, root, cut and memory-pool owner; resumption preserves consumed
+physical work and cannot widen limits or revive a failed scan. Staged edge reads
+resolve both endpoints before admission and decode only the winning original
+sidecar row, so an excluded sibling's payload is not observed.
+
+The cursor owns its backend while pulling and returns it after normal close or
+exhaustion. Dropping an unpolled pull is inert; dropping a polled pending pull,
+authorization failure, expiry, clock regression or unwind closes the session and
+releases its source. Fresh trusted-clock checks follow asynchronous construction,
+candidate admission and row delivery, independently of paced physical-work
+polling. Returned rows retain their copy and evaluator memory reservations until
+the last owned row drops, even after the cursor and session have been released.
+
+Six public regression sources cover clean and hidden graph variants under tight
+signed budgets, old catalogs and cuts, denied rights and namespace mismatch,
+admission before damaged sidecars, pending-pull cancellation, late expiry and
+retained output charges. Additional Strata regressions cover staged admission,
+original edge ordinals, source-owner isolation and fused failure. Independent
+source reviews found no remaining concrete blocker. Compilation, formatting,
+runtime tests, Clippy, UBS and exact-tree qualification for this integration are
+UNRUN; source review is not a passing native verdict. The executor and integrated
+qualification work remain open under `fgdb-w5-executor-olp` and
+`fgdb-qualify-integrated-nov22-maz0p`.
+
 ### Maintained per-invocation ordered pages — qualification pending
 
 Returning CALL and OPTIONAL CALL bodies can maintain one terminal finite

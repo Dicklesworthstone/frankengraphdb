@@ -48,6 +48,7 @@ mod relational;
 #[path = "query_authorized/tape.rs"]
 mod tape;
 pub use relational::{
+    AuthorizedBufferedError, AuthorizedBufferedOutputGuard, AuthorizedBufferedQueryRow, AuthorizedBufferedReadSource, AuthorizedBufferedRowCursor,
     AuthorizedAggregateCursor, AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor,
     AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
@@ -307,6 +308,16 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             return Err(QueryError::Authorization(error));
         }
         self.cx.checkpoint().map_err(interrupted)
+    }
+    /// An asynchronous boundary must observe a fresh host-clock sample even
+    /// when ordinary work is deliberately paced. This changes no allowance:
+    /// deferred work settles first, and the first retained refusal still wins.
+    fn poll_fresh(&mut self) -> Result<(), QueryError> {
+        self.settle()?;
+        self.poll()?;
+        let now = self.sample();
+        let charged = self.permit.charge_work_at(now, 0);
+        charged.map_err(|error| self.refusal(error))
     }
     fn node(&mut self) -> Result<(), QueryError> {
         self.nodes(1)

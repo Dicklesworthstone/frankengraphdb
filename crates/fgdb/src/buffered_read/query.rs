@@ -37,32 +37,36 @@ pub type BufferedQueryError = GqlQueryError<VertexScanError<BufferedReadError>, 
 /// A projected result owns its resident reservation independently of its
 /// cursor and source view. Borrowing the row does not release its charge.
 /// Explicit copies made by the application belong to the application's budget.
-pub struct BufferedQueryRow<Row = GraphValueRow> {
+pub struct BufferedQueryRow<Row = GraphValueRow, Guard = MemoryCharge> {
     row: Row,
     // Declaration order releases the data before refunding its reservation.
-    charge: MemoryCharge,
+    charge: Guard,
 }
 
-impl<Row> AsRef<Row> for BufferedQueryRow<Row> {
+impl<Row, Guard> AsRef<Row> for BufferedQueryRow<Row, Guard> {
     fn as_ref(&self) -> &Row {
         &self.row
     }
 }
 
-impl<Row> BufferedQueryRow<Row> {
-    pub(crate) fn into_parts(self) -> (Row, MemoryCharge) {
+impl<Row, Guard> BufferedQueryRow<Row, Guard> {
+    pub(crate) fn from_parts((row, charge): (Row, Guard)) -> Self {
+        Self { row, charge }
+    }
+
+    pub(crate) fn into_parts(self) -> (Row, Guard) {
         (self.row, self.charge)
     }
 }
 
-impl<Row> core::ops::Deref for BufferedQueryRow<Row> {
+impl<Row, Guard> core::ops::Deref for BufferedQueryRow<Row, Guard> {
     type Target = Row;
     fn deref(&self) -> &Row {
         &self.row
     }
 }
 
-impl<Row> core::fmt::Debug for BufferedQueryRow<Row> {
+impl<Row, Guard> core::fmt::Debug for BufferedQueryRow<Row, Guard> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("BufferedQueryRow([REDACTED])")
     }

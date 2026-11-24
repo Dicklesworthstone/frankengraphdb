@@ -10,6 +10,7 @@ mod native;
 #[path = "relational/seeded.rs"]
 pub(super) mod seeded;
 pub use native::{
+    AuthorizedBufferedError, AuthorizedBufferedOutputGuard, AuthorizedBufferedQueryRow, AuthorizedBufferedReadSource, AuthorizedBufferedRowCursor,
     AuthorizedAggregateCursor, AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor,
     AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,

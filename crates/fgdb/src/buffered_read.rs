@@ -115,12 +115,22 @@ impl<V: Vfs> core::fmt::Debug for BufferedReadView<V> {
 /// The catalog and graph share one immutable generation. As for
 /// [`BufferedReadView`], the caller retains the immutable object directory.
 pub struct BufferedReadPublication<V: Vfs = UnixVfs> {
+    namespace: DatabaseSecurityNamespaceId,
     published: PublishedRead<V>,
     pool: MemoryPool,
     limits: BufferedReadLimits,
 }
 
 impl<V: Vfs + Clone> BufferedReadPublication<V> {
+    pub(crate) fn security_namespace(&self) -> DatabaseSecurityNamespaceId {
+        self.namespace
+    }
+
+    /// Frontier of the exact catalog/graph publication selected at open.
+    pub fn frontier(&self) -> CommitSeq {
+        self.published.published_at
+    }
+
     /// Read the selected generation's symbol history without opening graph payloads.
     pub async fn symbol_catalog(&self, cx: &CommitCx) -> Result<SymbolCatalogReadView, OpenError> {
         SymbolCatalogReadView::from_published(cx, &self.published).await
@@ -154,6 +164,10 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
 }
 
 impl<V: Vfs + Clone> BufferedReadView<V> {
+    pub(crate) fn partition_mut(&mut self) -> &mut BufferedPartition<V> {
+        &mut self.partition
+    }
+
     pub fn frontier(&self) -> CommitSeq {
         self.partition.root().published_at
     }
@@ -603,6 +617,7 @@ impl<V: Vfs + Clone> Database<V> {
         drop(resolved);
         drop(selection_charge);
         Ok(BufferedReadPublication {
+            namespace: keys.namespace,
             published: PublishedRead {
                 store,
                 root_id: checkpoint.root_id,
