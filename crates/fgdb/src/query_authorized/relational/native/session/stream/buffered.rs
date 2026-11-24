@@ -20,8 +20,10 @@ use fgdb_types::CommitCx;
 
 #[path = "buffered/source.rs"]
 mod source;
+use fgdb_strata::store::BufferedVertexScanState;
+use fgdb_strata::tiered::edge_scan::BufferedEdgeScanState;
 pub use source::OutputGuard as AuthorizedBufferedOutputGuard;
-use source::{Position, Source};
+use source::Source;
 
 #[path = "buffered/ordered.rs"]
 mod ordered;
@@ -346,9 +348,14 @@ impl<V: Vfs> Drop for PollFence<'_, '_, V> {
     }
 }
 
+type VertexCursor<'q, V, C> =
+    AsyncVertexScanCursor<Source<'q, V, C, BufferedVertexScanState>, Checkpoint<'q>, GraphValueRow>;
+type EdgeCursor<'q, V, C> =
+    AsyncEdgeScanCursor<Source<'q, V, C, BufferedEdgeScanState>, Checkpoint<'q>>;
+
 enum Native<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> {
-    Vertex(AsyncVertexScanCursor<Source<'q, V, C>, Checkpoint<'q>, GraphValueRow>),
-    Edge(AsyncEdgeScanCursor<Source<'q, V, C>, Checkpoint<'q>>),
+    Vertex(Box<VertexCursor<'q, V, C>>),
+    Edge(Box<EdgeCursor<'q, V, C>>),
 }
 
 impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
@@ -486,9 +493,107 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> AuthorizedBufferedRowCursor<'_, V
     }
 }
 
-enum Plan {
-    Vertex(AsyncVertexScanPlan<GraphValueRow>, PropertySelection),
-    Edge(AsyncEdgeScanPlan, EdgeScanPropertySelection, EdgeRelation),
+enum Scan {
+    Vertex(AsyncVertexScanPlan<GraphValueRow>),
+    Edge(AsyncEdgeScanPlan),
+}
+
+struct Plan {
+    scan: Scan,
+    keys: PropertySelection,
+    endpoint_keys: PropertySelection,
+}
+
+impl Plan {
+    fn vertex(plan: AsyncVertexScanPlan<GraphValueRow>, keys: PropertySelection) -> Self {
+        Self {
+            scan: Scan::Vertex(plan),
+            keys,
+            endpoint_keys: PropertySelection::EMPTY,
+        }
+    }
+
+    fn edge(plan: AsyncEdgeScanPlan, selection: EdgeScanPropertySelection) -> Self {
+        Self {
+            scan: Scan::Edge(plan),
+            keys: selection.edge,
+            endpoint_keys: selection.endpoints,
+        }
+    }
+
+    /// Reserve the selected cursor's fixed allocation before opening any scan.
+    /// On refusal the caller still owns its original backend. Successful
+    /// sources park it in the return slot when they close or unwind.
+    fn open<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send>(
+        self,
+        slot: &mut Option<AuthorizedBufferedReadSource<V>>,
+        returned: &Returned<V>,
+        cx: &'q QueryCx,
+        execution: &Shared<'q, C>,
+        policy: GqlQueryPolicy,
+    ) -> Result<(Native<'q, V, C>, MemoryCharge), BufferedReadError> {
+        let backend = slot.as_mut().expect("opening owns its buffered backend");
+        let cursor_bytes = match &self.scan {
+            Scan::Vertex(_) => size_of::<VertexCursor<'q, V, C>>(),
+            Scan::Edge(_) => size_of::<EdgeCursor<'q, V, C>>(),
+        };
+        let metadata = backend
+            .view
+            .memory_pool()
+            .reserve(cx, 1024 + cursor_bytes)
+            .map_err(BufferedReadError::Memory)?;
+        let at = backend.at;
+        let control = execution.clone();
+        let checkpoint: Checkpoint<'q> = Box::new(move || control.borrow_mut().checkpoint());
+        let native = match self.scan {
+            Scan::Vertex(plan) => {
+                let state = backend
+                    .view
+                    .partition_mut()
+                    .vertex_scan(cx, at)?
+                    .into_state();
+                let source = Source::new(
+                    slot.take().expect("admitted backend"),
+                    returned.clone(),
+                    Some(state),
+                    self.keys,
+                    self.endpoint_keys,
+                    cx,
+                    execution.clone(),
+                );
+                Native::Vertex(Box::new(AsyncVertexScanCursor::new(
+                    source, plan, policy, checkpoint,
+                )))
+            }
+            Scan::Edge(plan) => {
+                let relation = plan.root_relation();
+                let position =
+                    if excludes_all_relations(relation, execution.borrow().permit.predicates()) {
+                        None
+                    } else {
+                        let partition = backend.view.partition_mut();
+                        let scan = match relation.one() {
+                            Some(relation) => partition.edge_scan_relation(cx, at, relation),
+                            None => partition.edge_scan(cx, at),
+                        }?;
+                        Some(scan.into_state())
+                    };
+                let source = Source::new(
+                    slot.take().expect("admitted backend"),
+                    returned.clone(),
+                    position,
+                    self.keys,
+                    self.endpoint_keys,
+                    cx,
+                    execution.clone(),
+                );
+                Native::Edge(Box::new(AsyncEdgeScanCursor::new(
+                    source, plan, policy, checkpoint,
+                )))
+            }
+        };
+        Ok((native, metadata))
+    }
 }
 
 // A finite selector with no allowed member needs no physical source. Any
@@ -524,13 +629,12 @@ fn compile(
         let plan = AsyncEdgeScanPlan::compile(pattern.plan()).map_err(|error| {
             QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(error)))
         })?;
-        let relation = plan.root_relation();
         let mut keys = plan
             .selected_property_demand()
             .ok_or(QueryError::StreamingUnsupported { facade })?;
         keys.edge = select(keys.edge);
         keys.endpoints = select(keys.endpoints);
-        Ok(Plan::Edge(plan, keys, relation))
+        Ok(Plan::edge(plan, keys))
     } else {
         let plan = AsyncVertexScanPlan::compile(pattern.plan()).map_err(plan_error)?;
         let keys = match plan.property_demand() {
@@ -540,7 +644,7 @@ fn compile(
                 return Err(QueryError::StreamingUnsupported { facade }.into());
             }
         };
-        Ok(Plan::Vertex(plan, keys))
+        Ok(Plan::vertex(plan, keys))
     }
 }
 
@@ -612,7 +716,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
             returned: Some(returned.clone()),
             armed: true,
         };
-        let outcome: Result<_, AuthorizedBufferedError> = (|| {
+        let mut open = |clock: &'q mut C, last_now_ms: &'q mut u64| {
             let backend = guard.pin.as_ref().ok_or(QueryError::Authorization(
                 AuthorizationError::ExecutionStopped,
             ))?;
@@ -651,63 +755,10 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
             execution.borrow_mut().checkpoint()?;
             let (plan, columns) = selected?;
             let at = backend.at;
-            let pool = backend.view.memory_pool().clone();
-            let metadata = pool
-                .reserve(cx, 1024 + size_of::<Source<'q, V, C>>())
-                .map_err(BufferedReadError::Memory)?;
-            let mut backend = guard.pin.take().expect("admitted backend is pinned");
-            let position = match &plan {
-                Plan::Vertex(..) => backend
-                    .view
-                    .partition_mut()
-                    .vertex_scan(cx, at)
-                    .map(|scan| Position::Vertex(Some(scan.into_state()))),
-                Plan::Edge(_, _, relation)
-                    if excludes_all_relations(*relation, capability.predicates()) =>
-                {
-                    Ok(Position::Edge(None))
-                }
-                Plan::Edge(_, _, relation) => match relation.one() {
-                    Some(relation) => backend
-                        .view
-                        .partition_mut()
-                        .edge_scan_relation(cx, at, relation),
-                    None => backend.view.partition_mut().edge_scan(cx, at),
-                }
-                .map(|scan| Position::Edge(Some(scan.into_state()))),
-            };
-            let position = match position {
-                Ok(position) => position,
-                Err(error) => {
-                    *guard.pin = Some(backend);
-                    return Err(error.into());
-                }
-            };
-            let (keys, endpoint_keys) = match &plan {
-                Plan::Vertex(_, keys) => (*keys, PropertySelection::EMPTY),
-                Plan::Edge(_, keys, _) => (keys.edge, keys.endpoints),
-            };
-            let source = Source::new(
-                backend,
-                returned.clone(),
-                position,
-                keys,
-                endpoint_keys,
-                cx,
-                execution.clone(),
-            );
-            let control = execution.clone();
-            let checkpoint: Checkpoint<'q> = Box::new(move || control.borrow_mut().checkpoint());
-            let inner = match plan {
-                Plan::Vertex(plan, _) => Native::Vertex(AsyncVertexScanCursor::new(
-                    source, plan, *policy, checkpoint,
-                )),
-                Plan::Edge(plan, _, _) => {
-                    Native::Edge(AsyncEdgeScanCursor::new(source, plan, *policy, checkpoint))
-                }
-            };
+            let (inner, metadata) = plan.open(guard.pin, &returned, cx, &execution, *policy)?;
             Ok((inner, execution, columns, at, metadata))
-        })();
+        };
+        let outcome: Result<_, AuthorizedBufferedError> = open(clock, last_now_ms);
         match outcome {
             Ok((inner, execution, columns, at, metadata)) => {
                 guard.armed = false;

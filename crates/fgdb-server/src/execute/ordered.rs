@@ -14,6 +14,8 @@ use fgdb_types::QueryCx;
 use std::sync::Arc;
 
 type BufferedSource = fgdb::AuthorizedBufferedReadSource<UnixVfs>;
+type NativeOrderSession<'a, Backend = fgdb::EmbeddedReadView> =
+    fgdb::AuthorizedOrderedReadSession<'a, crate::Symbols, fn() -> u64, File, File, File, Backend>;
 type OrderedFiles = (
     SpillFile<File>,
     SpillFile<File>,
@@ -22,22 +24,8 @@ type OrderedFiles = (
 );
 
 enum OrderSession<'a> {
-    Resident(
-        Box<fgdb::AuthorizedOrderedReadSession<'a, crate::Symbols, fn() -> u64, File, File, File>>,
-    ),
-    Buffered(
-        Box<
-            fgdb::AuthorizedOrderedReadSession<
-                'a,
-                crate::Symbols,
-                fn() -> u64,
-                File,
-                File,
-                File,
-                BufferedSource,
-            >,
-        >,
-    ),
+    Resident(Box<NativeOrderSession<'a>>),
+    Buffered(Box<NativeOrderSession<'a, BufferedSource>>),
 }
 
 pub(crate) struct OrderedSession<'a> {

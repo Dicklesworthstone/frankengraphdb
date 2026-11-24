@@ -234,7 +234,7 @@ impl ReadCursor<'_> {
     pub(crate) async fn next(&mut self) -> Result<Option<Vec<WireValue>>, Refusal> {
         let generation = self.generation.clone();
         ordered::in_generation(&generation, async {
-            let result = match &mut self.native {
+            match &mut self.native {
                 ReadSource::Rows(cursor) => cursor
                     .next_row()
                     .await
@@ -269,8 +269,7 @@ impl ReadCursor<'_> {
                     .transpose()
                     .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect()))
                     .map_err(buffered::refusal),
-            };
-            result
+            }
         })
         .await
     }

@@ -291,40 +291,41 @@ fn bind_relation(
     params: &GqlParameters,
     default: CommitSeq,
 ) -> Result<(AsyncSpillSetPlan, CommitSeq)> {
-    let (query, at) = match prepared {
-        PreparedNativeRead::Pattern(template) => (
-            template
+    let (plan, at) = match prepared {
+        PreparedNativeRead::Pattern(template) => {
+            let pattern = template
                 .bind_parameters(params)
                 .map_err(QueryError::PatternText)
-                .map_err(authorized)?
-                .into(),
-            default,
-        ),
+                .map_err(authorized)?;
+            (AsyncSpillSetPlan::compile_pattern(pattern), default)
+        }
         PreparedNativeRead::TemporalPattern(template) => {
             let bound = template
                 .bind_parameters(params)
                 .map_err(QueryError::TemporalText)
                 .map_err(authorized)?;
-            (bound.pattern().clone().into(), bound.as_of())
+            (
+                AsyncSpillSetPlan::compile_pattern(bound.pattern().clone()),
+                bound.as_of(),
+            )
         }
-        PreparedNativeRead::Set(template) => (
-            template
+        PreparedNativeRead::Set(template) => {
+            let query = template
                 .bind_parameters(params)
                 .map_err(QueryError::SetText)
-                .map_err(authorized)?,
-            default,
-        ),
+                .map_err(authorized)?;
+            (AsyncSpillSetPlan::compile(&query), default)
+        }
         PreparedNativeRead::TemporalSet(template) => {
             let bound = template
                 .bind_parameters(params)
                 .map_err(QueryError::TemporalSetText)
                 .map_err(authorized)?;
-            (bound.query().clone(), bound.as_of())
+            (AsyncSpillSetPlan::compile(bound.query()), bound.as_of())
         }
         _ => return Err(unsupported(prepared.facade_class())),
     };
-    let plan =
-        AsyncSpillSetPlan::compile(&query).map_err(|_| unsupported(prepared.facade_class()))?;
+    let plan = plan.map_err(|_| unsupported(prepared.facade_class()))?;
     admit(&plan, prepared.facade_class())?;
     Ok((plan, at))
 }
@@ -570,90 +571,31 @@ impl<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> Host<'q, V, C> {
                             return Err(unsupported(crate::NativeReadClass::Set));
                         }
                     };
-                    Plan::Vertex(plan.clone(), keys)
+                    Plan::vertex(plan.clone(), keys)
                 }
                 AsyncSpillSetSourcePlan::Edge(plan) => {
-                    let relation = plan.root_relation();
                     let mut keys = plan
                         .selected_property_demand()
                         .ok_or_else(|| unsupported(crate::NativeReadClass::Set))?;
                     keys.edge = selected_keys(keys.edge, scope);
                     keys.endpoints = selected_keys(keys.endpoints, scope);
-                    Plan::Edge(plan.clone(), keys, relation)
+                    Plan::edge(plan.clone(), keys)
                 }
                 _ => return Err(unsupported(crate::NativeReadClass::Set)),
             }
         };
-        let mut backend =
-            take_returned(&self.returned).ok_or(NativeSpoolError::IncompleteCursor)?;
-        let opened = (|| {
-            let metadata = backend
-                .view
-                .memory_pool()
-                .reserve(self.cx, 1024 + size_of::<Source<'q, V, C>>())
-                .map_err(BufferedReadError::Memory)
-                .map_err(AuthorizedBufferedError::Read)
-                .map_err(buffered_error)?;
-            let position = match &selected {
-                Plan::Vertex(..) => backend
-                    .view
-                    .partition_mut()
-                    .vertex_scan(self.cx, self.at)
-                    .map(|scan| Position::Vertex(Some(scan.into_state()))),
-                Plan::Edge(_, _, relation)
-                    if excludes_all_relations(
-                        *relation,
-                        self.execution.borrow().permit.predicates(),
-                    ) =>
-                {
-                    Ok(Position::Edge(None))
-                }
-                Plan::Edge(_, _, relation) => match relation.one() {
-                    Some(relation) => backend
-                        .view
-                        .partition_mut()
-                        .edge_scan_relation(self.cx, self.at, relation),
-                    None => backend.view.partition_mut().edge_scan(self.cx, self.at),
-                }
-                .map(|scan| Position::Edge(Some(scan.into_state()))),
-            }
+        let backend = take_returned(&self.returned).ok_or(NativeSpoolError::IncompleteCursor)?;
+        let mut slot = Some(backend);
+        let opened = selected.open(&mut slot, &self.returned, self.cx, &self.execution, policy);
+        if let Some(backend) = slot {
+            *self
+                .returned
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(backend);
+        }
+        let (native, metadata) = opened
             .map_err(AuthorizedBufferedError::Read)
             .map_err(buffered_error)?;
-            Ok((position, metadata))
-        })();
-        let (position, metadata) = match opened {
-            Ok(opened) => opened,
-            Err(error) => {
-                *self
-                    .returned
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = Some(backend);
-                return Err(error);
-            }
-        };
-        let (keys, endpoint_keys) = match &selected {
-            Plan::Vertex(_, keys) => (*keys, PropertySelection::EMPTY),
-            Plan::Edge(_, keys, _) => (keys.edge, keys.endpoints),
-        };
-        let source = Source::new(
-            backend,
-            self.returned.clone(),
-            position,
-            keys,
-            endpoint_keys,
-            self.cx,
-            self.execution.clone(),
-        );
-        let execution = self.execution.clone();
-        let checkpoint: Checkpoint<'q> = Box::new(move || execution.borrow_mut().checkpoint());
-        let native = match selected {
-            Plan::Vertex(plan, _) => {
-                Native::Vertex(AsyncVertexScanCursor::new(source, plan, policy, checkpoint))
-            }
-            Plan::Edge(plan, _, _) => {
-                Native::Edge(AsyncEdgeScanCursor::new(source, plan, policy, checkpoint))
-            }
-        };
         Ok(Input {
             native,
             cx: self.cx,

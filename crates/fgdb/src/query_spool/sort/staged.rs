@@ -654,7 +654,7 @@ where
             drop(bytes);
             let retained = codec::row_memory(&row, work)?;
             codec::retain_reservation(&mut charge, retained, work.cx)?;
-            let mut cursor = stage
+            let started = stage
                 .start_with_async_elements(
                     row,
                     row_index,
@@ -676,11 +676,29 @@ where
                             .map_err(|error| NativeSpoolError::Spill(SpillError::Memory(error)))
                     },
                 )
-                .await
-                .map_err(|error| match error {
-                    SpillSetRowError::Control(error) => error,
-                    SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
-                })?;
+                .await;
+            let mut cursor = match started {
+                Ok(cursor) => cursor,
+                Err(SpillSetRowError::Control(error)) => {
+                    if let NativeSpoolError::Authorized(query) = &error
+                        && matches!(
+                            query.as_ref(),
+                            QueryError::Authorization(fgdb_warden::Error::LimitExceeded(_))
+                                | QueryError::Set(GqlQueryError::Rows(_))
+                        )
+                    {
+                        // The element lookup refused this row between completed
+                        // appends. Retire the unpublished run at that boundary;
+                        // its physical reservations remain spent. An interrupted
+                        // suspension keeps the normal poison fence.
+                        let _ = writer.suspend(work.cx);
+                    }
+                    return Err(error);
+                }
+                Err(SpillSetRowError::Native(error)) => {
+                    return Err(NativeSpoolError::SetExecution(error));
+                }
+            };
             // Evaluation has finished, so its temporary workspace can be released.
             // Preserve the initial cursor footprint through the entire expansion:
             // it covers the original iterator allocation AND payloads moved into

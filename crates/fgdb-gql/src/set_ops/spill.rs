@@ -444,9 +444,9 @@ struct GraphSourceMetadata {
 /// plans and merges them according to its native contract, also without a graph
 /// pattern or scan tail. Cross preserves both complete children in a left-major
 /// product. Aggregate reduces its complete child and converts all groups through
-/// the native row-domain boundary. Then execute stages() in order. The first graph stage
-/// canonicalizes visible source tuples as native Set admission does; a graph
-/// leaf's ORDER BY/SKIP/LIMIT runs BEFORE this canonicalization.
+/// the native row-domain boundary. Then execute stages() in order. An admitted
+/// Set canonicalizes visible graph tuples after the leaf's ORDER BY/SKIP/LIMIT.
+/// A standalone pattern retains the order established by its own tail.
 /// No source, expression, clause or unsupported descendant is erased even when
 /// the final count is zero. Bound plans contain no storage or query authority.
 #[derive(Clone)]
@@ -467,6 +467,28 @@ struct SourceAdmission {
 impl AsyncSpillSetPlan {
     pub fn compile(query: &PreparedGraphSet) -> Result<Self, SpillSetBuildError> {
         Self::compile_at(query, 0, &mut SourceAdmission::default(), false)
+    }
+
+    /// Compile a standalone graph RETURN, preserving its tail through delivery.
+    pub fn compile_pattern(
+        pattern: PreparedGraphPattern<GraphValueRow>,
+    ) -> Result<Self, SpillSetBuildError> {
+        let types: Vec<_> = pattern
+            .value_columns()
+            .iter()
+            .map(GraphSetColumnType::from)
+            .collect();
+        let output = SpillSetStage {
+            input: types.clone(),
+            columns: pattern.columns().to_vec(),
+            types,
+            operation: Operation::Identity,
+            order: None,
+            distinct: false,
+            offset: 0,
+            count: None,
+        };
+        Self::compile_graph_source(pattern, vec![output], false)
     }
 
     /// Admit native variable-length graph leaves for a host with a vertex
@@ -643,7 +665,15 @@ impl AsyncSpillSetPlan {
             }
             CompiledSource::Pattern(pattern) => pattern,
         };
-        let (source, source_tail) = if admission.bounded_walks
+        Self::compile_graph_source(pattern.clone(), stages, admission.bounded_walks)
+    }
+
+    fn compile_graph_source(
+        pattern: PreparedGraphPattern<GraphValueRow>,
+        stages: Vec<SpillSetStage>,
+        bounded_walks: bool,
+    ) -> Result<Self, SpillSetBuildError> {
+        let (source, source_tail) = if bounded_walks
             && matches!(
                 pattern.plan().operators().first(),
                 Some(GlaOperator::ScanVertices)
@@ -657,7 +687,7 @@ impl AsyncSpillSetPlan {
             let (plan, tail) = AsyncVertexProbePlan::compile_sort_input(pattern.plan())
                 .map_err(SpillSetBuildError::Vertex)?;
             (AsyncSpillSetSourcePlan::VertexProbe(plan), tail)
-        } else if admission.bounded_walks
+        } else if bounded_walks
             && matches!(
                 pattern.plan().operators().first(),
                 Some(GlaOperator::ScanVertices)
@@ -702,7 +732,7 @@ impl AsyncSpillSetPlan {
         Ok(Self {
             source,
             graph: Some(GraphSourceMetadata {
-                pattern: pattern.clone(),
+                pattern,
                 tail: source_tail,
             }),
             stages,

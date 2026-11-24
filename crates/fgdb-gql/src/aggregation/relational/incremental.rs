@@ -51,22 +51,15 @@ impl PreparedGraphAggregate {
     /// reducer. This broadens no maintained-circuit source profile: callers
     /// must independently admit every operator in the returned relation.
     /// Counts and extrema, like exact sums and averages, do not depend on
-    /// occurrence order. Collections keep their separate order proof.
+    /// occurrence order. Direct captured-edge collections consume complete
+    /// canonical graph rows. Other collections keep their visitation-order proof.
     pub(crate) fn complete_group_relation(&self) -> Option<PreparedGraphSetAggregate> {
         if self.relational_input.is_some() {
             return None;
         }
-        if self.aggregates.iter().any(|aggregate| {
-            matches!(
-                aggregate.function,
-                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
-            )
-        }) {
-            return self.incremental_collection_relation();
-        }
         let source = self.input.0.as_ref()?;
         let [
-            ..,
+            bindings @ ..,
             GlaOperator::ProjectValues { columns },
             GlaOperator::OrderByValues,
             GlaOperator::Limit {
@@ -77,6 +70,24 @@ impl PreparedGraphAggregate {
         else {
             return None;
         };
+        if self.aggregates.iter().any(|aggregate| {
+            matches!(
+                aggregate.function,
+                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+            )
+        }) {
+            // Native identified aggregation materializes this complete one-edge
+            // projection in canonical row order before updating any group.
+            // The external relation supplies exactly that order and multiplicity.
+            let captured_edge = self.computed_input.is_none()
+                && matches!(bindings, [
+                    GlaOperator::ScanEdges { .. },
+                    GlaOperator::CapturePath { start, segments, .. }
+                ] if start.ordinal() == 0 && matches!(segments.as_slice(), [end] if end.ordinal() == 1));
+            if !captured_edge {
+                return self.incremental_collection_relation();
+            }
+        }
         // The row producer requires a private COUNT cell. Hidden source cells
         // are not recoverable from the declared schema, even for numeric input.
         if columns.is_empty()

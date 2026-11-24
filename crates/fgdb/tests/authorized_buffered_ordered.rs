@@ -520,7 +520,27 @@ async fn aggregates(
 
 #[test]
 fn cold_ordered_host_templates_rebind_maps_and_history_without_reparsing() {
-    let ((), report) = run_async_under_lab(0xa8_0209, |root| async move {
+    check_ordered_template(
+        "AT BRANCH $route MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut \
+         WHERE n.score >= $filter.minimum RETURN n,n.score AS score \
+         ORDER BY score DESC,n LIMIT $page",
+        false,
+        [&[(1, 3), (3, 3), (5, 2)], &[(1, 30), (3, 3)], &[(1, 3)]],
+    );
+    check_ordered_template(
+        "AT BRANCH $route MATCH (n:L {score: $filter.minimum}) FOR SYSTEM_TIME AS OF SEQ $cut \
+         RETURN n,n.score AS score ORDER BY score DESC,n LIMIT $page",
+        true,
+        [&[(5, 2)], &[(3, 3)], &[(2, 1)]],
+    );
+}
+
+fn check_ordered_template(
+    text: &'static str,
+    expect_splice: bool,
+    expected: [&'static [(u128, i64)]; 3],
+) {
+    let ((), report) = run_async_under_lab(0xa8_0209, move |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let cx = contexts.query();
@@ -541,14 +561,15 @@ fn cold_ordered_host_templates_rebind_maps_and_history_without_reparsing() {
                 .with_map("filter", vec![("minimum".into(), scalar(minimum))])
                 .unwrap()
         };
-        let text = "AT BRANCH $route MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut \
-                    WHERE n.score >= $filter.minimum RETURN n,n.score AS score \
-                    ORDER BY score DESC,n LIMIT $page";
-        let (lowered, derived) =
-            GqlMapArgumentText::lower_fields(text, &arguments(old, 2, 3)).unwrap();
-        let selector = Arc::new(PreparedGraphBranchText::prepare(lowered.text()).unwrap());
+        let args = arguments(old, 2, 3);
+        let lowered = GqlMapArgumentText::lower_fields(text, &args);
+        assert_eq!(lowered.is_some(), expect_splice);
+        let (statement, derived) = lowered
+            .as_ref()
+            .map_or((text, &args), |(fields, derived)| (fields.text(), derived));
+        let selector = Arc::new(PreparedGraphBranchText::prepare(statement).unwrap());
         let native = {
-            let selected = selector.bind_parameters(&derived).unwrap();
+            let selected = selector.bind_parameters(derived).unwrap();
             Arc::new(
                 PreparedNativeRead::prepare(
                     selected.statement(),
@@ -561,15 +582,14 @@ fn cold_ordered_host_templates_rebind_maps_and_history_without_reparsing() {
                 .unwrap(),
             )
         };
-        let lowered = Arc::new(lowered);
+        let lowered = lowered.map(|(fields, _)| Arc::new(fields));
         let bound_lookups = lookups.load(Ordering::SeqCst);
         assert!(bound_lookups > 0);
         let mut foreign = None;
-        for (at, minimum, page, expected) in [
-            (old, 2, 3, vec![(1, 3), (3, 3), (5, 2)]),
-            (current, 3, 2, vec![(1, 30), (3, 3)]),
-            (old, 1, 1, vec![(1, 3)]),
-        ] {
+        for ((at, minimum, page), expected) in [(old, 2, 3), (current, 3, 2), (old, 1, 1)]
+            .into_iter()
+            .zip(expected)
+        {
             let args = arguments(at, minimum, page);
             let (scratch, a) = file(&cx, &pool).await;
             let (destination, b) = file(&cx, &pool).await;
@@ -598,7 +618,7 @@ fn cold_ordered_host_templates_rebind_maps_and_history_without_reparsing() {
                     },
                     selector.clone(),
                     native.clone(),
-                    Some(lowered.clone()),
+                    lowered.clone(),
                     scratch,
                     destination,
                     auxiliary,
@@ -623,8 +643,8 @@ fn cold_ordered_host_templates_rebind_maps_and_history_without_reparsing() {
             assert_eq!(
                 values(&mut cursor).await,
                 expected
-                    .into_iter()
-                    .map(|(id, score)| vec![GraphValue::Vertex(VId(id)), scalar(score)])
+                    .iter()
+                    .map(|&(id, score)| vec![GraphValue::Vertex(VId(id)), scalar(score)])
                     .collect::<Vec<_>>()
             );
             drop(cursor);
@@ -662,6 +682,17 @@ fn cold_ordered_catalog_admission_and_live_expiry_precede_invalid_sort_limits() 
         let authority = issuer();
         let token = authority.issue_at(&grant(5, 3), 100).unwrap();
         let pool = memory();
+        vfs.reset();
+        let selected = db
+            .buffered_read_publication(&cx, pool.clone(), cold_limits())
+            .unwrap()
+            .symbol_catalog(&commit)
+            .await
+            .unwrap()
+            .symbol_catalog_at(at)
+            .unwrap();
+        let catalog_reads = vfs.reads.load(Ordering::SeqCst);
+        assert!(catalog_reads > 0);
         for scenario in 0..3 {
             let now = Arc::new(AtomicU64::new(if scenario == 0 { 1001 } else { 100 }));
             let clock = Arc::clone(&now);
@@ -686,7 +717,8 @@ fn cold_ordered_catalog_admission_and_live_expiry_precede_invalid_sort_limits() 
                     at,
                     policy(3),
                     move || clock.load(Ordering::SeqCst),
-                    |_| -> Result<HostCatalog, String> {
+                    |catalog| -> Result<HostCatalog, String> {
+                        assert_eq!(catalog, selected);
                         calls.fetch_add(1, Ordering::SeqCst);
                         if scenario == 2 {
                             now.store(1001, Ordering::SeqCst);
@@ -709,7 +741,10 @@ fn cold_ordered_catalog_admission_and_live_expiry_precede_invalid_sort_limits() 
                     if matches!(*error, QueryError::Authorization(Error::Expired))));
             }
             assert_eq!(calls.load(Ordering::SeqCst), usize::from(scenario != 0));
-            assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                vfs.reads.load(Ordering::SeqCst),
+                if scenario == 0 { 0 } else { catalog_reads }
+            );
             assert_eq!(observations(&files), before);
             assert_eq!(pool.used(), 0);
         }
@@ -748,6 +783,11 @@ fn cold_relations_keep_masked_bags_scalar_stages_and_selected_products() {
                     "MATCH (n:L) RETURN n.score AS score,n.secret AS hidden \
                      ORDER BY score DESC SKIP 1 LIMIT 2",
                     vec![vec![scalar(3), null()], vec![scalar(2), null()]],
+                ),
+                (
+                    "MATCH (n:L) WITH n.score AS score ORDER BY score DESC SKIP 1 LIMIT 2 \
+                     RETURN score",
+                    vec![vec![scalar(2)], vec![scalar(3)]],
                 ),
                 (
                     "MATCH (n:L) RETURN n,n.score AS score,n.secret AS hidden \
@@ -939,7 +979,7 @@ fn cold_aggregates_keep_exact_cells_complete_groups_and_empty_input_semantics() 
                         Count(0),
                         Value(null()),
                         Value(null()),
-                        Value(GraphValue::List(vec![])),
+                        Value(GraphValue::List(Box::new([]))),
                     ]],
                 ),
                 (
@@ -1076,7 +1116,13 @@ fn cold_endpoint_fields_compose_with_sorting_scalar_stages_and_exact_aggregates(
                          collect(b.score) AS destinations,count(a.secret) AS hidden",
                         vec![vec![
                             Integer(i128::from(2 * source + 1)),
-                            Value(GraphValue::List(vec![scalar(1), scalar(1), scalar(3)])),
+                            // Captured-edge input orders complete projected rows.
+                            // The tuple with origin 1 and destination 3 comes first.
+                            Value(GraphValue::List(Box::new([
+                                scalar(3),
+                                scalar(1),
+                                scalar(1),
+                            ]))),
                             Count(0),
                         ]],
                     ),
@@ -1534,8 +1580,9 @@ fn cold_projected_payload_stays_charged_through_a_pending_spill_append() {
             )
             .unwrap();
         let baseline = pool.used();
+        // Canonical byte strings insert a marker after each eight-byte group.
         for file in &files {
-            file.0.lock().unwrap().pending_on_payload = Some(&[0x7a; 16]);
+            file.0.lock().unwrap().pending_on_payload = Some(&[0x7a; 8]);
         }
         let mut pending = Box::pin(ordered.execute_ordered(&cx, &prepared, &args).unwrap());
         let mut polls = 0;
@@ -1587,7 +1634,7 @@ fn cold_any_and_finite_relations_keep_selector_scope_and_external_composition_di
             // R, S and T all have real edges at this cut. A finite selector
             // excludes T even though the capability allows it, whereas Any
             // includes T and excludes S through the capability predicate.
-            for (selector, nodes, expected, count, total) in [
+            for (selector, nodes, expected, count, total, collected) in [
                 (
                     "",
                     8,
@@ -1599,6 +1646,7 @@ fn cold_any_and_finite_relations_keep_selector_scope_and_external_composition_di
                     ],
                     4,
                     44,
+                    &[5, 9, 13, 17][..],
                 ),
                 (
                     ":R|S",
@@ -1610,6 +1658,7 @@ fn cold_any_and_finite_relations_keep_selector_scope_and_external_composition_di
                     ],
                     3,
                     31,
+                    &[5, 9, 17][..],
                 ),
             ] {
                 let mut allowed = grant(nodes, 4);
@@ -1645,6 +1694,16 @@ fn cold_any_and_finite_relations_keep_selector_scope_and_external_composition_di
                 drop(cursor);
                 assert!(!ordered.is_closed());
 
+                let paged = format!("{text} SKIP 1 LIMIT 2");
+                let prepared = ordered.prepare(&cx, &paged, &args).unwrap();
+                let mut cursor = ordered
+                    .execute_ordered(&cx, &prepared, &args)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                assert_eq!(values(&mut cursor).await, expected[1..3]);
+                drop(cursor);
+
                 let text = format!(
                     "MATCH (a)-[r{selector}]->(b) RETURN count(*) AS rows,sum(r.score) AS total, \
                      avg(r.score) AS mean,count(r.secret) AS hidden"
@@ -1662,6 +1721,28 @@ fn cold_any_and_finite_relations_keep_selector_scope_and_external_composition_di
                         Integer(total),
                         Average(GraphExactAverage::new(total, count).unwrap()),
                         Count(0),
+                    ]],
+                    "{selector}; hidden={hidden}"
+                );
+                drop(cursor);
+                let text = format!(
+                    "MATCH (a)-[r{selector}]->(b) RETURN count(*) AS rows,sum(r.score) AS total, \
+                     collect(r.score) AS items"
+                );
+                let prepared = ordered.prepare(&cx, &text, &args).unwrap();
+                let mut cursor = ordered
+                    .execute_ordered_aggregate(&cx, &prepared, &args)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    aggregates(&mut cursor).await,
+                    vec![vec![
+                        Count(count),
+                        Integer(total),
+                        Value(GraphValue::List(
+                            collected.iter().copied().map(scalar).collect()
+                        )),
                     ]],
                     "{selector}; hidden={hidden}"
                 );
@@ -1764,7 +1845,7 @@ fn cold_any_and_finite_relations_keep_selector_scope_and_external_composition_di
                 vec![vec![
                     Count(0),
                     Value(null()),
-                    Value(GraphValue::List(vec![]))
+                    Value(GraphValue::List(Box::new([])))
                 ]]
             );
             drop(cursor);
@@ -2199,7 +2280,7 @@ fn cold_point_pending_reads_and_copied_payloads_keep_the_affine_owner() {
         let prepared = ordered.prepare(&cx, text, &args).unwrap();
         let baseline = pool.used();
         for file in &files {
-            file.0.lock().unwrap().pending_on_payload = Some(&[0x7a; 16]);
+            file.0.lock().unwrap().pending_on_payload = Some(&[0x7a; 8]);
         }
         let mut pending = Box::pin(ordered.execute_ordered(&cx, &prepared, &args).unwrap());
         let mut polls = 0;

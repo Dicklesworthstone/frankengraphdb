@@ -2531,6 +2531,15 @@ fn selected_property_endpoint_images_share_historical_labels_and_owners() {
             format!("{held:?}"),
             "BufferedEdgePropertiesEndpoints([REDACTED])"
         );
+        let held = held.into_edge_with_endpoint_topology();
+        assert_eq!(
+            core::mem::size_of_val(&held),
+            core::mem::size_of::<BufferedEdgeTopologyEndpoints>()
+        );
+        assert!(core::ptr::eq(held.source_vertex(), held.target_vertex()));
+        assert_eq!(held.edge().value(P), Some(&CanonicalScalar::Int(0).into()));
+        assert_eq!(held.target_vertex().labels(), [LabelId(10), LabelId(11)]);
+        assert_eq!(pool.used(), retained);
         drop(held);
         assert_eq!(pool.used(), 0);
     });

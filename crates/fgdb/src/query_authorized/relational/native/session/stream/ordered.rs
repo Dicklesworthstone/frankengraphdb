@@ -1736,8 +1736,7 @@ where
 /// A host must retain this exact future across control-frame pauses, because
 /// dropping an in-flight scratch operation preserves its poisoning rules.
 pub struct AuthorizedOrderExecution<'q, F, Backend = EmbeddedReadView> {
-    pub(super) future:
-        Pin<Box<dyn Future<Output = Result<AuthorizedSpoolCursor<'q, F, Backend>>> + Send + 'q>>,
+    pub(super) future: crate::SendFuture<'q, Result<AuthorizedSpoolCursor<'q, F, Backend>>>,
     pub(super) columns: Vec<String>,
     pub(super) at: CommitSeq,
 }

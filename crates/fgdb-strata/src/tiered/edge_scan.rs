@@ -128,19 +128,18 @@ impl core::fmt::Debug for BufferedEdgeEndpoints {
     }
 }
 
-/// Edge topology and both visible endpoint identities/labels at one cut.
-/// Property payloads were not requested. Separate field types prevent this
-/// projection from escaping as complete edge or vertex records with missing
-/// properties. Each image retains its own source-pool reservation; a self-loop
-/// shares its one endpoint owner.
-pub struct BufferedEdgeTopologyEndpoints {
-    edge: BufferedEdgeTopology,
+/// An authenticated edge projection and both visible endpoint topologies at
+/// one cut. The edge type determines whether selected edge keys are present.
+/// Each image retains its source-pool reservation; a self-loop shares its
+/// one endpoint owner.
+pub struct BufferedEdgeTopologyEndpoints<Edge = BufferedEdgeTopology> {
+    edge: Edge,
     source: BufferedVertexTopology,
     target: Option<BufferedVertexTopology>,
 }
 
-impl BufferedEdgeTopologyEndpoints {
-    pub fn edge(&self) -> &BufferedEdgeTopology {
+impl<Edge> BufferedEdgeTopologyEndpoints<Edge> {
+    pub fn edge(&self) -> &Edge {
         &self.edge
     }
 
@@ -153,7 +152,7 @@ impl BufferedEdgeTopologyEndpoints {
     }
 }
 
-impl core::fmt::Debug for BufferedEdgeTopologyEndpoints {
+impl<Edge> core::fmt::Debug for BufferedEdgeTopologyEndpoints<Edge> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("BufferedEdgeTopologyEndpoints([REDACTED])")
     }
@@ -182,6 +181,18 @@ impl BufferedEdgePropertiesEndpoints {
     /// own affine property reservation independently of the source cursor.
     pub fn into_edge(self) -> BufferedEdgeProperties {
         self.edge
+    }
+
+    /// Retain the selected edge and both endpoint topologies, releasing any
+    /// separately selected endpoint properties. A self-loop keeps one owner.
+    pub fn into_edge_with_endpoint_topology(
+        self,
+    ) -> BufferedEdgeTopologyEndpoints<BufferedEdgeProperties> {
+        BufferedEdgeTopologyEndpoints {
+            edge: self.edge,
+            source: self.source,
+            target: self.target,
+        }
     }
 
     pub fn source_vertex(&self) -> &BufferedVertexTopology {

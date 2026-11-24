@@ -185,14 +185,14 @@ impl AsyncSpillAggregatePlan {
             })
         {
             // Native graph aggregation does not generally visit bindings in
-            // aggregate-argument order. Reuse the proved normalization that
-            // carries its original occurrence order as private leading cells.
+            // aggregate-argument order. Preserve its original occurrence order
+            // through the complete row or private leading identity cells.
             // The complete ordered relation then owns source admission and
             // every computed expression before the reducer sees any rows.
             // Selecting a direct cursor, or sorting only the collected value,
             // would change COLLECT and first-occurrence COLLECT DISTINCT.
             let relation = aggregate
-                .incremental_collection_relation()
+                .complete_group_relation()
                 .ok_or(SpillAggregateBuildError::Unsupported)?;
             return Self::compile_relation_sources(&relation, bounded_walks);
         }

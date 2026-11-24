@@ -597,12 +597,16 @@ fn trusted_catalog_binding_uses_the_selected_cut_and_retains_host_names() {
         let commit = contexts.commit();
         let cx = contexts.query();
         let (_, mut db, old, _) = fixture(&commit, true).await;
-        let old_catalog = db.symbol_catalog_at(old).unwrap();
         let mut later = SymbolCatalog::default();
         later
             .bind_all([("later", CatalogSymbol::Property(PropertyKeyId(3)))])
             .unwrap();
         db.register_symbols(&commit, &later).await.unwrap();
+        // Historical names use the allocator floors of the selected publication.
+        let old_catalog = db.symbol_catalog_at(old).unwrap();
+        let later_id = CatalogSymbol::Property(PropertyKeyId(3));
+        assert_eq!(db.symbol_catalog().unwrap().name(later_id), Some("later"));
+        assert_eq!(old_catalog.name(later_id), None);
         let authority = issuer();
         let token = authority.issue_at(&grant(2), 100).unwrap();
         let pool = memory();
@@ -671,6 +675,17 @@ fn catalog_callbacks_follow_authorization_and_cannot_hide_late_expiry() {
         let (vfs, db, _, at) = fixture(&commit, false).await;
         let authority = issuer();
         let pool = memory();
+        vfs.reset();
+        let selected = db
+            .buffered_read_publication(&cx, pool.clone(), limits())
+            .unwrap()
+            .symbol_catalog(&commit)
+            .await
+            .unwrap()
+            .symbol_catalog_at(at)
+            .unwrap();
+        let catalog_reads = vfs.reads.load(Ordering::SeqCst);
+        assert!(catalog_reads > 0);
         for denied in [true, false] {
             let mut allowed = grant(2);
             if denied {
@@ -679,7 +694,7 @@ fn catalog_callbacks_follow_authorization_and_cannot_hide_late_expiry() {
             let token = authority.issue_at(&allowed, 100).unwrap();
             let calls = AtomicUsize::new(0);
             vfs.reset();
-            vfs.refuse.store(true, Ordering::SeqCst);
+            vfs.refuse.store(denied, Ordering::SeqCst);
             let result = db
                 .buffered_read_publication(&cx, pool.clone(), limits())
                 .unwrap()
@@ -692,8 +707,10 @@ fn catalog_callbacks_follow_authorization_and_cannot_hide_late_expiry() {
                     at,
                     policy(),
                     || 100,
-                    |_| -> Result<HostCatalog, String> {
+                    |catalog| -> Result<HostCatalog, String> {
+                        assert_eq!(catalog, selected);
                         calls.fetch_add(1, Ordering::SeqCst);
+                        vfs.refuse.store(true, Ordering::SeqCst);
                         Err("host rejected stale names".into())
                     },
                 )
@@ -713,11 +730,16 @@ fn catalog_callbacks_follow_authorization_and_cannot_hide_late_expiry() {
                 ));
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
             }
-            assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                vfs.reads.load(Ordering::SeqCst),
+                if denied { 0 } else { catalog_reads }
+            );
             assert_eq!(pool.used(), 0);
         }
         let token = authority.issue_at(&grant(2), 100).unwrap();
         let now = AtomicUsize::new(100);
+        vfs.reset();
+        vfs.refuse.store(false, Ordering::SeqCst);
         let result = db
             .buffered_read_publication(&cx, pool.clone(), limits())
             .unwrap()
@@ -730,8 +752,10 @@ fn catalog_callbacks_follow_authorization_and_cannot_hide_late_expiry() {
                 at,
                 policy(),
                 || now.load(Ordering::SeqCst) as u64,
-                |_| -> Result<HostCatalog, String> {
+                |catalog| -> Result<HostCatalog, String> {
+                    assert_eq!(catalog, selected);
                     now.store(1001, Ordering::SeqCst);
+                    vfs.refuse.store(true, Ordering::SeqCst);
                     Err("expiry must take precedence".into())
                 },
             )
@@ -742,7 +766,7 @@ fn catalog_callbacks_follow_authorization_and_cannot_hide_late_expiry() {
                 Error::Expired
             )))
         ));
-        assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(vfs.reads.load(Ordering::SeqCst), catalog_reads);
         assert_eq!(pool.used(), 0);
         vfs.refuse.store(false, Ordering::SeqCst);
     });
@@ -751,7 +775,20 @@ fn catalog_callbacks_follow_authorization_and_cannot_hide_late_expiry() {
 
 #[test]
 fn host_prepared_buffered_reads_rebind_maps_and_history_without_reparsing() {
-    let ((), report) = run_async_under_lab(0xa6_0112, |root| async move {
+    check_host_prepared_read(
+        "AT BRANCH $route MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut \
+         WHERE n.score = $record.score RETURN n,n.score ORDER BY n",
+        false,
+    );
+    check_host_prepared_read(
+        "AT BRANCH $route MATCH (n:L {score: $record.score}) FOR SYSTEM_TIME AS OF SEQ $cut \
+         RETURN n,n.score ORDER BY n",
+        true,
+    );
+}
+
+fn check_host_prepared_read(text: &'static str, expect_splice: bool) {
+    let ((), report) = run_async_under_lab(0xa6_0112, move |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let cx = contexts.query();
@@ -776,13 +813,15 @@ fn host_prepared_buffered_reads_rebind_maps_and_history_without_reparsing() {
                 )
                 .unwrap()
         };
-        let text = "AT BRANCH $route MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut \
-                    WHERE n.score = $record.score RETURN n,n.score ORDER BY n";
-        let (lowered, derived) =
-            GqlMapArgumentText::lower_fields(text, &arguments(old, 1)).unwrap();
-        let selector = Arc::new(PreparedGraphBranchText::prepare(lowered.text()).unwrap());
+        let args = arguments(old, 1);
+        let lowered = GqlMapArgumentText::lower_fields(text, &args);
+        assert_eq!(lowered.is_some(), expect_splice);
+        let (statement, derived) = lowered
+            .as_ref()
+            .map_or((text, &args), |(fields, derived)| (fields.text(), derived));
+        let selector = Arc::new(PreparedGraphBranchText::prepare(statement).unwrap());
         let native = {
-            let selected = selector.bind_parameters(&derived).unwrap();
+            let selected = selector.bind_parameters(derived).unwrap();
             Arc::new(
                 PreparedNativeRead::prepare(
                     selected.statement(),
@@ -795,7 +834,7 @@ fn host_prepared_buffered_reads_rebind_maps_and_history_without_reparsing() {
                 .unwrap(),
             )
         };
-        let lowered = Arc::new(lowered);
+        let lowered = lowered.map(|(fields, _)| Arc::new(fields));
         let prepared_lookups = lookups.load(Ordering::SeqCst);
         assert!(prepared_lookups > 0);
         let mut foreign = None;
@@ -824,7 +863,7 @@ fn host_prepared_buffered_reads_rebind_maps_and_history_without_reparsing() {
                     },
                     selector.clone(),
                     native.clone(),
-                    Some(lowered.clone()),
+                    lowered.clone(),
                 )
                 .await
                 .unwrap();
@@ -883,7 +922,7 @@ fn host_prepared_buffered_reads_rebind_maps_and_history_without_reparsing() {
                 |catalog| Ok(HostCatalog { catalog, lookups }),
                 mismatched,
                 native,
-                Some(lowered),
+                lowered,
             )
             .await;
         assert!(matches!(

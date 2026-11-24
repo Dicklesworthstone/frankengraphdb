@@ -347,11 +347,8 @@ where
 /// Keep this exact future while a host services cancellation or flow control.
 /// Dropping it never completes pending work or exposes a private scratch run.
 pub struct AuthorizedAggregateOrderExecution<'q, F, Backend = EmbeddedReadView> {
-    pub(in super::super) future: Pin<
-        Box<
-            dyn Future<Output = Result<AuthorizedAggregateSpoolCursor<'q, F, Backend>>> + Send + 'q,
-        >,
-    >,
+    pub(in super::super) future:
+        crate::SendFuture<'q, Result<AuthorizedAggregateSpoolCursor<'q, F, Backend>>>,
     pub(in super::super) columns: Vec<String>,
     pub(in super::super) at: CommitSeq,
 }

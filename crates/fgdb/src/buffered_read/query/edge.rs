@@ -23,7 +23,8 @@ use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::store::BufferedScanError;
 use fgdb_strata::tiered::edge_scan::{
     BufferedEdgeCandidate, BufferedEdgeDirection, BufferedEdgeEndpoints, BufferedEdgeJoinScan,
-    BufferedEdgePropertiesEndpoints, BufferedEdgeScanEvent, BufferedEdgeTopologyEndpoints,
+    BufferedEdgeProperties, BufferedEdgePropertiesEndpoints, BufferedEdgeScanEvent,
+    BufferedEdgeTopologyEndpoints,
 };
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -45,7 +46,7 @@ struct Record {
 enum Image {
     Complete(BufferedEdgeEndpoints),
     Topology(BufferedEdgeTopologyEndpoints),
-    Property(BufferedEdgePropertiesEndpoints),
+    Property(BufferedEdgeTopologyEndpoints<BufferedEdgeProperties>),
 }
 
 impl From<BufferedEdgeEndpoints> for Image {
@@ -62,7 +63,7 @@ impl From<BufferedEdgeTopologyEndpoints> for Image {
 
 impl From<BufferedEdgePropertiesEndpoints> for Image {
     fn from(image: BufferedEdgePropertiesEndpoints) -> Self {
-        Self::Property(image)
+        Self::Property(image.into_edge_with_endpoint_topology())
     }
 }
 

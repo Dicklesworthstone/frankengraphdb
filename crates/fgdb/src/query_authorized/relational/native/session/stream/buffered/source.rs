@@ -16,14 +16,9 @@ use fgdb_strata::store::{BufferedScanError, BufferedVertexProperties, BufferedVe
 use fgdb_strata::tiered::edge_scan::{BufferedEdgePropertiesEndpoints, BufferedEdgeScanState};
 use fgdb_strata::tiered::memory::MemoryError;
 
-pub(super) enum Position {
-    Vertex(Option<BufferedVertexScanState>),
-    Edge(Option<BufferedEdgeScanState>),
-}
-
-pub(super) struct Source<'q, V: Vfs, C> {
+pub(super) struct Source<'q, V: Vfs, C, P> {
     // Detached merge allocations drop before the backend returns to its owner.
-    position: Position,
+    position: Option<P>,
     backend: Option<AuthorizedBufferedReadSource<V>>,
     returned: Returned<V>,
     cx: &'q QueryCx,
@@ -33,11 +28,11 @@ pub(super) struct Source<'q, V: Vfs, C> {
     endpoint_keys: PropertySelection,
 }
 
-impl<'q, V: Vfs + Clone, C> Source<'q, V, C> {
+impl<'q, V: Vfs + Clone, C, P> Source<'q, V, C, P> {
     pub(super) fn new(
         backend: AuthorizedBufferedReadSource<V>,
         returned: Returned<V>,
-        position: Position,
+        position: Option<P>,
         keys: PropertySelection,
         endpoint_keys: PropertySelection,
         cx: &'q QueryCx,
@@ -57,16 +52,9 @@ impl<'q, V: Vfs + Clone, C> Source<'q, V, C> {
     }
 }
 
-impl<V: Vfs, C> Drop for Source<'_, V, C> {
+impl<V: Vfs, C, P> Drop for Source<'_, V, C, P> {
     fn drop(&mut self) {
-        match &mut self.position {
-            Position::Vertex(state) => {
-                state.take();
-            }
-            Position::Edge(state) => {
-                state.take();
-            }
-        }
+        self.position.take();
         if let Some(backend) = self.backend.take() {
             let previous = {
                 let mut returned = self
@@ -222,7 +210,9 @@ fn scratch(cx: &QueryCx, charge: &Arc<Mutex<MemoryCharge>>) -> Result<(), Author
     Ok(())
 }
 
-impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncVertexScanSource for Source<'_, V, Clock> {
+impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncVertexScanSource
+    for Source<'_, V, Clock, BufferedVertexScanState>
+{
     type Error = AuthorizedBufferedError;
     type Record = VertexRecord;
     type OutputGuard = OutputGuard;
@@ -236,11 +226,8 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncVertexScanSource for Sou
         control: &mut (impl FnMut(AsyncVertexScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<AsyncVertexCandidate<VertexRecord>>, VertexScanSourceError<Self::Error, C>>
     {
-        let Position::Vertex(position) = &mut self.position else {
-            unreachable!("compiled vertex plan owns a vertex position")
-        };
         loop {
-            let Some(state) = position.take() else {
+            let Some(state) = self.position.take() else {
                 return Ok(None);
             };
             let backend = self.backend.as_mut().expect("source owns backend");
@@ -278,7 +265,7 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncVertexScanSource for Sou
                 ))
                 .erase_send()
                 .await;
-            *position = Some(scan.into_state());
+            self.position = Some(scan.into_state());
             let Some(candidate) = result.map_err(vertex_control)? else {
                 return Ok(None);
             };
@@ -352,7 +339,9 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncVertexScanSource for Sou
     }
 }
 
-impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource for Source<'_, V, Clock> {
+impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource
+    for Source<'_, V, Clock, BufferedEdgeScanState>
+{
     type Error = AuthorizedBufferedError;
     type Record = EdgeRecord;
     type OutputGuard = OutputGuard;
@@ -369,11 +358,8 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource for Sourc
         if excludes_all_relations(relation, self.execution.borrow().permit.predicates()) {
             return Ok(None);
         }
-        let Position::Edge(position) = &mut self.position else {
-            unreachable!("compiled edge plan owns an edge position")
-        };
         loop {
-            let Some(state) = position.take() else {
+            let Some(state) = self.position.take() else {
                 return Ok(None);
             };
             let backend = self.backend.as_mut().expect("source owns backend");
@@ -426,7 +412,7 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource for Sourc
                 ))
                 .erase_send()
                 .await;
-            *position = Some(scan.into_state());
+            self.position = Some(scan.into_state());
             let Some(candidate) = result.map_err(edge_control)? else {
                 return Ok(None);
             };
