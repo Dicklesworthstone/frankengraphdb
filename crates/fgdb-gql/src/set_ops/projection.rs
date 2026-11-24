@@ -2034,6 +2034,26 @@ impl UnwindRows {
         })
     }
 
+    /// Bounds have already been evaluated for this input row. Every remaining
+    /// range member is an infallible integer. Jump directly to the first one
+    /// its owner's page can deliver and keep only the requested suffix length.
+    pub(super) fn page_range(&mut self, skip: &mut u64, count: Option<u64>) {
+        if let UnwindMembers::Range {
+            next,
+            step,
+            remaining,
+        } = &mut self.members
+        {
+            let skipped = i128::from(*skip).min(*remaining);
+            *next += skipped * *step;
+            *skip -= skipped as u64;
+            *remaining -= skipped;
+            if let Some(count) = count {
+                *remaining = (*remaining).min(i128::from(count));
+            }
+        }
+    }
+
     pub(super) fn visit_retained_values<E>(
         &self,
         visitor: &mut impl FnMut(&[GraphValue], usize) -> Result<(), E>,

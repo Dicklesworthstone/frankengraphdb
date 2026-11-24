@@ -15,6 +15,16 @@ type Consumer<'a, S, Checkpoint, E, C> =
     dyn FnMut(GraphValueRow, &mut S, &mut Meter<Checkpoint>) -> SetResult<(), E, C> + 'a;
 
 impl PreparedGraphSet {
+    /// Rows generated from the unit source by UNWIND have exactly the
+    /// declared width. An external source can supply its own row layout.
+    fn only_generated_rows(&self) -> bool {
+        let mut node = &self.node;
+        while let SetNode::Unwind { input, .. } = node {
+            node = &input.node;
+        }
+        matches!(node, SetNode::Values)
+    }
+
     /// A terminal expansion can be folded even if its children need a sort.
     /// Never elide a projection's implicit canonicalization or explicit order.
     #[cfg(test)]
@@ -277,6 +287,28 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
+    // A projection of every original column in order only renames the rows of
+    // an UNWIND range. Its page can select the range members directly. Keep
+    // any child page, sort, DISTINCT or computed projection in its own scope.
+    if (window.skip != 0 || window.remaining.is_some())
+        && let SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            ..
+        } = &query.node
+        && matches!(&input.node, SetNode::Unwind { value: GraphSetValue::Range { .. }, .. })
+        && input.order.is_empty()
+        && input.offset == 0
+        && input.count.is_none()
+        && input.only_generated_rows()
+        && projection.len() == input.columns.len()
+        && projection.iter().enumerate().all(|(column, item)| {
+            matches!(item.value(), GraphSetValue::Column(index) if *index == column)
+        })
+    {
+        return visit_expansion(input, source, meter, operand, window, consume);
+    }
     if !source.supports_procedure_rows()
         && matches!(&query.node, SetNode::Project { input, .. } if !input.preserves_row_order())
     {
@@ -451,6 +483,7 @@ where
                         &mut read,
                     )
                     .map_err(|error| projected(error, row_at))?;
+                    rows.page_range(&mut window.skip, window.remaining);
                     while let Some((row, next)) =
                         rows.next_with_control(&mut |event| meter.event(event))?
                     {

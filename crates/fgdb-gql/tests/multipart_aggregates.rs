@@ -807,6 +807,64 @@ fn unwind_range_streams_past_the_list_value_bound() {
 }
 
 #[test]
+fn integer_range_pages_seek_within_each_validated_input() {
+    let policy = GqlQueryPolicy::new(u64::MAX, 1, 10_000_000, 10_000_000);
+    for (text, sum) in [
+        (
+            "UNWIND range(1000000, 2000000) AS i WITH i LIMIT 3000 RETURN sum(i)",
+            3_004_498_500_i128,
+        ),
+        (
+            "UNWIND range(0, 9223372036854775807) AS i \
+             WITH i AS value SKIP 9223372036854775806 LIMIT 2 RETURN sum(value)",
+            18_446_744_073_709_551_613,
+        ),
+    ] {
+        let result = run(&prepare(text), policy, &mut || Ok(())).unwrap();
+        assert_eq!(result.value[0].values()[0].as_integer(), Some(sum));
+    }
+
+    // Pages span input rows and preserve descending order, repeated ranges
+    // and the page of an inner WITH. Compare against explicit list expansion.
+    for tail in [
+        "WITH a, i SKIP 2 LIMIT 3",
+        "WITH a, i SKIP 30 LIMIT 2",
+        "WITH a, i LIMIT 0",
+        "WITH a, i SKIP 1 LIMIT 4 WITH a, i SKIP 2 LIMIT 1",
+        "WITH a, i ORDER BY i SKIP 1 LIMIT 3",
+    ] {
+        let read = |members| {
+            execute(&format!(
+                "UNWIND [2,2,4] AS a UNWIND {members} AS i {tail} RETURN collect(i) AS items"
+            ))
+        };
+        assert_eq!(read("range(a, a-4, -2)"), read("[a, a-2, a-4]"), "{tail}");
+    }
+
+    for (text, expected) in [
+        (
+            "UNWIND [1,0] AS step UNWIND range(1,3,step) AS i \
+             WITH step,i LIMIT 1 RETURN sum(i)",
+            fgdb_gql::GraphIntegerErrorKind::InvalidRangeStep,
+        ),
+        (
+            "UNWIND range(1,5) AS i WITH 1/(5-i) AS x LIMIT 1 RETURN sum(x)",
+            fgdb_gql::GraphIntegerErrorKind::DivisionByZero,
+        ),
+    ] {
+        assert!(
+            matches!(
+                run(&prepare(text), policy, &mut || Ok(())),
+                Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
+                    GraphSetExecutionError::Projection { error, .. }
+                ))) if error.kind == expected
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn carried_existence_values_group_without_multiplying_outer_occurrences() {
     let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
                   UNWIND [0,0] AS occurrence";
