@@ -989,6 +989,14 @@ mod tests {
             nested,
         ] {
             let values = vec![GraphValue::Vertex(VId(1)), value];
+            assert_eq!(
+                source
+                    .evaluate_incremental_input(values.clone(), &mut |_| Ok::<_, ()>(()))
+                    .unwrap()
+                    .unwrap()
+                    .values(),
+                values
+            );
             let counted = source
                 .materialize_incremental_row(values.clone(), vec![GraphAggregateValue::Count(3)])
                 .unwrap();
@@ -1014,6 +1022,12 @@ mod tests {
             too_deep,
         ] {
             let values = vec![GraphValue::Vertex(VId(1)), invalid];
+            assert!(
+                source
+                    .evaluate_incremental_input(values.clone(), &mut |_| Ok::<_, ()>(()))
+                    .unwrap()
+                    .is_none()
+            );
             assert!(
                 source
                     .materialize_incremental_row(

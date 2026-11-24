@@ -11,15 +11,15 @@ use core::convert::Infallible;
 
 impl PreparedGraphAggregate {
     fn incremental_source_column_type(&self, column: usize) -> Option<GraphSetColumnType> {
-        match self.input.value_columns().get(column)? {
-            ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => {
-                Some(GraphSetColumnType::Scalar)
-            }
-            ValueProjection::Vertex { .. } => Some(GraphSetColumnType::Vertex),
-            ValueProjection::Path {
+        let projection = self.input.value_columns().get(column)?;
+        match projection {
+            ValueProjection::Property { .. }
+            | ValueProjection::EdgeProperty { .. }
+            | ValueProjection::Vertex { .. }
+            | ValueProjection::Path {
                 function: GraphPathFunction::Edge,
                 ..
-            } => Some(GraphSetColumnType::Edge),
+            } => Some(GraphSetColumnType::from(projection)),
             _ => None,
         }
     }
@@ -32,7 +32,7 @@ impl PreparedGraphAggregate {
     /// graph leaf. This is group-schema admission, not admission of the input
     /// operators. Completed relations preserve every native value domain,
     /// including the dynamic Any domain produced by UNWIND and list indexing.
-    /// The graph-binding adapter admits scalar, vertex and single-edge cells.
+    /// The graph-binding adapter admits stored properties, vertices and single edges.
     #[must_use]
     pub fn incremental_input_column_type(&self, column: usize) -> Option<GraphSetColumnType> {
         if let Some(relation) = &self.relational_input {
@@ -110,17 +110,10 @@ impl PreparedGraphAggregate {
         }
         for (column, value) in values.iter().enumerate() {
             govern(GlaExecutionEvent::Work)?;
-            let accepts = match self.incremental_source_column_type(column) {
-                Some(GraphSetColumnType::Scalar) => matches!(value, GraphValue::Scalar(_)),
-                Some(GraphSetColumnType::Vertex) => {
-                    matches!(value, GraphValue::Vertex(_)) || value.is_null()
-                }
-                Some(GraphSetColumnType::Edge) => {
-                    matches!(value, GraphValue::Edge(_)) || value.is_null()
-                }
-                _ => false,
-            };
-            if !accepts {
+            if !self
+                .incremental_source_column_type(column)
+                .is_some_and(|kind| value.validate_bounds() && kind.accepts(value))
+            {
                 return Ok(None);
             }
         }
