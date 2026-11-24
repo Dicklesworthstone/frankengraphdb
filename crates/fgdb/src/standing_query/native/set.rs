@@ -1097,8 +1097,12 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 checkpoint()?;
             }
             input
-        } else if let Some(plan) =
-            query.incremental_apply_distinct_with_control(&mut |_| checkpoint())?
+        } else if let Some((plan, window)) =
+            match query.incremental_apply_window_with_control(&mut |_| checkpoint())? {
+                Some(plan) => Some((plan.invocation, Some(plan.window))),
+                None => query.incremental_apply_distinct_with_control(&mut |_| checkpoint())?
+                    .map(|plan| (plan, None)),
+            }
         {
             // Distinctness belongs to one argument tuple, not the outer bag.
             // Share the original source, deduplicate its imported arguments,
@@ -1145,6 +1149,17 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                     self.database.standing_queries.len(),
                 )?;
                 input = self.append_private(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            if let Some(spec) = window {
+                let state = self.database.prepare_standing_window(
+                    cx,
+                    input,
+                    spec,
+                    input_policy,
+                    self.database.standing_queries.len(),
+                )?;
+                input = self.append_private(StandingQuery::Window(Box::new(state)));
                 checkpoint()?;
             }
             let state = self.database.prepare_standing_join_spec(
@@ -1909,3 +1924,6 @@ mod count_apply_tests;
 
 #[cfg(test)]
 mod distinct_apply_tests;
+
+#[cfg(test)]
+mod correlated_window_tests;

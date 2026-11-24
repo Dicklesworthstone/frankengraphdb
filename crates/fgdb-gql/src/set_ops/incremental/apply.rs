@@ -12,10 +12,12 @@ use fgdb_types::CanonicalScalar;
 mod count;
 mod distinct;
 mod existence;
+mod window;
 
 pub use count::{MaintainedCollectedCount, MaintainedCountJoin, MaintainedFilteredAggregate};
 pub use distinct::MaintainedDistinctApply;
 pub use existence::MaintainedExistenceJoin;
+pub use window::MaintainedWindowApply;
 
 /// A bag-only maintenance recipe for one correlated graph continuation.
 ///
@@ -86,19 +88,34 @@ fn body<'a, E>(
     stages: &mut Vec<Stage<'a>>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<Base<'a>>, E> {
+    body_with_window(query, no_imports, allow_distinct, None, stages, control)
+}
+
+// Peel precisely one terminal window; every preceding page retains its
+// ordinary refusal, including a hidden LIMIT 0.
+fn body_with_window<'a, E>(
+    query: &'a PreparedGraphSet,
+    no_imports: bool,
+    allow_distinct: bool,
+    terminal: Option<&PreparedGraphSet>,
+    stages: &mut Vec<Stage<'a>>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<Base<'a>>, E> {
     control(GlaExecutionEvent::Work)?;
-    if !query.unadorned_incremental_node() {
+    if !query.unadorned_incremental_node()
+        && !terminal.is_some_and(|window| core::ptr::eq(window, query))
+    {
         return Ok(None);
     }
     match &query.node {
-        SetNode::Scope(input) => body(input, no_imports, allow_distinct, stages, control),
+        SetNode::Scope(input) => body_with_window(input, no_imports, allow_distinct, terminal, stages, control),
         SetNode::Project {
             input,
             projection,
             quantifier,
             ..
         } if *quantifier == GraphSetQuantifier::All || allow_distinct => {
-            let Some(base) = body(input, no_imports, allow_distinct, stages, control)? else {
+            let Some(base) = body_with_window(input, no_imports, allow_distinct, terminal, stages, control)? else {
                 return Ok(None);
             };
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -109,7 +126,7 @@ fn body<'a, E>(
             let Some((_, code)) = query.incremental_filter() else {
                 return Ok(None);
             };
-            let Some(base) = body(input, no_imports, allow_distinct, stages, control)? else {
+            let Some(base) = body_with_window(input, no_imports, allow_distinct, terminal, stages, control)? else {
                 return Ok(None);
             };
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -139,6 +156,29 @@ fn body_base(query: &PreparedGraphSet, no_imports: bool) -> Option<Base<'_>> {
         }),
         _ => None,
     }
+}
+
+/// Locate only the finite terminal page owned by the keyed window recipe.
+/// This is sequence-shape analysis, not derivative or source admission. The
+/// complete Apply must still pass incremental_apply_window_with_control.
+pub(super) fn bounded_window_input(query: &PreparedGraphSet) -> Option<&PreparedGraphSet> {
+    if !query.unadorned_incremental_node() {
+        return None;
+    }
+    let SetNode::Apply { right, kind, .. } = &query.node else {
+        return None;
+    };
+    if matches!(kind, ApplyKind::Collect { .. }) {
+        return None;
+    }
+    let mut terminal = right.as_ref();
+    while terminal.unadorned_incremental_node() {
+        let SetNode::Scope(input) = &terminal.node else {
+            return None;
+        };
+        terminal = input;
+    }
+    (terminal.count.is_some() && terminal.incremental_result_order().is_some()).then_some(terminal)
 }
 
 /// The compiler's literal-witness page has no observable selected identity.

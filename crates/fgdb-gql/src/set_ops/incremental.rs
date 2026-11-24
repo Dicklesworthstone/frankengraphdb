@@ -8,7 +8,7 @@ mod window;
 
 pub use apply::{
     MaintainedApplyJoin, MaintainedCollectedCount, MaintainedCountJoin, MaintainedDistinctApply,
-    MaintainedExistenceJoin, MaintainedFilteredAggregate,
+    MaintainedExistenceJoin, MaintainedFilteredAggregate, MaintainedWindowApply,
 };
 
 impl PreparedGraphSet {
@@ -111,7 +111,7 @@ impl PreparedGraphSet {
     /// bounds at each scope, including explicitly ordered positional inputs.
     /// This finite structural walk examines no rows and clones no definitions.
     pub fn incremental_window_sequence_compatible(&self) -> bool {
-        fn shape(query: &PreparedGraphSet) -> (bool, bool) {
+        fn shape(query: &PreparedGraphSet, local_page: Option<&PreparedGraphSet>) -> (bool, bool) {
             let (nested_window, positional_source) = match &query.node {
                 SetNode::Pattern(_) => (false, false),
                 // Grouping completes and canonicalizes its output. Input
@@ -128,12 +128,19 @@ impl PreparedGraphSet {
                 // Complete derivative admission still belongs to the host.
                 SetNode::Arguments => (false, true),
                 SetNode::Apply { left, right, .. } => {
-                    let a = shape(left);
+                    let a = shape(left, None);
                     // A literal TRUE/LIMIT-one output observes only presence,
                     // never the identity or order of its selected witness.
                     // Ignore just that page; every real descendant window
                     // and the full existence derivative still need admission.
-                    let b = shape(apply::existence_input(query).unwrap_or(right));
+                    let b = if let Some(input) = apply::existence_input(query) {
+                        shape(input, None)
+                    } else {
+                        // The maintained invocation selects its own bounded
+                        // page before restoring outer occurrences. Its parent
+                        // consumes that bag; no outer positional page is erased.
+                        shape(right, apply::bounded_window_input(query))
+                    };
                     (a.0 || b.0, true)
                 }
                 // An output projection keeps positional enumeration. Retain
@@ -143,32 +150,31 @@ impl PreparedGraphSet {
                     input,
                     preserve_order: true,
                     ..
-                } => (shape(input).0, true),
+                } => (shape(input, local_page).0, true),
                 SetNode::Scope(input)
                 | SetNode::Filter { input, .. }
-                | SetNode::Project { input, .. } => shape(input),
+                | SetNode::Project { input, .. } => shape(input, local_page),
                 SetNode::Binary { left, right, .. } | SetNode::Join { left, right, .. } => {
-                    let a = shape(left);
-                    let b = shape(right);
+                    let a = shape(left, local_page);
+                    let b = shape(right, local_page);
                     (a.0 || b.0, a.1 || b.1)
                 }
                 SetNode::CrossJoin { left, right } => {
-                    let a = shape(left);
-                    let b = shape(right);
+                    let a = shape(left, local_page);
+                    let b = shape(right, local_page);
                     (a.0 || b.0, true)
                 }
-                SetNode::Unwind { input, .. } => (shape(input).0, true),
+                SetNode::Unwind { input, .. } => (shape(input, local_page).0, true),
                 SetNode::Values => (false, true),
             };
             (
-                query.count.is_some()
-                    || query.offset != 0
-                    || !query.order.is_empty()
+                (!local_page.is_some_and(|page| core::ptr::eq(page, query))
+                    && (query.count.is_some() || query.offset != 0 || !query.order.is_empty()))
                     || nested_window,
                 positional_source,
             )
         }
-        let (window, positional) = shape(self);
+        let (window, positional) = shape(self, None);
         !window || !positional
     }
 

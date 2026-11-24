@@ -12,6 +12,59 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Maintained per-invocation ordered pages — qualification pending
+
+Returning CALL and OPTIONAL CALL bodies can maintain one terminal finite
+ORDER BY/SKIP/LIMIT page for each exact imported argument tuple. The compiler
+uses the existing keyed invocation circuit and a partitioned native window.
+Body projections, filters and local DISTINCT run before selection; the original
+outer bag is restored afterwards. Duplicate outer rows therefore repeat the
+selected page without consuming its places, and OPTIONAL CALL supplies NULL
+exports only when the completed page is empty.
+
+```gql
+MATCH (a:Owner)
+OPTIONAL CALL (a) {
+  MATCH (a)-[:R]->(b) WHERE b.score >= 0
+  RETURN b AS candidate,b.score AS value
+  ORDER BY value DESC,candidate ASC SKIP 1 LIMIT 1
+}
+RETURN a,candidate,value
+```
+
+The window retains complete candidate support so deleting a selected row can
+promote an off-page candidate. Only partitions touched by a consolidated tick
+enter the weighted selection kernel. Every partition change, combined output
+and result total is staged before publication; refusal or a dropped update
+preserves the prior state. Empty partitions retire. NULL imports and calls
+without imports use the original exact invocation keys.
+
+Stored vertex properties require a preceding flat integer comparison on the
+same binding and property. Equality or an ordered comparison proves a scalar
+output before any independent source materializes it; NOT EQUAL, Boolean
+branches and unguarded fields retain their refusal. Every projected field,
+including hidden cells, needs that proof. Intermediate or nested pages,
+unbounded ordering, aggregate bodies and unsupported effects remain outside
+this recipe. The sequence check exempts only the exact consumed local page;
+outer and intermediate positional windows keep their admission rules.
+
+The existing native window, dependency registry and capability-scoped sources
+own maintenance, private input allowances, final public quotas, atomic
+registration and rebuild. Regression sources cover 4,096 compiler-level
+weighted transitions, independent per-owner pages, DISTINCT, duplicate outer
+rows, NULL imports, LIMIT zero, deletion refill, score and owner changes,
+inactive oversized collections and every registration/rebuild checkpoint.
+A served FGP subscription regression checks literal deltas, hidden candidate
+masking, pending-receipt reuse and acknowledgement through six successive cuts.
+
+Independent source review found no remaining blocker. The underlying three-file
+partitioned TopK kernel passed pinned Rustfmt; formatting of this complete
+integration, compilation, runtime tests, Clippy, UBS and exact-tree gates remain
+UNRUN after executor loss and exhausted workspace capacity. These are regression
+sources, not a passing runtime verdict. The executor and integrated qualification
+work remain open under `fgdb-w5-executor-olp` and
+`fgdb-qualify-integrated-nov22-maz0p`.
+
 ### Scoped graph algorithms enter external relational ordering — qualification pending
 
 Authorized ordered sessions can use registered native fnx.* procedure rows

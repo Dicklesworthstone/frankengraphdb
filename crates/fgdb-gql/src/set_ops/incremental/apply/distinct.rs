@@ -125,6 +125,14 @@ impl PreparedGraphSet {
         &self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<MaintainedDistinctApply<'_>>, E> {
+        self.keyed_apply_with_control(None, control)
+    }
+
+    pub(super) fn keyed_apply_with_control<E>(
+        &self,
+        terminal: Option<&PreparedGraphSet>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<MaintainedDistinctApply<'_>>, E> {
         control(GlaExecutionEvent::Work)?;
         if !self.unadorned_incremental_node() {
             return Ok(None);
@@ -142,7 +150,7 @@ impl PreparedGraphSet {
             return Ok(None);
         }
         let mut stages = Vec::new();
-        let Some(base) = body(right, imports.is_empty(), true, &mut stages, control)? else {
+        let Some(base) = body_with_window(right, imports.is_empty(), true, terminal, &mut stages, control)? else {
             return Ok(None);
         };
         let mut has_distinct = false;
@@ -164,7 +172,15 @@ impl PreparedGraphSet {
                 }
             }
         }
-        if !has_distinct || !independent(base.right, control)? {
+        if !has_distinct && terminal.is_none() {
+            return Ok(None);
+        }
+        let independent = if terminal.is_some() {
+            window::independent_window(base.right, control)?
+        } else {
+            independent(base.right, control)?
+        };
+        if !independent {
             return Ok(None);
         }
         let arguments = match base.arguments {

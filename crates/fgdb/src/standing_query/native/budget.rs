@@ -206,6 +206,21 @@ fn circuit(
         return circuit(cx, plan.left, scoped)?
             .combine(circuit(cx, plan.right.as_ref(), scoped)?, stages);
     }
+    if let Some(plan) = query.incremental_apply_window_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        // The keyed invocation circuit adds one partitioned window before its
+        // restoration join. Count precisely the nodes Staging::compile owns.
+        let plan = plan.invocation;
+        let stages = plan
+            .body
+            .len()
+            .checked_add(plan.output.len())
+            .and_then(|count| count.checked_add(5))
+            .and_then(|count| u64::try_from(count).ok())
+            .ok_or(StandingQueryError::Unsupported)?;
+        return circuit(cx, plan.left, scoped)?.combine(circuit(cx, plan.right, scoped)?, stages);
+    }
     if let Some(plan) = query.incremental_apply_distinct_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
     })? {
