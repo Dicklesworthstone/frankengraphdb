@@ -219,15 +219,52 @@ exhausted workspace storage. The mandatory `scripts/check.sh` attempt ended at
 its 50-second limit (exit 124); Cargo checks were UNRUN offline, and shellcheck
 and UBS were missing. These additions do not supply runtime qualification.
 
+### Maintained explicitly ordered correlated collections — qualification pending
+
+Reader-free returning `CALL` and `OPTIONAL CALL` bodies now admit `COLLECT`
+and `COLLECT(DISTINCT)` with one proven explicit input `ORDER BY`, including
+the native aggregate-argument projection that drops its sort keys. The compiler
+retains the complete sorted row as a private witness through later pure copies,
+constants, scope wrappers and exact single-row argument restoration. Before
+grouping, that witness moves to the input prefix; aggregate arguments and
+original group keys move with it. The existing collection owner uses the
+original comparator and whole-row tie-break, so deleting an earliest DISTINCT
+support can reorder the surviving list and a replacement can restore it.
+
+The same keyed invocation circuit still keeps duplicate outer occurrences out
+of the aggregate input. Global emptiness completes to a typed empty list,
+grouped emptiness creates no group, and optional restoration follows the full
+body and any supported terminal page. The host compiler and subscription
+footprint consume the additional ordinary projection stages without a separate
+collection evaluator. Input pages, deeper ordering, unknown enumeration and
+unproved post-sort filters, expansion, DISTINCT or fallible expressions still
+refuse. Native imported-value restoration that loses its explicit-order proof
+remains outside this extension.
+
+Core regression sources add 2,048 independently modeled weighted transitions
+covering hidden ranks and original-row tie-breaks, ASC/DESC and NULL placement,
+restored nullable imports, shifted group keys, first-support deletion/refill,
+outer multiplicity and exact deltas. They also cover native syntax admission,
+construction cancellation and refusal boundaries. A public standing-query lab
+regression checks literal lists against fresh snapshots after five commits,
+then integrates delayed subscription frames at their original frontiers and
+rebuilds after compaction.
+
+Independent source review completed. Rustfmt, compilation, runtime tests, UBS
+and the mandatory integrated gate remain UNRUN for this extension because the
+execution environment is unavailable; no passing runtime verdict is claimed.
+Integrated qualification `fgdb-qualify-integrated-nov22-maz0p` remains open.
+
 ### Maintained correlated collections — qualification pending
 
 Returning `CALL` and `OPTIONAL CALL` bodies can maintain `COLLECT` and
 `COLLECT(DISTINCT)` alongside the existing aggregate tuple. The compiler uses
 the existing native collection owner and keyed invocation circuit. Admission
-requires proven canonical complete-row input order both before and after
-invocation reconstruction, so duplicate occurrences and DISTINCT first-occurrence
-order survive deletion and refill. Unknown enumeration and explicit input
-comparators retain their refusal.
+originally required proven canonical complete-row input order both before and
+after invocation reconstruction, so duplicate occurrences and DISTINCT
+first-occurrence order survive deletion and refill. The explicit-order extension
+above now admits its separately proved input profile; unknown enumeration and
+other unproved comparators retain their refusal.
 
 Empty global collections become a typed empty list before post-group expressions
 or a terminal ranked page run. Grouped emptiness produces no fabricated group;

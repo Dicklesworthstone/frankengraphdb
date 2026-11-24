@@ -2,7 +2,9 @@
 //! Aggregates use RHS weights, never an outer-multiplied join.
 
 use super::*;
-use crate::algebra::{BindingSlot, GlaPlan, GraphValueRow, PreparedGraphPattern};
+use crate::algebra::{
+    BindingSlot, GlaPlan, GraphValueOrder, GraphValueRow, PreparedGraphPattern,
+};
 use crate::row_aggregate::definition::GroupDefinition;
 use crate::row_window::RowWindowSpec;
 use crate::{
@@ -128,7 +130,6 @@ fn aggregate_summary<'a, E>(
             {
                 return Ok(None);
             }
-            let mut collects = false;
             for spec in specs {
                 control(GlaExecutionEvent::Work)?;
                 if !matches!(
@@ -150,28 +151,78 @@ fn aggregate_summary<'a, E>(
                 ) {
                     return Ok(None);
                 }
-                collects |= matches!(
-                    spec.0,
-                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
-                );
-            }
-            // A counted bag alone cannot recover a positional input sequence.
-            // The keyed recipe below retains every public input cell and adds
-            // only a suffix constant within one invocation. Canonical complete
-            // rows therefore retain the original collection occurrence order.
-            // Explicit or unknown orders require a separate proof; never sort
-            // them here merely to obtain a maintained collection.
-            if collects
-                && !summary
-                    .input()
-                    .incremental_result_order()
-                    .is_some_and(|(order, _)| order.is_empty())
-            {
-                return Ok(None);
             }
             Ok(Some(summary))
         }
         _ => Ok(None),
+    }
+}
+
+/// A collection observes occurrences, not merely the aggregate input bag.
+/// Canonical complete rows need no extra state. An explicit sort may be
+/// followed only by total copies/constants and restoration of this invocation's
+/// single argument row; its original complete row becomes the ordering witness.
+enum CollectionInputOrder<'a> {
+    Canonical,
+    Explicit(&'a PreparedGraphSet),
+}
+
+fn collection_input_order<'a, E>(
+    query: &'a PreparedGraphSet,
+    imports: &[usize],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<CollectionInputOrder<'a>>, E> {
+    control(GlaExecutionEvent::Work)?;
+    if query
+        .incremental_result_order()
+        .is_some_and(|(order, _)| order.is_empty())
+    {
+        return Ok(Some(CollectionInputOrder::Canonical));
+    }
+    let mut current = query;
+    loop {
+        control(GlaExecutionEvent::Work)?;
+        if current.offset != 0 || current.count.is_some() {
+            return Ok(None);
+        }
+        if !current.order.is_empty() {
+            // A filter with its own order needs a separate staged predicate
+            // proof. The ordinary filter accessor admits unadorned nodes only.
+            if matches!(current.node, SetNode::Filter { .. }) {
+                return Ok(None);
+            }
+            return Ok(Some(CollectionInputOrder::Explicit(current)));
+        }
+        current = match &current.node {
+            SetNode::Scope(input) => input,
+            SetNode::Project {
+                input,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+                preserve_order: true,
+            } => {
+                for cell in projection {
+                    control(GlaExecutionEvent::Work)?;
+                    if !matches!(
+                        cell.value(),
+                        GraphSetValue::Column(_)
+                            | GraphSetValue::Literal(_)
+                            | GraphSetValue::TypedNull(_)
+                            | GraphSetValue::Value(_)
+                    ) {
+                        return Ok(None);
+                    }
+                }
+                input
+            }
+            SetNode::CrossJoin { left, right } => {
+                if argument_slots(right, imports, control)?.is_none() {
+                    return Ok(None);
+                }
+                left
+            }
+            _ => return Ok(None),
+        };
     }
 }
 
@@ -184,33 +235,42 @@ enum SummaryStage<'a> {
     Filter(&'a [GraphSetPredicateOp]),
     Restore(&'a PreparedGraphSet, Vec<usize>),
     Unwind(&'a PreparedGraphSet, &'a GraphSetValue),
+    CollectionOrder(&'a PreparedGraphSet),
+}
+
+struct CapturedCollectionOrder<'a> {
+    order: &'a [GraphValueOrder],
+    width: usize,
 }
 
 /// Peel row stages on either side of the aggregate without moving them across
 /// its conversion boundary. Rejoining a projection of Arguments contributes
 /// exactly one row from this invocation, even when an imported value is NULL.
+/// Only the proved collection-order boundary may carry an input comparator;
+/// deeper ordering and every input page still refuse.
 fn summary_stages<'a, E>(
     query: &'a PreparedGraphSet,
     imports: &[usize],
     terminal: Option<&PreparedGraphSet>,
+    collection_order: Option<&PreparedGraphSet>,
     stages: &mut Vec<SummaryStage<'a>>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<&'a PreparedGraphSet>, E> {
     control(GlaExecutionEvent::Work)?;
+    let capture_order = collection_order.is_some_and(|ordered| core::ptr::eq(ordered, query));
     if !query.unadorned_incremental_node()
         && !terminal.is_some_and(|page| core::ptr::eq(page, query))
+        && !capture_order
     {
         return Ok(None);
     }
-    let (input, stage) = match &query.node {
-        SetNode::Scope(input) => {
-            return summary_stages(input, imports, terminal, stages, control);
-        }
+    let next = match &query.node {
+        SetNode::Scope(input) => Some((input.as_ref(), None)),
         SetNode::Unwind { input, value } => {
             if !value.is_scan_local() {
                 return Ok(None);
             }
-            (input, SummaryStage::Unwind(query, value))
+            Some((input.as_ref(), Some(SummaryStage::Unwind(query, value))))
         }
         SetNode::Project {
             input,
@@ -224,47 +284,87 @@ fn summary_stages<'a, E>(
                     return Ok(None);
                 }
             }
-            (input, SummaryStage::Project(query, projection, *quantifier))
+            Some((
+                input.as_ref(),
+                Some(SummaryStage::Project(query, projection, *quantifier)),
+            ))
         }
         SetNode::Filter { input, .. } => {
             let Some((_, code)) = query.incremental_filter() else {
                 return Ok(None);
             };
-            (input, SummaryStage::Filter(code))
+            Some((input.as_ref(), Some(SummaryStage::Filter(code))))
         }
-        SetNode::CrossJoin { left, right } => {
-            let Some(columns) = argument_slots(right, imports, control)? else {
-                return Ok(Some(query));
-            };
-            (left, SummaryStage::Restore(query, columns))
+        SetNode::CrossJoin { left, right } => argument_slots(right, imports, control)?
+            .map(|columns| (left.as_ref(), Some(SummaryStage::Restore(query, columns)))),
+        _ => None,
+    };
+    let base = if let Some((input, stage)) = next {
+        let Some(base) =
+            summary_stages(input, imports, terminal, collection_order, stages, control)?
+        else {
+            return Ok(None);
+        };
+        if let Some(stage) = stage {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            stages.push(stage);
         }
-        _ => return Ok(Some(query)),
+        base
+    } else {
+        query
     };
-    let Some(base) = summary_stages(input, imports, terminal, stages, control)? else {
-        return Ok(None);
-    };
-    control(GlaExecutionEvent::ScratchEntry)?;
-    stages.push(stage);
+    if capture_order {
+        control(GlaExecutionEvent::ScratchEntry)?;
+        stages.push(SummaryStage::CollectionOrder(query));
+    }
     Ok(Some(base))
 }
 
 /// The private suffix contains the non-null join key and any original nullable
 /// values restored by WITH. They depend only on the invocation, so retaining
 /// them across DISTINCT preserves its original per-invocation multiplicity.
-fn summary_steps<E>(
+/// After an explicit collection sort, append its complete row as a witness.
+/// Later pure stages retain that witness, even when they drop the sort keys.
+fn summary_steps<'a, E>(
     initial: RowProjectionSpec,
-    stages: Vec<SummaryStage<'_>>,
+    stages: Vec<SummaryStage<'a>>,
     restored: &[usize],
     key_width: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<Option<Vec<RowProjectionSpec>>, E> {
+) -> Result<Option<(Vec<RowProjectionSpec>, Option<CapturedCollectionOrder<'a>>)>, E> {
     let mut steps = vec![initial];
     let private_width = key_width + restored.len();
+    let mut captured: Option<CapturedCollectionOrder<'a>> = None;
     for stage in stages {
         control(GlaExecutionEvent::Work)?;
         let types = steps.last().expect("initial frame").column_types();
-        let width = types.len() - private_width;
+        let retained_width = private_width + captured.as_ref().map_or(0, |order| order.width);
+        let width = types.len() - retained_width;
         let (query, mut values, quantifier) = match stage {
+            SummaryStage::CollectionOrder(query) => {
+                if captured.is_some()
+                    || query.order.is_empty()
+                    || query.offset != 0
+                    || query.count.is_some()
+                    || types.get(..width) != Some(query.types.as_slice())
+                {
+                    return Ok(None);
+                }
+                charge(types.len() + width, control)?;
+                let values = (0..types.len())
+                    .chain(0..width)
+                    .map(GraphSetValue::Column)
+                    .collect();
+                let Some(step) = project(types, values, control)? else {
+                    return Ok(None);
+                };
+                captured = Some(CapturedCollectionOrder {
+                    order: &query.order,
+                    width,
+                });
+                steps.push(step);
+                continue;
+            }
             SummaryStage::Filter(code) => {
                 charge(types.len() + code.len(), control)?;
                 let Ok(step) =
@@ -276,13 +376,13 @@ fn summary_steps<E>(
                 continue;
             }
             SummaryStage::Unwind(query, value) => {
-                // Expansion appends one public cell after the private suffix.
+                // Expansion appends one public cell after the retained suffix.
                 // Move that cell in front of the suffix immediately, before
                 // any later expression, filter, DISTINCT or aggregate reads
                 // the original body's column positions. The two ordinary
                 // owners preserve element multiplicity without expanding the
                 // outer bag's repeated invocation occurrences.
-                charge(types.len() + private_width + 1, control)?;
+                charge(types.len() + retained_width + 1, control)?;
                 let Ok(expansion) = RowProjectionSpec::unwind(
                     types.to_vec(),
                     names(types.len()),
@@ -330,7 +430,7 @@ fn summary_steps<E>(
                 (query, values, GraphSetQuantifier::All)
             }
         };
-        charge(private_width, control)?;
+        charge(retained_width, control)?;
         let public_width = values.len();
         values.extend((width..types.len()).map(GraphSetValue::Column));
         let Some(step) = distinct::projection(types, values, quantifier, control)? else {
@@ -341,7 +441,24 @@ fn summary_steps<E>(
         }
         steps.push(step);
     }
-    Ok(Some(steps))
+    if let Some(order) = &captured {
+        // The existing collection kernel compares explicit keys, then complete
+        // rows. Put the original sorted row FIRST, so that tie break is exact.
+        // Within one invocation all later cells are copies/constants of that
+        // witness and its arguments; equal witnesses cannot acquire a new tie.
+        let types = steps.last().expect("body frame").column_types();
+        let suffix = types.len() - order.width;
+        charge(types.len(), control)?;
+        let values = (suffix..types.len())
+            .chain(0..suffix)
+            .map(GraphSetValue::Column)
+            .collect();
+        let Some(reordered) = project(types, values, control)? else {
+            return Ok(None);
+        };
+        steps.push(reordered);
+    }
+    Ok(Some((steps, captured)))
 }
 
 // The source-restriction recipe below is specific to COUNT. In particular,
@@ -380,9 +497,11 @@ impl PreparedGraphSet {
     /// than tracing an aggregate argument through discarded computation. It
     /// admits any nonempty tuple of COUNT, integer SUM/AVG (including argument
     /// DISTINCT), typed MIN/MAX, and COLLECT with or without DISTINCT, including
-    /// imported values. Collections require canonical complete-row input order
-    /// both before and after invocation rekeying; unknown positional order and
-    /// explicit comparators retain their refusal. Relational
+    /// imported values. Collections retain canonical complete-row order or one
+    /// proved explicit sort, including hidden keys dropped by later pure output
+    /// projections. The complete sorted row remains a private ordering witness;
+    /// unknown positional order and unproved post-sort effects still refuse.
+    /// Relational
     /// DISTINCT retains the private invocation key at every body barrier.
     /// Reader-free list/range UNWIND may appear before and after the summary.
     /// Its appended member is placed before the private suffix so subsequent
@@ -422,8 +541,8 @@ impl PreparedGraphSet {
     /// consume page positions. Empty global completion still precedes the
     /// page, so SKIP can remove a zero COUNT or empty COLLECT before Optional
     /// null extension. Ordering the completed summaries does not relax the
-    /// collection input's separate canonical occurrence-order proof.
-    /// Intermediate or nested pages, unbounded ordering, internal exact-domain
+    /// collection input's separate occurrence-order proof.
+    /// Intermediate or nested pages, other unbounded ordering, internal exact-domain
     /// HAVING/output transforms,
     /// unsupported key domains and reader/ordinal effects retain their refusal.
     /// The optimized existing source-restriction recipe remains preferred.
@@ -449,7 +568,8 @@ impl PreparedGraphSet {
         }
         let terminal = bounded_window_input(self);
         let mut tail = Vec::new();
-        let Some(group_input) = summary_stages(body_query, imports, terminal, &mut tail, control)?
+        let Some(group_input) =
+            summary_stages(body_query, imports, terminal, None, &mut tail, control)?
         else {
             return Ok(None);
         };
@@ -458,8 +578,32 @@ impl PreparedGraphSet {
         };
         let original_keys = summary.group_key_columns();
         let grouped_width = original_keys.len();
+        let input_order = if summary.aggregate_specs().any(|(function, _)| {
+            matches!(
+                function,
+                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+            )
+        }) {
+            let Some(order) = collection_input_order(summary.input(), imports, control)? else {
+                return Ok(None);
+            };
+            Some(order)
+        } else {
+            None
+        };
+        let collection_boundary = match input_order {
+            Some(CollectionInputOrder::Explicit(query)) => Some(query),
+            _ => None,
+        };
         let mut stages = Vec::new();
-        let Some(source) = summary_stages(summary.input(), imports, None, &mut stages, control)?
+        let Some(source) = summary_stages(
+            summary.input(),
+            imports,
+            None,
+            collection_boundary,
+            &mut stages,
+            control,
+        )?
         else {
             return Ok(None);
         };
@@ -567,9 +711,12 @@ impl PreparedGraphSet {
         let Some(frame) = project(&input_types, values, control)? else {
             return Ok(None);
         };
-        let Some(body) = summary_steps(frame, stages, &restored, key_width, control)? else {
+        let Some((body, collection_order)) =
+            summary_steps(frame, stages, &restored, key_width, control)?
+        else {
             return Ok(None);
         };
+        let collection_width = collection_order.as_ref().map_or(0, |order| order.width);
         let width = body.last().expect("body frame").column_types().len() - private_width;
         // Grouping retains the actual complete relational input. The host
         // builds this same shared-source circuit, not a same-schema surrogate.
@@ -592,6 +739,13 @@ impl PreparedGraphSet {
                 return Ok(None);
             };
             active = next;
+        }
+        if let Some(order) = &collection_order {
+            charge(order.order.len(), control)?;
+            let Ok(ordered) = active.with_order_by(order.order) else {
+                return Ok(None);
+            };
+            active = ordered;
         }
         // Build names before the borrowed aggregate descriptors. Every output
         // is retained in declaration order, including otherwise unused values.
@@ -626,6 +780,7 @@ impl PreparedGraphSet {
         let mut collects = false;
         for ((function, argument), name) in summary.aggregate_specs().zip(&aggregate_names) {
             charge(1, control)?;
+            let argument = argument.map(|column| collection_width + column);
             let name = name.as_str();
             let aggregate = match (function, argument) {
                 (GraphAggregateFunction::CountRows, None) => GraphAggregate::count_rows(name),
@@ -661,11 +816,12 @@ impl PreparedGraphSet {
             };
             aggregates.push(aggregate);
         }
-        // The native collection owner orders these complete retained rows.
-        // Verify the reconstructed relation's proof too: a body expansion or
-        // order-preserving projection must not silently canonicalize a sequence
-        // that the original summary would visit differently.
+        // Canonical inputs still need the reconstructed relation's proof: a
+        // body expansion must not silently canonicalize an unknown sequence.
+        // Explicit inputs instead retain the complete original ordering witness
+        // and comparator, including the native whole-row tie break.
         if collects
+            && collection_order.is_none()
             && !active
                 .incremental_result_order()
                 .is_some_and(|(order, _)| order.is_empty())
@@ -677,7 +833,7 @@ impl PreparedGraphSet {
         // grouping position even when that position copies an imported value.
         charge(key_width + grouped_width, control)?;
         let keys: Vec<_> = (width..width + key_width)
-            .chain(original_keys.iter().copied())
+            .chain(original_keys.iter().map(|column| collection_width + column))
             .collect();
         let Ok(grouped) = active.group_by(&keys, &aggregates) else {
             return Ok(None);
@@ -773,7 +929,8 @@ impl PreparedGraphSet {
                 }
             }
         }
-        let Some(post_group) = summary_steps(completed, tail, &restored, key_width, control)?
+        let Some((post_group, None)) =
+            summary_steps(completed, tail, &restored, key_width, control)?
         else {
             return Ok(None);
         };

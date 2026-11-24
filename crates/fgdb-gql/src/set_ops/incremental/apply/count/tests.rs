@@ -4057,7 +4057,8 @@ fn collections_require_proven_input_order_and_distinct_can_restore_that_proof() 
             .unwrap(),
         base()
             .with_order_by(&[GraphValueOrder::descending(3)])
-            .unwrap(),
+            .unwrap()
+            .with_page(0, Some(1)),
     ] {
         let column = body.column_types().len() - 1;
         let summary = body
@@ -4124,6 +4125,8 @@ fn native_correlated_collections_keep_schema_identity_and_cancellation() {
         "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[:R]->(b:L) RETURN collect(b) AS members } RETURN a,members",
         "MATCH (a:L) WITH a OPTIONAL CALL(a) { MATCH (a)-[:R]->(b:L) RETURN collect(DISTINCT b) AS members,count(*) AS degree } RETURN a,members,degree",
         "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[:R]->(b:L) WITH DISTINCT b RETURN collect(b) AS members } RETURN a,members",
+        "MATCH (a:L) WITH a CALL(a) { MATCH (a)-[r:R]->(b) WITH b,id(r)%7 AS rank ORDER BY rank DESC RETURN collect(b) AS members } RETURN a,members",
+        "MATCH (a:L) WITH a OPTIONAL CALL(a) { MATCH (a)-[r:R]->(b) WITH b,id(r)%7 AS rank ORDER BY rank RETURN collect(DISTINCT b) AS members,count(*) AS degree } RETURN a,members,degree",
     ] {
         let query = PreparedGraphSetText::prepare(text, symbols)
             .unwrap()
@@ -4299,5 +4302,334 @@ fn ranked_collection_pages_preserve_lists_completion_and_optional_absence() {
                 }
             }
         }
+    }
+}
+
+
+fn ordered_collected_summary(
+    optional: bool,
+    grouped: bool,
+    descending: bool,
+) -> PreparedGraphSet {
+    let frame = || arguments(vec![GraphSetColumnType::Stored, GraphSetColumnType::Vertex]);
+    let args = frame();
+    let source = right();
+    let on = RowJoinSpec::cross(args.column_types(), source.column_types())
+        .unwrap()
+        .with_predicate(&[
+            GraphSetPredicateOp::Compare {
+                left: GraphSetOperand::Column(3),
+                comparison: IntegerComparison::NotEqual,
+                right: GraphSetOperand::Column(1),
+            },
+            GraphSetPredicateOp::IsNull {
+                operand: GraphSetOperand::Column(1),
+                is_null: true,
+            },
+            GraphSetPredicateOp::Or,
+        ])
+        .unwrap();
+    let rank = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::IdentityColumn {
+                column: 2,
+                text: false,
+            },
+            GraphIntegerOp::Literal(Some(2)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Remainder),
+        ])
+        .unwrap(),
+    );
+    let order = if descending {
+        GraphValueOrder::descending(2).with_nulls_first(true)
+    } else {
+        GraphValueOrder::ascending(2)
+    };
+    let body = args
+        .join(source, on)
+        .unwrap()
+        .project(
+            vec![
+                GraphSetProjection::new("ordinal", GraphSetValue::Column(2)),
+                GraphSetProjection::new("member", GraphSetValue::Column(3)),
+                GraphSetProjection::new("rank", rank),
+            ],
+            GraphSetQuantifier::All,
+        )
+        .unwrap()
+        .with_order_by(&[order])
+        .unwrap()
+        // Both the explicit sort key and the complete-row tie breaker
+        // disappear before grouping. Sorting only the retained member would
+        // reverse the rank-zero tie between ordinals 100 and 102.
+        .project_ordered_output(vec![GraphSetProjection::new(
+            "member",
+            GraphSetValue::Column(1),
+        )])
+        .unwrap()
+        .cross_join(
+            frame()
+                .project_ordered_output(vec![GraphSetProjection::new(
+                    "threshold",
+                    GraphSetValue::Column(0),
+                )])
+                .unwrap(),
+        )
+        .unwrap()
+        .project_ordered_output(vec![
+            GraphSetProjection::new("threshold", GraphSetValue::Column(1)),
+            GraphSetProjection::new("member", GraphSetValue::Column(0)),
+        ])
+        .unwrap()
+        .group_by(
+            if grouped { &[1] } else { &[] },
+            &[
+                GraphAggregate::count_rows("rows"),
+                GraphAggregate::collect("members", 1),
+                GraphAggregate::collect_distinct("unique", 1),
+                GraphAggregate::collect("imports", 0),
+            ],
+        )
+        .unwrap();
+    if optional {
+        outer().optional_apply(body, vec![0, 2]).unwrap()
+    } else {
+        outer().apply(body, vec![0, 2]).unwrap()
+    }
+}
+
+fn ordered_collected_right(mask: usize) -> ZSet<GraphValueRow> {
+    bag([
+        (mask & 1 != 0, row(vec![vertex(100), vertex(9)]), 2),
+        (mask & 2 != 0, row(vec![vertex(101), vertex(8)]), 3),
+        (mask != 0, row(vec![vertex(102), vertex(8)]), 4),
+        (mask != 0, row(vec![vertex(103), vertex(9)]), 1),
+        (mask != 0, row(vec![vertex(104), scalar(None)]), 2),
+        (mask != 0, row(vec![scalar(None), vertex(6)]), 1),
+    ]
+    .into_iter()
+    .filter_map(|(present, row, weight)| present.then_some((row, weight))))
+}
+
+// Literal source-identity order, independent of native comparators, recipes
+// and aggregates. NULL ranks lead DESC and follow ASC; equal ranks retain
+// the ascending complete-row tie breaker even in the descending profile.
+fn ordered_collected_oracle(
+    left: &ZSet<GraphValueRow>,
+    right: &ZSet<GraphValueRow>,
+    optional: bool,
+    grouped: bool,
+    descending: bool,
+) -> Bag {
+    let ordinals = if descending {
+        [None, Some(101), Some(103), Some(100), Some(102), Some(104)]
+    } else {
+        [Some(100), Some(102), Some(104), Some(101), Some(103), None]
+    };
+    let mut output = Bag::new();
+    for (outer, multiplicity) in left.iter() {
+        let threshold = &outer.values()[0];
+        let other = &outer.values()[2];
+        let mut groups = BTreeMap::<GraphValue, Vec<(GraphValue, i128)>>::new();
+        if !grouped {
+            groups.insert(scalar(None), Vec::new());
+        }
+        for ordinal in ordinals {
+            let identity = ordinal.map_or_else(|| scalar(None), vertex);
+            for (inner, weight) in right.iter() {
+                let member = &inner.values()[1];
+                if inner.values()[0] == identity
+                    && (other.is_null() || (!member.is_null() && member != other))
+                {
+                    groups
+                        .entry(if grouped {
+                            member.clone()
+                        } else {
+                            scalar(None)
+                        })
+                        .or_default()
+                        .push((member.clone(), weight.to_i128().unwrap()));
+                }
+            }
+        }
+        if groups.is_empty() && optional {
+            let mut cells = outer.values().to_vec();
+            cells.extend(vec![scalar(None); 5]);
+            output.insert(row(cells), multiplicity.to_i128().unwrap());
+        }
+        for (key, occurrences) in groups {
+            let mut count = 0_i64;
+            let mut members = Vec::new();
+            let mut unique = Vec::new();
+            let mut imports = Vec::new();
+            let mut seen = BTreeSet::new();
+            for (member, weight) in occurrences {
+                if !member.is_null() && seen.insert(member.clone()) {
+                    unique.push(member.clone());
+                }
+                for _ in 0..weight {
+                    count += 1;
+                    if !member.is_null() {
+                        members.push(member.clone());
+                    }
+                    if !threshold.is_null() {
+                        imports.push(threshold.clone());
+                    }
+                }
+            }
+            let mut cells = outer.values().to_vec();
+            if grouped {
+                cells.push(key);
+            }
+            cells.extend([
+                scalar(Some(count)),
+                collected_list(members),
+                collected_list(unique),
+                collected_list(imports),
+            ]);
+            output.insert(row(cells), multiplicity.to_i128().unwrap());
+        }
+    }
+    output
+}
+
+#[test]
+fn ordered_collections_keep_hidden_rank_ties_and_restored_imports() {
+    for descending in [false, true] {
+        for optional in [false, true] {
+            for grouped in [false, true] {
+                let query = ordered_collected_summary(optional, grouped, descending);
+                for before in 0..16 {
+                    for after in 0..16 {
+                        let old_left = filtered_left(before & 3);
+                        let old_right = ordered_collected_right(before >> 2);
+                        let next_left = filtered_left(after & 3);
+                        let next_right = ordered_collected_right(after >> 2);
+                        let old = ordered_collected_oracle(
+                            &old_left,
+                            &old_right,
+                            optional,
+                            grouped,
+                            descending,
+                        );
+                        let next = ordered_collected_oracle(
+                            &next_left,
+                            &next_right,
+                            optional,
+                            grouped,
+                            descending,
+                        );
+                        let mut circuit = FilteredCircuit::new(&query);
+                        circuit.tick(&old_left, &old_right).unwrap();
+                        assert_eq!(plain(circuit.rows()), old, "seed {before}");
+                        let delta = circuit
+                            .tick(
+                                &difference(&next_left, &old_left),
+                                &difference(&next_right, &old_right),
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            plain(circuit.rows()),
+                            next,
+                            "descending {descending}, optional {optional}, grouped {grouped}, {before}->{after}"
+                        );
+                        assert_eq!(
+                            delta,
+                            bag(next
+                                .into_iter()
+                                .chain(old.into_iter().map(|(row, n)| (row, -n))))
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn ordered_collection_recipes_preserve_identity_and_every_cancellation_checkpoint() {
+    for query in [
+        ordered_collected_summary(true, false, false),
+        ordered_collected_summary(false, true, true),
+    ] {
+        let original = query.canonical_bytes();
+        let mut calls = 0;
+        let recipe = query
+            .incremental_filtered_aggregate_with_control(&mut |_| {
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recipe.group.input().incremental_result_order().unwrap().0.len(),
+            1
+        );
+        for stop in 1..=calls {
+            let mut seen = 0;
+            assert!(
+                matches!(query.incremental_filtered_aggregate_with_control(&mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }), Err(at) if at == stop)
+            );
+            assert_eq!(seen, stop);
+            assert_eq!(query.canonical_bytes(), original);
+        }
+    }
+}
+
+#[test]
+fn ordered_collections_keep_input_pages_and_unproved_later_stages_refused() {
+    let ordered = || {
+        base()
+            .with_order_by(&[GraphValueOrder::descending(3)])
+            .unwrap()
+    };
+    let divide = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Literal(Some(1)),
+            GraphIntegerOp::Literal(Some(0)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+        ])
+        .unwrap(),
+    );
+    for body in [
+        ordered().with_page(0, Some(1)),
+        ordered()
+            .filter(&[GraphSetPredicateOp::Truth(Some(true))])
+            .unwrap(),
+        ordered()
+            .unwind(
+                "member".into(),
+                GraphSetValue::List(vec![GraphSetValue::Column(3)]),
+            )
+            .unwrap(),
+        ordered()
+            .project_ordered_output(vec![GraphSetProjection::new("failed", divide)])
+            .unwrap(),
+        ordered()
+            .project(
+                vec![GraphSetProjection::new("member", GraphSetValue::Column(3))],
+                GraphSetQuantifier::Distinct,
+            )
+            .unwrap(),
+        ordered()
+            .nested()
+            .unwrap()
+            .with_order_by(&[GraphValueOrder::ascending(3)])
+            .unwrap(),
+    ] {
+        let column = body.column_types().len() - 1;
+        let body = body
+            .group_by(&[], &[GraphAggregate::collect("members", column)])
+            .unwrap();
+        let query = outer().apply(body, vec![1, 1]).unwrap();
+        assert!(
+            query
+                .incremental_filtered_aggregate_with_control(&mut allow)
+                .unwrap()
+                .is_none()
+        );
     }
 }

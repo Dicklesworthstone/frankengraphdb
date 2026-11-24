@@ -987,3 +987,133 @@ fn collection_pipeline_parameters_are_frozen_and_reopening_rebuilds_from_storage
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn ordered_correlated_collections_replay_hidden_ranks_and_distinct_refills() {
+    let ((), report) = run_async_under_lab(0x4c47_010c, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for id in 1..=4 {
+            seed.create_vertex(VId(id), vec![], vec![]);
+        }
+        for (edge, destination) in [(10, 2), (18, 4), (12, 3), (13, 2)] {
+            seed.add_edge(EId(edge), VId(1), VId(destination), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let args = GqlParameters::new();
+        // The aggregate argument projection drops rank. The collection must
+        // still follow edge rank, including supports for the same destination.
+        let texts = [
+            "MATCH (a) WITH a UNWIND [1,1] AS copy WITH a CALL(a) { MATCH (a)-[r:R]->(b) WITH b,id(r)%7 AS rank ORDER BY rank DESC RETURN collect(b) AS values,collect(DISTINCT b) AS unique } RETURN a,values,unique",
+            "MATCH (a) WITH a UNWIND [1,1] AS copy WITH a OPTIONAL CALL(a) { MATCH (a)-[r:R]->(b) WITH b,id(r)%7 AS rank ORDER BY rank DESC RETURN collect(b) AS values,collect(DISTINCT b) AS unique } RETURN a,values,unique",
+        ];
+        let handles: Vec<_> = texts
+            .iter()
+            .map(|text| {
+                db.register_standing_native(&cx, text, &args, symbols, policy())
+                    .unwrap()
+            })
+            .collect();
+        let vertex_list = |ids: &[u128]| {
+            GraphValue::List(ids.iter().map(|id| GraphValue::Vertex(VId(*id))).collect())
+        };
+        let assert_lists = |db: &Database<MemVfs>,
+                            handle: &StandingQueryHandle,
+                            values: &[u128],
+                            unique: &[u128]| {
+            let rows = result_rows(db.standing_native_query(&cx, handle, policy()).unwrap().1);
+            // Every invocation has two outer occurrences, including global
+            // empty summaries. Their weights never multiply collection inputs.
+            assert_eq!(rows.len(), 8);
+            for (owner, copies) in (1..=4).zip(rows.chunks_exact(2)) {
+                for row in copies {
+                    assert_eq!(row.len(), 3);
+                    assert_eq!(row[0].as_value(), Some(&GraphValue::Vertex(VId(owner))));
+                    assert_eq!(
+                        row[1].as_value(),
+                        Some(&vertex_list(if owner == 1 { values } else { &[] }))
+                    );
+                    assert_eq!(
+                        row[2].as_value(),
+                        Some(&vertex_list(if owner == 1 { unique } else { &[] }))
+                    );
+                }
+            }
+        };
+        for (text, handle) in texts.iter().zip(&handles) {
+            assert_lists(&db, handle, &[2, 3, 4, 2], &[2, 3, 4]);
+            matches_snapshot(&db, &cx, text, &args, handle);
+        }
+        let mut subscription = db.open_standing_subscription(&cx, &handles[0]).unwrap();
+        subscription
+            .enable_replay(&mut db, &cx, 8, 1000, 1_000_000, policy())
+            .unwrap();
+        let baseline = subscription.poll(&db, &cx, policy()).unwrap().unwrap();
+        let mut accepted = copy(baseline.rows());
+        subscription.acknowledge(baseline.receipt()).unwrap();
+        let expected_lists: [(&[u128], &[u128]); 5] = [
+            (&[3, 4, 2], &[3, 4, 2]),
+            (&[2, 3, 4, 2], &[2, 3, 4]),
+            (&[2, 4, 2], &[2, 4]),
+            (&[4, 2], &[4, 2]),
+            (&[], &[]),
+        ];
+        let mut expected_replay = Vec::new();
+        for (step, (values, unique)) in expected_lists.into_iter().enumerate() {
+            let mut edit = WriteBatch::new(RelationId(1));
+            match step {
+                0 => {
+                    // Removing the earliest support for vertex 2 changes the
+                    // DISTINCT list order even though vertex 2 remains present.
+                    edit.delete_edge(EId(13));
+                }
+                1 => {
+                    edit.add_edge(EId(20), VId(1), VId(2), vec![]);
+                }
+                2 => {
+                    edit.delete_edge(EId(12));
+                }
+                3 => {
+                    edit.delete_edge(EId(20));
+                }
+                _ => {
+                    edit.delete_edge(EId(10));
+                    edit.delete_edge(EId(18));
+                }
+            }
+            let at = db.write(&commit, edit).await.unwrap();
+            for (text, handle) in texts.iter().zip(&handles) {
+                assert_lists(&db, handle, values, unique);
+                matches_snapshot(&db, &cx, text, &args, handle);
+            }
+            expected_replay.push((
+                at,
+                db.standing_native_bag(&cx, &handles[0], policy()).unwrap().1,
+            ));
+        }
+        // Consume only after all five commits. Every frame must reconstruct
+        // its own historical list, not the newest ranked supports.
+        for (at, expected) in expected_replay {
+            let frame = subscription.poll(&db, &cx, policy()).unwrap().unwrap();
+            assert!(!frame.is_snapshot());
+            assert_eq!(frame.frontier(), at);
+            accepted
+                .integrate(frame.rows(), LimbLimit::new(4), &mut |_| Ok::<_, ()>(()))
+                .unwrap();
+            assert_eq!(accepted, expected);
+            subscription.acknowledge(frame.receipt()).unwrap();
+        }
+        assert!(subscription.poll(&db, &cx, policy()).unwrap().is_none());
+        db.compact(&commit).await.unwrap();
+        for (text, handle) in texts.iter().zip(&handles) {
+            db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+            assert!(db.standing_group_delta(&cx, handle).unwrap().is_none());
+            assert_lists(&db, handle, &[], &[]);
+            matches_snapshot(&db, &cx, text, &args, handle);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
