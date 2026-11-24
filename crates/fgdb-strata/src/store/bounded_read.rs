@@ -983,6 +983,7 @@ impl<V: Vfs> BlockStore<V> {
         // Every caller validates the complete vertex history. A combined
         // analytics opener keeps the same immutable rows for its directory;
         // adjacency-only callers still retain no second patch collection.
+        let mut vertex_history = crate::root::VertexHistoryValidator::default();
         let patches = self
             .inspect_root_patches_observed(
                 cx,
@@ -990,7 +991,7 @@ impl<V: Vfs> BlockStore<V> {
                 |_, _, (rows, _)| retain_vertices.then_some(rows),
                 &mut observe,
                 1,
-                &mut super::RootWalk::default(),
+                |at, rows, _| vertex_history.observe_patch(at, rows),
             )
             .await?;
         let mut blocks = Vec::new();

@@ -3043,6 +3043,22 @@ fn compact_vertex_admission_matches_the_canonical_publication_history_validator(
             let id = PartitionRootVersion(id);
             let ordinary = store.admit_root(&query, id).await;
             assert_eq!(ordinary.is_ok(), expected.is_none(), "ordinary: {name}");
+            let counted = store
+                .reopen_counted(&query, id, |_| Ok::<(), StoreError>(()))
+                .await;
+            for (reader, result) in [
+                ("reopen", store.reopen(&query, id).await),
+                ("counted", counted),
+            ] {
+                if let Err(StoreError::MalformedRoot(owned)) = &ordinary {
+                    assert!(
+                        matches!(result, Err(StoreError::MalformedRoot(ref retained)) if retained == owned),
+                        "{reader} history conflict: {name}"
+                    );
+                } else {
+                    assert!(ordinary.is_ok() && result.is_ok(), "{reader}: {name}");
+                }
+            }
             let pool = MemoryPool::new(3 * 1024 * 1024, 0).unwrap();
             let compact = store
                 .open_buffered_root(&query, id, pool.clone(), limits())

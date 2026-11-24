@@ -480,29 +480,8 @@ pub fn compact_vertex_patches(
     let mut seen = 0usize;
     for rows in patches {
         for row in rows {
-            let key = (row.vid, row.created_at);
-            if let Some(existing) = statements.get(&key) {
-                crate::root::validate_vertex_restatement(existing, row)?;
-            } else {
-                let predecessor = statements
-                    .range(..key)
-                    .next_back()
-                    .filter(|((vid, _), _)| *vid == row.vid)
-                    .map(|(_, previous)| *previous);
-                if let Some(predecessor) = predecessor {
-                    crate::root::validate_vertex_successor(predecessor, row)?;
-                }
-                let successor = statements
-                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
-                    .next()
-                    .filter(|((vid, _), _)| *vid == row.vid)
-                    .map(|(_, next)| *next);
-                if let Some(successor) = successor {
-                    crate::root::validate_vertex_successor(row, successor)?;
-                }
-            }
+            crate::root::admit_retained_vertex_statement(&mut statements, row, |row| *row)?;
             seen += 1;
-            statements.insert(key, row);
         }
     }
     let retained: Vec<crate::vertex::VertexRow> = statements

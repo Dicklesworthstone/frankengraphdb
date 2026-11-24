@@ -3719,21 +3719,62 @@ impl<V: Vfs> BlockStore<V> {
         retain: impl FnMut(usize, &crate::root::PatchRef) -> bool,
     ) -> Result<Vec<VertexPatchRows>, StoreError> {
         let mut retain = retain;
+        let mut history = crate::root::VertexHistoryValidator::default();
         self.inspect_root_patches_observed(
             cx,
             root,
             |at, reference, (rows, _)| retain(at, reference).then_some(rows),
             &mut |_| Ok::<(), StoreError>(()),
             OPEN_READS_IN_FLIGHT,
-            &mut RootWalk::default(),
+            |at, rows, _| history.observe_patch(at, rows),
         )
         .await
+    }
+
+    /// Reopening a whole partition retains every patch. Validate each
+    /// statement against those rows while preserving publication order.
+    async fn read_all_root_patches(
+        &self,
+        cx: &impl StorageReadCx,
+        root: &crate::root::PartitionRoot,
+    ) -> Result<RetainedVertexHistory, StoreError> {
+        let mut statements = BTreeMap::new();
+        let patches = self
+            .inspect_root_patches_observed(
+                cx,
+                root,
+                |_, _, (rows, _)| Some(rows),
+                &mut |_| Ok::<(), StoreError>(()),
+                OPEN_READS_IN_FLIGHT,
+                |at, rows, prior: &[VertexPatchRows]| {
+                    for index in 0..rows.len() {
+                        crate::root::admit_retained_vertex_statement(
+                            &mut statements,
+                            (at, index),
+                            |&(patch, row)| {
+                                if patch == at {
+                                    &rows[row]
+                                } else {
+                                    &prior[patch][row]
+                                }
+                            },
+                        )?;
+                    }
+                    Ok(())
+                },
+            )
+            .await?;
+        Ok(RetainedVertexHistory {
+            patches,
+            statements,
+        })
     }
 
     /// Admit every vertex patch named by `root` and keep what `keep` returns
     /// for each; every patch is proven whether or not it is kept. `in_flight`
     /// bounds the reads running ahead of admission, as for blocks; a metering
-    /// `observe` passes 1. `walk` is left holding the vertex-history state.
+    /// `observe` passes 1. History admission runs before retention and can
+    /// refer to rows the caller has already kept.
     async fn inspect_root_patches_observed<E: From<StoreError>, T>(
         &self,
         cx: &impl StorageReadCx,
@@ -3741,10 +3782,13 @@ impl<V: Vfs> BlockStore<V> {
         mut keep: impl FnMut(usize, &crate::root::PatchRef, (VertexPatchRows, Vec<u8>)) -> Option<T>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
         in_flight: usize,
-        walk: &mut RootWalk,
+        mut admit_history: impl FnMut(
+            usize,
+            &VertexPatchRows,
+            &[T],
+        ) -> Result<(), crate::root::RootError>,
     ) -> Result<Vec<T>, E> {
         let mut patches = Vec::new();
-        let history = &mut walk.vertex_history;
         let mut reads = OrderedReads::new();
         let mut issued = 0;
         for (at, reference) in root.vertex_patches.iter().enumerate() {
@@ -3761,9 +3805,7 @@ impl<V: Vfs> BlockStore<V> {
                 ))
             })?;
             let read = self.admit_root_patch(at, reference, bytes, observe)?;
-            history
-                .observe_patch(at, &read.0)
-                .map_err(StoreError::MalformedRoot)?;
+            admit_history(at, &read.0, &patches).map_err(StoreError::MalformedRoot)?;
             if let Some(kept) = keep(at, reference, read) {
                 patches.try_reserve(1).map_err(|_| {
                     StoreError::Io(std::io::Error::new(
@@ -4520,7 +4562,7 @@ impl<V: Vfs> BlockStore<V> {
             blocks.push(entries);
             block_props.push(props);
         }
-        let patches = self.inspect_root_patches(cx, &root, |_, _| true).await?;
+        let patches = self.read_all_root_patches(cx, &root).await?.patches;
         Ok((root, blocks, block_props, patches))
     }
 
@@ -4575,18 +4617,17 @@ impl<V: Vfs> BlockStore<V> {
             block_props.push(props);
         }
         let patches = {
-            let mut walk = RootWalk::default();
-            let patches = self
-                .inspect_root_patches_observed(
-                    cx,
-                    &root,
-                    |_, _, (rows, _)| Some(rows),
-                    &mut |_| Ok::<(), E>(()),
-                    OPEN_READS_IN_FLIGHT,
-                    &mut walk,
-                )
-                .await?;
-            walk.visit_current_vertices(root.published_at, &mut visit)?;
+            let RetainedVertexHistory {
+                patches,
+                statements,
+            } = self.read_all_root_patches(cx, &root).await?;
+            visit_current_vertices(
+                statements
+                    .values()
+                    .map(|&(patch, row)| &patches[patch][row]),
+                root.published_at,
+                &mut visit,
+            )?;
             patches
         };
         visit(AdmittedCountEvent::Work)?;
@@ -4668,7 +4709,7 @@ impl<V: Vfs> BlockStore<V> {
                 |_, reference, read| Some((*reference, read)),
                 &mut |_| Ok::<(), StoreError>(()),
                 OPEN_READS_IN_FLIGHT,
-                &mut walk,
+                |at, rows, _| walk.vertex_history.observe_patch(at, rows),
             )
             .await?;
         let mut patches = Vec::with_capacity(read.len());
@@ -4846,6 +4887,12 @@ pub struct ReopenedPartition {
     pub admission: RootAdmission,
 }
 
+/// Each version points to its last admitted (patch, row) in publication order.
+struct RetainedVertexHistory {
+    patches: Vec<VertexPatchRows>,
+    statements: BTreeMap<(fgdb_types::VId, CommitSeq), (usize, usize)>,
+}
+
 /// The cross-object state one root walk accumulates beside the objects it
 /// keeps: the edge-history and chain-law state after the last block, and the
 /// vertex-history state after the last patch.
@@ -4888,20 +4935,20 @@ impl RootWalk {
         }
         Ok(())
     }
+}
 
-    fn visit_current_vertices<E>(
-        &self,
-        frontier: CommitSeq,
-        visit: &mut impl FnMut(AdmittedCountEvent<'_>) -> Result<(), E>,
-    ) -> Result<(), E> {
-        for row in self.vertex_history.statements() {
-            visit(AdmittedCountEvent::Work)?;
-            if row.visible_at(frontier) {
-                visit(AdmittedCountEvent::Vertex(&row.labels))?;
-            }
+fn visit_current_vertices<'a, E>(
+    statements: impl Iterator<Item = &'a crate::vertex::VertexRow>,
+    frontier: CommitSeq,
+    visit: &mut impl FnMut(AdmittedCountEvent<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    for row in statements {
+        visit(AdmittedCountEvent::Work)?;
+        if row.visible_at(frontier) {
+            visit(AdmittedCountEvent::Vertex(&row.labels))?;
         }
-        Ok(())
     }
+    Ok(())
 }
 
 /// What [`BlockStore::reopen_sealed`] proved about one root, besides the
@@ -4946,8 +4993,11 @@ impl RootAdmission {
         visit(AdmittedCountEvent::Work)?;
         self.walk
             .visit_current_edges(self.binding.published_at, &mut visit)?;
-        self.walk
-            .visit_current_vertices(self.binding.published_at, &mut visit)?;
+        visit_current_vertices(
+            self.walk.vertex_history.statements(),
+            self.binding.published_at,
+            &mut visit,
+        )?;
         visit(AdmittedCountEvent::Work)
     }
 

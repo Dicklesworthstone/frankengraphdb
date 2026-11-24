@@ -2790,6 +2790,46 @@ pub(crate) fn validate_vertex_successor(
     Ok(())
 }
 
+/// A new statement must join both adjacent versions of the same identity.
+fn validate_vertex_neighbors<'a, T>(
+    history: &'a std::collections::BTreeMap<(VId, CommitSeq), T>,
+    row: &crate::vertex::VertexRow,
+    resolve: impl Fn(&'a T) -> &'a crate::vertex::VertexRow,
+) -> Result<(), RootError> {
+    let key = (row.vid, row.created_at);
+    if let Some(((vid, _), previous)) = history.range(..key).next_back()
+        && *vid == row.vid
+    {
+        validate_vertex_successor(resolve(previous), row)?;
+    }
+    if let Some(((vid, _), next)) = history
+        .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+        .next()
+        && *vid == row.vid
+    {
+        validate_vertex_successor(row, resolve(next))?;
+    }
+    Ok(())
+}
+
+/// Collapse statements in publication order when their original patch rows
+/// are already retained. Store only the caller's reference or coordinate.
+pub(crate) fn admit_retained_vertex_statement<'a, T>(
+    history: &mut std::collections::BTreeMap<(VId, CommitSeq), T>,
+    source: T,
+    resolve: impl Fn(&T) -> &'a crate::vertex::VertexRow,
+) -> Result<(), RootError> {
+    let row = resolve(&source);
+    let key = (row.vid, row.created_at);
+    if let Some(existing) = history.get(&key) {
+        validate_vertex_restatement(resolve(existing), row)?;
+    } else {
+        validate_vertex_neighbors(history, row, |entry| resolve(entry))?;
+    }
+    history.insert(key, source);
+    Ok(())
+}
+
 impl VertexHistoryValidator {
     /// Borrow every collapsed statement without cloning labels or properties.
     /// A governed caller can poll before testing each row's visibility.
@@ -2834,31 +2874,8 @@ impl VertexHistoryValidator {
                 // entire row would deep-clone the same immutable values again.
                 existing.retired_at = row.retired_at;
                 continue;
-            } else {
-                // A NEW statement must extend its vid's chain contiguously:
-                // begin exactly where the predecessor retired (a gap is a
-                // resurrection, an overlap is aliasing), keep the birth
-                // ordinal, and — if a later statement already exists — retire
-                // exactly where that successor begins.
-                let predecessor = self
-                    .rows
-                    .range(..key)
-                    .next_back()
-                    .filter(|((vid, _), _)| *vid == row.vid)
-                    .map(|(_, existing)| existing);
-                if let Some(predecessor) = predecessor {
-                    validate_vertex_successor(predecessor, row)?;
-                }
-                let successor = self
-                    .rows
-                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
-                    .next()
-                    .filter(|((vid, _), _)| *vid == row.vid)
-                    .map(|(_, existing)| existing);
-                if let Some(successor) = successor {
-                    validate_vertex_successor(row, successor)?;
-                }
             }
+            validate_vertex_neighbors(&self.rows, row, |existing| existing)?;
             self.rows.insert(key, row.clone());
         }
         // `patch_at` names the publication position for future diagnostics;
