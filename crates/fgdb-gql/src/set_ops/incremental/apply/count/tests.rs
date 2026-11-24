@@ -1260,21 +1260,24 @@ fn filtered_count_recipe_retains_the_complete_input_and_all_cancellation_points(
     }
 }
 
-fn has_filtered_aggregate(query: &PreparedGraphSet) -> bool {
-    if query
+fn filtered_aggregate_recipe(query: &PreparedGraphSet) -> Option<MaintainedFilteredAggregate<'_>> {
+    if let Some(recipe) = query
         .incremental_filtered_aggregate_with_control(&mut allow)
         .unwrap()
-        .is_some()
     {
-        return true;
+        return Some(recipe);
     }
     match &query.node {
         SetNode::Scope(input)
         | SetNode::Project { input, .. }
         | SetNode::Filter { input, .. }
-        | SetNode::Unwind { input, .. } => has_filtered_aggregate(input),
-        _ => false,
+        | SetNode::Unwind { input, .. } => filtered_aggregate_recipe(input),
+        _ => None,
     }
+}
+
+fn has_filtered_aggregate(query: &PreparedGraphSet) -> bool {
+    filtered_aggregate_recipe(query).is_some()
 }
 
 #[test]
@@ -1705,6 +1708,12 @@ fn scalar_recipe_retains_complete_input_and_cancellation_while_count_fast_path_s
 
 #[test]
 fn scalar_recipe_accepts_native_calls_and_keeps_conditional_effect_refusals() {
+    let bind = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
     for (function, distinct) in [
         ("sum", false),
         ("sum", true),
@@ -1718,26 +1727,32 @@ fn scalar_recipe_accepts_native_calls_and_keeps_conditional_effect_refusals() {
         let text = format!(
             "MATCH (a:L) WITH a,a.p AS score CALL (a,score) {{ MATCH (a)-[:R]->(b:L) WHERE b <> a RETURN {call} AS total }} RETURN a,total"
         );
-        let query = PreparedGraphSetText::prepare(&text, symbols)
-            .unwrap()
-            .bind_parameters(&GqlParameters::new())
-            .unwrap();
-        assert!(has_filtered_aggregate(&query), "{text}");
+        assert!(has_filtered_aggregate(&bind(&text)), "{text}");
     }
+    let grouped = "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN b,sum(1) AS total } RETURN a,total";
+    let query = bind(grouped);
+    let recipe = filtered_aggregate_recipe(&query).expect(grouped);
+    // The two invocation slots precede the visible b key; the scalar 1
+    // occupies its own aggregate input slot.
+    assert_eq!(recipe.complete.keys(), &[(0, 0), (1, 1)]);
+    assert_eq!(recipe.group.group_key_columns(), &[2, 3, 0]);
+    assert_eq!(
+        recipe.group.aggregate_specs().collect::<Vec<_>>(),
+        [(GraphAggregateFunction::SumInt, Some(1))]
+    );
+    assert_eq!(
+        recipe.group.input().column_types()[..2],
+        [GraphSetColumnType::Vertex, GraphSetColumnType::Scalar]
+    );
     for text in [
         "MATCH (a:L) WITH a,a.p AS threshold CALL (a,threshold) { MATCH (b:L) WHERE b.p > threshold RETURN sum(id(b)) AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN avg(b.p) AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH b LIMIT 1 RETURN min(b) AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a WITH DISTINCT b LIMIT 1 RETURN max(b) AS total } RETURN a,total",
-        "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN b,sum(1) AS total } RETURN a,total",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN sum(1) AS total,collect(b) AS values } RETURN a,total,values",
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN collect(b) AS total } RETURN a,total",
     ] {
-        let query = PreparedGraphSetText::prepare(text, symbols)
-            .unwrap()
-            .bind_parameters(&GqlParameters::new())
-            .unwrap();
-        assert!(!has_filtered_aggregate(&query), "{text}");
+        assert!(!has_filtered_aggregate(&bind(text)), "{text}");
     }
 }
 
