@@ -2,9 +2,7 @@ use super::*;
 use crate::{DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use fgdb_gql::{GqlParameters, PreparedGraphSetText, PreparedGraphText};
-use fgdb_types::{
-    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts,
-};
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts};
 
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
@@ -297,7 +295,7 @@ fn reachability_registration_and_rebuild(
         profile,
         ReachabilityProfile::Properties | ReachabilityProfile::BoundedProperties
     );
-    let ((), report) = run_async_under_lab(0x6e73_7c11, |root| async move {
+    let ((), report) = run_async_under_lab(0x6e73_7c11, move |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -310,9 +308,7 @@ fn reachability_registration_and_rebuild(
                 if property_payloads {
                     vec![(
                         fgdb_delta_types::PropertyKeyId(1),
-                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
-                            i64::try_from(id).unwrap(),
-                        )),
+                        CanonicalScalar::Int(i64::try_from(id).unwrap()),
                     )]
                 } else {
                     vec![]

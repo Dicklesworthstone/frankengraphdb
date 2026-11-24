@@ -150,17 +150,17 @@ fn argument_and_unwind_summaries_follow_real_property_edge_and_outer_changes() {
                 2 => edit.delete_edge(EId(11)),
                 3 => {
                     edit.delete_edge(EId(12));
-                    edit.add_edge(EId(15), VId(5), VId(2), vec![]);
+                    edit.add_edge(EId(15), VId(5), VId(2), vec![])
                 }
                 4 => edit.set_vertex_label(VId(5), L, false),
                 5 => edit.delete_vertex(VId(1)),
                 6 => {
                     edit.set_vertex_label(VId(5), L, true);
-                    edit.set_vertex_property(VId(5), P, Some(CanonicalScalar::Int(0)));
+                    edit.set_vertex_property(VId(5), P, Some(CanonicalScalar::Int(0)))
                 }
                 7 => {
                     edit.set_vertex_label(VId(3), L, false);
-                    edit.set_vertex_label(VId(5), L, false);
+                    edit.set_vertex_label(VId(5), L, false)
                 }
                 8 => {
                     edit.create_vertex(VId(u128::MAX), vec![L], vec![(P, CanonicalScalar::Int(3))])
@@ -522,14 +522,14 @@ fn grouped_correlated_summaries_follow_group_lifetimes_and_restore_optional_occu
                 0 => change.add_edge(EId(15), VId(1), VId(4), vec![]),
                 1 => {
                     change.set_vertex_property(VId(1), P, None);
-                    change.delete_edge(EId(11));
+                    change.delete_edge(EId(11))
                 }
                 2 => change.delete_edge(EId(12)),
                 3 => change.delete_edge(EId(15)),
                 4 => change.set_vertex_label(VId(4), M, false),
                 5 => change.set_vertex_label(VId(5), L, false),
                 _ => unreachable!(),
-            }
+            };
             db.write(&commit, change).await.unwrap();
             let groups = match phase {
                 0 => vec![
