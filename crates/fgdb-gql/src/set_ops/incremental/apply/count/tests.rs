@@ -1314,7 +1314,6 @@ fn count_over_distinct_retains_outer_rows_and_counts_null_witnesses() {
     let left = bag(tokens
         .iter()
         .map(|(token, owner, weight)| (row(vec![token.clone(), vertex(*owner)]), *weight)));
-    let rhs = |b, weight| (row(vec![vertex(1), vertex(b)]), weight);
     let expected = |degree| {
         bag(tokens.iter().map(|(token, owner, weight)| {
             (
@@ -1327,10 +1326,27 @@ fn count_over_distinct_retains_outer_rows_and_counts_null_witnesses() {
             )
         }))
     };
-    for (projection, initial_degree) in [("b", 2), ("b,NULL AS missing", 2), ("NULL AS missing", 1)]
-    {
+    for (projection, returns_neighbor, initial_degree) in [
+        ("b", true, 2),
+        ("b,NULL AS missing", true, 2),
+        ("NULL AS missing", false, 1),
+    ] {
         let query = prepare(projection);
-        let mut circuit = FilteredCircuit::from_recipe(filtered_aggregate_recipe(&query).unwrap());
+        let recipe = filtered_aggregate_recipe(&query).unwrap();
+        let right_width = if returns_neighbor { 2 } else { 1 };
+        assert_eq!(
+            recipe.right.column_types(),
+            vec![GraphSetColumnType::Vertex; right_width],
+            "{projection}"
+        );
+        let rhs = |b, weight| {
+            let mut values = vec![vertex(1)];
+            if returns_neighbor {
+                values.push(vertex(b));
+            }
+            (row(values), weight)
+        };
+        let mut circuit = FilteredCircuit::from_recipe(recipe);
         let initial = expected(initial_degree);
         assert_eq!(
             circuit.tick(&left, &bag([rhs(2, 2), rhs(4, 1)])).unwrap(),
