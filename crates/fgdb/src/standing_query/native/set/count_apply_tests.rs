@@ -192,8 +192,14 @@ fn argument_and_unwind_summaries_follow_real_property_edge_and_outer_changes() {
         for ((text, query, handle), rows) in definitions.iter().zip(&expected) {
             db.rebuild_standing_query(&cx, handle, policy()).unwrap();
             check(&db, &cx, text, query, handle, rows, policy());
-            check_delta(&db, &cx, handle, db.frontier().unwrap(), rows, rows);
         }
+        super::tests::check_first_tick_after_rebuild(
+            &mut db,
+            &cx,
+            &commit,
+            definitions.iter().map(|entry| &entry.2),
+        )
+        .await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -561,8 +567,14 @@ fn grouped_correlated_summaries_follow_group_lifetimes_and_restore_optional_occu
         for (text, query, handle, _, _, expected) in &queries {
             db.rebuild_standing_query(&cx, handle, policy()).unwrap();
             check(&db, &cx, text, query, handle, expected, policy());
-            check_delta(&db, &cx, handle, db.frontier().unwrap(), expected, expected);
         }
+        super::tests::check_first_tick_after_rebuild(
+            &mut db,
+            &cx,
+            &commit,
+            queries.iter().map(|entry| &entry.2),
+        )
+        .await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -958,8 +970,14 @@ fn native_count_and_call_summarize_parallel_witnesses_once_per_outer_occurrence(
         for ((text, query, handle), rows) in queries.iter().zip(&expected) {
             db.rebuild_standing_query(&cx, handle, policy()).unwrap();
             check(&db, &cx, text, query, handle, rows, policy());
-            check_delta(&db, &cx, handle, db.frontier().unwrap(), rows, rows);
         }
+        super::tests::check_first_tick_after_rebuild(
+            &mut db,
+            &cx,
+            &commit,
+            queries.iter().map(|entry| &entry.2),
+        )
+        .await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -2957,15 +2975,14 @@ fn correlated_summary_continuations_keep_empty_groups_duplicates_and_exact_delta
                 &expected[*selected],
                 policy(),
             );
-            check_delta(
-                &db,
-                &cx,
-                handle,
-                db.frontier().unwrap(),
-                &expected[*selected],
-                &expected[*selected],
-            );
         }
+        super::tests::check_first_tick_after_rebuild(
+            &mut db,
+            &cx,
+            &commit,
+            queries.iter().map(|entry| &entry.2),
+        )
+        .await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

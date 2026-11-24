@@ -887,14 +887,16 @@ fn imported_map_input_and_external_sort_reserve_one_live_allowance() {
                 .unwrap();
             let (weight, row) = cursor.next_change().await.unwrap().unwrap();
             assert_eq!(weight, 2);
+            assert!(cursor.next_change().await.unwrap().is_none());
+            drop(cursor);
+            assert!(pool.used() >= row.as_ref().len());
             assert_eq!(
                 GraphValueRow::decode_canonical(row.as_ref())
                     .unwrap()
                     .values(),
                 &[scalar(3)]
             );
-            assert!(cursor.next_change().await.unwrap().is_none());
-            drop(cursor);
+            drop(row);
             assert_eq!(pool.used(), 0);
         }
         assert_eq!(

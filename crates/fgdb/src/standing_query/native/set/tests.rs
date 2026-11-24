@@ -7,6 +7,41 @@ use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeConte
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
 }
+
+/// The rebuild establishes a baseline. Each fixture selects labeled owners,
+/// so adding an unlabeled vertex advances the frontier with an empty result delta.
+pub(super) async fn check_first_tick_after_rebuild<'a>(
+    db: &mut Database<MemVfs>,
+    cx: &QueryCx,
+    commit: &fgdb_types::CommitCx,
+    handles: impl IntoIterator<Item = &'a StandingQueryHandle>,
+) {
+    let from = db.frontier().unwrap();
+    let handles: Vec<_> = handles.into_iter().collect();
+    assert!(!handles.is_empty());
+    for handle in &handles {
+        for requested in [CommitSeq(from.0.checked_sub(1).unwrap()), from] {
+            assert!(matches!(
+                db.standing_native_delta(cx, handle, requested, policy()),
+                Err(StandingQueryError::DeltaUnavailable { from: refused, frontier })
+                    if refused == requested && frontier == from
+            ));
+        }
+    }
+    let mut change = WriteBatch::new(RelationId(1));
+    change.create_vertex(VId(0xf00d_fa11), vec![], vec![]);
+    let next = db.write(commit, change).await.unwrap();
+    assert_eq!(next, CommitSeq(from.0 + 1));
+    for handle in handles {
+        for _ in 0..2 {
+            let (at, delta) = db
+                .standing_native_delta(cx, handle, from, policy())
+                .unwrap();
+            assert_eq!(at, next);
+            assert!(delta.is_empty());
+        }
+    }
+}
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0x61; 32],

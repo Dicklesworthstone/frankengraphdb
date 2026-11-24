@@ -331,8 +331,14 @@ fn native_exists_filters_and_values_keep_outer_bags_through_first_and_last_witne
         for ((text, query, handle), rows) in queries.iter().zip(&expected) {
             db.rebuild_standing_query(&cx, handle, policy()).unwrap();
             check(&db, &cx, text, query, handle, rows);
-            check_delta(&db, &cx, handle, db.frontier().unwrap(), rows, rows);
         }
+        super::tests::check_first_tick_after_rebuild(
+            &mut db,
+            &cx,
+            &commit,
+            queries.iter().map(|entry| &entry.2),
+        )
+        .await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
