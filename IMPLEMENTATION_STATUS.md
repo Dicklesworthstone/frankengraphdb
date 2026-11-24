@@ -12,6 +12,49 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Cold relational and aggregate execution — qualification pending
+
+`BufferedReadPublication::into_authorized_ordered_read_session` composes the
+canonical authorized session with bounded cold sources and three host-owned
+scratch files. Its `execute_ordered` and `execute_ordered_aggregate` methods
+reuse the existing external relation, grouping, sorting and final-delivery
+owners. The source adapter supplies scoped native vertex and typed single-edge
+leaves; UNION/INTERSECT/EXCEPT, products and row joins, supported scalar stages,
+correlated CALL and exact terminal aggregates retain their native semantics.
+Numeric cells, collection occurrence order, complete groups and final pages
+do not gain a second evaluator or reducer.
+
+Authorization, immutable prepared-handle identity, exact historical cut and
+recursive effect admission precede candidate and scratch access. Every branch
+and correlated body is checked, even under empty inputs or LIMIT zero. Complete
+property maps, carried-element property/metadata readers, endpoint property
+payloads, walks, probes, fixed-edge joins and procedures still refuse. Direct
+selected leaf properties remain behind staged visibility admission; supported
+row-only expressions can compose over already captured scalar values.
+
+The shared return guard now also owns affine buffered backends. An unpolled
+execution returns its backend without I/O. Dropping a polled pending source,
+scratch operation or completed-output read closes that cold session; fresh
+authority checks surround each poll and final row delivery. Ordinary query
+allowance refusals remain distinct from lifetime revocation. Source copy and
+evaluator reservations survive awaited spill appends, while returned encoded
+or aggregate rows retain their own reservations after cursor/session drop.
+Private input uses the existing external allowance; only final delivered rows
+spend the signed result-row quota. Default resident backend types keep their
+existing APIs and pending behavior.
+
+Six public regression sources exercise literal masked relations, scalar stages,
+selected products and CALL, weighted UNION rows, exact numeric and collection
+aggregates, historical cuts, preflight before I/O, pending-drop closure, late
+expiry, final quotas and retained output charges. The served-source regression
+also distinguishes native identity-ordered scalar output from unsupported
+unordered output and endpoint-property reads. Independent source review,
+pinned Rustfmt parsing/checks and whitespace checks passed. Compilation, runtime
+tests, Clippy, UBS and integrated qualification remain UNRUN after the earlier
+pinned dependency compiler termination. This API does not route server ordered
+requests to cold storage or qualify the full Loom/out-of-core architecture;
+`fgdb-w5-executor-olp` and `fgdb-qualify-integrated-nov22-maz0p` remain open.
+
 ### Served buffered source streams — qualification pending
 
 `DatabaseConfig::buffered_reads` and the per-database

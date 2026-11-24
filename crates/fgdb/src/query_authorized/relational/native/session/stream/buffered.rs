@@ -23,6 +23,9 @@ mod source;
 pub use source::OutputGuard as AuthorizedBufferedOutputGuard;
 use source::{Position, Source};
 
+#[path = "buffered/ordered.rs"]
+mod ordered;
+
 /// Typed refusal at the authorized buffered boundary. Query/credential failures
 /// retain the canonical QueryError; opening, catalog and cold storage failures
 /// remain distinguishable and are never represented as missing graph rows.
@@ -328,34 +331,7 @@ fn take_returned<V: Vfs>(slot: &Returned<V>) -> Option<AuthorizedBufferedReadSou
         .take()
 }
 
-struct ReturnGuard<'q, V: Vfs> {
-    session: &'q mut Option<AuthorizedBufferedReadSource<V>>,
-    returned: Returned<V>,
-    terminal: bool,
-}
-impl<V: Vfs> ReturnGuard<'_, V> {
-    fn fail(&mut self) {
-        self.terminal = true;
-        let returned = take_returned(&self.returned);
-        let pinned = self.session.take();
-        drop(returned);
-        drop(pinned);
-    }
-}
-impl<V: Vfs> Drop for ReturnGuard<'_, V> {
-    fn drop(&mut self) {
-        let returned = take_returned(&self.returned);
-        if self.terminal {
-            let pinned = self.session.take();
-            drop(returned);
-            drop(pinned);
-        } else if let Some(backend) = returned {
-            *self.session = Some(backend);
-        }
-        // Destructors run after the lock is gone. Before source construction,
-        // an ordinary refusal leaves the still-populated session slot intact.
-    }
-}
+type ReturnGuard<'q, V> = PinGuard<'q, AuthorizedBufferedReadSource<V>>;
 
 struct PollFence<'g, 'q, V: Vfs> {
     guard: &'g mut ReturnGuard<'q, V>,
@@ -626,12 +602,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
         } = state;
         let returned = Arc::new(Mutex::new(None));
         let mut guard = ReturnGuard {
-            session: view,
-            returned: returned.clone(),
-            terminal: true,
+            pin: view,
+            returned: Some(returned.clone()),
+            armed: true,
         };
         let outcome: Result<_, AuthorizedBufferedError> = (|| {
-            let backend = guard.session.as_ref().ok_or(QueryError::Authorization(
+            let backend = guard.pin.as_ref().ok_or(QueryError::Authorization(
                 AuthorizationError::ExecutionStopped,
             ))?;
             let now = clock();
@@ -673,7 +649,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
             let metadata = pool
                 .reserve(cx, 1024 + size_of::<Source<'q, V, C>>())
                 .map_err(BufferedReadError::Memory)?;
-            let mut backend = guard.session.take().expect("admitted backend is pinned");
+            let mut backend = guard.pin.take().expect("admitted backend is pinned");
             let position = match &plan {
                 Plan::Vertex(..) => backend
                     .view
@@ -694,7 +670,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
             let position = match position {
                 Ok(position) => position,
                 Err(error) => {
-                    *guard.session = Some(backend);
+                    *guard.pin = Some(backend);
                     return Err(error.into());
                 }
             };
@@ -723,7 +699,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
         })();
         match outcome {
             Ok((inner, execution, columns, at, metadata)) => {
-                guard.terminal = false;
+                guard.armed = false;
                 Ok(AuthorizedBufferedRowCursor {
                     inner: Some(inner),
                     guard,
@@ -736,7 +712,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send, V: Vfs + Clone>
                 })
             }
             Err(error) => {
-                guard.terminal = error.terminal();
+                guard.armed = error.terminal();
                 Err(error)
             }
         }

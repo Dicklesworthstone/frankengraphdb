@@ -70,6 +70,7 @@ where
         } = state;
         let mut guard = PinGuard {
             pin: view,
+            returned: None,
             armed: true,
         };
         let opened = open(

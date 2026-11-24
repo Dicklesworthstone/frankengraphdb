@@ -532,6 +532,10 @@ pub(crate) fn spool_refusal(error: impl Into<NativeSpoolError>) -> Refusal {
             return query_refusal(*error);
         }
         NativeSpoolError::Aggregate(error) => return aggregate_spool_refusal(*error),
+        NativeSpoolError::BufferedRead(error) => {
+            return super::buffered::refusal(fgdb::AuthorizedBufferedError::Read(*error));
+        }
+        NativeSpoolError::BufferedSession(error) => return super::buffered::refusal(*error),
         error => error,
     };
     let code = match &error {

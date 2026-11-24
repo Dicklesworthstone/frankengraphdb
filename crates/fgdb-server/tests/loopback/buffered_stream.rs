@@ -124,7 +124,8 @@ fn buffered_text_and_prepared_streams_preserve_masking_history_and_typed_edges()
                 ExecuteMode::Write,
                 "CREATE (a:Person {age:7,name:'left'}), (b:Person {age:8,name:'right'}), \
              (h:Company {age:999,name:'hidden'}), \
-             (a)-[:KNOWS {age:3}]->(b), (a)-[:KNOWS {age:4}]->(b), \
+             (a)-[:KNOWS {age:3,name:'private-left'}]->(b), \
+             (a)-[:KNOWS {age:4,name:'private-right'}]->(b), \
              (a)-[:WORKS_AT {age:999}]->(b), (a)-[:KNOWS {age:999}]->(h)",
                 vec![],
             )
@@ -149,7 +150,7 @@ fn buffered_text_and_prepared_streams_preserve_masking_history_and_typed_edges()
             .execute(
                 cx,
                 ExecuteMode::ReadStream,
-                "MATCH (a)-[r:KNOWS]->(b) RETURN r.age AS weight, b.name AS hidden ORDER BY r",
+                "MATCH (a)-[r:KNOWS]->(b) RETURN r.age AS weight, r.name AS hidden ORDER BY r",
                 vec![],
             )
             .await
@@ -293,7 +294,7 @@ fn buffered_credit_cancellation_budget_and_refusal_release_the_only_source_slot(
                 .execute(
                     cx,
                     ExecuteMode::ReadStream,
-                    "MATCH (n:Person) RETURN n.age AS age LIMIT 1",
+                    "MATCH (n:Person) RETURN n.age AS age ORDER BY n LIMIT 1",
                     vec![],
                 )
                 .await
@@ -314,7 +315,7 @@ fn buffered_credit_cancellation_budget_and_refusal_release_the_only_source_slot(
                 .execute(
                     cx,
                     ExecuteMode::ReadStream,
-                    "MATCH (a)-[r:WORKS_AT]->(b) RETURN r.age AS age",
+                    "MATCH (a)-[r:WORKS_AT]->(b) RETURN r.age AS age ORDER BY r",
                     vec![],
                 )
                 .await
@@ -322,20 +323,26 @@ fn buffered_credit_cancellation_budget_and_refusal_release_the_only_source_slot(
                 .rows
                 .is_empty()
         );
-        assert_eq!(
-            server_code(
-                reader
-                    .execute(
-                        cx,
-                        ExecuteMode::ReadStream,
-                        "MATCH (n:Person) RETURN count(*) AS n",
-                        vec![],
-                    )
-                    .await
-                    .unwrap_err()
-            ),
-            ErrorCode::Statement
-        );
+        for unsupported in [
+            "MATCH (n:Person) RETURN count(*) AS n",
+            // Without an explicit identity order the scalar-only result
+            // needs a blocking order. The configured source does not sort.
+            "MATCH (n:Person) RETURN n.age AS age LIMIT 1",
+            // The bounded edge profile admits selected edge fields and
+            // endpoint topology, not endpoint property payloads.
+            "MATCH (a)-[r:KNOWS]->(b) RETURN r.age,b.name ORDER BY r",
+        ] {
+            assert_eq!(
+                server_code(
+                    reader
+                        .execute(cx, ExecuteMode::ReadStream, unsupported, vec![])
+                        .await
+                        .unwrap_err()
+                ),
+                ErrorCode::Statement,
+                "{unsupported}"
+            );
+        }
         assert_eq!(
             server_code(
                 reader

@@ -132,14 +132,40 @@ enum RowPlan {
 // The pin slot is disjoint from the borrowed capability/clock. Arming before
 // callbacks makes unwind close this session even if a caller catches the panic
 // and tries to poll or explicitly close the still-borrowing cursor afterward.
-struct PinGuard<'q> {
-    pin: &'q mut Option<EmbeddedReadView>,
+struct PinGuard<'q, Backend = EmbeddedReadView> {
+    pin: &'q mut Option<Backend>,
+    returned: Option<Arc<Mutex<Option<Backend>>>>,
     armed: bool,
 }
-impl Drop for PinGuard<'_> {
+impl<Backend> PinGuard<'_, Backend> {
+    fn take_returned(&self) -> Option<Backend> {
+        self.returned.as_ref().and_then(|slot| {
+            slot.lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+        })
+    }
+
+    fn fail(&mut self) {
+        self.armed = true;
+        let returned = self.take_returned();
+        let pinned = self.pin.take();
+        drop(returned);
+        drop(pinned);
+    }
+}
+impl<Backend> Drop for PinGuard<'_, Backend> {
     fn drop(&mut self) {
+        // An asynchronous source returns its affine backend before this guard
+        // restores or discards it. No backend destructor runs under the slot
+        // lock. Resident sources leave the optional return slot absent.
+        let returned = self.take_returned();
         if self.armed {
-            self.pin.take();
+            let pinned = self.pin.take();
+            drop(returned);
+            drop(pinned);
+        } else if let Some(backend) = returned {
+            *self.pin = Some(backend);
         }
     }
 }
@@ -1223,6 +1249,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         } = state;
         let mut guard = PinGuard {
             pin: view,
+            returned: None,
             armed: true,
         };
         let result = open(

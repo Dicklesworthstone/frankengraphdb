@@ -8,12 +8,12 @@ use crate::{NativeAggregateSpoolCursor, NativeAggregateSpoolRow};
 use fgdb_gql::GraphAggregateTextSlot;
 use fgdb_gql::spill_aggregate::{AsyncSpillAggregatePlan, SpillAggregateDefinition};
 
-struct BoundAggregateOrder {
-    input: AsyncSpillSetPlan,
-    definition: SpillAggregateDefinition,
-    columns: Vec<String>,
-    slots: Vec<GraphAggregateTextSlot>,
-    at: CommitSeq,
+pub(in super::super) struct BoundAggregateOrder {
+    pub(in super::super) input: AsyncSpillSetPlan,
+    pub(in super::super) definition: SpillAggregateDefinition,
+    pub(in super::super) columns: Vec<String>,
+    pub(in super::super) slots: Vec<GraphAggregateTextSlot>,
+    pub(in super::super) at: CommitSeq,
 }
 
 fn compile_graph_input(
@@ -34,7 +34,7 @@ fn compile_graph_input(
     }
 }
 
-fn bind_aggregate_order(
+pub(in super::super) fn bind_aggregate_definition(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
     default: CommitSeq,
@@ -116,7 +116,6 @@ fn bind_aggregate_order(
     {
         return Err(unsupported());
     }
-    admit_external_sources(&input)?;
     Ok(BoundAggregateOrder {
         input: *input,
         definition,
@@ -124,6 +123,16 @@ fn bind_aggregate_order(
         slots: slots.to_vec(),
         at,
     })
+}
+
+fn bind_aggregate_order(
+    prepared: &PreparedNativeRead,
+    params: &GqlParameters,
+    default: CommitSeq,
+) -> core::result::Result<BoundAggregateOrder, QueryError> {
+    let bound = bind_aggregate_definition(prepared, params, default)?;
+    admit_external_sources(&bound.input)?;
+    Ok(bound)
 }
 
 struct OpenedAggregateOrder<'q, C> {
@@ -158,6 +167,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
         } = state;
         let mut guard = PinGuard {
             pin: view,
+            returned: None,
             armed: true,
         };
         let result = open(
@@ -336,20 +346,23 @@ where
 /// One admitted external aggregate, with public schema before first demand.
 /// Keep this exact future while a host services cancellation or flow control.
 /// Dropping it never completes pending work or exposes a private scratch run.
-pub struct AuthorizedAggregateOrderExecution<'q, F> {
-    future:
-        Pin<Box<dyn Future<Output = Result<AuthorizedAggregateSpoolCursor<'q, F>>> + Send + 'q>>,
-    columns: Vec<String>,
-    at: CommitSeq,
+pub struct AuthorizedAggregateOrderExecution<'q, F, Backend = EmbeddedReadView> {
+    pub(in super::super) future: Pin<
+        Box<
+            dyn Future<Output = Result<AuthorizedAggregateSpoolCursor<'q, F, Backend>>> + Send + 'q,
+        >,
+    >,
+    pub(in super::super) columns: Vec<String>,
+    pub(in super::super) at: CommitSeq,
 }
 
-impl<F> core::fmt::Debug for AuthorizedAggregateOrderExecution<'_, F> {
+impl<F, Backend> core::fmt::Debug for AuthorizedAggregateOrderExecution<'_, F, Backend> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("AuthorizedAggregateOrderExecution([REDACTED])")
     }
 }
 
-impl<F> AuthorizedAggregateOrderExecution<'_, F> {
+impl<F, Backend> AuthorizedAggregateOrderExecution<'_, F, Backend> {
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
@@ -359,8 +372,8 @@ impl<F> AuthorizedAggregateOrderExecution<'_, F> {
     }
 }
 
-impl<'q, F> Future for AuthorizedAggregateOrderExecution<'q, F> {
-    type Output = Result<AuthorizedAggregateSpoolCursor<'q, F>>;
+impl<'q, F, Backend> Future for AuthorizedAggregateOrderExecution<'q, F, Backend> {
+    type Output = Result<AuthorizedAggregateSpoolCursor<'q, F, Backend>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.get_mut().future.as_mut().poll(cx)
@@ -371,20 +384,20 @@ impl<'q, F> Future for AuthorizedAggregateOrderExecution<'q, F> {
 /// RETURN slots refer to keys()/values() on each row without cloning repeated
 /// output values. Each returned row owns its decoded memory reservation.
 /// Scratch handles, source counters and a reusable permit never escape.
-pub struct AuthorizedAggregateSpoolCursor<'q, F> {
-    reader: Option<NativeAggregateSpoolCursor<'q, F>>,
-    control: Option<LiveControl<'q>>,
-    guard: Option<PinGuard<'q>>,
-    cx: &'q QueryCx,
-    columns: Vec<String>,
-    slots: Vec<GraphAggregateTextSlot>,
-    keys: Vec<String>,
-    aggregates: Vec<String>,
-    at: CommitSeq,
-    state: ScanState,
+pub struct AuthorizedAggregateSpoolCursor<'q, F, Backend = EmbeddedReadView> {
+    pub(in super::super) reader: Option<NativeAggregateSpoolCursor<'q, F>>,
+    pub(in super::super) control: Option<LiveControl<'q>>,
+    pub(in super::super) guard: Option<PinGuard<'q, Backend>>,
+    pub(in super::super) cx: &'q QueryCx,
+    pub(in super::super) columns: Vec<String>,
+    pub(in super::super) slots: Vec<GraphAggregateTextSlot>,
+    pub(in super::super) keys: Vec<String>,
+    pub(in super::super) aggregates: Vec<String>,
+    pub(in super::super) at: CommitSeq,
+    pub(in super::super) state: ScanState,
 }
 
-impl<F> core::fmt::Debug for AuthorizedAggregateSpoolCursor<'_, F> {
+impl<F, Backend> core::fmt::Debug for AuthorizedAggregateSpoolCursor<'_, F, Backend> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedAggregateSpoolCursor")
             .field("state", &self.state)
@@ -393,7 +406,7 @@ impl<F> core::fmt::Debug for AuthorizedAggregateSpoolCursor<'_, F> {
     }
 }
 
-impl<F> AuthorizedAggregateSpoolCursor<'_, F> {
+impl<F, Backend> AuthorizedAggregateSpoolCursor<'_, F, Backend> {
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
@@ -431,7 +444,9 @@ impl<F> AuthorizedAggregateSpoolCursor<'_, F> {
     }
 }
 
-impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> AuthorizedAggregateSpoolCursor<'_, F> {
+impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin, Backend>
+    AuthorizedAggregateSpoolCursor<'_, F, Backend>
+{
     /// Decode one exact aggregate row under the retained permit. Pending drop,
     /// source/decode failure and delivery refusal permanently fuse this cursor.
     /// A final authority check precedes exposing the independently charged row.

@@ -27,6 +27,7 @@ mod procedure;
 #[path = "ordered/terminal_aggregate.rs"]
 mod terminal_aggregate;
 pub use terminal_aggregate::{AuthorizedAggregateOrderExecution, AuthorizedAggregateSpoolCursor};
+pub(super) use terminal_aggregate::{BoundAggregateOrder, bind_aggregate_definition};
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 type PreparedOrderedSession<'a, R, C, A, B, D> = (
@@ -51,7 +52,7 @@ pub struct AuthorizedSortLimits {
     pub max_sort_work: u64,
 }
 impl AuthorizedSortLimits {
-    fn external(self) -> ExternalOrderLimits {
+    pub(super) fn external(self) -> ExternalOrderLimits {
         ExternalOrderLimits {
             group_capacity: self.group_capacity,
             max_partitions: self.max_partitions,
@@ -64,7 +65,7 @@ impl AuthorizedSortLimits {
         }
     }
 
-    fn validate(self) -> Result<()> {
+    pub(super) fn validate(self) -> Result<()> {
         if self.group_capacity == 0
             || self.max_partitions == 0
             || self.run_rows == 0
@@ -91,7 +92,8 @@ impl AuthorizedSortLimits {
 }
 
 /// A narrowed session with three privately owned, trusted scratch backends.
-/// Obtain it only through `Database::authorized_ordered_read_session`.
+/// Obtain it through a trusted Database resident-session factory or
+/// `BufferedReadPublication::into_authorized_ordered_read_session`.
 ///
 /// The host fixes the database generation, capability, catalog, clock, native
 /// policy, spill backends and physical ceilings together. Request code can
@@ -99,16 +101,19 @@ impl AuthorizedSortLimits {
 /// that observes private pre-window rows or recover a raw completed spool.
 /// Files keep the existing append-only quotas and poisoning laws across calls.
 /// Close/drop never evaluates pending work; backend/path retirement belongs to
-/// the host's query region. No durable result, resume token or spill of the
-/// underlying resident graph is implied.
-pub struct AuthorizedOrderedReadSession<'a, R, C, A, B, D> {
-    session: AuthorizedReadSession<'a, R, C>,
-    scratch: SpillFile<A>,
-    destination: SpillFile<B>,
-    auxiliary: SpillFile<D>,
-    limits: AuthorizedSortLimits,
+/// the host's query region. The chosen backend fixes whether graph leaves use
+/// resident history or one buffered publication. No durable result or resume
+/// token is implied.
+pub struct AuthorizedOrderedReadSession<'a, R, C, A, B, D, Backend = EmbeddedReadView> {
+    pub(super) session: AuthorizedReadSession<'a, R, C, Backend>,
+    pub(super) scratch: SpillFile<A>,
+    pub(super) destination: SpillFile<B>,
+    pub(super) auxiliary: SpillFile<D>,
+    pub(super) limits: AuthorizedSortLimits,
 }
-impl<R, C, A, B, D> core::fmt::Debug for AuthorizedOrderedReadSession<'_, R, C, A, B, D> {
+impl<R, C, A, B, D, Backend> core::fmt::Debug
+    for AuthorizedOrderedReadSession<'_, R, C, A, B, D, Backend>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedOrderedReadSession")
             .field("closed", &self.session.is_closed())
@@ -116,7 +121,7 @@ impl<R, C, A, B, D> core::fmt::Debug for AuthorizedOrderedReadSession<'_, R, C, 
             .finish()
     }
 }
-impl<R, C, A, B, D> AuthorizedOrderedReadSession<'_, R, C, A, B, D> {
+impl<R, C, A, B, D, Backend> AuthorizedOrderedReadSession<'_, R, C, A, B, D, Backend> {
     pub fn close(&mut self) {
         self.session.close();
     }
@@ -124,8 +129,8 @@ impl<R, C, A, B, D> AuthorizedOrderedReadSession<'_, R, C, A, B, D> {
         self.session.is_closed()
     }
 }
-impl<R: GraphSymbolResolver, C: FnMut() -> u64, A, B, D>
-    AuthorizedOrderedReadSession<'_, R, C, A, B, D>
+impl<R: GraphSymbolResolver, C: FnMut() -> u64, A, B, D, Backend>
+    AuthorizedOrderedReadSession<'_, R, C, A, B, D, Backend>
 {
     /// Retain only immutable syntax/catalog bindings owned by this session.
     /// No query execution, scratch admission or result-row reservation occurs.
@@ -315,10 +320,10 @@ impl EmbeddedReadView {
     }
 }
 
-fn authorized(error: QueryError) -> NativeSpoolError {
+pub(super) fn authorized(error: QueryError) -> NativeSpoolError {
     NativeSpoolError::Authorized(Box::new(error))
 }
-fn terminal_spool(error: &NativeSpoolError) -> bool {
+pub(super) fn terminal_spool(error: &NativeSpoolError) -> bool {
     match error {
         NativeSpoolError::Authorized(error) | NativeSpoolError::Prepare(error) => {
             terminal_error(error)
@@ -853,6 +858,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
         } = state;
         let mut guard = PinGuard {
             pin: view,
+            returned: None,
             armed: true,
         };
         let result = open(
@@ -1408,7 +1414,7 @@ impl<C: FnMut() -> u64 + Send> ExternalOrderHost for ScopedOrderHost<'_, C> {
 
 // These stages have no buffered graph source. Preserve the authorized set
 // error surface for data and controls, including its original row ordinal.
-fn stage_error(error: NativeSpoolError) -> NativeSpoolError {
+pub(super) fn stage_error(error: NativeSpoolError) -> NativeSpoolError {
     let error = match error {
         NativeSpoolError::SetExecution(error) => {
             GqlQueryError::Source(error.map_source(|never| match never {}))
@@ -1522,8 +1528,8 @@ where
 // Physical sort/encoding work is pre-reserved; native stage evaluation charges
 // the same live permit per event. Fresh checks surround EVERY poll, including
 // Pending and errors. A bounded synchronous section is not preempted midway.
-async fn checked_future<T>(
-    guard: &mut PinGuard<'_>,
+pub(super) async fn checked_future<T, Backend>(
+    guard: &mut PinGuard<'_, Backend>,
     mut checkpoint: impl FnMut() -> core::result::Result<(), QueryError>,
     future: impl Future<Output = Result<T>>,
 ) -> Result<T> {
@@ -1539,17 +1545,25 @@ async fn checked_future<T>(
             guard.armed = terminal_error(&error);
             return Poll::Ready(Err(authorized(error)));
         }
-        guard.armed = matches!(&outcome, Poll::Ready(Err(error)) if terminal_spool(error));
+        guard.armed = match &outcome {
+            // An affine cold source cannot be reused after its in-flight pull
+            // is dropped. Resident completed-spool reads retain their existing
+            // cursor-only fusion rule.
+            Poll::Pending => guard.returned.is_some(),
+            Poll::Ready(Err(error)) => terminal_spool(error),
+            Poll::Ready(Ok(_)) => false,
+        };
         outcome
     })
     .await
 }
 
-enum Control {
+pub(super) enum Control {
     Checkpoint,
     Deliver(usize),
 }
-type LiveControl<'q> = Box<dyn FnMut(Control) -> core::result::Result<(), QueryError> + Send + 'q>;
+pub(super) type LiveControl<'q> =
+    Box<dyn FnMut(Control) -> core::result::Result<(), QueryError> + Send + 'q>;
 
 impl<'a, R, C, A, B, D> AuthorizedOrderedReadSession<'a, R, C, A, B, D>
 where
@@ -1721,17 +1735,18 @@ where
 /// one final cursor; dropping never finishes the query or exposes a spool.
 /// A host must retain this exact future across control-frame pauses, because
 /// dropping an in-flight scratch operation preserves its poisoning rules.
-pub struct AuthorizedOrderExecution<'q, F> {
-    future: Pin<Box<dyn Future<Output = Result<AuthorizedSpoolCursor<'q, F>>> + Send + 'q>>,
-    columns: Vec<String>,
-    at: CommitSeq,
+pub struct AuthorizedOrderExecution<'q, F, Backend = EmbeddedReadView> {
+    pub(super) future:
+        Pin<Box<dyn Future<Output = Result<AuthorizedSpoolCursor<'q, F, Backend>>> + Send + 'q>>,
+    pub(super) columns: Vec<String>,
+    pub(super) at: CommitSeq,
 }
-impl<F> core::fmt::Debug for AuthorizedOrderExecution<'_, F> {
+impl<F, Backend> core::fmt::Debug for AuthorizedOrderExecution<'_, F, Backend> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("AuthorizedOrderExecution([REDACTED])")
     }
 }
-impl<F> AuthorizedOrderExecution<'_, F> {
+impl<F, Backend> AuthorizedOrderExecution<'_, F, Backend> {
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
@@ -1739,8 +1754,8 @@ impl<F> AuthorizedOrderExecution<'_, F> {
         self.at
     }
 }
-impl<'q, F> Future for AuthorizedOrderExecution<'q, F> {
-    type Output = Result<AuthorizedSpoolCursor<'q, F>>;
+impl<'q, F, Backend> Future for AuthorizedOrderExecution<'q, F, Backend> {
+    type Output = Result<AuthorizedSpoolCursor<'q, F, Backend>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.get_mut().future.as_mut().poll(cx)
@@ -1752,16 +1767,16 @@ impl<'q, F> Future for AuthorizedOrderExecution<'q, F> {
 /// leave `next_row`. Returned buffers retain their spill-pool reservations.
 /// Earlier delivered rows remain valid after a later refusal. Close/drop does
 /// not read the suffix, and there is no independent reader or raw spool getter.
-pub struct AuthorizedSpoolCursor<'q, F> {
-    reader: Option<NativeSpoolCursor<'q, F>>,
-    control: Option<LiveControl<'q>>,
-    guard: Option<PinGuard<'q>>,
-    cx: &'q QueryCx,
-    columns: Vec<String>,
-    at: CommitSeq,
-    state: ScanState,
+pub struct AuthorizedSpoolCursor<'q, F, Backend = EmbeddedReadView> {
+    pub(super) reader: Option<NativeSpoolCursor<'q, F>>,
+    pub(super) control: Option<LiveControl<'q>>,
+    pub(super) guard: Option<PinGuard<'q, Backend>>,
+    pub(super) cx: &'q QueryCx,
+    pub(super) columns: Vec<String>,
+    pub(super) at: CommitSeq,
+    pub(super) state: ScanState,
 }
-impl<F> core::fmt::Debug for AuthorizedSpoolCursor<'_, F> {
+impl<F, Backend> core::fmt::Debug for AuthorizedSpoolCursor<'_, F, Backend> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedSpoolCursor")
             .field("state", &self.state)
@@ -1769,7 +1784,7 @@ impl<F> core::fmt::Debug for AuthorizedSpoolCursor<'_, F> {
             .finish()
     }
 }
-impl<F> AuthorizedSpoolCursor<'_, F> {
+impl<F, Backend> AuthorizedSpoolCursor<'_, F, Backend> {
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
@@ -1791,10 +1806,11 @@ impl<F> AuthorizedSpoolCursor<'_, F> {
         self.guard.take();
     }
 }
-impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> AuthorizedSpoolCursor<'_, F> {
+impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin, Backend> AuthorizedSpoolCursor<'_, F, Backend> {
     /// Drive one authenticated frame read under the original QueryCx. A dropped
     /// in-flight call fuses this cursor; an unwound host callback additionally
-    /// closes the session. No caller-selected clock or policy is accepted.
+    /// closes the session. An affine buffered backend also closes its session
+    /// after a dropped Pending pull. No caller-selected clock or policy is accepted.
     pub async fn next_row(&mut self) -> Result<Option<TrackedBytes>> {
         if self.state != ScanState::Open {
             return Ok(None);

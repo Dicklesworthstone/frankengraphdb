@@ -37,6 +37,9 @@ pub enum NativeSpoolError {
     Procedure(Box<GqlQueryError<crate::GqlError, Cancel>>),
     /// Snapshot admission for a source that opens no graph scan.
     BufferedRead(Box<crate::BufferedReadError>),
+    /// An authorized cold publication retains its opening, catalog and
+    /// fixed-cut refusal without erasing those domains into a query string.
+    BufferedSession(Box<crate::AuthorizedBufferedError>),
     SetExecution(fgdb_gql::GraphSetExecutionError<core::convert::Infallible>),
     /// A completed intermediate group preserves the native reducer's errors.
     Aggregate(Box<NativeAggregateSpoolError>),
@@ -66,6 +69,7 @@ impl core::fmt::Display for NativeSpoolError {
             Self::BufferedExecute(e) => e.fmt(f),
             Self::Procedure(e) => e.fmt(f),
             Self::BufferedRead(e) => e.fmt(f),
+            Self::BufferedSession(e) => e.fmt(f),
             Self::SetExecution(e) => e.fmt(f),
             Self::Aggregate(e) => e.fmt(f),
             Self::Spill(e) => e.fmt(f),
@@ -96,6 +100,7 @@ impl core::error::Error for NativeSpoolError {
             Self::BufferedExecute(e) => Some(e.as_ref()),
             Self::Procedure(e) => Some(e.as_ref()),
             Self::BufferedRead(e) => Some(e.as_ref()),
+            Self::BufferedSession(e) => Some(e.as_ref()),
             Self::SetExecution(e) => Some(e),
             Self::Aggregate(e) => Some(e.as_ref()),
             Self::Spill(e) => Some(e),
@@ -336,6 +341,7 @@ impl PreparedNativeRead {
 pub(crate) struct SpoolRow {
     row: GraphValueRow,
     _charge: Option<MemoryCharge>,
+    _evaluation: Option<Arc<std::sync::Mutex<MemoryCharge>>>,
     tracked_encoding: bool,
 }
 impl SpoolRow {
@@ -343,6 +349,7 @@ impl SpoolRow {
         Self {
             row,
             _charge: None,
+            _evaluation: None,
             tracked_encoding: false,
         }
     }
@@ -350,6 +357,19 @@ impl SpoolRow {
         Self {
             row,
             _charge: Some(charge),
+            _evaluation: None,
+            tracked_encoding: true,
+        }
+    }
+    pub(crate) fn buffered_with_evaluation(
+        row: GraphValueRow,
+        charge: MemoryCharge,
+        evaluation: Arc<std::sync::Mutex<MemoryCharge>>,
+    ) -> Self {
+        Self {
+            row,
+            _charge: Some(charge),
+            _evaluation: Some(evaluation),
             tracked_encoding: true,
         }
     }
@@ -357,6 +377,7 @@ impl SpoolRow {
         Self {
             row,
             _charge: None,
+            _evaluation: None,
             tracked_encoding: true,
         }
     }

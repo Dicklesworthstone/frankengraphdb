@@ -122,6 +122,12 @@ impl core::fmt::Debug for OutputGuard {
     }
 }
 
+impl OutputGuard {
+    pub(super) fn into_parts(self) -> (MemoryCharge, Arc<Mutex<MemoryCharge>>) {
+        (self._copy, self._evaluation)
+    }
+}
+
 pub(super) struct VertexRecord {
     labels: Vec<LabelId>,
     fields: BufferedVertexProperties,

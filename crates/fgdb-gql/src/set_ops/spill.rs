@@ -997,6 +997,17 @@ impl SpillSetStage {
         self.count
     }
 
+    /// Whether this stage can request a property or metadata value from a
+    /// carried element. Hosts without a scoped point reader use this cached
+    /// effect to refuse the complete program before opening any source.
+    pub fn may_read_elements(&self) -> bool {
+        match &self.operation {
+            Operation::Identity | Operation::Filter(_) => false,
+            Operation::Project { reads_elements, .. }
+            | Operation::Unwind { reads_elements, .. } => *reads_elements,
+        }
+    }
+
     /// The finite occurrence window of a singleton range or its immediately
     /// following identity projection. Neither stage may reorder the members.
     pub fn singleton_range_page(&self, next: Option<&Self>) -> Option<(u64, u64)> {
@@ -1127,12 +1138,7 @@ impl SpillSetStage {
         M: Fn(usize) -> Result<G, E> + Sync,
         G: Send,
     {
-        let reads_elements = match &self.operation {
-            Operation::Identity | Operation::Filter(_) => false,
-            Operation::Project { reads_elements, .. }
-            | Operation::Unwind { reads_elements, .. } => *reads_elements,
-        };
-        if !reads_elements {
+        if !self.may_read_elements() {
             return self.start(row, row_index, control);
         }
         self.admit_input(&row, control)?;
