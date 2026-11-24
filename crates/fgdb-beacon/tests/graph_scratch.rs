@@ -379,3 +379,246 @@ fn scratch_bounded_execution_matches_independent_min_plus_oracle() {
         }
     }
 }
+
+fn fusion_index() -> fgdb_beacon::IndexSnapshot {
+    use fgdb_beacon::{BeaconIndex, DistanceMetric, HnswConfig, IndexConfig, IndexDocument};
+
+    BeaconIndex::build(
+        IndexConfig {
+            vector: Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean).exact_only()),
+            ..IndexConfig::default()
+        },
+        [
+            (1, 0.0, "red"),
+            (2, 1.0, "blue"),
+            (3, 2.0, "red"),
+            (4, 3.0, "red"),
+        ]
+        .map(|(id, coordinate, text)| IndexDocument {
+            id: VId(id),
+            vector: Some(vec![coordinate]),
+            text: Some(text.to_owned()),
+        }),
+        &mut WorkBudget::new(1_000_000),
+    )
+    .unwrap()
+    .snapshot()
+}
+
+fn fusion_query() -> fgdb_beacon::ExactHybridQuery<'static> {
+    use fgdb_beacon::{ExactHybridQuery, ExactRrfProfile, TextMatch, VectorSearch};
+
+    ExactHybridQuery {
+        vector: &[0.0],
+        text: "red",
+        boolean_text: None,
+        k: 3,
+        vector_candidates: 2,
+        text_candidates: 2,
+        vector_mode: VectorSearch::Exact,
+        text_mode: TextMatch::Any,
+        profile: ExactRrfProfile::default(),
+    }
+}
+
+struct CancelScratch {
+    calls: usize,
+    stop: usize,
+}
+
+impl WorkControl for CancelScratch {
+    fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
+        Ok(())
+    }
+
+    fn reserve_scratch(&mut self, _: usize) -> Result<(), BeaconError> {
+        self.calls += 1;
+        if self.calls == self.stop {
+            Err(BeaconError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn check_fusion_scratch<T: core::fmt::Debug + PartialEq>(
+    entries: usize,
+    mut run: impl FnMut(&mut dyn WorkControl) -> Result<T, BeaconError>,
+) -> T {
+    let mut work = Control::new(entries);
+    let expected = run(&mut work).unwrap();
+    assert_eq!(work.used, entries);
+    for limit in 0..entries {
+        let mut short = Control::new(limit);
+        assert_eq!(
+            run(&mut short).unwrap_err(),
+            BeaconError::ResourceLimit {
+                resource: "test scratch",
+                limit,
+            }
+        );
+        assert!(short.used <= limit);
+    }
+    for stop in 1..=work.calls {
+        let mut cancelled = CancelScratch { calls: 0, stop };
+        assert_eq!(run(&mut cancelled).unwrap_err(), BeaconError::Cancelled);
+        assert_eq!(cancelled.calls, stop);
+    }
+    // Every failed attempt discarded its private prefix. The same immutable
+    // snapshot still returns the complete native answer under work-only control.
+    assert_eq!(run(&mut WorkBudget::new(1_000_000)).unwrap(), expected);
+    expected
+}
+
+#[test]
+fn indexed_fusion_admits_the_union_once_before_ranking_and_output() {
+    let snapshot = fusion_index();
+    let query = fusion_query();
+    // Vector [1,2], text [1,3]: U=3. Three evidence entries, three
+    // retained heap slots and three result rows: U + 2*min(k,U) = 9.
+    let rows = check_fusion_scratch(9, |work| {
+        snapshot.hybrid_search_exact_fusion(query, |_| true, work)
+    });
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [VId(1), VId(2), VId(3)]
+    );
+    assert_eq!(
+        (rows[0].score.numerator(), rows[0].score.denominator()),
+        (2, 61)
+    );
+    // Disjoint singleton populations: both equal 1/61, ordered by VId.
+    let disjoint = fgdb_beacon::ExactHybridQuery {
+        text: "blue",
+        k: 2,
+        vector_candidates: 1,
+        text_candidates: 1,
+        ..query
+    };
+    let rows = check_fusion_scratch(6, |work| {
+        snapshot.hybrid_search_exact_fusion(disjoint, |_| true, work)
+    });
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [VId(1), VId(2)]
+    );
+    // VId 3 replaces the first heap occupant; replacement is not new scratch.
+    // Vector [3,2,4], text [1,3,4]: U=4, k=1, so six entries suffice.
+    let replacing = fgdb_beacon::ExactHybridQuery {
+        vector: &[2.0],
+        k: 1,
+        vector_candidates: 3,
+        text_candidates: 3,
+        ..query
+    };
+    let rows = check_fusion_scratch(6, |work| {
+        snapshot.hybrid_search_exact_fusion(replacing, |_| true, work)
+    });
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, VId(3));
+}
+
+#[test]
+fn filtered_disabled_and_zero_output_fusion_retains_only_admitted_entries() {
+    use fgdb_beacon::ExactRrfProfile;
+
+    let snapshot = fusion_index();
+    let query = fusion_query();
+    // Filtering precedes candidate depths: vector [2,3], text [3].
+    let rows = check_fusion_scratch(6, |work| {
+        snapshot.hybrid_search_exact_fusion(query, |id| id == VId(2) || id == VId(3), work)
+    });
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [VId(3), VId(2)]
+    );
+    for (profile, expected) in [
+        (ExactRrfProfile::new(60, 1, 0).unwrap(), [VId(1), VId(2)]),
+        (ExactRrfProfile::new(60, 0, 1).unwrap(), [VId(1), VId(3)]),
+    ] {
+        let enabled = fgdb_beacon::ExactHybridQuery {
+            vector: if profile.vector_weight() == 0 {
+                &[f32::NAN]
+            } else {
+                query.vector
+            },
+            profile,
+            k: 2,
+            ..query
+        };
+        let rows = check_fusion_scratch(6, |work| {
+            snapshot.hybrid_search_exact_fusion(enabled, |_| true, work)
+        });
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            expected
+        );
+    }
+    assert!(
+        check_fusion_scratch(0, |work| {
+            snapshot.hybrid_search_exact_fusion(query, |_| false, work)
+        })
+        .is_empty()
+    );
+    assert!(
+        check_fusion_scratch(0, |work| {
+            snapshot.hybrid_search_exact_fusion(
+                fgdb_beacon::ExactHybridQuery { k: 0, ..query },
+                |_| panic!("zero output does not inspect candidates"),
+                work,
+            )
+        })
+        .is_empty()
+    );
+}
+
+#[test]
+fn graph_fusion_shares_indexed_evidence_admission_with_all_three_lanes() {
+    let snapshot = fusion_index();
+    let query = GraphHybridQuery {
+        retrieval: fgdb_beacon::ExactHybridQuery {
+            k: 4,
+            ..fusion_query()
+        },
+        graph_candidates: 3,
+        graph_weight: 100,
+    };
+    let graph = [
+        GraphHit { id: VId(2), hops: 0 },
+        GraphHit { id: VId(3), hops: 1 },
+        GraphHit { id: VId(9), hops: 1 },
+    ];
+    // Three validated graph IDs + three eligible ranks + four UNION evidence
+    // entries + four heap slots + four results. IDs 2/3 are not charged twice.
+    let rows = check_fusion_scratch(18, |work| {
+        snapshot.hybrid_search_graph_filtered(query, &graph, |_| true, work)
+    });
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [VId(2), VId(3), VId(9), VId(1)]
+    );
+    // Rejected graph IDs still validate, but never acquire a rank/evidence.
+    // The surviving union is [1,3,9]: 3 + 2 + 3 + 3 + 3 = 14.
+    let rows = check_fusion_scratch(14, |work| {
+        snapshot.hybrid_search_graph_filtered(query, &graph, |id| id != VId(2), work)
+    });
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [VId(3), VId(9), VId(1)]
+    );
+    // Disabling graph retrieval must still admit every index-lane evidence
+    // entry. Its malformed population is unobserved, as the API requires.
+    let disabled = GraphHybridQuery {
+        retrieval: fusion_query(),
+        graph_weight: 0,
+        ..query
+    };
+    let duplicate = [GraphHit { id: VId(9), hops: 0 }; 4];
+    let rows = check_fusion_scratch(9, |work| {
+        snapshot.hybrid_search_graph_filtered(disabled, &duplicate, |_| true, work)
+    });
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [VId(1), VId(2), VId(3)]
+    );
+}
