@@ -245,6 +245,10 @@ fn circuit(
         return circuit(cx, input, scoped);
     }
     if let Some((input, _, _)) = query.incremental_projection() {
+        let captured = query.incremental_captured_unwind_projection(&mut |_| {
+            cx.checkpoint().map_err(StandingQueryError::Interrupted)
+        })?;
+        let input = captured.as_ref().map_or(input, |(child, _)| child);
         return circuit(cx, input, scoped)?.append(1);
     }
     if let Some((left, right, _, _)) = query.incremental_selected_join_with_control(&mut |_| {

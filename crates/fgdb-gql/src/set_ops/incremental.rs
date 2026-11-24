@@ -281,6 +281,164 @@ impl PreparedGraphSet {
         }
     }
 
+    /// Capture stored vertex properties in their maintained source before a
+    /// nonempty literal UNWIND. Each expanded copy then carries the value from
+    /// the same commit as its vertex. The final projection restores the public
+    /// slots and quantifier. Dynamic or empty expansions keep their ordinary
+    /// admission path, where a property read may never be reached.
+    pub fn incremental_captured_unwind_projection<E>(
+        &self,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<(Self, crate::row_projection::RowProjectionSpec)>, E> {
+        use crate::GlaExecutionEvent::{ScratchEntry, Work};
+        let Some((expanded, outputs, quantifier)) = self.incremental_projection() else {
+            return Ok(None);
+        };
+        let Some((source, alias, list @ GraphSetValue::List(items))) =
+            expanded.incremental_unwind()
+        else {
+            return Ok(None);
+        };
+        if items.is_empty() {
+            return Ok(None);
+        }
+        for item in items {
+            control(Work)?;
+            if !matches!(item, GraphSetValue::Literal(_)) {
+                return Ok(None);
+            }
+        }
+        let width = source.columns.len();
+        let mut fields = Vec::new();
+        for output in outputs {
+            control(Work)?;
+            match output.value() {
+                GraphSetValue::Column(_) => {}
+                GraphSetValue::MapGet {
+                    map,
+                    property: GraphElementKey::Property(key),
+                    ..
+                } => {
+                    let GraphSetValue::Column(column) = map.as_ref() else {
+                        return Ok(None);
+                    };
+                    if source.types.get(*column) != Some(&GraphSetColumnType::Vertex)
+                        || output.name() == alias
+                    {
+                        return Ok(None);
+                    }
+                    control(ScratchEntry)?;
+                    fields.push((*column, *key, output.name()));
+                }
+                _ => return Ok(None),
+            }
+        }
+        if fields.is_empty() || width + fields.len() + 1 > crate::algebra::MAX_PATTERN_VERTICES {
+            return Ok(None);
+        }
+        let Some(captured) = source.with_vertex_fields(&fields, control)? else {
+            return Ok(None);
+        };
+        let Ok(input) = captured.unwind(alias.to_owned(), list.clone()) else {
+            return Ok(None);
+        };
+        let mut next_field = width;
+        let mut projected = Vec::with_capacity(outputs.len());
+        for output in outputs {
+            control(ScratchEntry)?;
+            let column = match output.value() {
+                GraphSetValue::Column(column) if *column == width => width + fields.len(),
+                GraphSetValue::Column(column) => *column,
+                _ => {
+                    next_field += 1;
+                    next_field - 1
+                }
+            };
+            projected.push(GraphSetProjection::new(
+                output.name(),
+                GraphSetValue::Column(column),
+            ));
+        }
+        Ok(crate::row_projection::RowProjectionSpec::new(
+            input.types.clone(),
+            projected,
+            quantifier,
+        )
+        .ok()
+        .map(|spec| (input, spec)))
+    }
+
+    fn with_vertex_fields<E>(
+        &self,
+        fields: &[(usize, fgdb_delta_types::PropertyKeyId, &str)],
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<Self>, E> {
+        use crate::GlaExecutionEvent::{ScratchEntry, Work};
+        if !self.unadorned_incremental_node()
+            || self.columns.len() + fields.len() > crate::algebra::MAX_PATTERN_VERTICES
+        {
+            return Ok(None);
+        }
+        for &(_, _, name) in fields {
+            for existing in &self.columns {
+                control(Work)?;
+                if existing == name {
+                    return Ok(None);
+                }
+            }
+        }
+        match &self.node {
+            SetNode::Pattern(pattern) => {
+                Ok(pattern.with_scanned_vertex_fields(fields).map(Into::into))
+            }
+            SetNode::Scope(input) => Ok(input
+                .with_vertex_fields(fields, control)?
+                .and_then(|input| input.nested().ok())),
+            SetNode::Project {
+                input,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+                preserve_order,
+            } => {
+                for p in projection {
+                    control(Work)?;
+                    if !matches!(p.value(), GraphSetValue::Column(_)) {
+                        return Ok(None);
+                    }
+                }
+                let mut inner_fields = Vec::with_capacity(fields.len());
+                for &(col, key, name) in fields {
+                    control(ScratchEntry)?;
+                    let Some(GraphSetValue::Column(slot)) =
+                        projection.get(col).map(GraphSetProjection::value)
+                    else {
+                        return Ok(None);
+                    };
+                    inner_fields.push((*slot, key, name));
+                }
+                let width = input.columns.len();
+                let Some(child) = input.with_vertex_fields(&inner_fields, control)? else {
+                    return Ok(None);
+                };
+                let mut columns = projection.clone();
+                for (i, &(_, _, name)) in fields.iter().enumerate() {
+                    control(ScratchEntry)?;
+                    columns.push(GraphSetProjection::new(
+                        name,
+                        GraphSetValue::Column(width + i),
+                    ));
+                }
+                Ok(if *preserve_order {
+                    child.project_ordered_output(columns)
+                } else {
+                    child.project(columns, GraphSetQuantifier::All)
+                }
+                .ok())
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Borrow both complete operands of an unconditional Cartesian product.
     /// Every child must still be admitted and initialized, even when its peer
     /// is empty. A wrapper order/page is never discarded, including LIMIT 0.
@@ -573,6 +731,71 @@ mod tests {
                 .incremental_cross_join()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn maintained_vertex_fields_cross_only_nonempty_literal_expansions() {
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::CanonicalScalar;
+        let source = PreparedGraphSet::from(
+            PreparedGraphText::prepare("MATCH (a) RETURN a", |_, _: &str| None)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap(),
+        );
+        let field = GraphSetValue::MapGet {
+            map: Box::new(GraphSetValue::Column(0)),
+            key: "score".into(),
+            property: GraphElementKey::Property(PropertyKeyId(5)),
+        };
+        let after = |items| {
+            source
+                .clone()
+                .unwind("token".into(), GraphSetValue::List(items))
+                .unwrap()
+                .project(
+                    vec![
+                        GraphSetProjection::new("token", GraphSetValue::Column(1)),
+                        GraphSetProjection::new("score", field.clone()),
+                        GraphSetProjection::new("owner", GraphSetValue::Column(0)),
+                    ],
+                    GraphSetQuantifier::Distinct,
+                )
+                .unwrap()
+        };
+        let query = after(vec![GraphSetValue::Literal(CanonicalScalar::Int(7)); 2]);
+        let (expanded, spec) = query
+            .incremental_captured_unwind_projection(&mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.quantifier(), GraphSetQuantifier::Distinct);
+        assert_eq!(spec.column_types(), query.column_types());
+        assert_eq!(
+            spec.columns().collect::<Vec<_>>(),
+            ["token", "score", "owner"]
+        );
+        assert_eq!(
+            expanded.column_types(),
+            &[
+                GraphSetColumnType::Vertex,
+                GraphSetColumnType::Stored,
+                GraphSetColumnType::Any
+            ]
+        );
+        assert_eq!(
+            query
+                .incremental_captured_unwind_projection(&mut |_| Err("stop"))
+                .unwrap_err(),
+            "stop"
+        );
+        for items in [vec![], vec![GraphSetValue::Column(0)]] {
+            assert!(
+                after(items)
+                    .incremental_captured_unwind_projection(&mut |_| Ok::<_, ()>(()))
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

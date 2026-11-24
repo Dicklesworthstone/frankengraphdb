@@ -32,6 +32,53 @@ impl<Row> PreparedGraphPattern<Row> {
 }
 
 impl PreparedGraphPattern<GraphValueRow> {
+    /// Add fields of already projected vertex identities to a single scan.
+    /// Selection still runs before the payload projections at the same cut.
+    pub(crate) fn with_scanned_vertex_fields(
+        &self,
+        fields: &[(usize, PropertyKeyId, &str)],
+    ) -> Option<Self> {
+        let [
+            source @ ..,
+            GlaOperator::ProjectValues { columns },
+            GlaOperator::OrderByValues,
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            },
+        ] = self.logical.operators.as_slice()
+        else {
+            return None;
+        };
+        if self.logical.visible_columns.is_some()
+            || !matches!(
+                source,
+                [GlaOperator::ScanVertices]
+                    | [GlaOperator::ScanVertices, GlaOperator::Select { .. }]
+            )
+        {
+            return None;
+        }
+        let extra = fields
+            .iter()
+            .map(|&(column, key, _)| match columns.get(column)? {
+                ValueProjection::Vertex { slot } => {
+                    Some(ValueProjection::Property { slot: *slot, key })
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut scan = self.clone();
+        let GlaOperator::ProjectValues { columns } = &mut scan.logical.operators[source.len()]
+        else {
+            return None;
+        };
+        columns.extend(extra);
+        scan.columns
+            .extend(fields.iter().map(|&(_, _, name)| name.to_owned()));
+        Some(scan)
+    }
+
     /// Drop the captures of named relationships that nothing reads.
     ///
     /// `MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN count(*)` names two

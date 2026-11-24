@@ -1264,12 +1264,19 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         } else if let Some(input) = query.incremental_scope() {
             return self.compile(cx, input, policy, checkpoint).map(Some);
         } else if let Some((input, projection, quantifier)) = query.incremental_projection() {
-            let spec = RowProjectionSpec::new(
-                input.column_types().to_vec(),
-                projection.to_vec(),
-                quantifier,
-            )
-            .map_err(StandingQueryError::ProjectionSchema)?;
+            let captured = query.incremental_captured_unwind_projection(&mut |_| checkpoint())?;
+            let (input, spec) = match &captured {
+                Some((child, spec)) => (child, spec.clone()),
+                None => (
+                    input,
+                    RowProjectionSpec::new(
+                        input.column_types().to_vec(),
+                        projection.to_vec(),
+                        quantifier,
+                    )
+                    .map_err(StandingQueryError::ProjectionSchema)?,
+                ),
+            };
             let input = self.compile(cx, input, policy, checkpoint)?;
             let query = self.database.prepare_standing_projection(
                 cx,
