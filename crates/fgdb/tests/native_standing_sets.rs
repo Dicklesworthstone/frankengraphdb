@@ -850,6 +850,598 @@ fn native_source_projection_waits_for_the_last_selected_destination() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+fn reachability_property_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+    match (kind, name) {
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+        _ => symbols(kind, name),
+    }
+}
+
+fn property_output_bag(values: &[GraphValue]) -> ZSet<Vec<QueryValue>> {
+    ZSet::from_updates(
+        values
+            .iter()
+            .map(|value| (vec![QueryValue::Value(value.clone())], ZWeight::ONE)),
+        fgdb_delta_types::LimbLimit::new(4),
+        &mut |_| Ok::<_, ()>(()),
+    )
+    .unwrap()
+}
+
+// Read current graph facts and traverse them independently of the maintained
+// circuit. Endpoint selection never removes an intermediate traversal vertex.
+fn reachable_property_rows(
+    db: &Database<MemVfs>,
+    undirected: bool,
+    reflexive: bool,
+    detailed: bool,
+    bounds: Option<[u32; 2]>,
+) -> ZSet<Vec<QueryValue>> {
+    let vertices: BTreeMap<_, _> = db
+        .vertices_at(db.frontier().unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|vertex| (vertex.vid, vertex))
+        .collect();
+    let direction = if undirected {
+        GlaDirection::Undirected
+    } else {
+        GlaDirection::Forward
+    };
+    let pairs = if let Some(bounds) = bounds {
+        // Enumerate only the requested finite walk lengths. Never use the
+        // unbounded closure oracle as an approximation for this branch.
+        bounded_walk_rows(db, &[RelationId(1)], direction, bounds, [&[], &[]], &[0, 1])
+    } else {
+        reachable_pairs(db, &[RelationId(1)], direction, false, reflexive)
+    };
+    let mut rows = BTreeSet::new();
+    for (pair, _) in pairs.iter() {
+        let (QueryValue::Value(GraphValue::Vertex(a)), QueryValue::Value(GraphValue::Vertex(b))) =
+            (&pair[0], &pair[1])
+        else {
+            unreachable!("vertex-pair oracle");
+        };
+        let origin = &vertices[a];
+        let destination = &vertices[b];
+        if !origin.labels.contains(&LabelId(1))
+            || !origin.props.iter().any(|(key, value)| {
+                *key == P && value.as_scalar() == Some(&CanonicalScalar::Int(1))
+            })
+            || !destination.labels.contains(&LabelId(2))
+        {
+            continue;
+        }
+        let value = destination
+            .props
+            .iter()
+            .find(|(key, _)| *key == PropertyKeyId(2))
+            .map_or(GraphValue::Scalar(CanonicalScalar::Null), |(_, value)| {
+                GraphValue::from_property_value(value).unwrap()
+            });
+        let row = if detailed {
+            vec![
+                GraphValue::Vertex(*a),
+                GraphValue::Vertex(*b),
+                value.clone(),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                value,
+            ]
+        } else {
+            vec![value]
+        };
+        rows.insert(row.into_iter().map(QueryValue::Value).collect::<Vec<_>>());
+    }
+    ZSet::from_updates(
+        rows.into_iter().map(|row| (row, ZWeight::ONE)),
+        fgdb_delta_types::LimbLimit::new(4),
+        &mut |_| Ok::<_, ()>(()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn native_reachability_properties_follow_membership_payloads_and_last_value_witnesses() {
+    use fgdb_types::{
+        CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue, CanonicalText,
+    };
+
+    let ((), report) = run_async_under_lab(0x6e73_7c15, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let q = PropertyKeyId(2);
+        let mut seed = WriteBatch::new(RelationId(1));
+        for (id, labels, properties) in [
+            (1, vec![LabelId(1)], vec![(P, CanonicalScalar::Int(1))]),
+            (2, vec![LabelId(1)], vec![(P, CanonicalScalar::Int(0))]),
+            (3, vec![], vec![]),
+            (4, vec![LabelId(2)], vec![(q, CanonicalScalar::Int(7))]),
+            (5, vec![LabelId(2)], vec![(q, CanonicalScalar::Int(7))]),
+            (6, vec![LabelId(2)], vec![]),
+        ] {
+            seed.create_vertex(VId(id), labels, properties);
+        }
+        for (id, a, b) in [(10, 1, 3), (11, 2, 3), (12, 3, 4), (13, 3, 5), (14, 3, 6)] {
+            seed.add_edge(EId(id), VId(a), VId(b), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let cases = [
+            (
+                "MATCH (a:L {p:1})-[:R*]->(b:R) RETURN DISTINCT b.q AS value",
+                false,
+                false,
+                false,
+                7,
+                None,
+            ),
+            (
+                "MATCH (b:R)<-[:R*]-(a:L {p:1}) RETURN DISTINCT b.q AS value",
+                false,
+                false,
+                false,
+                7,
+                None,
+            ),
+            (
+                "MATCH (a:L {p:1})-[:R*0..]-(b:R) RETURN DISTINCT b.q AS value",
+                true,
+                true,
+                false,
+                9,
+                None,
+            ),
+            (
+                "MATCH (a:L {p:1})-[:R*0..]->(b:R) RETURN DISTINCT a AS origin,b AS target,b.q AS first,a.p AS selected,b.q AS again",
+                false,
+                true,
+                true,
+                9,
+                None,
+            ),
+            (
+                "MATCH REPEATABLE ELEMENTS WALK (a:L {p:1})-[:R*3]->(b:R) RETURN DISTINCT b.q AS value",
+                false,
+                false,
+                false,
+                11,
+                Some([3, 3]),
+            ),
+        ];
+        let params = GqlParameters::new();
+        let mut handles = Vec::new();
+        for (text, _, _, _, nodes, _) in &cases {
+            let prepared =
+                PreparedNativeRead::prepare(text, &params, reachability_property_symbols).unwrap();
+            assert_eq!(
+                prepared.subscription_footprint(&cx, &params).unwrap().0,
+                *nodes as u64
+            );
+            let handle = prepared
+                .register_standing(&mut db, &cx, &params, policy())
+                .unwrap();
+            assert_eq!(
+                db.standing_query_node_stats(&cx, &handle).unwrap().count(),
+                *nodes
+            );
+            handles.push(handle);
+        }
+        // Many private reachability pairs and endpoint rows collapse to two
+        // delivered values. Only the final DISTINCT output spends this cap.
+        let small = GqlQueryPolicy::new(100_000, 2, 10_000_000, 10_000_000);
+        let capped = db
+            .register_standing_native(
+                &cx,
+                cases[0].0,
+                &params,
+                reachability_property_symbols,
+                small,
+            )
+            .unwrap();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let number = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let list = CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![
+                CanonicalScalar::Int(2).into(),
+                CanonicalScalar::Int(1).into(),
+            ])
+            .unwrap(),
+        );
+        let map = CanonicalPropertyValue::Map(
+            CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+                CanonicalText::new_ucs_basic("k").unwrap(),
+                CanonicalScalar::Int(3).into(),
+            )])
+            .unwrap(),
+        );
+        let list_value = GraphValue::List(vec![number(2), number(1)].into_boxed_slice());
+        let map_value = GraphValue::map(vec![(Box::<str>::from("k"), number(3))]).unwrap();
+        let mut previous: Vec<_> = handles
+            .iter()
+            .map(|handle| db.standing_native_bag(&cx, handle, policy()).unwrap().1)
+            .collect();
+        for answer in &previous[..3] {
+            assert_eq!(*answer, property_output_bag(&[null.clone(), number(7)]));
+        }
+        assert!(
+            previous[4].is_empty(),
+            "two-hop targets do not satisfy an exact three-hop WALK"
+        );
+        for tick in 0..17 {
+            let mut change = WriteBatch::new(RelationId(1));
+            match tick {
+                0 => {
+                    change.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(1)));
+                }
+                1 => {
+                    change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(0)));
+                }
+                2 => {
+                    change.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(0)));
+                }
+                3 => {
+                    change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1)));
+                    change.set_vertex_property(VId(4), q, Some(CanonicalScalar::Int(8)));
+                }
+                4 => {
+                    change.set_vertex_property(VId(5), q, Some(CanonicalScalar::Int(8)));
+                }
+                5 => {
+                    change.set_vertex_property(VId(4), q, None);
+                }
+                6 => {
+                    change.set_vertex_property(VId(5), q, Some(CanonicalScalar::Null));
+                }
+                7 => {
+                    change.set_vertex_property_value(VId(6), q, Some(list.clone()));
+                }
+                8 => {
+                    change.set_vertex_property_value(VId(4), q, Some(map.clone()));
+                }
+                9 => {
+                    change.set_vertex_label(VId(5), LabelId(2), false);
+                }
+                10 => {
+                    change.set_vertex_label(VId(6), LabelId(2), false);
+                }
+                11 => {
+                    change.delete_edge(EId(12));
+                }
+                12 => {
+                    change.create_vertex(
+                        VId(7),
+                        vec![LabelId(1), LabelId(2)],
+                        vec![(P, CanonicalScalar::Int(1)), (q, CanonicalScalar::Int(9))],
+                    );
+                }
+                13 => {
+                    change.set_vertex_property(VId(7), P, Some(CanonicalScalar::Int(0)));
+                }
+                14 => {
+                    change.set_vertex_property(VId(7), P, Some(CanonicalScalar::Int(1)));
+                    change.set_vertex_label(VId(5), LabelId(2), true);
+                    // This supplies the first exact three-hop route, while
+                    // leaving all unbounded endpoint/value sets unchanged.
+                    change.add_edge(EId(15), VId(3), VId(3), vec![]);
+                }
+                15 => {
+                    change.delete_vertex(VId(7));
+                }
+                16 => {
+                    change.set_vertex_property(VId(5), q, Some(CanonicalScalar::Int(3)));
+                }
+                _ => unreachable!(),
+            }
+            let from = db.frontier().unwrap();
+            db.write(&commit, change).await.unwrap();
+            let literal = match tick {
+                0 | 1 => vec![null.clone(), number(7)],
+                2 | 11 | 12 | 13 => vec![],
+                3 => vec![null.clone(), number(7), number(8)],
+                4 | 5 => vec![null.clone(), number(8)],
+                6 | 14 | 15 => vec![null.clone()],
+                7 => vec![null.clone(), list_value.clone()],
+                8 => vec![null.clone(), list_value.clone(), map_value.clone()],
+                9 => vec![list_value.clone(), map_value.clone()],
+                10 => vec![map_value.clone()],
+                16 => vec![number(3)],
+                _ => unreachable!(),
+            };
+            for (index, ((text, undirected, reflexive, detailed, nodes, bounds), handle)) in
+                cases.iter().zip(&handles).enumerate()
+            {
+                let expected =
+                    reachable_property_rows(&db, *undirected, *reflexive, *detailed, *bounds);
+                let (at, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
+                assert_eq!(at, db.frontier().unwrap());
+                assert_eq!(actual, expected, "current graph facts, tick {tick}: {text}");
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                    db.query(&cx, text, &params, reachability_property_symbols, policy())
+                        .unwrap(),
+                    "ordinary path execution, tick {tick}: {text}"
+                );
+                let (through, delta) = db
+                    .standing_native_delta(&cx, handle, from, policy())
+                    .unwrap();
+                assert_eq!(through, at);
+                if index < 3 && matches!(tick, 0 | 1 | 5) {
+                    assert!(
+                        delta.is_empty(),
+                        "remaining endpoint/value support, tick {tick}: {text}"
+                    );
+                }
+                previous[index]
+                    .integrate(&delta, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                assert_eq!(
+                    previous[index], expected,
+                    "signed derivative, tick {tick}: {text}"
+                );
+                if index < 3 {
+                    let mut values = literal.clone();
+                    if index == 2 && matches!(tick, 12 | 14) {
+                        values.push(number(9));
+                    }
+                    assert_eq!(
+                        actual,
+                        property_output_bag(&values),
+                        "literal values, tick {tick}: {text}"
+                    );
+                }
+                if index == 4 {
+                    let values = match tick {
+                        14 | 15 => vec![null.clone()],
+                        16 => vec![number(3)],
+                        _ => vec![],
+                    };
+                    assert_eq!(
+                        actual,
+                        property_output_bag(&values),
+                        "exact three-hop values, tick {tick}"
+                    );
+                }
+                if matches!(tick, 3 | 8 | 12 | 16) {
+                    db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+                    assert_eq!(
+                        db.standing_native_bag(&cx, handle, policy()).unwrap(),
+                        (at, expected)
+                    );
+                    assert_eq!(
+                        db.standing_query_node_stats(&cx, handle).unwrap().count(),
+                        *nodes
+                    );
+                }
+            }
+            if tick == 3 {
+                assert!(matches!(
+                    db.standing_native_bag(&cx, &capped, policy()),
+                    Err(StandingQueryError::Unavailable {
+                        reason: StandingQueryFailure::ResultBudget,
+                        ..
+                    })
+                ));
+                assert!(db.rebuild_standing_query(&cx, &capped, small).is_err());
+                db.rebuild_standing_query(&cx, &capped, policy()).unwrap();
+                assert_eq!(
+                    db.standing_native_bag(&cx, &capped, policy()).unwrap().1,
+                    property_output_bag(&literal)
+                );
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_reachability_property_subscriptions_mask_payloads_and_bridges_before_maintenance() {
+    use asupersync::security::key::AuthKey;
+    use fgdb::{NativeSubscriptionSetup, SubscriptionError};
+    use fgdb_delta_types::SchemaEpoch;
+    use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
+    use std::sync::Arc;
+
+    let ((), report) = run_async_under_lab(0x6e73_7c16, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let q = PropertyKeyId(2);
+        let mut seed = WriteBatch::new(RelationId(1));
+        for (id, labels, properties) in [
+            (1, vec![LabelId(1)], vec![(P, CanonicalScalar::Int(1))]),
+            (2, vec![LabelId(1)], vec![(q, CanonicalScalar::Int(7))]),
+            (3, vec![LabelId(1)], vec![(q, CanonicalScalar::Int(99))]),
+            (10, vec![LabelId(2)], vec![]),
+        ] {
+            seed.create_vertex(VId(id), labels, properties);
+        }
+        for (id, a, b) in [(1, 1, 2), (10, 2, 10), (11, 10, 3)] {
+            seed.add_edge(EId(id), VId(a), VId(b), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let text = "MATCH (a:L {p:1})-[:R*]->(b:L) RETURN DISTINCT b.q AS value";
+        let params = GqlParameters::new();
+        let query =
+            PreparedNativeRead::prepare(text, &params, reachability_property_symbols).unwrap();
+        let ordinary = db
+            .query(&cx, text, &params, reachability_property_symbols, policy())
+            .unwrap();
+        assert_eq!(
+            ordinary,
+            QueryResult::Rows {
+                columns: vec!["value".into()],
+                rows: vec![
+                    vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                        7
+                    )))],
+                    vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                        99
+                    )))],
+                ],
+            },
+            "the unscoped route through hidden vertex 10 really reaches vertex 3"
+        );
+        let issuer = Authority::new(
+            AuthKey::from_seed(0x6e73_7c16),
+            DatabaseSecurityNamespaceId([0x52; 32]),
+            "graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut subscriptions = Vec::new();
+        let mut delivered = Vec::new();
+        let limbs = fgdb_delta_types::LimbLimit::new(4);
+        for expose_q in [true, false] {
+            let mut grant = Grant::read_only(
+                "main",
+                1000,
+                QueryLimits {
+                    max_nodes: 100_000,
+                    max_work: 10_000_000,
+                    max_rows: 100_000,
+                },
+            );
+            grant.labels = Scope::only([LabelId(1)]);
+            grant.relations = Scope::only([RelationId(1)]);
+            grant.properties = if expose_q {
+                Scope::only([P, q])
+            } else {
+                Scope::only([P])
+            };
+            let token = issuer.issue_at(&grant, 0).unwrap();
+            let authority = issuer.verify_at(&token, "main", 1).unwrap();
+            assert_eq!(
+                query
+                    .subscription_footprint_authorized(&cx, &params, authority.predicates())
+                    .unwrap()
+                    .0,
+                8
+            );
+            let (mut subscription, initial) = query
+                .subscribe_authorized(
+                    &mut db,
+                    &cx,
+                    &params,
+                    authority.predicates(),
+                    NativeSubscriptionSetup {
+                        maintenance: policy(),
+                        delivery: policy(),
+                        retention: [16, 1000, 100_000],
+                    },
+                    |columns, batch| {
+                        assert_eq!(columns, ["value"]);
+                        Ok::<_, SubscriptionError>(Arc::clone(batch))
+                    },
+                )
+                .unwrap();
+            let rows = initial
+                .rows()
+                .checked_clone(limbs, &mut |_| Ok::<_, ()>(()))
+                .unwrap();
+            assert_eq!(
+                rows,
+                property_output_bag(&[GraphValue::Scalar(if expose_q {
+                    CanonicalScalar::Int(7)
+                } else {
+                    CanonicalScalar::Null
+                })])
+            );
+            subscription.acknowledge(initial.receipt()).unwrap();
+            subscriptions.push(subscription);
+            delivered.push(rows);
+        }
+        for tick in 0..8 {
+            let mut change = WriteBatch::new(RelationId(1));
+            match tick {
+                0 => {
+                    change.set_vertex_property(VId(3), q, Some(CanonicalScalar::Int(100)));
+                }
+                1 => {
+                    change.set_vertex_property(VId(10), P, Some(CanonicalScalar::Int(1)));
+                }
+                2 => {
+                    change.add_edge(EId(2), VId(2), VId(3), vec![]);
+                }
+                3 => {
+                    change.set_vertex_property(VId(2), q, Some(CanonicalScalar::Int(100)));
+                }
+                4 => {
+                    change.delete_edge(EId(1));
+                }
+                5 => {
+                    change.add_edge(EId(3), VId(1), VId(3), vec![]);
+                }
+                6 => {
+                    change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(0)));
+                }
+                7 => {
+                    change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1)));
+                    change.set_vertex_property(VId(3), q, None);
+                }
+                _ => unreachable!(),
+            }
+            db.write(&commit, change).await.unwrap();
+            let values = match tick {
+                0 | 1 => vec![GraphValue::Scalar(CanonicalScalar::Int(7))],
+                2 => vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(7)),
+                    GraphValue::Scalar(CanonicalScalar::Int(100)),
+                ],
+                3 | 5 => vec![GraphValue::Scalar(CanonicalScalar::Int(100))],
+                4 | 6 => vec![],
+                7 => vec![GraphValue::Scalar(CanonicalScalar::Null)],
+                _ => unreachable!(),
+            };
+            for (index, subscription) in subscriptions.iter_mut().enumerate() {
+                let batch = subscription.poll(&db, &cx, policy()).unwrap();
+                if tick == 1 || (index == 1 && matches!(tick, 0 | 3)) {
+                    assert!(
+                        batch.is_none(),
+                        "hidden property/bridge update has no public frontier, tick {tick}"
+                    );
+                }
+                if let Some(batch) = batch {
+                    let repeated = subscription.poll(&db, &cx, policy()).unwrap().unwrap();
+                    assert!(
+                        Arc::ptr_eq(&repeated, &batch),
+                        "retry keeps the exact delivery and receipt"
+                    );
+                    assert_eq!(repeated.rows(), batch.rows());
+                    assert!(!batch.is_snapshot());
+                    delivered[index]
+                        .integrate(batch.rows(), limbs, &mut |_| Ok::<_, ()>(()))
+                        .unwrap();
+                    subscription.acknowledge(batch.receipt()).unwrap();
+                }
+                let expected = if index == 0 || values.is_empty() {
+                    property_output_bag(&values)
+                } else {
+                    property_output_bag(&[GraphValue::Scalar(CanonicalScalar::Null)])
+                };
+                assert_eq!(
+                    delivered[index], expected,
+                    "authorized values, tick {tick}, scope {index}"
+                );
+            }
+        }
+        for subscription in &mut subscriptions {
+            assert_eq!(
+                subscription
+                    .close_and_release(&mut db, &cx, policy())
+                    .unwrap(),
+                9,
+                "capability mask, property-aware reachability circuit and replay owner"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn native_reachability_keeps_exact_support_deltas_and_rebuilds_the_owned_circuit() {
     let ((), report) = run_async_under_lab(0x6e73_7c10, |root| async move {

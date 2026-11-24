@@ -91,13 +91,22 @@ impl PreparedNativeRead {
     /// collapsed parallel edges and kept or dropped self-loops. YIELD aliases
     /// and downstream row stages retain their native schema; unsupported
     /// projection recipes refuse.
-    /// A single uncaptured, unbounded directed TRAIL with exactly one-or-more
-    /// hops and DISTINCT endpoint pairs composes a maintained one-hop source
-    /// with deletion-safe recursive closure. Relation unions and wildcard
-    /// types keep their ordinary authorized source semantics; reversed output
-    /// columns keep their aliases. Path bags, zero/bounded hop intervals,
-    /// undirected trails, endpoint predicates and a path-local page/order
-    /// require other derivatives and remain unsupported.
+    /// A single uncaptured, unbounded TRAIL with zero-or-more or one-or-more
+    /// hops composes ordinary maintained sources with deletion-safe closure.
+    /// Zero-or-more includes visible isolates and admits undirected traversal;
+    /// positive-only undirected TRAIL still requires another derivative.
+    /// Finite repeatable-element WALK uses shared incidence, exact-hop joins
+    /// and unions of the selected depths within the complete owner ceiling.
+    /// Both recipes retain authorized relation unions and wildcard sources.
+    /// Endpoint-local labels and property predicates select membership after
+    /// complete reachability. Demanded endpoint properties are joined by vertex
+    /// identity and retain the ordinary stored-value domain, including NULL,
+    /// lists and maps. DISTINCT output may project endpoint identities and
+    /// properties in any order, with aliases/repetitions; multiple reachable
+    /// pairs retain counted support for a collapsed output value. Labels and
+    /// property predicates never constrain intermediate transit vertices.
+    /// Path bags, bounded TRAIL, captures, edge predicates and a path-local
+    /// page/order remain outside these recursive derivatives.
     /// Core-number CALLs use the exact affected-component maintainer with
     /// self-loops dropped. Their checked integer rows and derivatives are
     /// retained only for native registration; typed core-number views do not

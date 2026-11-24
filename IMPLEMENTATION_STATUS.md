@@ -39,9 +39,10 @@ Native standing queries and authorized subscriptions can now maintain finite
 repeatable-element WALK reachability with exact lengths or inclusive hop
 intervals. Forward, reverse and undirected traversal share the same recipe.
 Zero hops come from independent visible vertex lifetimes, including isolated
-vertices. Endpoint label conjunctions and endpoint-only DISTINCT projections
-are applied after traversal, so differently labeled intermediate vertices
-remain usable.
+vertices. Endpoint-local labels and property predicates, demanded property
+payloads and DISTINCT endpoint projections are applied after traversal, so
+unselected intermediate vertices remain usable. The property enrichment
+contract is shared with unbounded reachability, described below.
 
 ```gql
 MATCH REPEATABLE ELEMENTS WALK (a:Start)-[:R*0..3]->(b:Goal)
@@ -62,10 +63,10 @@ owner. Private intermediate policies retain work and scratch admission; the
 final projection owns the public row allowance. Existing staged cancellation,
 rebuild and release paths own the complete circuit.
 
-This is an endpoint-only DISTINCT WALK subset. Bounded TRAIL, SIMPLE, ACYCLIC,
-shortest selectors, captured paths, path bags, property predicates and
-unsupported ordering/paging retain their refusal. Default different-edge
-semantics are never silently changed into repeatable WALK.
+This is a DISTINCT endpoint identity/property WALK subset. Bounded TRAIL,
+SIMPLE, ACYCLIC, shortest selectors, captured paths, path bags, cross-endpoint
+comparisons and unsupported ordering/paging retain their refusal. Default
+different-edge semantics are never silently changed into repeatable WALK.
 
 Regression sources include an independent finite-walk oracle over eight
 profiles and eleven real commits, all directions, repeated cycles, alternative
@@ -76,11 +77,12 @@ Pinned formatting and whitespace checks passed on the changed Rust sources.
 
 Compilation and Rust test execution remain UNRUN: the pinned dependency cache
 was missing after an environment reset, and the controlled fetch retry ended
-with another executor disconnect before compilation. Clippy, UBS,
-`scripts/check.sh` and complete exact-tree proof are also UNRUN. The original
-`fgdb-w6-recursion-x78`, `fgdb-w6-zset-circuits-kjv` and integrated qualification
-`fgdb-qualify-integrated-nov22-maz0p` remain open. No full recursion, path
-enumeration or measured speedup claim is made.
+with another executor disconnect before compilation. Clippy and complete
+exact-tree proof are also UNRUN. The subsequent endpoint-property extension
+below records scoped formatter/scanner and full-gate results for the combined
+source. The original `fgdb-w6-recursion-x78`, `fgdb-w6-zset-circuits-kjv` and
+integrated qualification `fgdb-qualify-integrated-nov22-maz0p` remain open.
+No full recursion, path enumeration or measured speedup claim is made.
 
 ### Maintained grouped correlated summaries — qualification pending
 
@@ -176,65 +178,90 @@ are UNRUN; source inspection is not a passing qualification. The integrated
 qualification task `fgdb-qualify-integrated-nov22-maz0p` remains open. No storage
 memory bound, full path-source support or measured speedup is claimed.
 
-### Maintained reflexive and label-selected reachability — qualification pending
+### Maintained reflexive and property-selected reachability — qualification pending
 
-Native maintained endpoint queries now admit zero-or-more hops, including
-isolated visible vertices and directed, reversed or undirected relationships.
-The compiler supplies independently counted edge and vertex-lifetime rows to
-the existing deletion-safe closure. Removing a real self-loop therefore cannot
-remove the empty path of a surviving vertex. Nonempty undirected TRAIL closure
-continues to refuse because walking one physical edge in both directions cannot
-establish a legal nonempty cycle.
+Native maintained endpoint queries admit zero-or-more hops, including isolated
+visible vertices and directed, reversed or undirected relationships. The
+compiler supplies independently counted edge and vertex-lifetime rows to the
+existing deletion-safe closure. Removing a real self-loop cannot remove the
+empty path of a surviving vertex. Positive-only undirected TRAIL closure still
+refuses because walking one physical edge in both directions is not a legal
+nonempty cycle. Finite repeatable-element WALK uses the same endpoint
+selection/enrichment after its exact-hop layers and selected-depth unions;
+its existing complete 64-owner admission ceiling remains enforced.
 
-Endpoint label conjunctions are maintained as separate vertex sources and
-applied after full reachability. Differently labeled intermediate vertices stay
-in the traversal. Endpoint-only DISTINCT projections can return a source, a
-destination, both, or repeated endpoint columns; lossy projections retain
-counted support until the last contributing reachable pair disappears.
+Endpoint-local label and property predicates are maintained through ordinary
+vertex sources and applied after full authorized reachability. Unselected or
+differently labeled intermediate vertices remain traversable. Property-bearing
+sources additionally retain each demanded property once, keyed by vertex
+identity, and join their complete payload after closure. Property mutations
+therefore update both endpoint eligibility and delivered values without making
+the closure depend on endpoint payloads.
 
-Examples of the admitted forms:
+DISTINCT output can contain either endpoint identity, either endpoint's stored
+properties, or a repeated/reordered combination. Projecting away identities
+retains counted support until the last contributing reachable pair disappears.
+Missing properties and stored NULL retain ordinary NULL semantics; lists and
+maps remain stored values. The ordinary counted-row materializer now accepts
+the same bounded Stored domain already supported by its aggregate carrier.
+
+Examples of admitted forms:
 
 ```gql
 MATCH (a)-[:R*0..]-(b) RETURN DISTINCT a,b
-MATCH (a:Start)-[:R*0..]->(b:Goal) RETURN DISTINCT b
-MATCH (a:Start)-[:R*]->(b) RETURN DISTINCT a
+MATCH (a:Start {p:$start})-[:R*]->(b:Goal) RETURN DISTINCT b.name AS name
+MATCH REPEATABLE ELEMENTS WALK (a:Start {p:$start})-[:R*3]->(b)
+RETURN DISTINCT b.name AS name
+MATCH (a:Start)-[:R*0..]->(b) WHERE b.p IS NOT NULL
+RETURN DISTINCT a.p AS origin,b.p AS destination
 ```
 
-All source observations retain capability masking. Registration reserves the
-complete owned circuit; private intermediate rows retain work and scratch
+All source observations retain capability masking before evaluation, including
+property reads and property-delta maintenance. Registration reserves the
+complete owned circuit. Private intermediate rows retain source/work/scratch
 admission, and the final projection enforces the public row allowance.
-Cancellation and failed rebuilds preserve existing registered state.
-This remains an exact, DISTINCT, endpoint-only subset of unbounded reachability.
-The separate bounded repeatable-WALK recipe is described above; path-enumeration
-subscriptions remain unsupported.
+Cancellation and failed rebuilds preserve existing registered state. This is
+an exact DISTINCT subset: bounded TRAIL paths, captured paths, edge predicates,
+cross-endpoint comparisons and path-local ordering/paging remain unsupported
+by these recursive derivatives.
 
-Regression sources cover isolated-vertex lifetimes, all admitted directions,
-parallel/self-loop support, cycles, label changes, collapsed endpoint support,
-hidden topology, exact deltas, rebuild and staged-registration rollback.
-A supplemental independent model compared the first rewrite with explicit
-edge-identity TRAIL enumeration across 1,088 three-vertex graph/profile
-combinations. That model is not execution of the Rust implementation.
+Regression sources cover visible isolates, admitted directions, parallel and
+self-loop support, cycles, label/property membership changes, equal-value
+collisions, NULL/list/map payload updates, hidden topology and property scopes,
+exact deltas, rebuild, public result overflow and every registration/rebuild
+cancellation stage. Tests compare literal outputs and separate independent
+finite-walk/unbounded reachability oracles with ordinary execution. A bounded
+three-hop property case remains empty until a transit self-loop supplies the
+extra hop, even while the unbounded query already has matching endpoints.
+A supplemental independent model checked
+the earlier zero-hop rewrite against explicit edge-identity TRAIL enumeration
+across 1,088 three-vertex graph/profile combinations; that model is not execution
+of the Rust implementation.
 
 Qualification remains open under `fgdb-w6-recursion-x78`,
 `fgdb-w6-zset-circuits-kjv` and `fgdb-qualify-integrated-nov22-maz0p`.
-Independent source reviews found no blocking issue in either change. A pinned
-Rustfmt invocation processed the eight changed Rust files in a local candidate,
-but the executor became unavailable before final-tree checks. A limited UBS
-scan of the first feature's six Rust files exited 0 with no critical findings,
-267 warnings (mostly test-assertion notices) and 13 informational findings;
-its Cargo and AST rule-pack phases were unavailable. It is not a full scanner
-verdict for the second feature.
+Independent source reviews cover the compiler, host schema/layout, ownership,
+stored-value domain, authorization and regression fixtures. Pinned Rustfmt
+checks passed for all seven changed Rust files, and the whitespace check passed.
+The separate scoped UBS scan exited 0 with zero critical findings, 423 warnings
+and 19 informational findings; its Cargo-dependent and AST rule-pack phases
+were unavailable.
 
-The pinned dependency fetch succeeded. The subsequent Cargo check exited 101
-after rustc compiling libc was killed, before project compilation; the executor
-subsequently became unavailable. Project compilation, Rust tests, Clippy, final
-format/scanner checks, `scripts/check.sh` and complete exact-tree proof remain
-UNRUN. The required `scripts/br_sync.sh` export could not be executed after
-the environment loss; no manually edited Beads export is included. Combined
-native reverse/undirected label-update tests remain a coverage gap (direction
-recognition and unselected direction lifecycles are covered by test sources).
-No measured speedup or broader recursion claim is made.
+The full `scripts/check.sh` attempt completed RED (exit 1): four core checks
+passed and six were red; registered gates recorded one pass, 13 red and 26
+unrun. Missing Cargo, rustc, shellcheck, UBS, cargo-audit, Lean and br on that
+gate's PATH, plus unavailable historical anchors, prevented qualification.
+The workspace UBS baseline errors followed a missing scanner, not a completed
+scan. All 19 registered Rust test artifacts were unrun. The separate successful
+formatter and scoped scanner observations do not turn this full gate green.
 
+The earlier Cargo check exited 101 after rustc compiling libc was killed,
+before project compilation. The restored executor still lacked the exact
+asupersync dependency and sufficient build capacity. Compilation, Rust tests,
+Clippy and complete exact-tree proof remain UNRUN for this extension. Progress
+was recorded in the recursion bead without closing it. The prescribed
+`scripts/br_sync.sh fgdb-w6-recursion-x78` export failed with exit 8 because
+the device was full; no tracked JSONL delta or manual export is included.
 
 ### Authorized mixed demand retrieval — qualification pending
 

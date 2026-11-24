@@ -597,6 +597,60 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         Ok(input)
     }
 
+    fn compile_endpoint_output(
+        &mut self,
+        cx: &QueryCx,
+        mut selected: usize,
+        endpoint_sources: &[Option<PreparedGraphSet>; 2],
+        projection: RowProjectionSpec,
+        policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+    ) -> Result<usize, StandingQueryError> {
+        // Both recursive recipes first produce unique [source, destination]
+        // identities over complete authorized transit. Endpoint predicates and
+        // demanded payloads belong after that support relation, never inside it.
+        let input_policy = group::input_policy(policy);
+        let mut selected_types = vec![GraphSetColumnType::Vertex; 2];
+        for (endpoint, source) in endpoint_sources.iter().enumerate() {
+            let Some(source) = source else {
+                continue;
+            };
+            let vertices = self.compile_group_input(cx, source, input_policy, checkpoint)?;
+            // Membership alone preserves only the left columns. Enrichment
+            // appends the right identity and every demanded property; original
+            // endpoint slots stay 0/1 through both joins.
+            let kind = if source.column_types().len() == 1 {
+                RowJoinKind::Semi
+            } else {
+                RowJoinKind::Inner
+            };
+            let spec = RowJoinSpec::new(&selected_types, source.column_types(), &[(endpoint, 0)])
+                .map_err(StandingQueryError::JoinSchema)?
+                .with_kind(kind);
+            selected_types = spec.column_types().collect();
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [selected, vertices],
+                &spec,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            selected = self.append_private(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+        }
+        // Public rows are charged only after value collisions are thresholded
+        // by the compiler's projection. Source/work/scratch limits stay active
+        // on every private source, transit layer and endpoint join.
+        let state = self.database.prepare_standing_projection(
+            cx,
+            selected,
+            projection,
+            policy,
+            self.database.standing_queries.len(),
+        )?;
+        Ok(self.append(StandingQuery::Projection(Box::new(state))))
+    }
+
     fn compile_bounded_walk(
         &mut self,
         cx: &QueryCx,
@@ -684,40 +738,14 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 }
             }
         }
-        let mut selected = selected.ok_or(StandingQueryError::Unsupported)?;
-        // Endpoint predicates apply only after all transit layers. Filtering
-        // the incidence source by either endpoint's labels would lose valid
-        // routes through differently labelled intermediate vertices.
-        for (endpoint, filter) in definition.endpoint_filters().iter().enumerate() {
-            let Some(filter) = filter else {
-                continue;
-            };
-            let vertices = self.compile_group_input(cx, filter, input_policy, checkpoint)?;
-            let spec = RowJoinSpec::new(
-                &[GraphSetColumnType::Vertex; 2],
-                &[GraphSetColumnType::Vertex],
-                &[(endpoint, 0)],
-            )
-            .map_err(StandingQueryError::JoinSchema)?
-            .with_kind(RowJoinKind::Semi);
-            let state = self.database.prepare_standing_join_spec(
-                cx,
-                [selected, vertices],
-                &spec,
-                input_policy,
-                self.database.standing_queries.len(),
-            )?;
-            selected = self.append_private(StandingQuery::Join(Box::new(state)));
-            checkpoint()?;
-        }
-        let state = self.database.prepare_standing_projection(
+        self.compile_endpoint_output(
             cx,
-            selected,
+            selected.ok_or(StandingQueryError::Unsupported)?,
+            definition.endpoint_sources(),
             definition.projection().clone(),
             policy,
-            self.database.standing_queries.len(),
-        )?;
-        Ok(self.append(StandingQuery::Projection(Box::new(state))))
+            checkpoint,
+        )
     }
 
     fn compile(
@@ -768,11 +796,9 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             self.append(StandingQuery::Window(Box::new(state)))
         } else if let Some(pattern) = query.incremental_pattern() {
             if let Some(definition) = pattern.incremental_closure_definition() {
-                let (input, endpoint_filters, projection) = definition.into_parts();
-                // Ordinary sources mask incidence and vertex lifetimes before
-                // recursion. The full closure and endpoint membership joins
-                // are private: only the final projected support spends the
-                // delivered-row allowance. Source/work/scratch limits remain.
+                let (input, endpoint_sources, projection) = definition.into_parts();
+                // Incidence and zero-hop lifetimes retain ordinary source
+                // authorization before entering recursive closure.
                 let input_policy = group::input_policy(policy);
                 let input = self.compile_group_input(cx, &input, input_policy, checkpoint)?;
                 let closure = self.database.prepare_standing_closure(
@@ -782,39 +808,16 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                     input_policy,
                     self.database.standing_queries.len(),
                 )?;
-                let mut selected = self.append_private(StandingQuery::Closure(Box::new(closure)));
+                let closure = self.append_private(StandingQuery::Closure(Box::new(closure)));
                 checkpoint()?;
-                for (endpoint, filter) in endpoint_filters.into_iter().enumerate() {
-                    let Some(filter) = filter else {
-                        continue;
-                    };
-                    let vertices =
-                        self.compile_group_input(cx, &filter, input_policy, checkpoint)?;
-                    let spec = RowJoinSpec::new(
-                        &[GraphSetColumnType::Vertex, GraphSetColumnType::Vertex],
-                        &[GraphSetColumnType::Vertex],
-                        &[(endpoint, 0)],
-                    )
-                    .map_err(StandingQueryError::JoinSchema)?
-                    .with_kind(RowJoinKind::Semi);
-                    let state = self.database.prepare_standing_join_spec(
-                        cx,
-                        [selected, vertices],
-                        &spec,
-                        input_policy,
-                        self.database.standing_queries.len(),
-                    )?;
-                    selected = self.append_private(StandingQuery::Join(Box::new(state)));
-                    checkpoint()?;
-                }
-                let output = self.database.prepare_standing_projection(
+                self.compile_endpoint_output(
                     cx,
-                    selected,
+                    closure,
+                    &endpoint_sources,
                     projection,
                     policy,
-                    self.database.standing_queries.len(),
-                )?;
-                self.append(StandingQuery::Projection(Box::new(output)))
+                    checkpoint,
+                )?
             } else if let Some(definition) = pattern.incremental_bounded_walk_definition() {
                 self.compile_bounded_walk(cx, definition, policy, checkpoint)?
             } else {

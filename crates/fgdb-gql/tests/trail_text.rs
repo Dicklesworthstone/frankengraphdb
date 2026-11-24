@@ -335,7 +335,7 @@ fn closure_recipe_admits_only_distinct_unbounded_endpoint_support() {
         let definition = pattern
             .incremental_closure_definition()
             .unwrap_or_else(|| panic!("eligible endpoint closure: {text}"));
-        assert!(definition.endpoint_filters().iter().all(Option::is_none));
+        assert!(definition.endpoint_sources().iter().all(Option::is_none));
         let output = definition.projection();
         let source = definition
             .input()
@@ -370,7 +370,7 @@ fn closure_recipe_admits_only_distinct_unbounded_endpoint_support() {
         let definition = pattern
             .incremental_closure_definition()
             .unwrap_or_else(|| panic!("eligible reflexive closure: {text}"));
-        assert!(definition.endpoint_filters().iter().all(Option::is_none));
+        assert!(definition.endpoint_sources().iter().all(Option::is_none));
         let output = definition.projection();
         let (operation, quantifier, edges, lifetimes) =
             definition.input().incremental_binary().unwrap();
@@ -417,10 +417,7 @@ fn closure_recipe_admits_only_distinct_unbounded_endpoint_support() {
         "MATCH (a)-[:R*]-(b) RETURN DISTINCT a,b",
         "MATCH ACYCLIC (a)-[:R*]->(b) RETURN DISTINCT a,b",
         "MATCH p = (a)-[:R*]->(b) RETURN DISTINCT a,b,p",
-        "MATCH (a)-[:R*]->(b) WHERE b.p=1 RETURN DISTINCT a,b",
         "MATCH (a)-[:R*]->(a) RETURN DISTINCT a",
-        "MATCH (a:L)-[:R*]->(b) RETURN DISTINCT b.p AS value",
-        "MATCH (a:L)-[:R*]->(b) WHERE a.p=1 RETURN DISTINCT b",
         "MATCH (a:L)-[:R*]-(b) RETURN DISTINCT b",
         "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b ORDER BY b",
         "MATCH (a)-[:R*]->(b) RETURN DISTINCT a,b LIMIT 0",
@@ -508,7 +505,7 @@ fn bounded_walk_recipe_keeps_exact_intervals_and_limits_the_shared_circuit() {
         assert_eq!(definition.lifetimes().is_some(), minimum == 0, "{text}");
         assert_eq!(
             definition
-                .endpoint_filters()
+                .endpoint_sources()
                 .each_ref()
                 .map(Option::is_some),
             filters,
@@ -551,7 +548,6 @@ fn bounded_walk_recipe_keeps_exact_intervals_and_limits_the_shared_circuit() {
         "MATCH REPEATABLE ELEMENTS SIMPLE (a)-[:R*1..3]->(b) RETURN DISTINCT a,b",
         "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) RETURN a,b",
         "MATCH REPEATABLE ELEMENTS p = WALK (a)-[:R*1..3]->(b) RETURN DISTINCT a,b,p",
-        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) WHERE b.p=1 RETURN DISTINCT a,b",
         "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) RETURN DISTINCT a,b LIMIT 0",
         "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) RETURN DISTINCT a,b ORDER BY a",
         "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..22]->(b) RETURN DISTINCT a,b",
@@ -649,7 +645,7 @@ fn closure_endpoint_labels_select_membership_after_unrestricted_transit() {
             .unwrap_or_else(|| panic!("selected endpoint support: {text}"));
         assert_eq!(
             definition
-                .endpoint_filters()
+                .endpoint_sources()
                 .each_ref()
                 .map(Option::is_some),
             filters,
@@ -669,7 +665,7 @@ fn closure_endpoint_labels_select_membership_after_unrestricted_transit() {
             incidence_rows,
             "unqualified intermediate vertex remains in topology: {text}"
         );
-        for filter in definition.endpoint_filters().iter().flatten() {
+        for filter in definition.endpoint_sources().iter().flatten() {
             let filter = filter.incremental_pattern().unwrap();
             assert!(filter.incremental_row_source_definition().is_some());
             assert!(filter.incremental_closure_definition().is_none());
@@ -679,7 +675,7 @@ fn closure_endpoint_labels_select_membership_after_unrestricted_transit() {
     let definition = prepare("MATCH (a:L:S)-[:R*0..]->(b) RETURN DISTINCT a")
         .incremental_closure_definition()
         .unwrap();
-    let filter = definition.endpoint_filters()[0]
+    let filter = definition.endpoint_sources()[0]
         .as_ref()
         .unwrap()
         .incremental_pattern()
@@ -771,4 +767,414 @@ fn projected_reachability_retracts_only_the_last_endpoint_witness() {
             }
         }
     }
+}
+
+fn property_pattern(text: &str) -> PreparedGraphPattern<GraphValueRow> {
+    use fgdb_delta_types::LabelId;
+
+    PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+        _ => symbols(kind, name),
+    })
+    .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+    .bind_parameters(&GqlParameters::new().with_int64("start", 1).unwrap())
+    .unwrap()
+}
+
+fn property_closure(text: &str) -> fgdb_gql::algebra::IncrementalClosureDefinition {
+    property_pattern(text)
+        .incremental_closure_definition()
+        .unwrap_or_else(|| panic!("property endpoint closure: {text}"))
+}
+
+#[test]
+fn closure_endpoint_properties_keep_predicates_and_exact_inner_join_layout() {
+    use fgdb_delta_types::LabelId;
+    use fgdb_gql::GraphSetColumnType::{Stored, Vertex};
+    use fgdb_gql::GraphSetQuantifier;
+    use fgdb_gql::row_projection::IncrementalRowProjection;
+
+    let definition = property_closure(
+        "MATCH (a:L {p:$start})-[:R*]->(b) WHERE b.q IS NOT NULL \
+         RETURN DISTINCT b.q AS target,a.p AS origin,b.q AS repeated,a,b",
+    );
+    assert_eq!(
+        definition.projection().quantifier(),
+        GraphSetQuantifier::All
+    );
+    for (endpoint, source) in definition.endpoint_sources().iter().enumerate() {
+        let source = source.as_ref().unwrap();
+        assert_eq!(source.column_types(), &[Vertex, Stored]);
+        let pattern = source.incremental_pattern().unwrap();
+        assert!(pattern.incremental_row_source_definition().is_some());
+        assert!(!pattern.plan().scans_edges());
+        let rows = pattern
+            .plan()
+            .execute_governed_with_identified_properties(
+                3,
+                VERTICES,
+                std::iter::empty::<Edge>(),
+                |vid, predicates| {
+                    let labels: &[LabelId] = if vid == VId(1) { &[LabelId(1)] } else { &[] };
+                    let mut properties = vec![(P, VALUES[vid.0 as usize - 1].clone())];
+                    if vid == VId(3) {
+                        properties.push((PropertyKeyId(2), VALUES[2].clone()));
+                    }
+                    Ok::<_, ()>(
+                        predicates
+                            .iter()
+                            .all(|test| test.matches(labels, &properties)),
+                    )
+                },
+                |vid, key| {
+                    Ok(if key == P {
+                        Some(&VALUES[vid.0 as usize - 1])
+                    } else if vid == VId(3) {
+                        Some(&VALUES[2])
+                    } else {
+                        None
+                    })
+                },
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        let vertex = if endpoint == 0 { 1 } else { 3 };
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.values().to_vec())
+                .collect::<Vec<_>>(),
+            vec![vec![
+                GraphValue::Vertex(VId(vertex)),
+                GraphValue::Scalar(CanonicalScalar::Int(vertex as i64)),
+            ]]
+        );
+    }
+    // Neither the source property predicate nor the target NULL test may
+    // reach the incidence source; vertex 2 is an unselected transit vertex.
+    let incidence = definition.input().incremental_pattern().unwrap();
+    assert_eq!(
+        run(
+            incidence,
+            &[(EId(11), VId(1), R, VId(2)), (EId(12), VId(2), R, VId(3)),],
+        )
+        .len(),
+        2
+    );
+    let mut projection = IncrementalRowProjection::new(definition.into_parts().2);
+    let row = GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Vertex(VId(3)),
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Scalar(CanonicalScalar::Int(1)),
+        GraphValue::Vertex(VId(3)),
+        GraphValue::Scalar(CanonicalScalar::Int(3)),
+    ]);
+    let limbs = fgdb_delta_types::LimbLimit::new(4);
+    let input = fgdb_delta_types::ZSet::from_updates(
+        [(row, fgdb_delta_types::ZWeight::ONE)],
+        limbs,
+        &mut |_| Ok::<_, ()>(()),
+    )
+    .unwrap();
+    let delta = projection
+        .prepare(&input, limbs, Some(1), &mut |_| Ok::<_, ()>(()))
+        .unwrap()
+        .commit();
+    assert_eq!(
+        delta
+            .iter()
+            .map(|(row, _)| row.values().to_vec())
+            .collect::<Vec<_>>(),
+        vec![vec![
+            GraphValue::Scalar(CanonicalScalar::Int(3)),
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+            GraphValue::Scalar(CanonicalScalar::Int(3)),
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(3)),
+        ]]
+    );
+    for text in [
+        "MATCH (a)-[:R*]->(b) WHERE b.p=1 RETURN DISTINCT a,b",
+        "MATCH (a:L)-[:R*]->(b) WHERE a.p>=1 RETURN DISTINCT b",
+        "MATCH (a {p:$start})-[:R*]->(b) RETURN DISTINCT b.p AS value",
+        "MATCH (a)-[:R*]->(b) WHERE a.p IS NULL RETURN DISTINCT b.p AS value",
+        "MATCH (a)<-[:R*0..]-(b) WHERE b.p='name' RETURN DISTINCT a.p AS value",
+        "MATCH (a)-[:R*0..]-(b) WHERE b.p IS NOT NULL RETURN DISTINCT a.p AS value",
+    ] {
+        assert!(
+            property_closure(text)
+                .endpoint_sources()
+                .iter()
+                .any(Option::is_some)
+        );
+    }
+}
+
+#[test]
+fn closure_property_projection_keeps_colliding_payloads_until_the_last_pair() {
+    use fgdb_delta_types::{LimbLimit, ZSet, ZWeight};
+    use fgdb_gql::GraphSetColumnType::{Stored, Vertex};
+    use fgdb_gql::GraphSetQuantifier;
+    use fgdb_gql::row_projection::IncrementalRowProjection;
+
+    let values = [
+        GraphValue::Scalar(CanonicalScalar::Int(7)),
+        GraphValue::Scalar(CanonicalScalar::Null),
+        GraphValue::List(
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ]
+            .into(),
+        ),
+        GraphValue::map(vec![(
+            "items".into(),
+            GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(3))].into()),
+        )])
+        .unwrap(),
+    ];
+    let limbs = LimbLimit::new(4);
+    for value in values {
+        let definition = property_closure(
+            "MATCH (a)-[:R*]->(b) \
+             RETURN DISTINCT b.q AS first,b.p AS second,b.q AS again",
+        );
+        assert!(definition.endpoint_sources()[0].is_none());
+        assert_eq!(
+            definition.endpoint_sources()[1]
+                .as_ref()
+                .unwrap()
+                .column_types(),
+            &[Vertex, Stored, Stored],
+            "repeated property demands share one source column"
+        );
+        assert_eq!(
+            definition.projection().quantifier(),
+            GraphSetQuantifier::Distinct
+        );
+        let mut projection = IncrementalRowProjection::new(definition.into_parts().2);
+        // The output asks for q before p, but the source stores p then q in
+        // property-key order. Its extra identity is retained only in the join.
+        let enriched = |a, b, value: &GraphValue| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(a)),
+                GraphValue::Vertex(VId(b)),
+                GraphValue::Vertex(VId(b)),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                value.clone(),
+            ])
+        };
+        let projected = |value: &GraphValue| {
+            GraphValueRow::from_owned_values(vec![
+                value.clone(),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                value.clone(),
+            ])
+        };
+        let left = enriched(1, 3, &value);
+        let right = enriched(2, 4, &value);
+        let initial = ZSet::from_updates(
+            [(left.clone(), ZWeight::ONE), (right.clone(), ZWeight::ONE)],
+            limbs,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+        let added = projection
+            .prepare(&initial, limbs, Some(1), &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .commit();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added.weight(&projected(&value)), Some(&ZWeight::ONE));
+        let first_retraction =
+            ZSet::from_updates([(left, ZWeight::from_i128(-1))], limbs, &mut |_| {
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert!(
+            projection
+                .prepare(&first_retraction, limbs, Some(1), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .commit()
+                .is_empty()
+        );
+        let replacement = GraphValue::Scalar(if value.is_null() {
+            CanonicalScalar::Int(9)
+        } else {
+            CanonicalScalar::Null
+        });
+        let updated = enriched(2, 4, &replacement);
+        let property_change = ZSet::from_updates(
+            [
+                (right, ZWeight::from_i128(-1)),
+                (updated.clone(), ZWeight::ONE),
+            ],
+            limbs,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+        let changed = projection
+            .prepare(&property_change, limbs, Some(1), &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .commit();
+        assert_eq!(changed.len(), 2);
+        assert_eq!(
+            changed.weight(&projected(&value)),
+            Some(&ZWeight::from_i128(-1))
+        );
+        assert_eq!(
+            changed.weight(&projected(&replacement)),
+            Some(&ZWeight::ONE)
+        );
+        let last_retraction =
+            ZSet::from_updates([(updated, ZWeight::from_i128(-1))], limbs, &mut |_| {
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        let removed = projection
+            .prepare(&last_retraction, limbs, Some(1), &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .commit();
+        assert_eq!(
+            removed.weight(&projected(&replacement)),
+            Some(&ZWeight::from_i128(-1))
+        );
+        assert!(projection.rows().is_empty());
+    }
+}
+
+#[test]
+fn closure_property_width_admission_counts_hidden_join_identities_and_semi_inputs() {
+    use fgdb_delta_types::LabelId;
+    use fgdb_gql::algebra::MAX_PATTERN_VERTICES;
+
+    let prepare = |text: &str| {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Property, name) => name
+                .strip_prefix('p')
+                .and_then(|number| number.parse().ok())
+                .map(PropertyKeyId)
+                .map(GraphSymbol::Property),
+            _ => None,
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    };
+    let columns = (1..=MAX_PATTERN_VERTICES - 3)
+        .map(|index| format!("a.p{index} AS c{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let maximal = prepare(&format!("MATCH (a)-[:R*]->(b) RETURN DISTINCT {columns}"));
+    let definition = maximal.incremental_closure_definition().unwrap();
+    assert_eq!(
+        definition.endpoint_sources()[0]
+            .as_ref()
+            .unwrap()
+            .column_types()
+            .len(),
+        MAX_PATTERN_VERTICES - 2
+    );
+    // The first INNER join exactly fills the internal schema. The later
+    // identity-only SEMI input still participates in RowJoinSpec admission.
+    let too_wide = prepare(&format!("MATCH (a)-[:R*]->(b:L) RETURN DISTINCT {columns}"));
+    assert!(too_wide.incremental_closure_definition().is_none());
+    let one_more = prepare(&format!(
+        "MATCH (a)-[:R*]->(b) RETURN DISTINCT {columns},a.p{} AS extra",
+        MAX_PATTERN_VERTICES - 2
+    ));
+    assert!(one_more.incremental_closure_definition().is_none());
+
+    let repeated = (0..MAX_PATTERN_VERTICES - 1)
+        .map(|index| format!("a.p1 AS c{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let repeated = prepare(&format!("MATCH (a)-[:R*]->(b) RETURN DISTINCT {repeated}"))
+        .incremental_closure_definition()
+        .unwrap();
+    assert_eq!(
+        repeated.endpoint_sources()[0]
+            .as_ref()
+            .unwrap()
+            .column_types()
+            .len(),
+        2,
+        "output aliases do not duplicate internal property demands"
+    );
+}
+
+#[test]
+fn bounded_walk_properties_share_endpoint_enrichment_and_keep_owner_limits() {
+    use fgdb_gql::GraphSetColumnType::{Stored, Vertex};
+    use fgdb_gql::GraphSetQuantifier;
+
+    for (text, minimum, maximum, nodes) in [
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a {p:$start})-[:R*0]->(b) \
+             RETURN DISTINCT b.q AS value",
+            0,
+            0,
+            6,
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a {p:$start})-[:R*0..2]->(b) \
+             RETURN DISTINCT b.q AS value",
+            0,
+            2,
+            12,
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a {p:$start})<-[:R*1..3]-(b) \
+             RETURN DISTINCT b.q AS value",
+            1,
+            3,
+            13,
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS WALK (a {p:$start})-[:R*0..2]-(b) \
+             RETURN DISTINCT b.q AS value",
+            0,
+            2,
+            12,
+        ),
+    ] {
+        let pattern = property_pattern(text);
+        assert!(pattern.incremental_closure_definition().is_none());
+        let definition = pattern.incremental_bounded_walk_definition().unwrap();
+        assert_eq!(definition.bounds().minimum(), minimum, "{text}");
+        assert_eq!(definition.bounds().maximum(), maximum, "{text}");
+        assert_eq!(definition.circuit_nodes(), nodes, "{text}");
+        assert_eq!(definition.edges().is_some(), maximum != 0);
+        assert_eq!(definition.lifetimes().is_some(), minimum == 0);
+        assert_eq!(
+            definition.endpoint_sources()[0]
+                .as_ref()
+                .unwrap()
+                .column_types(),
+            &[Vertex]
+        );
+        assert_eq!(
+            definition.endpoint_sources()[1]
+                .as_ref()
+                .unwrap()
+                .column_types(),
+            &[Vertex, Stored]
+        );
+        assert_eq!(
+            definition.projection().quantifier(),
+            GraphSetQuantifier::Distinct
+        );
+    }
+    let within =
+        property_pattern("MATCH REPEATABLE ELEMENTS WALK (a)-[:R*30]->(b) RETURN DISTINCT b.p")
+            .incremental_bounded_walk_definition()
+            .unwrap();
+    assert_eq!(within.circuit_nodes(), 63);
+    let too_many =
+        property_pattern("MATCH REPEATABLE ELEMENTS WALK (a)-[:R*31]->(b) RETURN DISTINCT b.p");
+    assert!(too_many.incremental_bounded_walk_definition().is_none());
 }

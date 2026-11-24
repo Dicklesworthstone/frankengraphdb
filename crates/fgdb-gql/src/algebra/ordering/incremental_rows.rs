@@ -24,12 +24,13 @@ struct Output<'a> {
 }
 
 /// Compiler-owned stages for DISTINCT endpoint reachability. The incidence
-/// input contains all authorized transit vertices. Optional endpoint membership
-/// sources must be semi-joined AFTER closure and BEFORE the final projection.
+/// input contains all authorized transit vertices. Optional endpoint row sources
+/// are joined AFTER closure and BEFORE the final projection; identity-only
+/// sources use SEMI, while sources carrying properties use INNER.
 #[derive(Clone, Debug)]
 pub struct IncrementalClosureDefinition {
     input: crate::PreparedGraphSet,
-    endpoint_filters: [Option<crate::PreparedGraphSet>; 2],
+    endpoint_sources: [Option<crate::PreparedGraphSet>; 2],
     projection: crate::row_projection::RowProjectionSpec,
 }
 
@@ -40,8 +41,8 @@ impl IncrementalClosureDefinition {
     }
 
     #[must_use]
-    pub const fn endpoint_filters(&self) -> &[Option<crate::PreparedGraphSet>; 2] {
-        &self.endpoint_filters
+    pub const fn endpoint_sources(&self) -> &[Option<crate::PreparedGraphSet>; 2] {
+        &self.endpoint_sources
     }
 
     #[must_use]
@@ -57,20 +58,20 @@ impl IncrementalClosureDefinition {
         [Option<crate::PreparedGraphSet>; 2],
         crate::row_projection::RowProjectionSpec,
     ) {
-        (self.input, self.endpoint_filters, self.projection)
+        (self.input, self.endpoint_sources, self.projection)
     }
 }
 
 /// A finite endpoint-reachability circuit for repeatable-element WALK.
 /// Every hop keeps DISTINCT endpoint support, not complete path occurrences.
 /// The host shares the edge source between hop layers and unions exactly the
-/// requested inclusive interval before applying endpoint membership filters.
+/// requested inclusive interval before applying endpoint predicates and properties.
 #[derive(Clone, Debug)]
 pub struct IncrementalBoundedWalkDefinition {
     edges: Option<crate::PreparedGraphSet>,
     lifetimes: Option<crate::PreparedGraphSet>,
     bounds: crate::GraphWalkBounds,
-    endpoint_filters: [Option<crate::PreparedGraphSet>; 2],
+    endpoint_sources: [Option<crate::PreparedGraphSet>; 2],
     projection: crate::row_projection::RowProjectionSpec,
 }
 
@@ -91,8 +92,8 @@ impl IncrementalBoundedWalkDefinition {
     }
 
     #[must_use]
-    pub const fn endpoint_filters(&self) -> &[Option<crate::PreparedGraphSet>; 2] {
-        &self.endpoint_filters
+    pub const fn endpoint_sources(&self) -> &[Option<crate::PreparedGraphSet>; 2] {
+        &self.endpoint_sources
     }
 
     #[must_use]
@@ -100,7 +101,7 @@ impl IncrementalBoundedWalkDefinition {
         &self.projection
     }
 
-    /// Owners beyond the source leaves and endpoint Semi joins: one edge
+    /// Owners beyond the source leaves and endpoint joins: one edge
     /// threshold, a join/projection per later hop, a union per extra selected
     /// hop, and the final output projection. All arithmetic is over an
     /// admitted finite GraphWalkBounds, never the unbounded sentinel.
@@ -119,7 +120,7 @@ impl IncrementalBoundedWalkDefinition {
         self.derived_nodes()
             + u64::from(self.edges.is_some())
             + u64::from(self.lifetimes.is_some())
-            + self.endpoint_filters.iter().flatten().count() as u64 * 2
+            + self.endpoint_sources.iter().flatten().count() as u64 * 2
     }
 }
 
@@ -129,7 +130,7 @@ struct EndpointWalk {
     direction: crate::algebra::GlaDirection,
     search: crate::algebra::GraphWalkSearch,
     different_edges: bool,
-    endpoint_filters: [Option<crate::PreparedGraphSet>; 2],
+    endpoint_sources: [Option<crate::PreparedGraphSet>; 2],
     projection: crate::row_projection::RowProjectionSpec,
 }
 
@@ -156,27 +157,33 @@ fn vertex_lifetimes() -> Option<crate::PreparedGraphSet> {
 
 impl PreparedGraphPattern<GraphValueRow> {
     /// Compile the support of one unbounded TRAIL into a counted edge/lifetime
-    /// relation, optional endpoint membership sources and an endpoint projection.
-    /// The host must apply deletion-safe closure, then the endpoint semi joins,
-    /// then the projection. Label selection never restricts transit vertices.
+    /// relation, optional endpoint row sources and a final projection.
+    /// The host must apply deletion-safe closure, then the endpoint joins,
+    /// then the projection. Endpoint predicates never restrict transit vertices.
+    ///
+    /// Each endpoint source starts with its vertex identity, followed by its
+    /// sorted, unique demanded property keys. Predicate-only sources use SEMI
+    /// joins. Property-bearing sources use INNER joins that append their entire
+    /// row, including the identity, in endpoint order. The projection schema
+    /// describes exactly that layout. Ordinary sources retain missing values
+    /// as NULL and preserve stored scalar, list and map values.
     ///
     /// DISTINCT is load-bearing: closure has one row per reachable pair, not
-    /// one row per path. Endpoint-only output may retain either or both vertices,
-    /// with aliases and repetitions. Projecting away an endpoint thresholds the
-    /// remaining support so deleting one witness cannot retract another.
+    /// one row per path. Output may retain endpoint identities and properties,
+    /// with aliases and repetitions. Unless both identities survive, projected
+    /// support is thresholded so deleting one witness cannot retract another.
     ///
-    /// The admitted interval is zero-or-more or one-or-more hops, with optional
-    /// endpoint label conjunctions and no captures, edge/property predicates,
-    /// order or page. Zero-hop support adds one self pair per visible vertex,
-    /// including isolates, through an ordinary UNION ALL source. Those lifetime
-    /// rows and real self-loops retain independent counted support, so deleting
-    /// one does not retract the other. An undirected one-or-more trail cannot
-    /// use this recipe: traversing one physical edge in both directions does
-    /// not constitute a legal cycle. Zero-or-more support is sound in every
-    /// direction because each distinct reachable pair has a simple path and
-    /// every visible vertex has an empty path. Ordinary selection retains
-    /// relation unions, wildcard types and source authorization before closure
-    /// sees incidence or vertex lifetimes.
+    /// The admitted interval is zero-or-more or one-or-more hops, with ordinary
+    /// endpoint predicates and no captures, edge predicates, order or page.
+    /// Zero-hop support adds one self pair per visible vertex, including
+    /// isolates, through an ordinary UNION ALL source. Those lifetime rows and
+    /// real self-loops retain independent counted support, so deleting one does
+    /// not retract the other. An undirected one-or-more trail cannot use this
+    /// recipe: traversing one physical edge in both directions does not form a
+    /// legal cycle. Zero-or-more support is sound in every direction because
+    /// each distinct reachable pair has a simple path and every visible vertex
+    /// has an empty path. Ordinary selection retains relation unions, wildcard
+    /// types and source authorization before closure sees topology/lifetimes.
     #[must_use]
     pub fn incremental_closure_definition(&self) -> Option<IncrementalClosureDefinition> {
         use crate::algebra::{GlaDirection, GraphWalkSearch};
@@ -204,7 +211,7 @@ impl PreparedGraphPattern<GraphValueRow> {
         };
         Some(IncrementalClosureDefinition {
             input,
-            endpoint_filters: path.endpoint_filters,
+            endpoint_sources: path.endpoint_sources,
             projection: path.projection,
         })
     }
@@ -212,11 +219,11 @@ impl PreparedGraphPattern<GraphValueRow> {
     /// Compile finite WALK reachability using only existing maintained joins,
     /// DISTINCT projections and unions. Each layer represents the existence
     /// of a walk of exactly that length. Intermediate vertices remain wholly
-    /// unrestricted by endpoint labels, and zero hops include visible isolates.
+    /// unrestricted by endpoint predicates, and zero hops include visible isolates.
     ///
     /// Reusing an edge is legal only for repeatable-element WALK. Bounded
-    /// TRAIL, SIMPLE, ACYCLIC, shortest selectors, path capture/bags, predicates
-    /// and pages keep their existing refusal; their semantics cannot be
+    /// TRAIL, SIMPLE, ACYCLIC, shortest selectors, path capture/bags, edge or
+    /// cross-endpoint predicates, and pages keep their refusal; their semantics cannot be
     /// recovered from endpoint support. The entire recipe must fit the native
     /// relational depth budget before any source is read or owner registered.
     #[must_use]
@@ -237,7 +244,7 @@ impl PreparedGraphPattern<GraphValueRow> {
                 None
             },
             bounds: path.bounds,
-            endpoint_filters: path.endpoint_filters,
+            endpoint_sources: path.endpoint_sources,
             projection: path.projection,
         };
         (definition.circuit_nodes() <= crate::MAX_GRAPH_SET_DEPTH as u64).then_some(definition)
@@ -245,8 +252,11 @@ impl PreparedGraphPattern<GraphValueRow> {
 
     /// One source/selection/projection proof shared by finite and unbounded
     /// reachability. The caller separately proves its path-mode derivative.
+    /// Endpoint row sources retain their predicates and demanded properties;
+    /// the full incidence source never acquires an endpoint restriction.
     fn incremental_endpoint_walk(&self) -> Option<EndpointWalk> {
         use crate::algebra::{GraphColumn, GraphPatternBuilder, VertexPredicate};
+        use crate::row_join::{RowJoinKind, RowJoinSpec};
         use crate::{
             GraphSetColumnType, GraphSetProjection, GraphSetQuantifier, GraphSetValue,
             PreparedGraphSet,
@@ -260,16 +270,23 @@ impl PreparedGraphPattern<GraphValueRow> {
         {
             return None;
         }
-        let slots = output
-            .columns
-            .iter()
-            .map(|column| match column {
+        let mut identities = [false, false];
+        let mut property_keys = [Vec::new(), Vec::new()];
+        for column in output.columns {
+            match column {
                 ValueProjection::Vertex { slot } if slot.ordinal() < 2 => {
-                    Some(usize::from(slot.ordinal() == 1))
+                    identities[usize::from(slot.ordinal() == 1)] = true;
                 }
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
+                ValueProjection::Property { slot, key } if slot.ordinal() < 2 => {
+                    property_keys[usize::from(slot.ordinal() == 1)].push(*key);
+                }
+                _ => return None,
+            }
+        }
+        for keys in &mut property_keys {
+            keys.sort_unstable();
+            keys.dedup();
+        }
         let [GlaOperator::ScanVertices, remainder @ ..] =
             &self.plan().operators()[..output.projection]
         else {
@@ -277,7 +294,7 @@ impl PreparedGraphPattern<GraphValueRow> {
         };
         let mut expansion = None;
         let mut different_edges = false;
-        let mut labels = [Vec::new(), Vec::new()];
+        let mut endpoint_predicates = [Vec::new(), Vec::new()];
         for operator in remainder {
             match operator {
                 GlaOperator::VarLengthExpand { .. } if expansion.is_none() => {
@@ -287,10 +304,15 @@ impl PreparedGraphPattern<GraphValueRow> {
                     if slot.ordinal() < 2 && (slot.ordinal() == 0 || expansion.is_some()) =>
                 {
                     for predicate in predicates {
-                        let VertexPredicate::HasLabel(label) = predicate else {
-                            return None;
-                        };
-                        labels[usize::from(slot.ordinal() == 1)].push(*label);
+                        match predicate {
+                            VertexPredicate::HasLabel(_)
+                            | VertexPredicate::IntegerProperty { .. }
+                            | VertexPredicate::ScalarProperty { .. }
+                            | VertexPredicate::PropertyNull { .. } => {
+                                endpoint_predicates[usize::from(slot.ordinal() == 1)]
+                                    .push(predicate.clone());
+                            }
+                        }
                     }
                 }
                 GlaOperator::DifferentEdges { segments }
@@ -336,54 +358,89 @@ impl PreparedGraphPattern<GraphValueRow> {
             .ok()?
             .with_duplicates()
             .into();
-        let mut endpoint_filters = [None, None];
-        for (endpoint, mut labels) in labels.into_iter().enumerate() {
-            if labels.is_empty() {
+        let mut endpoint_sources = [None, None];
+        let mut input_types = vec![GraphSetColumnType::Vertex; 2];
+        let mut property_offsets = [None, None];
+        for (endpoint, predicates) in endpoint_predicates.into_iter().enumerate() {
+            let keys = &property_keys[endpoint];
+            if predicates.is_empty() && keys.is_empty() {
                 continue;
             }
-            labels.sort_unstable();
-            labels.dedup();
             let mut vertices = GraphPatternBuilder::new();
             vertices.vertex("vertex").ok()?;
-            for label in labels {
-                vertices
-                    .filter("vertex", VertexPredicate::HasLabel(label))
-                    .ok()?;
+            for predicate in predicates {
+                vertices.filter("vertex", predicate).ok()?;
             }
-            endpoint_filters[endpoint] = Some(
-                vertices
-                    .prepare_values(&[GraphColumn::vertex("vertex", "vertex")], 0, None)
-                    .ok()?
-                    .with_duplicates()
-                    .into(),
+            let names: Vec<_> = (0..keys.len())
+                .map(|index| format!("property_{index}"))
+                .collect();
+            let mut columns = vec![GraphColumn::vertex("vertex", "vertex")];
+            columns.extend(
+                names
+                    .iter()
+                    .zip(keys)
+                    .map(|(name, key)| GraphColumn::property(name, "vertex", *key)),
             );
+            // The ordinary counted source needs one private COUNT column.
+            if columns.len() >= MAX_PATTERN_VERTICES {
+                return None;
+            }
+            let source: PreparedGraphSet = vertices
+                .prepare_values(&columns, 0, None)
+                .ok()?
+                .with_duplicates()
+                .into();
+            // Match the host's exact join admission, including the combined
+            // input-width bound of a predicate-only SEMI join after enrichment.
+            let join = RowJoinSpec::new(&input_types, source.column_types(), &[(endpoint, 0)])
+                .ok()?
+                .with_kind(if keys.is_empty() {
+                    RowJoinKind::Semi
+                } else {
+                    RowJoinKind::Inner
+                });
+            if !keys.is_empty() {
+                property_offsets[endpoint] = Some(input_types.len() + 1);
+            }
+            input_types = join.column_types().collect();
+            endpoint_sources[endpoint] = Some(source);
         }
-        // Keeping both endpoint IDs is injective even with repeated columns.
-        // Otherwise several reachable pairs may support one projected row.
-        let quantifier = if slots.contains(&0) && slots.contains(&1) {
+        // Keeping both endpoint identities is injective, even with repeated
+        // columns and property payloads. Otherwise values can collide.
+        let quantifier = if identities.into_iter().all(|present| present) {
             GraphSetQuantifier::All
         } else {
             GraphSetQuantifier::Distinct
         };
-        let projection = crate::row_projection::RowProjectionSpec::new(
-            vec![GraphSetColumnType::Vertex; 2],
-            self.columns()
-                .iter()
-                .zip(slots)
-                .map(|(name, slot)| {
-                    GraphSetProjection::new(name.clone(), GraphSetValue::Column(slot))
-                })
-                .collect(),
-            quantifier,
-        )
-        .ok()?;
+        let columns = self
+            .columns()
+            .iter()
+            .zip(output.columns)
+            .map(|(name, column)| {
+                let column = match column {
+                    ValueProjection::Vertex { slot } => usize::from(slot.ordinal() == 1),
+                    ValueProjection::Property { slot, key } => {
+                        let endpoint = usize::from(slot.ordinal() == 1);
+                        property_offsets[endpoint]?
+                            + property_keys[endpoint].binary_search(key).ok()?
+                    }
+                    _ => return None,
+                };
+                Some(GraphSetProjection::new(
+                    name.clone(),
+                    GraphSetValue::Column(column),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let projection =
+            crate::row_projection::RowProjectionSpec::new(input_types, columns, quantifier).ok()?;
         Some(EndpointWalk {
             input,
             bounds: *bounds,
             direction: *direction,
             search: *search,
             different_edges,
-            endpoint_filters,
+            endpoint_sources,
             projection,
         })
     }
@@ -455,7 +512,7 @@ impl PreparedGraphPattern<GraphValueRow> {
     /// The caller MUST retain this original pattern and apply its quantifier,
     /// ordering and window downstream. Source topology is admitted separately
     /// by the standing-query engine; this method is not an authority grant.
-    /// Up to MAX_PATTERN_VERTICES - 1 scalar/vertex/edge columns are admitted.
+    /// Up to MAX_PATTERN_VERTICES - 1 stored-property/vertex/edge columns are admitted.
     #[must_use]
     pub fn incremental_row_source_definition(&self) -> Option<PreparedGraphAggregate> {
         let output = self.incremental_rows_output()?;
@@ -898,7 +955,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn stored_property_tuples_preserve_nested_values_and_reject_graph_entities() {
         let mut builder = GraphPatternBuilder::new();

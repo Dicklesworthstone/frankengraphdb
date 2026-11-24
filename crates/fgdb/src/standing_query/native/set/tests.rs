@@ -2,7 +2,9 @@ use super::*;
 use crate::{DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use fgdb_gql::{GqlParameters, PreparedGraphSetText, PreparedGraphText};
-use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts,
+};
 
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
@@ -232,36 +234,69 @@ fn reachability_symbols(
             Some(fgdb_gql::GraphSymbol::Relation(RelationId(2)))
         }
         (fgdb_gql::GraphSymbolKind::Label, "L") => Some(fgdb_gql::GraphSymbol::Label(LabelId(1))),
+        (fgdb_gql::GraphSymbolKind::Property, "p") => Some(fgdb_gql::GraphSymbol::Property(
+            fgdb_delta_types::PropertyKeyId(1),
+        )),
         _ => None,
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReachabilityProfile {
+    Plain,
+    Bounded,
+    Properties,
+    BoundedProperties,
+}
+
 #[test]
 fn native_reachability_registration_and_rebuild_are_atomic_at_every_stage_and_row_limit() {
-    reachability_registration_and_rebuild(false, false, false);
+    reachability_registration_and_rebuild(false, false, ReachabilityProfile::Plain);
 }
 
 #[test]
 fn native_reflexive_reachability_registration_and_rebuild_preserve_private_lifetime_support() {
-    reachability_registration_and_rebuild(true, false, false);
+    reachability_registration_and_rebuild(true, false, ReachabilityProfile::Plain);
 }
 
 #[test]
 fn selected_reachability_registration_and_rebuild_keep_endpoint_owners_atomic() {
-    reachability_registration_and_rebuild(true, true, false);
+    reachability_registration_and_rebuild(true, true, ReachabilityProfile::Plain);
 }
 
 #[test]
 fn bounded_walk_registration_and_rebuild_preserve_shared_hop_dependencies_atomically() {
-    reachability_registration_and_rebuild(false, false, true);
+    reachability_registration_and_rebuild(false, false, ReachabilityProfile::Bounded);
 }
 
 #[test]
 fn selected_reflexive_bounded_walk_keeps_private_lifetimes_and_endpoint_owners_atomic() {
-    reachability_registration_and_rebuild(true, true, true);
+    reachability_registration_and_rebuild(true, true, ReachabilityProfile::Bounded);
 }
 
-fn reachability_registration_and_rebuild(reflexive: bool, selected: bool, bounded: bool) {
+#[test]
+fn property_reachability_registration_and_rebuild_keep_payload_joins_atomic() {
+    reachability_registration_and_rebuild(true, true, ReachabilityProfile::Properties);
+}
+
+#[test]
+fn bounded_property_walk_registration_and_rebuild_keep_payload_joins_atomic() {
+    reachability_registration_and_rebuild(true, true, ReachabilityProfile::BoundedProperties);
+}
+
+fn reachability_registration_and_rebuild(
+    reflexive: bool,
+    selected: bool,
+    profile: ReachabilityProfile,
+) {
+    let bounded = matches!(
+        profile,
+        ReachabilityProfile::Bounded | ReachabilityProfile::BoundedProperties
+    );
+    let property_payloads = matches!(
+        profile,
+        ReachabilityProfile::Properties | ReachabilityProfile::BoundedProperties
+    );
     let ((), report) = run_async_under_lab(0x6e73_7c11, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -272,7 +307,16 @@ fn reachability_registration_and_rebuild(reflexive: bool, selected: bool, bounde
             seed.create_vertex(
                 VId(id),
                 if selected { vec![LabelId(1)] } else { vec![] },
-                vec![],
+                if property_payloads {
+                    vec![(
+                        fgdb_delta_types::PropertyKeyId(1),
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                            i64::try_from(id).unwrap(),
+                        )),
+                    )]
+                } else {
+                    vec![]
+                },
             );
         }
         for id in 1..=8 {
@@ -286,7 +330,11 @@ fn reachability_registration_and_rebuild(reflexive: bool, selected: bool, bounde
             .unwrap();
         let before = db.standing_queries.len();
         let prior_answer = db.standing_native_query(&cx, &prior, policy()).unwrap();
-        let text = if bounded && selected {
+        let text = if bounded && property_payloads {
+            "MATCH REPEATABLE ELEMENTS WALK (a:L)-[:R*0..3]->(b:L) WHERE a.p>=1 AND b.p>=1 RETURN DISTINCT a.p AS origin,b.p AS target"
+        } else if property_payloads {
+            "MATCH (a:L)-[:R*0..]->(b:L) WHERE a.p>=1 AND b.p>=1 RETURN DISTINCT a.p AS origin,b.p AS target"
+        } else if bounded && selected {
             "MATCH REPEATABLE ELEMENTS WALK (a:L)-[:R*0..3]->(b:L) RETURN DISTINCT a,b"
         } else if bounded && reflexive {
             "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..3]->(b) RETURN DISTINCT a,b"
@@ -304,7 +352,7 @@ fn reachability_registration_and_rebuild(reflexive: bool, selected: bool, bounde
             (true, false) => 9,
             (false, true) => 5,
             (false, false) => 3,
-        } + if selected { 4 } else { 0 };
+        } + if selected || property_payloads { 4 } else { 0 };
         let rows = if reflexive { 6 } else { 3 };
         let prepared = PreparedNativeRead::prepare(text, &params, reachability_symbols).unwrap();
         assert_eq!(

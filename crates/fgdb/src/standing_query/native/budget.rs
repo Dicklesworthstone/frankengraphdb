@@ -64,8 +64,8 @@ fn closure_footprint(
     scoped: bool,
 ) -> Result<Footprint, StandingQueryError> {
     let mut footprint = circuit(cx, definition.input(), scoped)?.append(2)?;
-    for filter in definition.endpoint_filters().iter().flatten() {
-        footprint = footprint.combine(circuit(cx, filter, scoped)?, 1)?;
+    for source in definition.endpoint_sources().iter().flatten() {
+        footprint = footprint.combine(circuit(cx, source, scoped)?, 1)?;
     }
     Ok(footprint)
 }
@@ -87,8 +87,8 @@ fn bounded_walk_footprint(
     {
         footprint = footprint.combine(circuit(cx, source, scoped)?, 0)?;
     }
-    for filter in definition.endpoint_filters().iter().flatten() {
-        footprint = footprint.combine(circuit(cx, filter, scoped)?, 1)?;
+    for source in definition.endpoint_sources().iter().flatten() {
+        footprint = footprint.combine(circuit(cx, source, scoped)?, 1)?;
     }
     Ok(footprint)
 }
