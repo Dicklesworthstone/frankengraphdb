@@ -8,7 +8,9 @@
 
 use super::{IncrementalTriangles, TriangleError, TriangleQuantifier, TriangleUpdate};
 use crate::zset::committed::snapshot::EdgeSnapshot;
-use crate::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeInputUpdate};
+use crate::zset::committed::{
+    CommittedEdgeInput, CommittedSchemaCompatibility, EdgeInputError, EdgeInputUpdate,
+};
 use crate::zset::event;
 use crate::{
     LimbLimit, LocalDeltaBatchIndex, LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent,
@@ -148,6 +150,21 @@ impl CommittedTriangles {
         let input = self
             .input
             .prepare_committed_successor(cx, batch, limbs, control)?;
+        Self::prepare_input(input, &mut self.triangles, self.relation, limbs, control)
+    }
+
+    /// Live-publisher topology maintenance with exact borrowed catalog
+    /// compatibility evidence. Detached continuation remains schema-strict.
+    pub fn prepare_catalog_successor<E>(
+        &mut self,
+        cx: &CommitCx,
+        compatibility: &CommittedSchemaCompatibility<'_>,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<CommittedTrianglesUpdate<'_>, CommittedTrianglesError<E>> {
+        let input = self
+            .input
+            .prepare_catalog_successor(cx, compatibility, limbs, control)?;
         Self::prepare_input(input, &mut self.triangles, self.relation, limbs, control)
     }
 

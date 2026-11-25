@@ -116,6 +116,30 @@ fn literal_operand_refusals_keep_the_type_and_callers_byte() {
                 NativeReadClass::Set,
             ),
             (
+                "MATCH (n) RETURN labels(42)",
+                "42",
+                "a vertex or NULL",
+                NativeReadClass::Set,
+            ),
+            (
+                "MATCH (n) RETURN type({p: 1})",
+                "{p",
+                "an edge or NULL",
+                NativeReadClass::Set,
+            ),
+            (
+                "MATCH (n) RETURN startNode([1]) LIMIT 0",
+                "[1]",
+                "an edge or NULL",
+                NativeReadClass::Set,
+            ),
+            (
+                "MATCH (n) RETURN endNode(true) LIMIT 0",
+                "true",
+                "an edge or NULL",
+                NativeReadClass::Set,
+            ),
+            (
                 "MATCH (n) RETURN 1 IN {x: 2}",
                 "{x",
                 "a list or NULL after IN",
