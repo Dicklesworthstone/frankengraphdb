@@ -12,6 +12,35 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Beacon maintenance across additive catalog commits — qualification pending
+
+Maintained text/vector indexes and their optional graph-source pins now advance
+across validated immutable-name registrations and symbol-allocation-floor
+changes. These catalog operations preserve the numeric label/property identities
+in an existing Beacon definition, so their committed tick has no changed
+documents to reindex.
+
+The schema owner retains the exact transition identity only after admitting its
+catalog successor and predecessor. Maintenance requires that retained proof,
+the single-row schema shape, matching graph/branch, epochs and sequence before
+treating the tick as a no-document update. The existing work meter, failure
+fence, final atomic publication and historical pins remain active. Explicit
+retained-history refresh uses the same rule. A root-only open carries no
+transition proof; checkpoint catch-up keeps its existing authoritative rebuild
+fallback when that evidence is absent.
+
+Regression sources cover exact and forged admission proofs, historical cuts,
+plain and graph-enabled registrations, unchanged text/vector results, old pins,
+zero document/scratch allowances, zero-work refusal and the next ordinary graph
+write compared with a fresh index. General standing-query schema handling is
+still outside this change.
+
+Independent source review and textual checks completed. Pinned Rust formatting,
+compilation, native tests, Clippy, UBS and exact-tree qualification remain UNRUN
+after execution-host loss. Keep `fgdb-t38fv`,
+`fgdb-rc1111-durable-watermarks-c1g98` and
+`fgdb-qualify-integrated-nov22-maz0p` open.
+
 ### Chronicle malformed-marker recovery — qualification pending
 
 Recovery now distinguishes a missing canonical marker field from an illegal tag
