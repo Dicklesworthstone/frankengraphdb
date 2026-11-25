@@ -211,7 +211,12 @@ fn attested_catalog_ticks_preserve_raw_anchors_and_accept_old_prepared_epochs() 
         assert_eq!(state.frontier(), CommitSeq(2));
         assert_eq!(state.snapshot(LIMBS, &mut allow).unwrap(), baseline);
         index.insert(catalog.clone()).unwrap();
-        assert!(state.prepare_next(&index, LIMBS, &mut allow).unwrap().is_none());
+        assert!(
+            state
+                .prepare_next(&index, LIMBS, &mut allow)
+                .unwrap()
+                .is_none()
+        );
         // Neither the marker nor the raw schema template is replaced by an
         // invented empty graph batch to obtain the zero topology derivative.
         let changed = LogicalDeltaBatch::from_parts_for_test(
@@ -230,10 +235,7 @@ fn attested_catalog_ticks_preserve_raw_anchors_and_accept_old_prepared_epochs() 
         // A fresh epoch, then a graph write prepared before registration.
         // Both are compatible; detached consumers still refuse epoch drift.
         for (seq, epoch, retired, created) in [(3, 1, 1, 4), (4, 0, 2, 5)] {
-            let mut entry = coordinate(
-                1,
-                vec![delete(retired), create(created, 1, 7, 8)],
-            );
+            let mut entry = coordinate(1, vec![delete(retired), create(created, 1, 7, 8)]);
             entry.schema_epoch = SchemaEpoch(epoch);
             let next = batch(seq, vec![entry]);
             let proof = CommittedSchemaCompatibility::attest_name_only_catalog(
@@ -253,17 +255,19 @@ fn attested_catalog_ticks_preserve_raw_anchors_and_accept_old_prepared_epochs() 
                 .prepare_catalog_successor(cx, &proof, LIMBS, &mut allow)
                 .unwrap()
                 .commit();
-            assert_eq!(delta.weight(&(RelationId(1), VId(7), VId(8))), Some(&ZWeight::ONE));
+            assert_eq!(
+                delta.weight(&(RelationId(1), VId(7), VId(8))),
+                Some(&ZWeight::ONE)
+            );
             assert_eq!(state.frontier(), CommitSeq(seq));
             assert_eq!(state.epochs[&RelationId(1)], SchemaEpoch(epoch));
         }
         assert_eq!(state.edge_count(), 3);
         assert_eq!(
-            state.snapshot(LIMBS, &mut allow).unwrap().weight(&(
-                RelationId(1),
-                VId(7),
-                VId(8)
-            )),
+            state
+                .snapshot(LIMBS, &mut allow)
+                .unwrap()
+                .weight(&(RelationId(1), VId(7), VId(8))),
             Some(&ZWeight::from_i128(2))
         );
     });
@@ -341,12 +345,15 @@ fn catalog_attestation_cannot_admit_future_epochs_foreign_scopes_or_other_schema
         let mut wrong_epoch = good.coordinate_entries().to_vec();
         wrong_epoch[0].schema_epoch = SchemaEpoch(1);
         malformed.push(wrong_epoch);
-        malformed.push(vec![coordinate(1, vec![DeltaRow::Constraint {
-            before_schema_root: ObjectId([1; 32]),
-            after_schema_root: ObjectId([2; 32]),
-            before_constraint_root: ObjectId([3; 32]),
-            after_constraint_root: ObjectId([4; 32]),
-        }])]);
+        malformed.push(vec![coordinate(
+            1,
+            vec![DeltaRow::Constraint {
+                before_schema_root: ObjectId([1; 32]),
+                after_schema_root: ObjectId([2; 32]),
+                before_constraint_root: ObjectId([3; 32]),
+                after_constraint_root: ObjectId([4; 32]),
+            }],
+        )]);
         let mut future = coordinate(1, vec![create(4, 1, 7, 8)]);
         future.schema_epoch = SchemaEpoch(2);
         malformed.push(vec![future]);
