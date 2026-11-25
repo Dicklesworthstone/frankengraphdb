@@ -7,7 +7,7 @@ use super::{
     Authority, CapabilityToken, CommitCx, Database, Error, Execution, TxnCx, Vfs, Workspace,
     WriteTxnError, chain,
 };
-use crate::write_txn::CompletionCheckpoint;
+use crate::write_txn::CompletionChecks;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertStats};
 use fgdb_gql::{
@@ -17,6 +17,20 @@ use fgdb_gql::{
 };
 use fgdb_types::{CommitSeq, EmbeddedTxnCompletion, QueryCx};
 use fgdb_warden::{ExecutionPermit, PlannerPredicates, WriteAccess};
+
+impl<Clock: FnMut() -> u64> CompletionChecks for &mut Execution<'_, '_, Clock> {
+    fn logical(&mut self) -> Result<(), WriteTxnError> {
+        self.checkpoint()
+    }
+
+    fn private_validation(&mut self) -> Result<(), WriteTxnError> {
+        self.poll()
+    }
+
+    fn validation_complete(&mut self) -> Result<(), WriteTxnError> {
+        self.checkpoint()
+    }
+}
 
 /// An idle execution owns its permit without borrowing its context. During a
 /// call, the existing authorized executor borrows the owner's cloned CommitCx;
@@ -736,19 +750,13 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
                 state
                     .workspace
                     .transaction()
-                    .complete_with_validation_controlled(
+                    .complete_rebased_controlled(
                         database,
                         &self.cx,
                         None,
                         false,
                         None,
-                        |phase| match phase {
-                            CompletionCheckpoint::Logical
-                            | CompletionCheckpoint::ValidationComplete => {
-                                state.execution.checkpoint()
-                            }
-                            CompletionCheckpoint::PrivateValidation => state.execution.poll(),
-                        },
+                        &mut state.execution,
                     )
                     .await
             })

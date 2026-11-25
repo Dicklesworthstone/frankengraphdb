@@ -240,6 +240,8 @@ impl PurposeContexts {
             commit: CommitCx {
                 inner: root.restrict::<LocalDatabaseCaps>(),
                 tracker: Arc::clone(&tracker),
+                #[cfg(feature = "simulation-checkpoints")]
+                checkpoint_probe: None,
             },
             maint: MaintCx {
                 inner: root.restrict::<LocalDatabaseCaps>(),
@@ -356,6 +358,16 @@ impl SimulationCheckpointProbe {
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::Relaxed)
     }
+
+    fn observe(&self) -> Result<(), Box<asupersync::error::Error>> {
+        let ordinal = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.stop == Some(ordinal) {
+            return Err(Box::new(asupersync::error::Error::cancelled(
+                &asupersync::types::CancelReason::user("simulation checkpoint interruption"),
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Evaluation-context checkpoints between two full foundation checkpoints.
@@ -460,12 +472,7 @@ impl QueryCx {
         paced_checkpoint(&self.inner, &self.pacer)?;
         #[cfg(feature = "simulation-checkpoints")]
         if let Some(probe) = &self.checkpoint_probe {
-            let ordinal = probe.calls.fetch_add(1, Ordering::Relaxed) + 1;
-            if probe.stop == Some(ordinal) {
-                return Err(Box::new(asupersync::error::Error::cancelled(
-                    &asupersync::types::CancelReason::user("simulation checkpoint interruption"),
-                )));
-            }
+            probe.observe()?;
         }
         Ok(())
     }
@@ -657,6 +664,8 @@ impl StorageReadCx for TxnCx {
 pub struct CommitCx {
     inner: Cx<LocalDatabaseCaps>,
     tracker: Arc<ObligationTracker>,
+    #[cfg(feature = "simulation-checkpoints")]
+    checkpoint_probe: Option<Arc<SimulationCheckpointProbe>>,
 }
 
 impl CommitCx {
@@ -666,7 +675,22 @@ impl CommitCx {
     }
 
     pub fn checkpoint(&self) -> Result<(), Box<asupersync::error::Error>> {
-        self.inner.checkpoint().map_err(Box::new)
+        self.inner.checkpoint().map_err(Box::new)?;
+        #[cfg(feature = "simulation-checkpoints")]
+        if let Some(probe) = &self.checkpoint_probe {
+            probe.observe()?;
+        }
+        Ok(())
+    }
+
+    /// Clones the commit context with a shared simulation probe. Each
+    /// successful foundation checkpoint advances the probe once.
+    #[cfg(feature = "simulation-checkpoints")]
+    #[must_use]
+    pub fn with_checkpoint_probe(&self, probe: Arc<SimulationCheckpointProbe>) -> Self {
+        let mut context = self.clone();
+        context.checkpoint_probe = Some(probe);
+        context
     }
 
     /// The capability-empty context a commit's deterministic intent replay
