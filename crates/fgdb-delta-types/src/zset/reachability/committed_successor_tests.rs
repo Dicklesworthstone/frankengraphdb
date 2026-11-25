@@ -233,7 +233,9 @@ fn catalog_checkpoint_keeps_the_raw_anchor_and_needs_fresh_compatibility_for_epo
         vec![(CommitSeq(1), first), (CommitSeq(2), forged)],
     );
     assert_eq!(
-        restored.prepare_next(&changed, LIMBS, &mut allow).unwrap_err(),
+        restored
+            .prepare_next(&changed, LIMBS, &mut allow)
+            .unwrap_err(),
         CommittedReachabilityError::Input(EdgeInputError::HistoryChanged { at: CommitSeq(2) })
     );
     let candidate = batch(3, vec![edge(3, 3, 4)]);
@@ -248,7 +250,9 @@ fn catalog_checkpoint_keeps_the_raw_anchor_and_needs_fresh_compatibility_for_epo
     );
     index.insert(next.clone()).unwrap();
     assert_eq!(
-        restored.prepare_next(&index, LIMBS, &mut allow).unwrap_err(),
+        restored
+            .prepare_next(&index, LIMBS, &mut allow)
+            .unwrap_err(),
         CommittedReachabilityError::Input(EdgeInputError::SchemaChanged)
     );
     assert_eq!(restored, state);
