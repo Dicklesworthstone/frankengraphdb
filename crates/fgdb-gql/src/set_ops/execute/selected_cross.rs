@@ -38,14 +38,23 @@ pub(crate) fn scalar_to_identity(value: &GraphValue, text: bool) -> Option<u128>
         GraphValue::Scalar(CanonicalScalar::Int(n)) if *n >= 0 => Some(*n as u128),
         GraphValue::Scalar(CanonicalScalar::Float(number)) => {
             let raw = number.get();
-            if !raw.is_finite() || raw < 0.0 || raw >= 9_223_372_036_854_775_808.0 {
+            // The predicate retains overflowing id() operands as u128 and
+            // compares them exactly with Float. Source seeds and join keys
+            // must retain the same domain, including identities above i64.
+            const U128_EXCLUSIVE_MAX: f64 =
+                340_282_366_920_938_463_463_374_607_431_768_211_456.0;
+            if !raw.is_finite() || raw < 0.0 || raw >= U128_EXCLUSIVE_MAX {
                 return None;
             }
-            let candidate = raw as i64;
-            (candidate >= 0
-                && number.compare_rational(i128::from(candidate), core::num::NonZeroU64::MIN)
-                    == Ordering::Equal)
-                .then_some(candidate as u128)
+            let candidate = raw as u128;
+            if let Ok(signed) = i128::try_from(candidate) {
+                (number.compare_rational(signed, core::num::NonZeroU64::MIN) == Ordering::Equal)
+                    .then_some(candidate)
+            } else {
+                // Binary64 in [2^127, 2^128) has an integral ULP (2^75),
+                // so this in-range conversion loses no fractional bits.
+                Some(candidate)
+            }
         }
         _ => None,
     }
@@ -246,12 +255,11 @@ pub(crate) fn required_id_keys<E>(
     Ok(keys)
 }
 
-fn right_element_identity(value: &GraphValue, text: bool) -> Option<u128> {
-    let id = match value {
-        GraphValue::Vertex(fgdb_types::VId(id)) | GraphValue::Edge(fgdb_types::EId(id)) => *id,
-        _ => return None,
-    };
-    (text || i64::try_from(id).is_ok()).then_some(id)
+fn right_element_identity(value: &GraphValue) -> Option<u128> {
+    match value {
+        GraphValue::Vertex(fgdb_types::VId(id)) | GraphValue::Edge(fgdb_types::EId(id)) => Some(*id),
+        _ => None,
+    }
 }
 
 fn id_eligible<E>(
@@ -263,7 +271,7 @@ fn id_eligible<E>(
     for &(a, b, text) in keys {
         control(GlaExecutionEvent::Work)?;
         let present = if right {
-            right_element_identity(&row.values()[b], text).is_some()
+            right_element_identity(&row.values()[b]).is_some()
         } else {
             scalar_to_identity(&row.values()[a], text).is_some()
         };
@@ -284,12 +292,12 @@ fn compare_id_keys<E>(
     for &(a, b, text) in keys {
         control(GlaExecutionEvent::Work)?;
         let lhs = if left_is_right {
-            right_element_identity(&left.values()[b], text)
+            right_element_identity(&left.values()[b])
         } else {
             scalar_to_identity(&left.values()[a], text)
         }
         .expect("id_eligible checked left key");
-        let rhs = right_element_identity(&right.values()[b], text)
+        let rhs = right_element_identity(&right.values()[b])
             .expect("id_eligible checked right key");
         let order = lhs.cmp(&rhs);
         if order != Ordering::Equal {
@@ -969,6 +977,164 @@ mod lookup_domain_tests {
                 ])
             })
             .collect()
+    }
+
+    #[test]
+    fn numeric_identity_seeds_keep_exact_full_width_and_exclusive_float_bounds() {
+        // Every power of two in the identity domain is represented exactly.
+        // This crosses both signed boundaries without deriving expectations
+        // through the conversion or comparison under test.
+        for exponent in 0..128 {
+            let identity = 1_u128 << exponent;
+            assert_eq!(
+                scalar_to_identity(&float(identity as f64), false),
+                Some(identity),
+                "2^{exponent}"
+            );
+        }
+        let last_float_identity = u128::MAX - ((1_u128 << 75) - 1);
+        for (value, expected) in [
+            (int(0), Some(0)),
+            (int(i64::MAX), Some(i64::MAX as u128)),
+            (float(-0.0), Some(0)),
+            (float(last_float_identity as f64), Some(last_float_identity)),
+            (float(i64::MAX as f64), Some(1_u128 << 63)),
+            // This conversion rounds UP to 2^128, never to u128::MAX.
+            (float(u128::MAX as f64), None),
+            (float(f64::MAX), None),
+            (float(0.5), None),
+            (float(f64::from_bits(1)), None),
+            (float(-1.0), None),
+            (float(f64::NEG_INFINITY), None),
+            (float(f64::INFINITY), None),
+            (float(f64::NAN), None),
+            (int(-1), None),
+            (GraphValue::Scalar(CanonicalScalar::Null), None),
+            (GraphValue::Vertex(VId(7)), None),
+            (GraphValue::Edge(EId(7)), None),
+        ] {
+            assert_eq!(scalar_to_identity(&value, false), expected, "{value:?}");
+        }
+        for (text, expected) in [
+            (u128::MAX.to_string(), Some(u128::MAX)),
+            ("0".to_owned(), Some(0)),
+            ("00".to_owned(), None),
+            ("-1".to_owned(), None),
+            ("340282366920938463463374607431768211456".to_owned(), None),
+        ] {
+            assert_eq!(
+                scalar_to_identity(
+                    &GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&text).unwrap()),
+                    true,
+                ),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_identity_lookup_matches_full_width_predicate_and_literal_occurrences() {
+        let wide = 1_u128 << 63;
+        let high = 1_u128 << 127;
+        let last = u128::MAX - ((1_u128 << 75) - 1);
+        let precise = 1_u128 << 53;
+        let left = rows(vec![
+            float(wide as f64),
+            float(last as f64),
+            float(wide as f64),
+            float(high as f64),
+            float(precise as f64),
+            int(7),
+            float(0.5),
+            float(u128::MAX as f64),
+            float(f64::NAN),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            float(f64::INFINITY),
+            int(-1),
+        ]);
+        let right = rows(vec![
+            GraphValue::Vertex(VId(wide + 1)),
+            GraphValue::Vertex(VId(wide)),
+            GraphValue::Edge(EId(high)),
+            GraphValue::Vertex(VId(last)),
+            GraphValue::Edge(EId(wide)),
+            GraphValue::Vertex(VId(wide)),
+            GraphValue::Vertex(VId(precise + 1)),
+            GraphValue::Vertex(VId(precise)),
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Vertex(VId(7)),
+            GraphValue::Edge(EId(7)),
+            GraphValue::Vertex(VId(0)),
+            GraphValue::Edge(EId(high + 1)),
+            int(7),
+            GraphValue::Vertex(VId(wide - 1)),
+            GraphValue::Edge(EId(high - 1)),
+            GraphValue::Vertex(VId(last - 1)),
+        ]);
+        let pairs = [
+            (0, 1),
+            (0, 4),
+            (0, 5),
+            (1, 3),
+            (2, 1),
+            (2, 4),
+            (2, 5),
+            (3, 2),
+            (4, 7),
+            (5, 9),
+            (5, 10),
+        ];
+        for reversed in [false, true] {
+            let scalar = GraphSetOperand::Column(0);
+            let identity = GraphSetOperand::IdentityColumn {
+                column: 1,
+                text: false,
+            };
+            let (lhs, rhs) = if reversed {
+                (identity, scalar)
+            } else {
+                (scalar, identity)
+            };
+            let code = [GraphSetPredicateOp::Compare {
+                left: lhs,
+                comparison: IntegerComparison::Equal,
+                right: rhs,
+            }];
+            GraphSetPredicateOp::validate_schema(&[GraphSetColumnType::Any; 2], &code).unwrap();
+            for (l, row) in left.iter().enumerate() {
+                for (r, other) in right.iter().enumerate() {
+                    assert_eq!(
+                        GraphSetPredicateOp::evaluate_pair_with_control(
+                            &code, row, other, &mut allow,
+                        )
+                        .unwrap(),
+                        pairs.contains(&(l, r)),
+                        "ordinary predicate pair ({l}, {r}), reversed={reversed}"
+                    );
+                }
+            }
+            assert_eq!(
+                collect(&left, &right, &code, None, &mut allow).unwrap(),
+                literal_pairs(&left, &right, &pairs),
+                "indexed occurrences, reversed={reversed}"
+            );
+            assert_eq!(count(&left, &right, &code, None), pairs.len());
+            let index = Index::build(1, &right, &code, None, &mut allow).unwrap();
+            for (l, row) in left.iter().enumerate() {
+                let expected: Vec<_> = pairs
+                    .iter()
+                    .filter_map(|&(left, right)| (left == l).then_some(right))
+                    .collect();
+                for mut hint in 0..=right.len() {
+                    let range = index.range(row, &right, &mut hint, &mut allow).unwrap();
+                    assert_eq!(
+                        range.map(|at| index.ordinals[at]).collect::<Vec<_>>(),
+                        expected
+                    );
+                }
+            }
+        }
     }
 
     #[test]

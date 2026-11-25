@@ -490,6 +490,154 @@ fn external_scalar_identity_roots_narrow_id_and_element_id_correlations_across_c
 }
 
 #[test]
+fn full_width_numeric_identity_roots_agree_across_resident_and_external_queries() {
+    let ((), report) = run_async_under_lab(0xe6_7a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed(&contexts, &vfs).await;
+        let wide = VId(1_u128 << 63);
+        let high = VId(1_u128 << 127);
+        let last = VId(u128::MAX - ((1_u128 << 75) - 1));
+        let mut extra = WriteBatch::new(R);
+        for (id, value) in [
+            (wide, 10),
+            (VId(wide.0 + 1), 11),
+            (VId(IDS[1].0 + 1), 21),
+            (high, 30),
+            (VId(high.0 + 1), 31),
+            (last, 40),
+            (VId(last.0 + 1), 41),
+        ] {
+            extra.create_vertex(id, vec![], vec![(P, CanonicalScalar::Int(value))]);
+        }
+        for id in 100..116 {
+            extra.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(-1))]);
+        }
+        assert_eq!(
+            db.write(&contexts.commit(), extra).await.unwrap(),
+            CommitSeq(2)
+        );
+        let mut change = WriteBatch::new(R);
+        change.delete_vertex(wide);
+        change.set_vertex_property(high, P, Some(CanonicalScalar::Int(33)));
+        assert_eq!(
+            db.write(&contexts.commit(), change).await.unwrap(),
+            CommitSeq(3)
+        );
+
+        let float = |value| {
+            GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)))
+        };
+        let parameters = GqlParameters::new()
+            .with_list(
+                "ids",
+                vec![
+                    float(high.0 as f64),
+                    float(wide.0 as f64),
+                    float(high.0 as f64),
+                    float(IDS[1].0 as f64),
+                    float(last.0 as f64),
+                    float((1_u128 << 90) as f64), // exact but absent
+                    float(0.5),
+                    float(u128::MAX as f64), // rounds to the exclusive 2^128 bound
+                    float(f64::NAN),
+                    float(f64::INFINITY),
+                    float(-1.0),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ],
+            )
+            .unwrap();
+        let source_pool = memory();
+        let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+        for cut in [2, 3] {
+            let expected = if cut == 2 {
+                vec![(wide, 10), (IDS[1], 2), (high, 30), (high, 30), (last, 40)]
+            } else {
+                vec![(IDS[1], 2), (high, 33), (high, 33), (last, 40)]
+            };
+            let expected: Vec<_> = expected
+                .into_iter()
+                .map(|(id, value)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(id),
+                        GraphValue::Scalar(CanonicalScalar::Int(value)),
+                    ])
+                    .canonical_bytes()
+                    .unwrap()
+                })
+                .collect();
+            for (prefix, predicate) in [
+                ("", "id(n)=wanted"),
+                ("WITH wanted ", "wanted=id(n)"),
+            ] {
+                let text = format!(
+                    "UNWIND $ids AS wanted {prefix}MATCH (n) WHERE {predicate} \
+                     FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value ORDER BY n"
+                );
+                // There are five distinct exact seeds, including the absent
+                // identity. A full scan of this 26-vertex history cannot fit.
+                let exact = GqlQueryPolicy::new(5, 100, SORT_WORK, SORT_WORK);
+                let fgdb::QueryResult::Rows { rows, .. } =
+                    db.query(&cx, &text, &parameters, resolve, exact).unwrap()
+                else {
+                    panic!("expected read rows: {text}");
+                };
+                let resident: Vec<_> = rows
+                    .into_iter()
+                    .map(|row| {
+                        GraphValueRow::from_owned_values(
+                            row.into_iter()
+                                .map(|cell| match cell {
+                                    GraphAggregateValue::Value(value) => value,
+                                    other => panic!("expected ordinary value: {other:?}"),
+                                })
+                                .collect(),
+                        )
+                        .canonical_bytes()
+                        .unwrap()
+                    })
+                    .collect();
+                assert_eq!(resident, expected, "resident: {text}");
+                let (rows, snapshot, stats) =
+                    ordered_parameters(&mut view, &cx, &text, &parameters, exact, 32)
+                        .await
+                        .unwrap();
+                assert_eq!(rows, expected, "seeded external: {text}");
+                assert_eq!(snapshot, CommitSeq(cut));
+                assert_eq!(stats.snapshot_records, 5, "{text}");
+
+                // A smaller sort run deliberately keeps the existing scan
+                // fallback. It must produce precisely the same occurrence bag.
+                let (rows, _, stats) =
+                    ordered_parameters(&mut view, &cx, &text, &parameters, policy(), 1)
+                        .await
+                        .unwrap();
+                assert_eq!(rows, expected, "unseeded external: {text}");
+                assert_eq!(stats.snapshot_records, 26, "{text}");
+                let error = ordered_parameters(
+                    &mut view,
+                    &cx,
+                    &text,
+                    &parameters,
+                    GqlQueryPolicy::new(4, 100, SORT_WORK, SORT_WORK),
+                    32,
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    matches!(error, NativeSpoolError::BufferedExecute(ref error) if matches!(**error, GqlQueryError::Rows(ref error) if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords && error.limit == 4 && error.observed == 5)),
+                    "{error:?}"
+                );
+            }
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn external_apply_identity_roots_do_not_rescan_the_graph_or_hide_late_errors() {
     let ((), report) = run_async_under_lab(0xe6_72, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
