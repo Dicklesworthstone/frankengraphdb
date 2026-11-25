@@ -997,11 +997,12 @@ fn dynamic_metadata_keeps_null_map_wrong_type_and_lazy_branch_semantics() {
     assert_eq!(
         source
             .dynamic(
-                "RETURN labels(NULL) AS l, type(NULL) AS t, properties(NULL) AS p, keys(NULL) AS k",
+                "RETURN labels(NULL) AS l, type(NULL) AS t, properties(NULL) AS p, keys(NULL) AS k, \
+                 startNode(NULL) AS source, endNode(NULL) AS target",
                 &reads,
             )
             .unwrap(),
-        vec![vec![null.clone(); 4]],
+        vec![vec![null.clone(); 6]],
     );
     assert_eq!(reads.get(), 0);
     assert_eq!(
@@ -1046,6 +1047,10 @@ fn dynamic_metadata_keeps_null_map_wrong_type_and_lazy_branch_semantics() {
         ("properties(1)", "1"),
         ("properties('Cypher')", "'Cypher'"),
         ("keys([true, false])", "[true, false]"),
+        ("labels(42)", "42"),
+        ("type({})", "{}"),
+        ("startNode('edge')", "'edge'"),
+        ("endNode([null])", "[null]"),
         ("1 IN {x: []}", "{x: []}"),
         ("any(x IN ['a'] WHERE x % 2 = 0)", "%"),
         ("single(x IN [true] WHERE 2 / x > 1)", "/"),
@@ -1091,8 +1096,8 @@ fn dynamic_metadata_keeps_null_map_wrong_type_and_lazy_branch_semantics() {
         );
     }
     for statement in [
-        "RETURN labels(42) AS bad",
-        "RETURN type({}) AS bad",
+        "UNWIND [42] AS value RETURN labels(value) AS bad",
+        "UNWIND [{}] AS value RETURN type(value) AS bad",
         "RETURN any(x IN [2,'later'] WHERE x % 2 = 0) AS bad",
         "UNWIND [[1]] AS xs RETURN properties(xs) AS bad",
         "MATCH (n) WITH collect(n) AS ns RETURN type(ns[0]) AS bad",
@@ -1149,6 +1154,41 @@ fn dynamic_metadata_keeps_null_map_wrong_type_and_lazy_branch_semantics() {
             .is_err(),
             "{statement}"
         );
+    }
+}
+
+#[test]
+fn literal_metadata_domains_refuse_before_empty_sources_and_zero_limits() {
+    for function in ["labels", "type", "startNode", "endNode"] {
+        for operand in ["42", "1.5", "true", "'λ'", "[]", "[null]", "{}", "{p: 1}"] {
+            for prefix in [
+                "RETURN ",
+                "MATCH (n:L) RETURN ",
+                "UNWIND [] AS unused RETURN ",
+            ] {
+                for suffix in ["", " LIMIT 0"] {
+                    let text = format!("{prefix}{function}({operand}) AS bad{suffix}");
+                    let mut calls = 0;
+                    let error = PreparedGraphSetText::prepare(&text, |kind, name| {
+                        calls += 1;
+                        Catalog("p").resolve_symbol(kind, name)
+                    })
+                    .map(|_| ())
+                    .expect_err("literal operand domains are independent of source cardinality");
+                    assert_eq!(error.offset, prefix.len() + function.len() + 1, "{text}");
+                    assert!(
+                        matches!(
+                            error.kind,
+                            fgdb_gql::GraphSetTextErrorKind::Pattern(
+                                fgdb_gql::GraphPatternTextErrorKind::InvalidArgumentType(_)
+                            )
+                        ),
+                        "{text}: {error:?}"
+                    );
+                    assert_eq!(calls, 0, "refusal precedes catalog access: {text}");
+                }
+            }
+        }
     }
 }
 

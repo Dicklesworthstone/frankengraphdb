@@ -268,13 +268,31 @@ fn native_metadata_preserves_null_typed_failures_and_lazy_branch_selection() {
                 "{statement}: {error:?}"
             );
         }
+        // Literal domains are checked even in a branch that runtime evaluation
+        // would skip. Keep the original query as a preparation-error control.
+        let literal_error = db
+            .query(
+                &cx,
+                "MATCH (n:Thing {score:10}) WITH collect(n) AS ns RETURN \
+                 CASE WHEN false THEN type(ns[0]) ELSE labels(ns[0]) END AS labels, \
+                 CASE WHEN true THEN properties(ns[0]) ELSE labels(42) END AS props, \
+                 coalesce('kept', type(ns[0])) AS kept",
+                &parameters,
+                Catalog,
+                policy(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(literal_error, QueryError::Refused { .. }),
+            "{literal_error:?}"
+        );
         assert_eq!(
             cells(
                 db.query(
                     &cx,
                     "MATCH (n:Thing {score:10}) WITH collect(n) AS ns RETURN \
                  CASE WHEN false THEN type(ns[0]) ELSE labels(ns[0]) END AS labels, \
-                 CASE WHEN true THEN properties(ns[0]) ELSE labels(42) END AS props, \
+                 CASE WHEN true THEN properties(ns[0]) ELSE labels([42][0]) END AS props, \
                  coalesce('kept', type(ns[0])) AS kept",
                     &parameters,
                     Catalog,

@@ -123,6 +123,46 @@ fn expression_error(source: GraphMutationTextError) -> GraphSetTextError {
     }
 }
 
+/// A literal's domain cannot change when a row arrives. Reject impossible
+/// metadata operands during preparation, including behind an empty source or
+/// LIMIT 0. Computed values, nullable map projections and row/local references
+/// keep their ordinary runtime checks; literal NULL propagates for every kind.
+fn admit_metadata_literal(
+    kind: crate::GraphElementMetadata,
+    value: &ReadValueTemplate,
+    at: usize,
+) -> Result<(), GraphSetTextError> {
+    use crate::GraphElementMetadata;
+
+    let invalid = match value {
+        ReadValueTemplate::Literal(value) => !matches!(value.value(), CanonicalScalar::Null),
+        ReadValueTemplate::List(_) => true,
+        ReadValueTemplate::MapLiteral { guard: None, .. } => !matches!(
+            kind,
+            GraphElementMetadata::Properties | GraphElementMetadata::Keys
+        ),
+        _ => false,
+    };
+    if invalid {
+        let expected = match kind {
+            GraphElementMetadata::Labels => "a vertex or NULL",
+            GraphElementMetadata::Type
+            | GraphElementMetadata::StartNode
+            | GraphElementMetadata::EndNode => "an edge or NULL",
+            GraphElementMetadata::Properties | GraphElementMetadata::Keys => {
+                "a vertex, edge, map or NULL"
+            }
+        };
+        return Err(GraphSetTextError {
+            offset: at,
+            kind: GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::InvalidArgumentType(
+                expected,
+            )),
+        });
+    }
+    Ok(())
+}
+
 /// A scalar body over its composite operands (fgdb-o5o9t). A body that only
 /// reads its one slot is that composite, so `(any(...))` stays a quantifier.
 fn let_value(mut slots: Vec<ReadValueTemplate>, body: ReadValueTemplate) -> ReadValueTemplate {
@@ -3532,9 +3572,11 @@ impl<'a> Parser<'a> {
         let value = if let Some(kind) = self.value_metadata_call(inputs.is_some(), schema)? {
             self.advance()?;
             self.punct(b'(', "(")?;
+            let argument_at = self.current.at;
             let value =
                 self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b')', ")")?;
+            admit_metadata_literal(kind, &value, argument_at)?;
             ReadValueTemplate::ElementMetadata {
                 kind,
                 value: Box::new(value),
@@ -3994,21 +4036,15 @@ impl<'a> Parser<'a> {
                 )
             };
             self.punct(b')', ")")?;
-            // A literal scalar or list cannot acquire element metadata from a
-            // row. Check the complete argument so a subscript can still
-            // yield an element or map, and preserve NULL propagation.
-            if matches!(&map, ReadValueTemplate::List(_))
-                || matches!(&map, ReadValueTemplate::Literal(value) if !matches!(value.value(), CanonicalScalar::Null))
-            {
-                return Err(GraphSetTextError {
-                    offset: argument_at,
-                    kind: GraphSetTextErrorKind::Pattern(
-                        GraphPatternTextErrorKind::InvalidArgumentType(
-                            "a vertex, edge, map or NULL",
-                        ),
-                    ),
-                });
-            }
+            admit_metadata_literal(
+                if keys {
+                    crate::GraphElementMetadata::Keys
+                } else {
+                    crate::GraphElementMetadata::Properties
+                },
+                &map,
+                argument_at,
+            )?;
             (map, graph)
         };
         let value = if graph || stored_map {
