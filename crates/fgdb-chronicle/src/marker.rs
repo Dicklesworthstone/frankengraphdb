@@ -842,14 +842,15 @@ impl MarkerChain {
 /// after a crash) from corruption (not), and only the caller knows which
 /// position the entry occupied.
 pub fn decode_canonical(bytes: &[u8]) -> Option<CommitMarker> {
-    let (marker, consumed) = decode_canonical_prefix(bytes).ok()?;
+    let (marker, consumed) = decode_canonical_prefix(bytes, bytes.len()).ok()?;
     (consumed == bytes.len()).then_some(marker)
 }
 
 /// Why a canonical prefix cannot be decoded.
 ///
-/// A missing byte can be a torn append. A present illegal tag cannot: recovery
-/// must preserve that distinction even when the outer frame length is damaged.
+/// A missing byte can be a torn append. A present illegal tag or impossible
+/// head count cannot: recovery must preserve that distinction even when the
+/// outer frame length is damaged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MarkerDecodeError {
     Truncated,
@@ -862,9 +863,12 @@ pub(crate) enum MarkerDecodeError {
 /// past EOF. A complete marker plus the fixed framing suffix proves that the
 /// bytes are a complete damaged frame. A present illegal tag independently
 /// proves corruption; only missing fields remain eligible for torn-tail repair.
+/// `max_body_len` is the caller's canonical-body bound, independent of the
+/// available prefix: a count that cannot fit that bound is already corruption.
 /// Other callers must use [`decode_canonical`], which rejects trailing bytes.
 pub(crate) fn decode_canonical_prefix(
     bytes: &[u8],
+    max_body_len: usize,
 ) -> Result<(CommitMarker, usize), MarkerDecodeError> {
     let mut cursor = ByteReader::new(bytes);
 
@@ -884,6 +888,22 @@ pub(crate) fn decode_canonical_prefix(
     let prev_global = cursor.optional_marker_ref()?;
 
     let head_count = cursor.u32()? as usize;
+    // Every update needs two 128-bit identities and an option tag. The fixed
+    // suffix still needs its merge/availability tags, schema and effect
+    // digests, epochs, token, HLC and flags; optional values only add bytes.
+    // Refuse before allocating or reading updates. Otherwise an impossible
+    // count followed by EOF looks like a torn append and permits truncating
+    // an acknowledged frame whose leading length was also damaged.
+    const MIN_HEAD_UPDATE_BYTES: usize = 16 + 16 + 1;
+    const MIN_TRAILING_BYTES: usize = 1 + 32 + 8 + 8 + 8 + 16 + 8 + 32 + 32 + 32 + 1 + 4;
+    let minimum_body_len = head_count
+        .checked_mul(MIN_HEAD_UPDATE_BYTES)
+        .and_then(|heads| cursor.position().checked_add(heads))
+        .and_then(|prefix| prefix.checked_add(MIN_TRAILING_BYTES))
+        .ok_or(MarkerDecodeError::Corrupt)?;
+    if minimum_body_len > max_body_len {
+        return Err(MarkerDecodeError::Corrupt);
+    }
     let mut head_updates = Vec::with_capacity(head_count.min(1024));
     for _ in 0..head_count {
         head_updates.push(HeadUpdate {

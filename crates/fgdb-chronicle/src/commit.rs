@@ -1527,7 +1527,7 @@ impl<V: Vfs> CommitCoordinator<V> {
             // A damaged leading length must not hide a present illegal marker
             // tag. Distinguish corrupt bytes from missing fields before any
             // caller can classify this suffix as disposable torn staging.
-            return Err(Self::incomplete_entry_defect(bytes));
+            return Err(Self::incomplete_entry_defect(bytes, body_len));
         }
         let body_end = ENTRY_HEADER_BYTES + body_len;
         let marker = crate::marker::decode_canonical(&bytes[ENTRY_HEADER_BYTES..body_end])
@@ -1548,19 +1548,21 @@ impl<V: Vfs> CommitCoordinator<V> {
     }
 
     /// Classify a frame whose declared extent runs past the captured EOF.
-    /// Present illegal tags are corruption even if the canonical body cannot
-    /// finish decoding. A complete body plus the fixed framing suffix also
+    /// Present illegal tags and head counts that cannot fit the declared body
+    /// are corruption even if the canonical body cannot finish decoding.
+    /// A complete body plus the fixed framing suffix also
     /// proves a damaged leading length. Do not search for trailer bytes inside
     /// the body: arbitrary digests can contain a convincing trailer by chance.
-    fn incomplete_entry_defect(bytes: &[u8]) -> EntryDefect {
+    fn incomplete_entry_defect(bytes: &[u8], body_len: usize) -> EntryDefect {
         let Some(marker_and_suffix) = bytes.get(ENTRY_HEADER_BYTES..) else {
             return EntryDefect::Truncated;
         };
-        let intrinsic_body_len = match crate::marker::decode_canonical_prefix(marker_and_suffix) {
-            Ok((_, len)) => len,
-            Err(crate::marker::MarkerDecodeError::Truncated) => return EntryDefect::Truncated,
-            Err(crate::marker::MarkerDecodeError::Corrupt) => return EntryDefect::Corrupt,
-        };
+        let intrinsic_body_len =
+            match crate::marker::decode_canonical_prefix(marker_and_suffix, body_len) {
+                Ok((_, len)) => len,
+                Err(crate::marker::MarkerDecodeError::Truncated) => return EntryDefect::Truncated,
+                Err(crate::marker::MarkerDecodeError::Corrupt) => return EntryDefect::Corrupt,
+            };
         if intrinsic_body_len > MAX_ENTRY_BODY {
             return EntryDefect::Corrupt;
         }
@@ -1918,6 +1920,43 @@ mod tests {
         assert_eq!(decoded, marker);
         assert_eq!(actual_hash, hash);
         assert_eq!(consumed, frame.len());
+    }
+
+    #[test]
+    fn head_counts_must_leave_room_for_the_fixed_suffix_before_reading_updates() {
+        // Independent format offsets: the fixed fields through the absent
+        // global predecessor occupy 82 body bytes, then the u32 head count.
+        let count_at = super::ENTRY_HEADER_BYTES + 82;
+        let mut prefix = scan_fixture_frames()[0][..count_at + 4].to_vec();
+        for (body_len, head_count, expected) in [
+            (268_u32, 0_u32, EntryDefect::Truncated),
+            (300, 1, EntryDefect::Corrupt),
+            (301, 1, EntryDefect::Truncated),
+            (65_509, 1_977, EntryDefect::Truncated),
+            (65_536, 1_978, EntryDefect::Corrupt),
+            (65_536, u32::MAX, EntryDefect::Corrupt),
+        ] {
+            prefix[4..8].copy_from_slice(&body_len.to_be_bytes());
+            prefix[count_at..count_at + 4].copy_from_slice(&head_count.to_be_bytes());
+            assert_eq!(
+                CommitCoordinator::<UnixVfs>::decode_entry(&prefix),
+                Err(expected),
+                "declared body {body_len}, head count {head_count}"
+            );
+            let mut reader = prefix.as_slice();
+            let mut retained = Vec::new();
+            let Poll::Ready(result) = poll_once(CommitCoordinator::<UnixVfs>::read_next_entry(
+                &mut reader,
+                &mut retained,
+            )) else {
+                panic!("a slice reader cannot suspend");
+            };
+            assert_eq!(
+                result.expect("slice reader"),
+                Some(Err(expected)),
+                "streamed declared body {body_len}, head count {head_count}"
+            );
+        }
     }
 
     // Change the physical log after its first complete entry has passed the
