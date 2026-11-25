@@ -613,6 +613,26 @@ be a commit reachable in this repository.
 - **caught_by**: original native integration laws and independent source review. A tests-only run against the old guard actually exits 101 with four passes and two failures: the retained-target positive is rejected, while an impossible all-inputs-create plus nonzero-match tuple is accepted. The original formerly malformed `N=3,O=2,C=1,M=3,T=3` tuple is explicitly retained as a lawful positive.
 - **signature**: a physical optimization invalidated a necessary accounting bound, not the logical occurrence semantics. With selected inputs N, creations C, examinations O, matches M and distinct modified targets T, the repaired owner checks `C<=N`, `M<=(N-C)*(O+C)` and `T<=O+C` using guarded ceiling division, alongside every original action/effect, empty-input and cumulative-limit check. New negatives cover impossible multiplicity, distinct targets and create-plus-match counts. All ten original failing tests now pass unchanged; the five complete affected targets execute 3,823 unique passes, four existing ignores and zero filters. Queries, quotas, hidden-graph comparisons, rollback and reopen laws are unchanged. This is a correctness repair, not a measured speedup, formal proof or complete security qualification.
 
+### NE-0055 — Directed core-number subscriptions returned undirected results
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-standing-directed-core-lb63r
+- **repair**: b71d262544412816664441d2ff61e6a5080aef4c
+- **claimed**: a registered core-number query gives the same vertex scores as fresh execution under the selected projection.
+- **actual**: on two vertices with reciprocal edges and one parallel duplicate, fresh directed and reversed projections returned 2 for both vertices. The maintained projections returned 1.
+- **caught_by**: the embedded core projection test failed on both Linux and Apple Silicon. An independent public client reproduced the numerical difference. Registration now refuses both incompatible projections, while the undirected fresh and maintained scores remain 1.
+- **signature**: a maintainer that accepts projection options must establish equivalence for each admitted direction and edge policy.
+
+### NE-0056 — Optional-match null extension swallowed the result of a later graph read
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-xckyl
+- **repair**: b71d262544412816664441d2ff61e6a5080aef4c
+- **claimed**: a correlated COUNT or EXISTS evaluates against the completed outer row, including a missing optional binding.
+- **actual**: hoisting the read into the optional right-hand side returned NULL on the unmatched row for both expressions. The ordinary release CLI reproduced the wrong answers on a durable four-vertex graph. Both standing definitions refused registration.
+- **caught_by**: the original embedded count and existence cases failed on both platforms. After moving evaluation to the completed row, a fresh release client returned integer 0 and boolean false on the same database. All other NDJSON events stayed identical. Fresh, maintained and rebuilt rows also matched literal answers through four revisions.
+- **signature**: evaluating an expression before null extension is only valid when evaluation on the null-extended row produces the same value.
+
 ## Reverts
 
 The literal `AGENTS.md` clause, enforced. A performed revert has exactly one
