@@ -46,6 +46,7 @@ macro_rules! buffered_input {
                         Ok::<_, crate::BufferedReadError>(())
                     };
                     cx.with_restriction_async(self.cursor.next_input(&mut reserve))
+                        .erase_send()
                         .await
                         .map(|row| row.map(|row| SpoolRow::buffered(row.into_parts())))
                         .map_err(|error| {

@@ -569,10 +569,14 @@ where
         let row = match row {
             Ok(row) => row,
             Err(error) => {
-                // No frame has reached this writer. Release its exclusive
-                // position so an ordinary source refusal can be retried.
-                // Cancellation still fences the writer if suspension fails.
-                if count == 0 {
+                // A scoped budget can refuse before the first frame. Release
+                // that empty writer for a cheaper request on the same session.
+                // Execution failures still fence an unfinished difference.
+                let budget_refused = matches!(&error, NativeSpoolError::Authorized(cause)
+                    if matches!(cause.as_ref(),
+                        QueryError::Authorization(fgdb_warden::Error::LimitExceeded(_))
+                        | QueryError::Set(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))));
+                if count == 0 && budget_refused {
                     drop(writer.suspend(cx));
                 }
                 return Err(error);
