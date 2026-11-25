@@ -127,27 +127,29 @@ impl AsyncEdgeJoinPlan {
     /// values, and intersect both sets with the current property authority.
     /// Every nested expansion retains its own relation selector.
     ///
-    /// Optional scopes, probes, collections, complete metadata and unproved
-    /// instructions return `None`, even under LIMIT zero. The ordinary join
-    /// compiler and its complete-record execution profiles remain unchanged.
+    /// Correlated fixed-hop EXISTS/NOT EXISTS scopes and the external input's
+    /// terminal OPTIONAL contribute their local predicates and projections to
+    /// the same union. Independent scans, variable walks, collections, complete
+    /// metadata and unproved instructions return `None`, even under LIMIT zero.
+    /// The ordinary join compiler and complete-record profiles are unchanged.
     #[must_use]
     pub fn selected_property_demand(&self) -> Option<EdgeScanPropertySelection> {
-        if self.optional.is_some() {
-            return None;
-        }
         let joined = self.inner.joined.as_ref()?;
         let mut selected = EdgeScanPropertySelection {
             edge: PropertySelection::EMPTY,
             endpoints: PropertySelection::EMPTY,
         };
         for instruction in joined.stages.iter().flatten() {
-            let Instruction::Native(instruction) = instruction else {
-                return None;
-            };
-            // Edge-uniqueness checks compare only complete EIds. All payload
-            // consumers share the same exhaustive proof as a single edge.
-            if !matches!(instruction, GlaOperator::DifferentEdges { .. }) {
-                selected.include_instruction(instruction)?;
+            match instruction {
+                Instruction::Native(instruction) => {
+                    // Edge uniqueness compares only complete EIds. All field
+                    // consumers share the exhaustive single-edge proof.
+                    if !matches!(instruction, GlaOperator::DifferentEdges { .. }) {
+                        selected.include_instruction(instruction)?;
+                    }
+                }
+                Instruction::Probe(probe) => probe.include_selected_properties(&mut selected)?,
+                Instruction::Collect(_) => return None,
             }
         }
         let GlaOperator::ProjectValues { columns } = self.inner.projection.as_ref() else {
@@ -155,6 +157,9 @@ impl AsyncEdgeJoinPlan {
         };
         for column in columns {
             selected.include_projection(column)?;
+        }
+        if let Some(optional) = &self.optional {
+            optional.include_selected_properties(&mut selected)?;
         }
         Some(selected)
     }

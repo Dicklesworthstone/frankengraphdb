@@ -206,9 +206,51 @@ impl Optional {
         };
         columns.len()
     }
+
+    pub(crate) fn include_selected_properties(
+        &self,
+        selected: &mut EdgeScanPropertySelection,
+    ) -> Option<()> {
+        self.probe.include_selected_properties(selected)?;
+        let GlaOperator::ProjectValues { columns } = &self.projection else {
+            return None;
+        };
+        for column in columns {
+            selected.include_projection(column)?;
+        }
+        Some(())
+    }
 }
 
 impl Probe {
+    /// Demand over the already checked fixed-hop binding program. Copied
+    /// bindings read the outer record, so their predicates belong to the same
+    /// union as local edge/endpoint fields. This does not grant source access.
+    /// Independent scans and variable walks need their own selected-source
+    /// proofs and remain unavailable even if their predicates read no fields.
+    pub(crate) fn include_selected_properties(
+        &self,
+        selected: &mut EdgeScanPropertySelection,
+    ) -> Option<()> {
+        for step in &self.steps {
+            match step.binding {
+                Binding::Copy { .. } | Binding::Expand(_) => {}
+                Binding::Scan | Binding::Walk { .. } => return None,
+            }
+            for instruction in &step.predicates {
+                if !matches!(instruction, GlaOperator::DifferentEdges { .. }) {
+                    selected.include_instruction(instruction)?;
+                }
+            }
+            // Terminal nested probes belong to collection scopes. Do not
+            // infer admission for that separate allocation/output profile.
+            if !step.probes.is_empty() {
+                return None;
+            }
+        }
+        Some(())
+    }
+
     /// Fixed and finite variable-length atoms may start from a correlation or
     /// an independent vertex scan. Captures only copy values; a nullable capture
     /// is not an anchor. Fixed relationship captures can feed local property

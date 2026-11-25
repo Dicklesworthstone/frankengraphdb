@@ -2031,7 +2031,10 @@ fn cold_fixed_join_visible_node_boundary_and_output_owner_ignore_hidden_children
                     drop(cursor);
                     assert!(!reader.is_closed());
                     drop(reader);
-                    assert!(pool.used() > 0, "the delivered multi-hop copy retains its owner");
+                    assert!(
+                        pool.used() > 0,
+                        "the delivered multi-hop copy retains its owner"
+                    );
                     drop(row);
                     assert_eq!(pool.used(), 0);
                 }
@@ -2051,8 +2054,7 @@ fn cold_fixed_join_pending_drop_releases_source_owners() {
         let authority = issuer();
         let token = authority.issue_at(&grant(4), 100).unwrap();
         let pool = memory();
-        let mut reader =
-            session(&commit, &cx, &vfs, &pool, &authority, &token, at, || 100).await;
+        let mut reader = session(&commit, &cx, &vfs, &pool, &authority, &token, at, || 100).await;
         let args = GqlParameters::new();
         let prepared = reader
             .prepare(
@@ -2087,6 +2089,144 @@ fn cold_fixed_join_pending_drop_releases_source_owners() {
         assert!(reader.is_closed());
         assert_eq!(pool.used(), 0);
         vfs.pause.store(false, Ordering::SeqCst);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_edge_probes_use_scoped_selected_fields_at_the_pinned_cut() {
+    let ((), report) = run_async_under_lab(0xa6_0118, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let cx = c.query();
+        let authority = issuer();
+        let token = authority.issue_at(&grant(100), 100).unwrap();
+        for hidden in [false, true] {
+            let (vfs, _db, old, current) = fixed_join_fixture(&commit, hidden).await;
+            for (at, matches, absent) in [
+                (old, vec![101, 105], vec![102, 103, 104]),
+                (current, vec![], vec![101, 102, 104, 105]),
+            ] {
+                let pool = memory();
+                let mut reader = Database::open_buffered_publication_with_vfs(
+                    &commit,
+                    vfs.clone(),
+                    vfs.memory.database_dir(),
+                    keys(),
+                    pool.clone(),
+                    limits(),
+                )
+                .await
+                .unwrap()
+                .into_authorized_read_session(
+                    &commit,
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    at,
+                    GqlQueryPolicy::new(100, 10, 100_000, 100_000),
+                    || 100,
+                )
+                .await
+                .unwrap();
+                for (prefix, expected) in [("EXISTS", matches), ("NOT EXISTS", absent)] {
+                    let text = format!(
+                        "MATCH (a)-[r:R]->(b) WHERE {prefix} {{ \
+                         MATCH (b)-[s:R]->(c) WHERE c.score = 3 AND s.score = 5 \
+                         }} RETURN r",
+                    );
+                    let rows = collect(&mut reader, &cx, &text).await;
+                    let expected: Vec<_> = expected
+                        .into_iter()
+                        .map(|id| GraphValueRow::from_owned_values(vec![GraphValue::Edge(EId(id))]))
+                        .collect();
+                    assert_eq!(rows, expected, "hidden={hidden}; cut={at:?}; {prefix}");
+                }
+                // Selected fields still pass the property mask, and an
+                // invisible endpoint cannot supply a witness or a visible
+                // budget debit even when its incident edge is visible by type.
+                for predicate in ["c.secret = 999 OR s.secret = 999", "c.score = -1"] {
+                    let text = format!(
+                        "MATCH (a)-[r:R]->(b) WHERE EXISTS {{ \
+                         MATCH (b)-[s:R]->(c) WHERE {predicate} }} RETURN r",
+                    );
+                    assert!(collect(&mut reader, &cx, &text).await.is_empty());
+                }
+                assert!(
+                    collect(
+                        &mut reader,
+                        &cx,
+                        "MATCH (a)-[r:R]->(b) WHERE EXISTS { \
+                         MATCH (b)-[:S]->(c) } RETURN r",
+                    )
+                    .await
+                    .is_empty()
+                );
+                assert!(!reader.is_closed());
+                drop(reader);
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_edge_probe_node_limit_is_exact_and_refusal_allows_retry() {
+    let ((), report) = run_async_under_lab(0xa6_0119, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let cx = c.query();
+        let authority = issuer();
+        let args = GqlParameters::new();
+        for hidden in [false, true] {
+            let (vfs, _db, at, _) = fixed_join_fixture(&commit, hidden).await;
+            for nodes in [3, 4] {
+                let token = authority.issue_at(&grant(nodes), 100).unwrap();
+                let pool = memory();
+                let mut reader =
+                    session(&commit, &cx, &vfs, &pool, &authority, &token, at, || 100).await;
+                let prepared = reader
+                    .prepare(
+                        &cx,
+                        "MATCH (a)-[r:R]->(b) WHERE EXISTS { \
+                         MATCH (b)-[s:R]->(c) WHERE s.score = 5 AND c.score = 3 \
+                         } RETURN r LIMIT 1",
+                        &args,
+                    )
+                    .unwrap();
+                let mut cursor = reader.stream(&cx, &prepared, &args).unwrap();
+                let result = cursor.next().await.unwrap();
+                if nodes == 3 {
+                    assert!(matches!(
+                        result,
+                        Err(AuthorizedBufferedError::Query(QueryError::Authorization(
+                            Error::LimitExceeded(LimitDimension::Nodes)
+                        )))
+                    ));
+                    assert_eq!(cursor.state(), VertexScanState::Failed);
+                } else {
+                    assert_eq!(
+                        result.unwrap().as_ref().values(),
+                        &[GraphValue::Edge(EId(101))]
+                    );
+                }
+                assert!(cursor.next().await.is_none());
+                drop(cursor);
+                assert!(!reader.is_closed());
+                // A new execution has a fresh signed allowance and reuses the
+                // same affine publication after the exhausted probe or refusal.
+                assert_eq!(
+                    collect(&mut reader, &cx, "MATCH (a)-[r:R]->(b) RETURN r LIMIT 1").await,
+                    vec![GraphValueRow::from_owned_values(vec![GraphValue::Edge(
+                        EId(101)
+                    )])],
+                );
+                drop(reader);
+                assert_eq!(pool.used(), 0);
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
