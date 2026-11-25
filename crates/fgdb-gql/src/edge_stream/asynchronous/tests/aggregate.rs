@@ -1,5 +1,8 @@
 use super::*;
-use crate::spill_aggregate::{AsyncEdgeSpillAggregateCursor, AsyncSpillAggregatePlan};
+use crate::spill_aggregate::{
+    AsyncEdgeSpillAggregateCursor, AsyncSpillAggregatePlan, SpillAggregateBuildError,
+};
+use crate::spill_set::AsyncSpillSetSourcePlan;
 use crate::stream::VertexScanEvent;
 use crate::{
     GraphAggregateError, GraphAggregateValue, PreparedGraphAggregate, PreparedGraphAggregateText,
@@ -157,8 +160,6 @@ fn async_edge_aggregate_refusals_keep_typed_failures_and_release_pending_orienta
 
 #[test]
 fn async_edge_aggregate_selects_complete_inputs_and_reduction_requires_exhaustion() {
-    // A correlated fixed-hop probe is an async join input now (3faae262,
-    // 0e7c7e7c; fgdb-dvtfk); the rest are still refused.
     assert!(
         AsyncSpillAggregatePlan::compile(&definition(
             "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN COUNT(*) AS rows LIMIT 0"
@@ -168,13 +169,37 @@ fn async_edge_aggregate_selects_complete_inputs_and_reduction_requires_exhaustio
     for text in [
         "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN COUNT(*) AS rows LIMIT 0",
         "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN COUNT(*) AS rows LIMIT 0",
-        "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r.p) AS rows LIMIT 0",
-        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS rows LIMIT 0",
     ] {
         assert!(
             AsyncSpillAggregatePlan::compile(&definition(text)).is_err(),
             "{text}"
         );
+    }
+    for (page, count) in [("", None), (" LIMIT 0", Some(0))] {
+        for collection in ["COLLECT(DISTINCT r.p)", "COLLECT(r.p)"] {
+            let text = format!("MATCH (a)-[r:R]->(b) RETURN {collection} AS rows{page}");
+            let plan = AsyncSpillAggregatePlan::compile(&definition(&text)).unwrap();
+            let AsyncSpillAggregatePlan::Relation { input, definition } = plan else {
+                panic!("captured-edge collection needs its complete ordered relation");
+            };
+            assert!(matches!(input.source(), AsyncSpillSetSourcePlan::Edge(_)));
+            assert!(definition.has_collections());
+            assert_eq!(definition.result_window(), (0, count));
+            assert!(
+                input
+                    .stages()
+                    .iter()
+                    .any(|stage| stage.order() == Some(&[]))
+            );
+            assert!(input.stages().iter().all(|stage| stage.count().is_none()));
+        }
+        let optional = format!(
+            "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN COLLECT(DISTINCT r.p) AS rows{page}"
+        );
+        assert!(matches!(
+            AsyncSpillAggregatePlan::compile(&definition(&optional)),
+            Err(SpillAggregateBuildError::Unsupported)
+        ));
     }
     for text in [
         "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN COUNT(*) AS rows LIMIT 0",
@@ -194,23 +219,28 @@ fn async_edge_aggregate_selects_complete_inputs_and_reduction_requires_exhaustio
         )),
         Ok(AsyncSpillAggregatePlan::Edge(_))
     ));
-    let query = definition("MATCH (a)-[r:R]-(b) RETURN COUNT(*) AS rows");
-    let AsyncSpillAggregatePlan::Edge(plan) = AsyncSpillAggregatePlan::compile(&query).unwrap()
-    else {
-        panic!("edge aggregate");
-    };
-    let source = Source::new(inputs());
-    let counts = source.counts.clone();
-    let mut cursor = AsyncEdgeSpillAggregateCursor::new(source, plan, policy(), ok);
-    assert!(matches!(
-        cursor.finish_result::<Infallible, ()>(),
-        Err(GqlQueryError::Source(
-            GraphAggregateError::InvalidReductionInput
-        ))
-    ));
-    assert_eq!(cursor.state(), EdgeScanState::Failed);
-    assert_eq!(counts.reads.load(Ordering::SeqCst), 0);
-    assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+    for text in [
+        "MATCH (a)-[r:R]-(b) RETURN COUNT(*) AS rows",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r.p) AS rows LIMIT 0",
+    ] {
+        let AsyncSpillAggregatePlan::Edge(plan) =
+            AsyncSpillAggregatePlan::compile(&definition(text)).unwrap()
+        else {
+            panic!("edge aggregate");
+        };
+        let source = Source::new(inputs());
+        let counts = source.counts.clone();
+        let mut cursor = AsyncEdgeSpillAggregateCursor::new(source, plan, policy(), ok);
+        assert!(matches!(
+            cursor.finish_result::<Infallible, ()>(),
+            Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput
+            ))
+        ));
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert_eq!(counts.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[test]

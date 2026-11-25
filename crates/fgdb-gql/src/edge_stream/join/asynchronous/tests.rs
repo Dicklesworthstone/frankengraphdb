@@ -868,7 +868,6 @@ fn invisible_candidates_are_charged_but_do_not_resurrect_as_join_bindings() {
     );
 }
 
-
 fn selected_key(ordinal: u64) -> PropertyKeyId {
     PropertyKeyId((1_u64 << 40) | ordinal)
 }

@@ -2349,9 +2349,7 @@ fn cold_fixed_joins_compose_with_external_ordering_and_exact_aggregates() {
         let args = GqlParameters::new();
         for hidden in [false, true] {
             let (vfs, _db, old, current) = fixture(&commit, hidden).await;
-            for (at, first, high, low, total) in
-                [(old, 3, 9, 7, 16), (current, 30, 17, 9, 26)]
-            {
+            for (at, first, high, low, total) in [(old, 3, 9, 7, 16), (current, 30, 17, 9, 26)] {
                 let pool = memory();
                 let (mut ordered, _) = session(
                     &commit,
@@ -2365,8 +2363,7 @@ fn cold_fixed_joins_compose_with_external_ordering_and_exact_aggregates() {
                     policy(2),
                 )
                 .await;
-                let text =
-                    "MATCH (a)-[r:R]->(b)-[s:R]->(c) \
+                let text = "MATCH (a)-[r:R]->(b)-[s:R]->(c) \
                      RETURN a.score AS first,b.score AS middle,c.score AS last, \
                      r.score AS weight,s.score AS following,s.secret AS hidden \
                      ORDER BY weight DESC";
@@ -2379,8 +2376,22 @@ fn cold_fixed_joins_compose_with_external_ordering_and_exact_aggregates() {
                 assert_eq!(
                     values(&mut cursor).await,
                     vec![
-                        vec![scalar(first), scalar(1), scalar(3), scalar(high), scalar(5), null()],
-                        vec![scalar(first), scalar(1), scalar(3), scalar(low), scalar(5), null()],
+                        vec![
+                            scalar(first),
+                            scalar(1),
+                            scalar(3),
+                            scalar(high),
+                            scalar(5),
+                            null()
+                        ],
+                        vec![
+                            scalar(first),
+                            scalar(1),
+                            scalar(3),
+                            scalar(low),
+                            scalar(5),
+                            null()
+                        ],
                     ],
                     "hidden={hidden}; cut={at:?}",
                 );
@@ -2463,7 +2474,6 @@ fn cold_fixed_joins_compose_with_external_ordering_and_exact_aggregates() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 #[test]
 fn cold_edge_leaves_do_not_reuse_a_previous_vertex_leafs_node_credit() {
     let ((), report) = run_async_under_lab(0xa8_0217, |root| async move {
@@ -2521,7 +2531,7 @@ fn cold_edge_leaves_do_not_reuse_a_previous_vertex_leafs_node_credit() {
                         .await;
                     if tight {
                         assert!(
-                            matches!(result, Err(NativeSpoolError::Authorized(error))
+                            matches!(result.unwrap_err(), NativeSpoolError::Authorized(error)
                                 if matches!(*error, QueryError::Authorization(
                                     Error::LimitExceeded(LimitDimension::Nodes)))),
                             "hidden={hidden}; required={required}",

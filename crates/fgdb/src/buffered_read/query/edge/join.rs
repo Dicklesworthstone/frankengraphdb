@@ -32,6 +32,37 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
             GlaDirection::Reverse => BufferedEdgeDirection::Incoming,
             GlaDirection::Undirected => BufferedEdgeDirection::Undirected,
         };
+        let mut observe = |event| {
+            control(match event {
+                BufferedEdgeScanEvent::Work => AsyncEdgeScanEvent::Work,
+                BufferedEdgeScanEvent::Identity(eid) => AsyncEdgeScanEvent::Candidate(eid),
+            })
+        };
+        if let Some(keys) = self.property_demand {
+            let candidate = self
+                .cx
+                .with_restriction_async(
+                    self.scan
+                        .next_incident_admitted_properties_and_endpoint_properties(
+                            self.cx,
+                            endpoint,
+                            relation,
+                            direction,
+                            after,
+                            keys.edge,
+                            keys.endpoints,
+                            &mut |_| Ok(true),
+                            &mut observe,
+                        ),
+                )
+                .erase_send()
+                .await
+                .map_err(scan_error)
+                .map_err(EdgeExpansionSourceError::Read)?;
+            return self
+                .admit_record(candidate)
+                .map_err(EdgeExpansionSourceError::Read);
+        }
         let candidate = self
             .cx
             .with_restriction_async(self.scan.next_incident_retained_with_endpoints(
@@ -40,21 +71,12 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
                 relation,
                 direction,
                 after,
-                &mut |event| {
-                    control(match event {
-                        BufferedEdgeScanEvent::Work => AsyncEdgeScanEvent::Work,
-                        BufferedEdgeScanEvent::Identity(eid) => AsyncEdgeScanEvent::Candidate(eid),
-                    })
-                },
+                &mut observe,
             ))
             .erase_send()
             .await
-            .map_err(|error| {
-                EdgeExpansionSourceError::Read(match error {
-                    BufferedScanError::Read(error) => EdgeScanSourceError::Source(error),
-                    BufferedScanError::Control(error) => EdgeScanSourceError::Control(error),
-                })
-            })?;
+            .map_err(scan_error)
+            .map_err(EdgeExpansionSourceError::Read)?;
         // Repeated siblings reuse one charged incidence merge only when their
         // complete request continues the preceding historical candidate. A
         // different hop, backtrack or restart remains an independent seek;
@@ -273,7 +295,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         >,
         EdgeQueryError,
     > {
-        let (source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
+        let (mut source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
+        source.property_demand = plan.selected_property_demand();
         Ok(AsyncEdgeJoinCursor::new(source, plan, policy, checkpoint))
     }
 
@@ -300,6 +323,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         EdgeQueryError,
     > {
         let (mut source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
+        source.property_demand = plan.selected_property_demand();
         source.edge_seed_direction = Some(seed_direction(plan.root_direction()));
         source.vertex_seeds = Some(seeds);
         Ok(AsyncEdgeJoinCursor::new(source, plan, policy, checkpoint))
@@ -326,7 +350,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         >,
         EdgeQueryError,
     > {
-        let (source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
+        let (mut source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
+        source.property_demand = plan.selected_property_demand();
         Ok(AsyncEdgeJoinSpillAggregateCursor::new(
             source, plan, policy, checkpoint,
         ))

@@ -65,6 +65,7 @@ fn query(text: &str) -> PreparedGraphPattern<GraphValueRow> {
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
         (GraphSymbolKind::Property, "missing") => Some(GraphSymbol::Property(PropertyKeyId(2))),
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(8))),
         _ => None,
     })
     .unwrap()

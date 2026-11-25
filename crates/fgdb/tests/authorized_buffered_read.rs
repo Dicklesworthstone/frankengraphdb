@@ -2031,7 +2031,10 @@ fn cold_fixed_join_visible_node_boundary_and_output_owner_ignore_hidden_children
                     drop(cursor);
                     assert!(!reader.is_closed());
                     drop(reader);
-                    assert!(pool.used() > 0, "the delivered multi-hop copy retains its owner");
+                    assert!(
+                        pool.used() > 0,
+                        "the delivered multi-hop copy retains its owner"
+                    );
                     drop(row);
                     assert_eq!(pool.used(), 0);
                 }
@@ -2051,8 +2054,7 @@ fn cold_fixed_join_pending_drop_releases_source_owners() {
         let authority = issuer();
         let token = authority.issue_at(&grant(4), 100).unwrap();
         let pool = memory();
-        let mut reader =
-            session(&commit, &cx, &vfs, &pool, &authority, &token, at, || 100).await;
+        let mut reader = session(&commit, &cx, &vfs, &pool, &authority, &token, at, || 100).await;
         let args = GqlParameters::new();
         let prepared = reader
             .prepare(

@@ -648,6 +648,40 @@ fn cold_direct_collections_preserve_native_occurrence_order_and_complete_result_
 }
 
 #[test]
+fn cold_captured_edge_collections_preserve_duplicate_values_before_the_final_page() {
+    let ((), report) = run_async_under_lab(0xc01d_c015, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let mut db = Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_edge_property(EId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(17)));
+        change.set_edge_property(EId(4), PropertyKeyId(1), None);
+        assert_eq!(db.write(&commit, change).await.unwrap(), CommitSeq(4));
+        let resident = db.read_session().unwrap();
+        // The four live edges carry [17, 8, 17, NULL] in identity order.
+        for (collection, values) in [
+            ("COLLECT(DISTINCT r.p)", &[8, 17][..]),
+            ("COLLECT(r.p)", &[8, 17, 17][..]),
+        ] {
+            for page in ["", " LIMIT 0"] {
+                let text = format!("MATCH (a)-[r:R]->(b) RETURN {collection} AS rows{page}");
+                let expected = if page.is_empty() {
+                    vec![(vec![], vec![collected_ints(values)])]
+                } else {
+                    vec![]
+                };
+                assert_bounded_summary(&commit, &cx, &vfs, &resident, &text, 4, expected).await;
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn cold_direct_collections_keep_typed_values_null_elision_and_full_width_identities() {
     let ((), report) = run_async_under_lab(0xc01d_c012, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

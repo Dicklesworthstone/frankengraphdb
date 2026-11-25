@@ -1687,7 +1687,10 @@ fn buffered_fixed_hop_joins_keep_scoped_rows_aggregates_and_prepared_history() {
                 .unwrap();
             assert!(!resident.rows.is_empty(), "{pattern}");
             assert!(
-                resident.rows.iter().all(|row| row.last() == Some(&WireValue::Null)),
+                resident
+                    .rows
+                    .iter()
+                    .all(|row| row.last() == Some(&WireValue::Null)),
                 "masked metadata cannot cross either hop"
             );
             for mode in [ExecuteMode::ReadStream, ExecuteMode::ReadOrdered] {
@@ -1716,7 +1719,10 @@ fn buffered_fixed_hop_joins_keep_scoped_rows_aggregates_and_prepared_history() {
         );
         assert_eq!(
             aggregate,
-            oracle.execute(cx, ExecuteMode::Read, summary, vec![]).await.unwrap()
+            oracle
+                .execute(cx, ExecuteMode::Read, summary, vec![])
+                .await
+                .unwrap()
         );
 
         let historical = "MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) \
@@ -1819,7 +1825,12 @@ fn buffered_fixed_hop_joins_keep_scoped_rows_aggregates_and_prepared_history() {
             limited.ping(cx, 815).await.unwrap();
             super::ordered_stream::empty_scratch(&directory).await;
             assert_eq!(
-                reader.execute(cx, mode, statement, vec![]).await.unwrap().rows.len(),
+                reader
+                    .execute(cx, mode, statement, vec![])
+                    .await
+                    .unwrap()
+                    .rows
+                    .len(),
                 1
             );
         }

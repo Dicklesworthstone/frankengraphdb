@@ -378,13 +378,21 @@ fn boolean_edge_queries_skip_unused_sidecars_but_keep_eager_property_reads() {
             .await
             .unwrap();
         let mut bodies = std::collections::BTreeMap::new();
+        let mut nested_sidecars = std::collections::BTreeSet::new();
         for block in root.blocks {
             let bytes = store
                 .get_bytes(&commit, fgdb_strata::DeltaBlockVersion(block.block_id))
                 .await
                 .unwrap();
-            if let Some((id, _)) = fgdb_strata::decode_block_with_properties(&bytes).unwrap().1 {
+            let (entries, properties) = fgdb_strata::decode_block_with_properties(&bytes).unwrap();
+            if let Some((id, _)) = properties {
                 let path = store.path(id);
+                if entries
+                    .first()
+                    .is_some_and(|edge| edge.relation == RelationId(8))
+                {
+                    nested_sidecars.insert(path.clone());
+                }
                 bodies.insert(path.clone(), vfs.read(&path).await.unwrap());
             }
         }
@@ -457,6 +465,52 @@ fn boolean_edge_queries_skip_unused_sidecars_but_keep_eager_property_reads() {
             assert!(cursor.next().await.is_none());
             assert_eq!(cursor.row_stats(), failed);
         }
+        // Both the R root and its S child have damaged edge sidecars.
+        assert!(!nested_sidecars.is_empty() && nested_sidecars.len() < bodies.len());
+        let topology = query("MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN r,a,s,c");
+        let mut join = view
+            .stream_graph_edge_joins_governed(&cx, &topology, query_policy())
+            .unwrap();
+        assert_eq!(
+            join.next().await.unwrap().unwrap().values(),
+            &[
+                GraphValue::Edge(EId(103)),
+                GraphValue::Vertex(VId(4)),
+                GraphValue::Edge(EId(105)),
+                GraphValue::Vertex(VId(4))
+            ]
+        );
+        assert!(join.next().await.is_none());
+        assert_eq!(join.state(), EdgeScanState::Exhausted);
+        drop(join);
+        let endpoints =
+            query("MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN r,a,s,c,b.p AS middle,c.p AS last");
+        let mut join = view
+            .stream_graph_edge_joins_governed(&cx, &endpoints, query_policy())
+            .unwrap();
+        assert_eq!(
+            join.next().await.unwrap().unwrap().values(),
+            &[
+                GraphValue::Edge(EId(103)),
+                GraphValue::Vertex(VId(4)),
+                GraphValue::Edge(EId(105)),
+                GraphValue::Vertex(VId(4)),
+                GraphValue::Scalar(CanonicalScalar::Int(11)),
+                GraphValue::Scalar(CanonicalScalar::Int(4)),
+            ]
+        );
+        assert!(join.next().await.is_none());
+        drop(join);
+        let needed = query("MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN r,a,s,r.p AS value");
+        let mut join = view
+            .stream_graph_edge_joins_governed(&cx, &needed, query_policy())
+            .unwrap();
+        assert!(matches!(
+            join.next().await,
+            Some(Err(GqlQueryError::Source(EdgeScanError::Source(_))))
+        ));
+        assert_eq!(join.state(), EdgeScanState::Failed);
+        drop(join);
         for (path, bytes) in bodies {
             vfs.write(&path, &bytes).await.unwrap();
         }

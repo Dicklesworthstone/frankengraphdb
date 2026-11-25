@@ -119,6 +119,7 @@ impl<V: Vfs + Clone, Row: VertexScanOutput> BufferedQueryCursor<'_, '_, V, Row> 
     pub async fn next(&mut self) -> Option<Result<BufferedQueryRow<Row>, BufferedQueryError>> {
         self.cx
             .with_restriction_async(self.inner.next())
+            .erase_send()
             .await
             .map(|result| {
                 result.map(|output| {

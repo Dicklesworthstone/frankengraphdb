@@ -441,9 +441,8 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource
                 .resume_edge_scan(self.cx, state)
                 .map_err(|error| EdgeScanSourceError::Source(error.into()))?;
             let execution = &self.execution;
-            let mut admit = |row: &BufferedEdgeTopologyEndpoints| {
-                admit_edge(execution, relation, row, control)
-            };
+            let mut admit =
+                |row: &BufferedEdgeTopologyEndpoints| admit_edge(execution, relation, row, control);
             let mut observe = |_| {
                 execution
                     .borrow_mut()
@@ -471,7 +470,10 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource
             };
             return Ok(Some(AsyncEdgeCandidate {
                 eid: candidate.eid,
-                record: Some(self.retain_edge(fields).map_err(EdgeScanSourceError::Source)?),
+                record: Some(
+                    self.retain_edge(fields)
+                        .map_err(EdgeScanSourceError::Source)?,
+                ),
             }));
         }
     }
@@ -567,9 +569,8 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource
                 .resume_edge_join_scan(self.cx, state)
                 .map_err(|error| EdgeScanSourceError::Source(error.into()))?;
             let execution = &self.execution;
-            let mut admit = |row: &BufferedEdgeTopologyEndpoints| {
-                admit_edge(execution, relation, row, control)
-            };
+            let mut admit =
+                |row: &BufferedEdgeTopologyEndpoints| admit_edge(execution, relation, row, control);
             let mut observe = |_| {
                 execution
                     .borrow_mut()
@@ -597,7 +598,10 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeScanSource
             };
             return Ok(Some(AsyncEdgeCandidate {
                 eid: candidate.eid,
-                record: Some(self.retain_edge(fields).map_err(EdgeScanSourceError::Source)?),
+                record: Some(
+                    self.retain_edge(fields)
+                        .map_err(EdgeScanSourceError::Source)?,
+                ),
             }));
         }
     }
@@ -663,9 +667,8 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeJoinSource
                     EdgeExpansionSourceError::Read(EdgeScanSourceError::Source(error.into()))
                 })?;
             let execution = &self.execution;
-            let mut admit = |row: &BufferedEdgeTopologyEndpoints| {
-                admit_edge(execution, relation, row, control)
-            };
+            let mut admit =
+                |row: &BufferedEdgeTopologyEndpoints| admit_edge(execution, relation, row, control);
             let mut observe = |_| {
                 execution
                     .borrow_mut()
@@ -745,11 +748,9 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeJoinSource
         let mut bytes = 1024usize;
         for record in records {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            bytes = bytes
-                .checked_add(1024)
-                .ok_or_else(|| {
-                    EdgeScanSourceError::Source(BufferedReadError::SizeOverflow.into())
-                })?;
+            bytes = bytes.checked_add(1024).ok_or_else(|| {
+                EdgeScanSourceError::Source(BufferedReadError::SizeOverflow.into())
+            })?;
             let edge = record.fields.edge();
             let target = if edge.entry().src == edge.entry().dst {
                 &[][..]

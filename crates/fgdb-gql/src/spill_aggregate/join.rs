@@ -6,7 +6,7 @@ use crate::algebra::EdgeRelation;
 use crate::edge_stream::aggregate::EdgeAggregateError;
 use crate::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
-    EdgeScanBuildError, EdgeScanState,
+    EdgeScanBuildError, EdgeScanPropertySelection, EdgeScanState,
 };
 use crate::stream::VertexScanEvent;
 use crate::{
@@ -28,6 +28,12 @@ impl AsyncEdgeJoinSpillAggregatePlan {
     /// The checked root selector of the aggregate's fixed-hop input.
     pub fn root_relation(&self) -> EdgeRelation {
         self.input.root_relation()
+    }
+
+    /// The complete fixed-hop input includes aggregate arguments and grouping keys.
+    #[must_use]
+    pub fn selected_property_demand(&self) -> Option<EdgeScanPropertySelection> {
+        self.input.selected_property_demand()
     }
 
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {

@@ -3906,16 +3906,24 @@ fn admitted_native_incidence_selects_children_without_advancing_root() {
                 .seal_relation(&cx, source, CommitSeq(0), relation, run_limits)
                 .await
                 .unwrap();
-            let origins = [(0, 1), (2, 1), (4, 1), (6, 2), (8, 4), (90, 1), (u128::MAX, 2)]
-                .into_iter()
-                .enumerate()
-                .map(|(ordinal, (eid, created))| {
-                    (
-                        EId(eid),
-                        OriginBirthOrder::new(CommitSeq(created), ordinal as u64, 0, EId(eid)),
-                    )
-                })
-                .collect();
+            let origins = [
+                (0, 1),
+                (2, 1),
+                (4, 1),
+                (6, 2),
+                (8, 4),
+                (90, 1),
+                (u128::MAX, 2),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, (eid, created))| {
+                (
+                    EId(eid),
+                    OriginBirthOrder::new(CommitSeq(created), ordinal as u64, 0, EId(eid)),
+                )
+            })
+            .collect();
             let run = AdjRunSegment::from_sealed(&cx, &sealed, &origins, run_limits).unwrap();
             root = store
                 .publish_adj_run(
@@ -3996,7 +4004,10 @@ fn admitted_native_incidence_selects_children_without_advancing_root() {
             assert_eq!(admitted, [eid]);
             assert_eq!(identities, [eid]);
             let row = candidate.row.unwrap();
-            assert_eq!(row.edge().properties(), &[(P, CanonicalScalar::Int(value).into())]);
+            assert_eq!(
+                row.edge().properties(),
+                &[(P, CanonicalScalar::Int(value).into())]
+            );
             assert_eq!(
                 row.source_properties(),
                 &[(P, CanonicalScalar::Int(source_value).into())]

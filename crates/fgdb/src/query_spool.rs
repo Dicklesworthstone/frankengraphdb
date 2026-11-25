@@ -566,7 +566,18 @@ where
     let mut count = 0_u64;
     let mut largest = 0;
     while let Some(row) = cursor.pull().await {
-        let row = row?;
+        let row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                // No frame has reached this writer. Release its exclusive
+                // position so an ordinary source refusal can be retried.
+                // Cancellation still fences the writer if suspension fails.
+                if count == 0 {
+                    drop(writer.suspend(cx));
+                }
+                return Err(error);
+            }
+        };
         if row.row.len() != encoded_columns {
             return Err(SpillError::InvalidRun.into());
         }
