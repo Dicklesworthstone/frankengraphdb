@@ -12,6 +12,45 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Full-width numeric identity lookups — qualification pending
+
+Numeric identity seeds and indexed equality joins now retain the same full
+128-bit identity domain as the ordinary id() predicate. Exact finite,
+nonnegative integer floats below 2^128 can select vertices and edges above
+the old i64 ceiling. Fractions, nonfinite values, negatives and the exclusive
+upper bound remain ineligible; adjacent identities are never rounded into a
+match. The shared conversion covers resident and buffered external source
+selection as well as selected-cross lookup and exact counts.
+
+Regression sources compare indexed occurrences and counts with the native
+predicate and a literal pair matrix, including duplicates and reversed
+operands. A public durable fixture compares resident, seeded external and
+scan-fallback results at two historical cuts, with an absent identity,
+one-short admission and memory release. Source review and textual checks
+completed; native formatting, compilation, tests, Clippy, UBS and exact-tree
+qualification remain UNRUN after execution-host loss. Keep `fgdb-2acff`,
+`fgdb-w5-executor-olp` and `fgdb-qualify-integrated-nov22-maz0p` open.
+
+### Bounded FGP and Bolt establishment — qualification pending
+
+FGP and Bolt connections have one absolute 30-second protocol-establishment
+allowance after the optional, separately bounded TLS handshake. Partial
+messages, unsuccessful database selections and blocked response writes or
+flushes do not renew it. The connection's runtime clock drives the timer;
+cancellation and drain retain explicit wake paths. FGP retires the allowance
+only after READY flushes, and Bolt only after its authenticated HELLO response
+flushes. Authenticated connections retain their existing lifetime semantics.
+
+The shared private owner uses the foundation timer and cancellation receiver,
+without a background task. Connection futures remain boxed. Regression
+sources drive both real protocol dispatchers with empty and fragmented setup,
+blocked writes/flushes, cancellation/drain, final-response backpressure and
+an authenticated connection that remains usable after an hour of virtual time.
+Independent source and pinned-foundation API reviews completed. Native
+formatting, compilation, tests, Clippy, UBS and full exact-tree proof remain
+UNRUN after execution-host loss. Keep `fgdb-w10-fgp-core-5b1`,
+`fgdb-w10-server-rte` and `fgdb-qualify-integrated-nov22-maz0p` open.
+
 ### Authorized cold probes, optional matches and graph paths — qualification pending
 
 Capability-scoped buffered reads now admit fixed-hop correlated EXISTS and
@@ -92,6 +131,14 @@ tag behind the torn-tail outcome. Both read-only scanning and writable recovery
 refuse that corruption; writable recovery preserves the damaged bytes and any
 following committed entries. The public marker decoder and durable encoding are
 unchanged.
+
+The prefix decoder also checks that the head-update count and minimum fixed
+suffix fit the declared canonical body before allocation or update reads.
+The bound uses the actual frame declaration, not only the global maximum.
+A new acknowledged-commit regression changes one count bit and one length bit;
+both scanner postures and writable recovery must refuse without truncation,
+then reopen the independently repaired bytes. Direct and streamed boundary
+cases retain legal missing-byte outcomes and reject impossible counts.
 
 Regression sources cover all five discriminant sites in final and middle
 entries, both scanner postures, writer recovery, byte preservation and recovery

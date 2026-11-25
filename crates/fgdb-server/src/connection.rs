@@ -214,10 +214,24 @@ pub(crate) fn run<'a>(
     server: &'a Server,
     stream: Box<dyn DuplexIo>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(run_inner(cx, server, stream))
+    Box::pin(async move {
+        let establishment = crate::tls::Establishment::default();
+        establishment
+            .serve(
+                cx,
+                &server.shutdown,
+                Box::pin(run_inner(cx, server, stream, &establishment)),
+            )
+            .await;
+    })
 }
 
-async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
+async fn run_inner(
+    cx: &Cx,
+    server: &Server,
+    stream: Box<dyn DuplexIo>,
+    establishment: &crate::tls::Establishment,
+) {
     let limits = FrameLimits::new(server.limits.max_frame_len as usize)
         .expect("server limits were validated at construction");
     let Ok((read, write)) = split_duplex(cx, stream) else {
@@ -606,6 +620,7 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     return;
                 }
                 lane.send_generation = None;
+                establishment.complete();
             }
             FrameKind::BeginTransaction
             | FrameKind::BeginReadTransaction

@@ -16,11 +16,80 @@ use fgdb_protocol::transport::DuplexIo;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 const MAX_CERTIFICATE_BYTES: u64 = 1 << 20;
 const TLS13: u16 = 0x0304;
+const PROTOCOL_ESTABLISHMENT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One absolute protocol-establishment allowance after the separately bounded
+/// TLS handshake. Partial messages, failed database selections and blocked
+/// response writes cannot renew it. Once the authenticated setup response is
+/// completely flushed, the ordinary connection owns all later lifetimes.
+#[derive(Default)]
+pub(crate) struct Establishment {
+    complete: AtomicBool,
+}
+
+impl Establishment {
+    pub(crate) fn complete(&self) {
+        self.complete.store(true, Ordering::Release);
+    }
+
+    pub(crate) async fn serve(
+        &self,
+        cx: &Cx,
+        shutdown: &crate::Shutdown,
+        connection: Pin<Box<dyn Future<Output = ()> + Send + '_>>,
+    ) {
+        let deadline = cx
+            .now()
+            .saturating_add_nanos(PROTOCOL_ESTABLISHMENT_TIMEOUT.as_nanos() as u64);
+        let wake_at = cx
+            .budget()
+            .deadline
+            .map_or(deadline, |limit| limit.min(deadline));
+        let mut timer = Some(asupersync::time::sleep_until(wake_at));
+        let mut waiter = Some(shutdown.waiter());
+        // Register cancellation even for embedding hosts polling directly,
+        // outside a scheduler task. No message can complete this receiver.
+        let (_sender, mut receiver) = asupersync::channel::oneshot::channel::<()>();
+        let mut cancelled = Some(Box::pin(receiver.recv(cx)));
+        let mut connection = connection;
+        poll_fn(|task| {
+            if let Some(timer) = &mut timer {
+                if waiter
+                    .as_ref()
+                    .is_some_and(|waiter| waiter.poll_triggered(task))
+                    || cx.checkpoint().is_err()
+                    || cancelled
+                        .as_mut()
+                        .is_some_and(|cancelled| cancelled.as_mut().poll(task).is_ready())
+                {
+                    return Poll::Ready(());
+                }
+                // The foundation timer must use this connection's clock and
+                // driver, including when a host polls outside an ambient Cx.
+                let _current = Cx::set_current(Some(cx.clone()));
+                if Pin::new(timer).poll(task).is_ready() {
+                    return Poll::Ready(());
+                }
+            }
+            let result = connection.as_mut().poll(task);
+            if self.complete.load(Ordering::Acquire) {
+                // Retire the timer in the SAME poll that finishes setup. A
+                // long-lived authenticated stream never retains this alarm
+                // or inherits an idle timeout from its connection admission.
+                timer = None;
+                cancelled = None;
+                waiter = None;
+            }
+            result
+        })
+        .await;
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum Protocol {
@@ -346,13 +415,406 @@ pub(crate) async fn establish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::Budget;
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+    use asupersync::types::{CancelKind, Time};
+    use fgdb_protocol::body::{
+        Auth, AuthOk, Body, Credential, Hello, Ping, Ready, SelectDatabase,
+    };
+    use fgdb_protocol::{Binding, Decoder, Frame, FrameKind, FrameLimits, StreamId};
+    use std::collections::VecDeque;
     use std::io::{Read as _, Write as _};
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::{self, Receiver, SyncSender};
     use std::task::{Wake, Waker};
     use std::time::Instant;
 
     const SOCKET_WAIT: Duration = Duration::from_secs(5);
+
+    #[derive(Default)]
+    struct SetupWire {
+        inbound: Mutex<VecDeque<u8>>,
+        outbound: Mutex<Vec<u8>>,
+        reader: Mutex<Option<Waker>>,
+        block_write: AtomicBool,
+        block_flush: AtomicBool,
+        dropped: AtomicBool,
+    }
+
+    impl SetupWire {
+        fn feed(&self, bytes: &[u8]) {
+            self.inbound.lock().unwrap().extend(bytes);
+            let waker = self.reader.lock().unwrap().take();
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+
+        fn take_output(&self) -> Vec<u8> {
+            std::mem::take(&mut *self.outbound.lock().unwrap())
+        }
+    }
+
+    struct SetupIo(Arc<SetupWire>);
+
+    impl Drop for SetupIo {
+        fn drop(&mut self) {
+            self.0.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    impl AsyncRead for SetupIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            *self.0.reader.lock().unwrap() = Some(task.waker().clone());
+            let mut inbound = self.0.inbound.lock().unwrap();
+            if inbound.is_empty() {
+                return Poll::Pending;
+            }
+            let count = inbound.len().min(buffer.remaining());
+            let bytes: Vec<_> = inbound.drain(..count).collect();
+            buffer.put_slice(&bytes);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for SetupIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.0.block_write.load(Ordering::Acquire) {
+                return Poll::Pending;
+            }
+            self.0.outbound.lock().unwrap().extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.0.block_flush.load(Ordering::Acquire) {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn setup_connection<'a>(
+        protocol: Protocol,
+        cx: &'a Cx,
+        server: &'a crate::Server,
+        wire: &Arc<SetupWire>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let stream = Box::new(SetupIo(Arc::clone(wire)));
+        match protocol {
+            Protocol::Fgp => crate::connection::run(cx, server, stream),
+            Protocol::Bolt => Box::pin(crate::bolt::run(cx, server, stream, None)),
+            Protocol::Http => unreachable!("HTTP owns its existing idle timeout"),
+        }
+    }
+
+    fn fgp_message(
+        kind: FrameKind,
+        request: u64,
+        binding: Binding,
+        body: impl Body,
+    ) -> Vec<u8> {
+        let limits = FrameLimits::new(4096).unwrap();
+        Frame::new(
+            kind,
+            request,
+            StreamId::CONTROL,
+            binding,
+            body.encode().unwrap(),
+            limits,
+        )
+        .unwrap()
+        .encode(limits)
+        .unwrap()
+    }
+
+    fn fgp_response(wire: &SetupWire, kind: FrameKind) -> Frame {
+        let bytes = wire.take_output();
+        let decoded = Decoder::new(FrameLimits::new(4096).unwrap())
+            .decode(&bytes, |_| Ok(()))
+            .unwrap();
+        assert_eq!(decoded.consumed, bytes.len());
+        let frame = decoded.frame.expect("one complete setup response");
+        assert_eq!(frame.header().kind(), kind);
+        frame
+    }
+
+    fn setup_request(protocol: Protocol) -> Vec<u8> {
+        match protocol {
+            Protocol::Fgp => fgp_message(
+                FrameKind::Hello,
+                1,
+                Binding::Transport,
+                Hello {
+                    min_version: 1,
+                    max_version: 1,
+                    client_nonce: [0x73; 32],
+                    max_frame_len: 4096,
+                },
+            ),
+            Protocol::Bolt => {
+                let mut bytes = fgdb_bolt::message::MAGIC.to_vec();
+                bytes.extend_from_slice(&[0, 0, 0, 5]);
+                bytes.extend_from_slice(&[0; 12]);
+                bytes
+            }
+            Protocol::Http => unreachable!(),
+        }
+    }
+
+    fn with_setup_clock(test: impl FnOnce(&Cx, &VirtualClock, &TimerDriverHandle)) {
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let runtime = RuntimeBuilder::current_thread()
+            .with_timer_driver(timer.clone())
+            .build()
+            .unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        // Keep the runtime driver in this root poll while the test advances
+        // its clock explicitly. No wall sleep or scheduler race sets a limit.
+        runtime.block_on(async { test(&cx, &clock, &timer) });
+    }
+
+    #[test]
+    fn empty_and_fragmented_protocol_setups_expire_at_one_absolute_deadline() {
+        for protocol in [Protocol::Fgp, Protocol::Bolt] {
+            for fragmented in [false, true] {
+                with_setup_clock(|cx, clock, timer| {
+                    let server =
+                        crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
+                    let wire = Arc::new(SetupWire::default());
+                    let request = setup_request(protocol);
+                    if fragmented {
+                        wire.feed(&request[..1]);
+                    }
+                    let mut connection = setup_connection(protocol, cx, &server, &wire);
+                    let wakes = Arc::new(crate::recovery::tests::WakeCounter::default());
+                    let waker = Waker::from(Arc::clone(&wakes));
+                    let mut task = Context::from_waker(&waker);
+                    assert!(connection.as_mut().poll(&mut task).is_pending());
+                    assert_eq!(timer.pending_count(), 1);
+                    clock.advance_to(Time::from_secs(29));
+                    if fragmented {
+                        wire.feed(&request[1..2]);
+                    }
+                    assert!(connection.as_mut().poll(&mut task).is_pending());
+                    let before = wakes.0.load(Ordering::Relaxed);
+                    clock.advance_to(Time::from_secs(30));
+                    timer.process_timers();
+                    assert!(wakes.0.load(Ordering::Relaxed) > before);
+                    assert!(connection.as_mut().poll(&mut task).is_ready());
+                    drop(connection);
+                    assert!(wire.dropped.load(Ordering::Acquire));
+                    assert!(wire.take_output().is_empty());
+                    assert_eq!(timer.pending_count(), 0);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_setup_deadline_covers_blocked_writes_and_flushes() {
+        for protocol in [Protocol::Fgp, Protocol::Bolt] {
+            for flush in [false, true] {
+                with_setup_clock(|cx, clock, timer| {
+                    let server =
+                        crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
+                    let wire = Arc::new(SetupWire::default());
+                    wire.block_write.store(!flush, Ordering::Release);
+                    wire.block_flush.store(flush, Ordering::Release);
+                    wire.feed(&setup_request(protocol));
+                    let mut connection = setup_connection(protocol, cx, &server, &wire);
+                    let mut task = Context::from_waker(Waker::noop());
+                    assert!(connection.as_mut().poll(&mut task).is_pending());
+                    assert_eq!(wire.outbound.lock().unwrap().is_empty(), !flush);
+                    clock.advance_to(Time::from_secs(30));
+                    timer.process_timers();
+                    assert!(connection.as_mut().poll(&mut task).is_ready());
+                    drop(connection);
+                    assert!(wire.dropped.load(Ordering::Acquire));
+                    assert_eq!(timer.pending_count(), 0);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn pending_protocol_setup_wakes_on_drain_and_cancellation() {
+        for protocol in [Protocol::Fgp, Protocol::Bolt] {
+            for cancel in [false, true] {
+                with_setup_clock(|cx, _, timer| {
+                    let server =
+                        crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
+                    let wire = Arc::new(SetupWire::default());
+                    let mut connection = setup_connection(protocol, cx, &server, &wire);
+                    let wakes = Arc::new(crate::recovery::tests::WakeCounter::default());
+                    let waker = Waker::from(Arc::clone(&wakes));
+                    let mut task = Context::from_waker(&waker);
+                    assert!(connection.as_mut().poll(&mut task).is_pending());
+                    let before = wakes.0.load(Ordering::Relaxed);
+                    if cancel {
+                        cx.cancel_fast(CancelKind::User);
+                    } else {
+                        server.shutdown().trigger();
+                    }
+                    assert!(wakes.0.load(Ordering::Relaxed) > before);
+                    assert!(connection.as_mut().poll(&mut task).is_ready());
+                    drop(connection);
+                    assert!(wire.dropped.load(Ordering::Acquire));
+                    assert_eq!(timer.pending_count(), 0);
+                    assert_eq!(cx.now(), Time::ZERO);
+                });
+            }
+        }
+    }
+
+    fn bolt_message(tag: u8, fields: Vec<fgdb_bolt::packstream::Value>) -> Vec<u8> {
+        let mut message = Vec::new();
+        fgdb_bolt::packstream::encode(
+            &fgdb_bolt::packstream::Value::Struct { tag, fields },
+            &mut message,
+        );
+        let mut framed = Vec::new();
+        fgdb_bolt::message::frame(&message, &mut framed);
+        framed
+    }
+
+    fn bolt_success(wire: &SetupWire) {
+        let mut decoder = fgdb_bolt::message::Dechunker::new(4096);
+        decoder.push(&wire.take_output());
+        let response = decoder.next_message().unwrap().unwrap();
+        assert!(matches!(
+            fgdb_bolt::packstream::decode(&response).unwrap(),
+            fgdb_bolt::packstream::Value::Struct { tag: 0x70, .. }
+        ));
+        assert!(decoder.next_message().unwrap().is_none());
+    }
+
+    #[test]
+    fn authenticated_setup_retires_its_deadline_only_after_the_final_flush() {
+        use fgdb_bolt::packstream::Value;
+
+        for (protocol, name) in [(Protocol::Fgp, "fgp"), (Protocol::Bolt, "bolt")] {
+            for block_final_flush in [false, true] {
+                let clock = Arc::new(VirtualClock::new());
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let runtime = RuntimeBuilder::current_thread()
+                    .with_timer_driver(timer.clone())
+                    .build()
+                    .unwrap();
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                runtime.block_on(async {
+                    let (server, token, _) = crate::recovery::tests::served(
+                        &cx,
+                        &format!("setup-deadline-{name}-{block_final_flush}"),
+                    )
+                    .await;
+                    let wire = Arc::new(SetupWire::default());
+                    let mut connection = setup_connection(protocol, &cx, &server, &wire);
+                    let mut task = Context::from_waker(Waker::noop());
+                    wire.feed(&setup_request(protocol));
+                    assert!(connection.as_mut().poll(&mut task).is_pending());
+                    let ready = match protocol {
+                        Protocol::Fgp => {
+                            fgp_response(&wire, FrameKind::HelloAck);
+                            wire.feed(&fgp_message(
+                                FrameKind::Auth,
+                                2,
+                                Binding::Transport,
+                                Auth {
+                                    credential: Credential::WardenCapability(token.encode()),
+                                },
+                            ));
+                            assert!(connection.as_mut().poll(&mut task).is_pending());
+                            let authenticated = fgp_response(&wire, FrameKind::AuthOk);
+                            let session =
+                                AuthOk::decode(authenticated.payload()).unwrap().session;
+                            // Authentication alone cannot retire FGP setup:
+                            // this connection still has no selected database.
+                            assert_eq!(timer.pending_count(), 1);
+                            wire.block_flush.store(block_final_flush, Ordering::Release);
+                            wire.feed(&fgp_message(
+                                FrameKind::SelectDatabase,
+                                3,
+                                Binding::Session(session),
+                                SelectDatabase {
+                                    name: "test".into(),
+                                },
+                            ));
+                            assert!(connection.as_mut().poll(&mut task).is_pending());
+                            let frame = fgp_response(&wire, FrameKind::Ready);
+                            Some(Binding::Ready(
+                                Ready::decode(frame.payload()).unwrap().binding(session),
+                            ))
+                        }
+                        Protocol::Bolt => {
+                            assert_eq!(wire.take_output(), [0, 0, 0, 5]);
+                            wire.block_flush.store(block_final_flush, Ordering::Release);
+                            wire.feed(&bolt_message(
+                                0x01,
+                                vec![Value::Map(vec![
+                                    ("scheme".into(), Value::string("bearer")),
+                                    (
+                                        "credentials".into(),
+                                        Value::string(fgdb_protocol::json::hex(
+                                            &token.encode(),
+                                        )),
+                                    ),
+                                ])],
+                            ));
+                            assert!(connection.as_mut().poll(&mut task).is_pending());
+                            bolt_success(&wire);
+                            None
+                        }
+                        Protocol::Http => unreachable!(),
+                    };
+                    assert_eq!(timer.pending_count(), usize::from(block_final_flush));
+                    clock.advance_to(Time::from_secs(3_600));
+                    timer.process_timers();
+                    if block_final_flush {
+                        assert!(connection.as_mut().poll(&mut task).is_ready());
+                    } else {
+                        assert!(connection.as_mut().poll(&mut task).is_pending());
+                        assert!(!wire.dropped.load(Ordering::Acquire));
+                        if let Some(binding) = ready {
+                            wire.feed(&fgp_message(
+                                FrameKind::Ping,
+                                4,
+                                binding,
+                                Ping { nonce: 73 },
+                            ));
+                            assert!(connection.as_mut().poll(&mut task).is_pending());
+                            let response = fgp_response(&wire, FrameKind::Pong);
+                            assert_eq!(Ping::decode(response.payload()).unwrap().nonce, 73);
+                        } else {
+                            wire.feed(&bolt_message(0x0f, Vec::new()));
+                            assert!(connection.as_mut().poll(&mut task).is_pending());
+                            bolt_success(&wire);
+                        }
+                    }
+                    drop(connection);
+                    assert!(wire.dropped.load(Ordering::Acquire));
+                    assert_eq!(timer.pending_count(), 0);
+                    server.finish_shutdown(&cx).await;
+                });
+            }
+        }
+    }
 
     /// Establish through the real listener boundary, not a test-only adapter.
     /// Polling the result outside block_on exercises the foundation's fallback
