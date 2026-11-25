@@ -633,6 +633,16 @@ be a commit reachable in this repository.
 - **caught_by**: the original embedded count and existence cases failed on both platforms. After moving evaluation to the completed row, a fresh release client returned integer 0 and boolean false on the same database. All other NDJSON events stayed identical. Fresh, maintained and rebuilt rows also matched literal answers through four revisions.
 - **signature**: evaluating an expression before null extension is only valid when evaluation on the null-extended row produces the same value.
 
+### NE-0057 — A failed historical difference left unfinished spill files reusable
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-c0thk
+- **repair**: bf0b227cb0782ed3cd3abe9d971da0e31ff50619
+- **claimed**: a caller can retry a cheaper authorized request after exceeding its input budget. A historical difference that fails during evaluation fences its incomplete files and publishes no changes.
+- **actual**: `5395e9622` suspended an empty writer for every source error. An arithmetic exception at the second endpoint returned no changes, but a follow-up difference on the same files succeeded.
+- **caught_by**: the unchanged embedded regression failed on Linux and Apple Silicon. A public same-session comparison reproduced the unexpected success with a direct vertex identity and a division by zero. Releasing the writer only on a typed budget refusal restored the expected poisoned-file error across all four original projection and page combinations. All 17 public comparison cases passed, including the lawful cheaper retry.
+- **signature**: whether a writer has emitted its first frame and whether its caller may retry are independent conditions. Both matter when reusing scratch files after a failed operation.
+
 ## Reverts
 
 The literal `AGENTS.md` clause, enforced. A performed revert has exactly one
