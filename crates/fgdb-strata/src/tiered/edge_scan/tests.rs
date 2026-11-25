@@ -3885,3 +3885,192 @@ fn staged_edge_and_endpoint_properties_never_materialize_hidden_siblings() {
         });
     }
 }
+
+#[test]
+fn admitted_native_incidence_selects_children_without_advancing_root() {
+    use crate::tiered::sealed::{AdjRunSegment, OriginBirthOrder, SealedLimits};
+
+    run(|contexts, path| async move {
+        let (store, source) = fixture(&contexts, &path, false).await;
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let run_limits = SealedLimits {
+            max_rows: 16,
+            max_incidences: 32,
+            max_image_bytes: 128 * 1024,
+            max_property_bytes: 16 * 1024,
+        };
+        let mut root = source;
+        for relation in [R, S] {
+            let sealed = store
+                .seal_relation(&cx, source, CommitSeq(0), relation, run_limits)
+                .await
+                .unwrap();
+            let origins = [(0, 1), (2, 1), (4, 1), (6, 2), (8, 4), (90, 1), (u128::MAX, 2)]
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, (eid, created))| {
+                    (
+                        EId(eid),
+                        OriginBirthOrder::new(CommitSeq(created), ordinal as u64, 0, EId(eid)),
+                    )
+                })
+                .collect();
+            let run = AdjRunSegment::from_sealed(&cx, &sealed, &origins, run_limits).unwrap();
+            root = store
+                .publish_adj_run(
+                    &commit,
+                    &cx,
+                    root,
+                    &run,
+                    run_limits,
+                    fgdb_crypto::Digest([0x54; 32]),
+                    None,
+                )
+                .await
+                .unwrap()
+                .0;
+        }
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, root, pool.clone(), limits())
+            .await
+            .unwrap();
+        view.set_native_run_limits(&cx, Some(run_limits)).unwrap();
+        let mut root = view.edge_scan_relation(&cx, CommitSeq(5), R).unwrap();
+        let first = root
+            .next_admitted_properties_and_endpoint_properties(
+                &cx,
+                Some(R),
+                PropertySelection::one(P),
+                PropertySelection::one(P),
+                &mut |_| Ok::<_, ()>(true),
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.eid, EId(4));
+        assert_eq!(
+            first.row.as_ref().unwrap().edge().properties(),
+            &[(P, CanonicalScalar::Int(45).into())]
+        );
+        assert!(root.has_published_relation(Some(R)));
+        drop(first);
+        let mut position = root.into_join_scan().into_state();
+
+        // The first child reuses the root's native locator, whose root after
+        // identity is EId(4). The second selects a different native relation,
+        // whose root after identity has never been initialized at all.
+        for (endpoint, relation, after, eid, value, source_value, target_value) in [
+            (VId(1), R, EId(4), EId(6), 60, 11, 20),
+            (VId(2), S, EId(0), EId(2), 20, 20, 11),
+        ] {
+            let mut scan = view.resume_edge_join_scan(&cx, position).unwrap();
+            let mut admitted = Vec::new();
+            let mut identities = Vec::new();
+            let candidate = scan
+                .next_incident_admitted_properties_and_endpoint_properties(
+                    &cx,
+                    endpoint,
+                    Some(relation),
+                    BufferedEdgeDirection::Outgoing,
+                    Some(after),
+                    PropertySelection::one(P),
+                    PropertySelection::one(P),
+                    &mut |topology| {
+                        admitted.push(topology.edge().entry().eid);
+                        Ok::<_, ()>(true)
+                    },
+                    &mut |event| {
+                        if let BufferedEdgeScanEvent::Identity(eid) = event {
+                            identities.push(eid);
+                        }
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(candidate.eid, eid);
+            assert_eq!(admitted, [eid]);
+            assert_eq!(identities, [eid]);
+            let row = candidate.row.unwrap();
+            assert_eq!(row.edge().properties(), &[(P, CanonicalScalar::Int(value).into())]);
+            assert_eq!(
+                row.source_properties(),
+                &[(P, CanonicalScalar::Int(source_value).into())]
+            );
+            assert_eq!(
+                row.target_properties(),
+                &[(P, CanonicalScalar::Int(target_value).into())]
+            );
+            drop(row);
+            position = scan.into_state();
+        }
+
+        let mut scan = view.resume_edge_join_scan(&cx, position).unwrap();
+        let next = scan
+            .next_admitted_properties_and_endpoint_properties(
+                &cx,
+                Some(R),
+                PropertySelection::one(P),
+                PropertySelection::one(P),
+                &mut |_| Ok::<_, ()>(true),
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.eid, EId(6));
+        assert_eq!(
+            next.row.as_ref().unwrap().edge().properties(),
+            &[(P, CanonicalScalar::Int(60).into())]
+        );
+        drop(next);
+        let mut remaining = Vec::new();
+        while let Some(candidate) = scan
+            .next_admitted_properties_and_endpoint_properties(
+                &cx,
+                Some(R),
+                PropertySelection::EMPTY,
+                PropertySelection::EMPTY,
+                &mut |_| Ok::<_, ()>(true),
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap()
+        {
+            assert_eq!(candidate.row.is_some(), candidate.eid != EId(90));
+            remaining.push(candidate.eid);
+        }
+        assert_eq!(remaining, [EId(90), EId(u128::MAX)]);
+        assert!(!scan.is_closed());
+        let position = scan.into_state();
+        let mut scan = view.resume_edge_join_scan(&cx, position).unwrap();
+        let final_child = scan
+            .next_incident_admitted_properties_and_endpoint_properties(
+                &cx,
+                VId(1),
+                Some(R),
+                BufferedEdgeDirection::Outgoing,
+                Some(EId(90)),
+                PropertySelection::one(P),
+                PropertySelection::EMPTY,
+                &mut |_| Ok::<_, ()>(true),
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(final_child.eid, EId(u128::MAX));
+        assert_eq!(
+            final_child.row.as_ref().unwrap().edge().properties(),
+            &[(P, CanonicalScalar::Int(99).into())]
+        );
+        drop(final_child);
+        drop(scan);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}

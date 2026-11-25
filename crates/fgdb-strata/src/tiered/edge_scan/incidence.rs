@@ -91,10 +91,87 @@ struct Continuation {
 /// Returned edge/endpoints own their charges independently. This is owner-level
 /// storage access, not a Warden grant or cross-process retention lease.
 pub struct BufferedEdgeJoinScan<'source, V: Vfs> {
+    owner: std::sync::Arc<()>,
     driver: Option<Driver<'source, V>>,
     continuation: Option<Continuation>,
     as_of: CommitSeq,
     work: usize,
+}
+
+/// An affine join position detached from its exclusive partition borrow.
+///
+/// Root, child continuation, optional native run and cumulative physical work
+/// remain one owner. Root exhaustion still permits children of the final root;
+/// a closed or failed driver remains terminal when reattached. This is not a
+/// durable resume token and cannot be moved to a different admitted source.
+pub struct BufferedEdgeJoinScanState {
+    owner: std::sync::Arc<()>,
+    driver: Option<DetachedDriver>,
+    continuation: Option<Continuation>,
+    as_of: CommitSeq,
+    work: usize,
+}
+
+struct DetachedDriver {
+    root: BufferedEdgeScanState,
+    vertices: Option<BufferedVertexScanState>,
+    native_incident: Option<(RelationId, Option<published::RunCursor>)>,
+}
+
+impl BufferedEdgeJoinScanState {
+    pub const fn snapshot_seq(&self) -> CommitSeq {
+        self.as_of
+    }
+
+    pub const fn work_used(&self) -> usize {
+        self.work
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.driver.is_none()
+    }
+}
+
+impl core::fmt::Debug for BufferedEdgeJoinScanState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BufferedEdgeJoinScanState")
+            .field("snapshot", &self.as_of)
+            .field("closed", &self.is_closed())
+            .field("work", &self.work)
+            .field("source", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl<V: Vfs> BufferedPartition<V> {
+    /// Reattach the complete joined source to the same admitted partition and
+    /// profile. Ownership is checked even for a terminal position. No routing,
+    /// prefix replay or fresh work allowance is introduced by reattachment.
+    pub fn resume_edge_join_scan(
+        &mut self,
+        cx: &QueryCx,
+        state: BufferedEdgeJoinScanState,
+    ) -> Result<BufferedEdgeJoinScan<'_, V>, BufferedReadError> {
+        if !std::sync::Arc::ptr_eq(self.scan_owner(), &state.owner) {
+            return Err(invalid_load());
+        }
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        let driver = match state.driver {
+            Some(driver) => Some(Driver {
+                root: self.resume_edge_scan(cx, driver.root)?,
+                vertices: driver.vertices,
+                native_incident: driver.native_incident,
+            }),
+            None => None,
+        };
+        Ok(BufferedEdgeJoinScan {
+            owner: state.owner,
+            driver,
+            continuation: state.continuation,
+            as_of: state.as_of,
+            work: state.work,
+        })
+    }
 }
 
 impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
@@ -107,6 +184,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
     pub fn into_join_scan(self) -> BufferedEdgeJoinScan<'source, V> {
         let active = self.state.is_some();
         BufferedEdgeJoinScan {
+            owner: self.partition.scan_owner().clone(),
             as_of: self.as_of,
             work: self.work.used,
             continuation: None,
@@ -131,6 +209,23 @@ impl<V: Vfs> core::fmt::Debug for BufferedEdgeJoinScan<'_, V> {
 }
 
 impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
+    /// Release the partition borrow while retaining every independent position
+    /// and reservation. The source remains bound to its exact admitted owner.
+    pub fn into_state(self) -> BufferedEdgeJoinScanState {
+        let work = self.work_used();
+        BufferedEdgeJoinScanState {
+            owner: self.owner,
+            driver: self.driver.map(|driver| DetachedDriver {
+                root: driver.root.into_state(),
+                vertices: driver.vertices,
+                native_incident: driver.native_incident,
+            }),
+            continuation: self.continuation,
+            as_of: self.as_of,
+            work,
+        }
+    }
+
     pub const fn snapshot_seq(&self) -> CommitSeq {
         self.as_of
     }
@@ -406,6 +501,107 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         result
     }
 
+    /// Admit a root's topology before loading selected edge and endpoint
+    /// fields. Exhausting the root does not close its independent incidence
+    /// source, including when this returns the final root candidate.
+    pub async fn next_admitted_properties_and_endpoint_properties<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        relation: Option<RelationId>,
+        keys: PropertySelection,
+        endpoint_keys: PropertySelection,
+        admit: &mut (impl FnMut(&BufferedEdgeTopologyEndpoints) -> Result<bool, C> + Send),
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertiesEndpoints>>, BufferedScanError<C>>
+    {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        self.continuation = None;
+        let used = &mut self.work;
+        let result = driver
+            .root
+            .next_admitted_properties_and_endpoint_properties(
+                cx,
+                relation,
+                keys,
+                endpoint_keys,
+                admit,
+                &mut |event| {
+                    observe(event)?;
+                    if event == BufferedEdgeScanEvent::Work {
+                        *used = used.saturating_add(1);
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+        self.work = driver.root.work.used;
+        if result.is_ok() {
+            self.driver = Some(driver);
+        }
+        result
+    }
+
+    /// Select an independent historical successor and authorize its relation
+    /// and both endpoint topologies before any selected value is decoded.
+    /// A denied or invisible identity still returns its EId with no row, so a
+    /// caller can advance without charging visible-candidate work.
+    ///
+    /// Root position and cumulative physical work are shared with ordinary
+    /// joined reads. The same exact-request continuation retains routed merge
+    /// heads across successors, while native complete-run admission keeps its
+    /// existing contract. Errors and dropped polled pulls close both positions.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn next_incident_admitted_properties_and_endpoint_properties<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        endpoint: VId,
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+        after: Option<EId>,
+        keys: PropertySelection,
+        endpoint_keys: PropertySelection,
+        admit: &mut (impl FnMut(&BufferedEdgeTopologyEndpoints) -> Result<bool, C> + Send),
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertiesEndpoints>>, BufferedScanError<C>>
+    {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        let mut continuation = self.continuation.take();
+        let request = Incidence {
+            endpoint,
+            relation,
+            direction,
+            after,
+        };
+        let used = &mut self.work;
+        let result = driver
+            .continue_incident_admitted(
+                cx,
+                request,
+                &mut continuation,
+                keys,
+                endpoint_keys,
+                admit,
+                &mut |event| {
+                    observe(event)?;
+                    if event == BufferedEdgeScanEvent::Work {
+                        *used = used.saturating_add(1);
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+        self.work = driver.root.work.used;
+        if result.is_ok() {
+            self.continuation = continuation;
+            self.driver = Some(driver);
+        }
+        result
+    }
+
     /// The first historical incident EId strictly greater than `after`.
     /// Positions belong to the caller's traversal prefix, never to the root.
     /// Emit Identity exactly once before resolving the winning history, even
@@ -633,6 +829,108 @@ impl<V: Vfs> Driver<'_, V> {
             Some(candidate) => Some(
                 self.root
                     .resolve_endpoints(cx, candidate, request.relation, observe)
+                    .await?,
+            ),
+            None => None,
+        };
+        if let Some(candidate) = &result {
+            saved.next.after = Some(candidate.eid);
+        }
+        if exhausted {
+            saved.state = None;
+        }
+        Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn continue_incident_admitted<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        request: Incidence,
+        continuation: &mut Option<Continuation>,
+        keys: PropertySelection,
+        endpoint_keys: PropertySelection,
+        admit: &mut (impl FnMut(&BufferedEdgeTopologyEndpoints) -> Result<bool, C> + Send),
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgePropertiesEndpoints>>, BufferedScanError<C>>
+    {
+        self.root.work.step(cx, observe)?;
+        if self.may_select_native_incident(request.relation) {
+            *continuation = None;
+        }
+        if let Some(candidate) = self
+            .published_incident(cx, request, EdgePropertyAccess::Skip, observe)
+            .await?
+        {
+            let Some(candidate) = candidate else {
+                return Ok(None);
+            };
+            // A root run and an independently selected relation use the same
+            // canonical selected-row reader. Detach the root state temporarily
+            // so its run can be borrowed while the shared work meter advances.
+            let selected_root = self.root.has_published_relation(request.relation);
+            let root_state = self.root.state.take();
+            let run = if selected_root {
+                root_state.as_ref().and_then(|state| state.run.as_ref())
+            } else {
+                self.native_incident
+                    .as_ref()
+                    .and_then(|(_, run)| run.as_ref())
+            }
+            .ok_or_else(invalid_load)?;
+            let result = self
+                .root
+                .admit_selected_candidate(
+                    cx,
+                    candidate,
+                    request.relation,
+                    keys,
+                    endpoint_keys,
+                    Some(NativePropertySource::Incidence(run)),
+                    None,
+                    admit,
+                    observe,
+                )
+                .await;
+            self.root.state = root_state;
+            return result.map(Some);
+        }
+        if continuation
+            .as_ref()
+            .is_none_or(|saved| saved.next != request)
+        {
+            *continuation = None;
+            let state = self
+                .prepare_incident(cx, request, true, EdgePropertyAccess::Skip, observe)
+                .await?;
+            *continuation = Some(Continuation {
+                next: request,
+                state: Some(state),
+            });
+        }
+        let saved = continuation.as_mut().expect("complete continuation");
+        let Some(state) = saved.state.as_mut() else {
+            return Ok(None);
+        };
+        let candidate = self
+            .root
+            .advance_with_location(state, cx, EdgePropertyAccess::Skip, observe)
+            .await?;
+        let exhausted = !state.has_more();
+        let result = match candidate {
+            Some((candidate, location)) => Some(
+                self.root
+                    .admit_selected_candidate(
+                        cx,
+                        candidate,
+                        request.relation,
+                        keys,
+                        endpoint_keys,
+                        None,
+                        location,
+                        admit,
+                        observe,
+                    )
                     .await?,
             ),
             None => None,

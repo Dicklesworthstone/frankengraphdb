@@ -336,6 +336,24 @@ pub(super) async fn selected_current<V: Vfs, C: Send>(
     if run.after != Some(eid) {
         return Err(invalid_load().into());
     }
+    selected_incident(partition, work, run, cx, as_of, eid, keys, observe).await
+}
+
+/// Materialize an already admitted incident winner at the immutable run's
+/// exact cut. Child reads have an independent position: they neither require
+/// nor change the global root's `after` identity. The caller verifies the
+/// selected entry against the topology it admitted before exposing the row.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn selected_incident<V: Vfs, C: Send>(
+    partition: &mut BufferedPartition<V>,
+    work: &mut EdgeScanWork,
+    run: &RunCursor,
+    cx: &QueryCx,
+    as_of: CommitSeq,
+    eid: EId,
+    keys: PropertySelection,
+    observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+) -> Result<BufferedValue<BufferedEdge>, BufferedScanError<C>> {
     row(
         partition,
         work,
