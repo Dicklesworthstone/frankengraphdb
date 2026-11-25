@@ -1492,6 +1492,99 @@ fn a_bounded_length_increase_on_the_final_durable_entry_fails_closed() {
 }
 
 #[test]
+fn illegal_marker_tags_under_a_bounded_length_increase_never_truncate_committed_history() {
+    let dir = scratch_dir("bounded-length-illegal-tags");
+    under_lab(0x5441_4753, move |cx| async move {
+        let cx = &cx;
+        let (pristine, first_len) = three_commit_log(&dir, cx).await;
+        let second_body_len = u32::from_be_bytes(
+            pristine[first_len + 4..first_len + 8]
+                .try_into()
+                .expect("second entry length"),
+        ) as usize;
+        let second_end = first_len + 8 + second_body_len + 32 + 8;
+        assert!(second_end < pristine.len(), "the fixture has a successor");
+
+        // The second canonical marker has one branch update with a previous
+        // head, and absent global, merge and payload-availability references.
+        // Name every discriminant independently of the decoder under test.
+        let effect_tag = 8 + 8;
+        let global_tag = effect_tag + 1 + 32 + 32;
+        let head_previous_tag = global_tag + 1 + 4 + 16 + 16;
+        let merge_tag = head_previous_tag + 1 + 32 + 8;
+        let availability_tag = merge_tag + 1 + 32 + 8 + 8 + 8 + 16 + 8 + 32 + 32 + 32;
+        let tags = [
+            ("effect", effect_tag, 1),
+            ("global predecessor", global_tag, 0),
+            ("branch predecessor", head_previous_tag, 1),
+            ("merge", merge_tag, 0),
+            ("payload availability", availability_tag, 0),
+        ];
+        for with_successor in [false, true] {
+            let end = if with_successor {
+                pristine.len()
+            } else {
+                second_end
+            };
+            for (name, offset, original_tag) in tags {
+                let mut damaged = pristine[..end].to_vec();
+                let tag = first_len + 8 + offset;
+                assert_eq!(damaged[tag], original_tag, "{name} fixture tag");
+                damaged[tag] = 0x7f;
+                damaged[first_len + 4..first_len + 8]
+                    .copy_from_slice(&(MAX_ENTRY_BODY as u32).to_be_bytes());
+                assert!(
+                    damaged.len() - first_len < MAX_ENTRY_BODY,
+                    "the corrupted declaration must run past captured EOF"
+                );
+                write_log(&dir, &damaged);
+
+                let history =
+                    CommitCoordinator::scan_committed_chain(cx, &UnixVfs::new(), &dir).await;
+                assert!(
+                    matches!(history, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                    "{name}, successor={with_successor}: a read-only scan must refuse \
+                     present corruption; got {history:?}"
+                );
+                let summary = CommitCoordinator::scan_committed_prefix(
+                    cx,
+                    &UnixVfs::new(),
+                    &dir,
+                    CommitSeq::FIRST,
+                )
+                .await;
+                assert!(
+                    matches!(summary, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                    "{name}, successor={with_successor}: even an earlier requested cut \
+                     must not hide the damaged suffix; got {summary:?}"
+                );
+                assert_eq!(log_bytes(&dir), damaged, "read-only scans preserve evidence");
+
+                let recovered = CommitCoordinator::open(cx, &dir, keys()).await;
+                assert!(
+                    matches!(recovered, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                    "{name}, successor={with_successor}: recovery must not treat an \
+                     acknowledged marker as torn staging; got {recovered:?}"
+                );
+                assert_eq!(
+                    log_bytes(&dir),
+                    damaged,
+                    "failed recovery preserves both the damaged marker and its successors"
+                );
+            }
+        }
+        // A refusal must release the writer lease, and no decoder failure may
+        // contaminate a subsequent independently repaired open.
+        write_log(&dir, &pristine);
+        let recovered = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("the restored committed bytes remain recoverable");
+        assert_eq!(recovered.chain().len(), 3);
+        assert_eq!(recovered.chain().verify(), Ok(()));
+    });
+}
+
+#[test]
 fn a_corrupt_final_entry_trailer_length_fails_closed() {
     let dir = scratch_dir("corrupt-trailer-length");
     under_lab(38, move |cx| async move {

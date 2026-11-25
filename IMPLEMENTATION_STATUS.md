@@ -12,6 +12,29 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Chronicle malformed-marker recovery — qualification pending
+
+Recovery now distinguishes a missing canonical marker field from an illegal tag
+already present in the captured log. A damaged frame length can no longer hide
+an illegal effect-source, predecessor, merge-reference or payload-availability
+tag behind the torn-tail outcome. Both read-only scanning and writable recovery
+refuse that corruption; writable recovery preserves the damaged bytes and any
+following committed entries. The public marker decoder and durable encoding are
+unchanged.
+
+Regression sources cover all five discriminant sites in final and middle
+entries, both scanner postures, writer recovery, byte preservation and recovery
+after independent repair. A separate direct/streamed decoder control exercises
+every prefix of a valid frame with all optional fields and a convincing false
+trailer embedded in a digest. The classifier does not search arbitrary payload
+bytes for trailer sentinels. This closes the identified illegal-tag case, not
+every possible ambiguity between coordinated corruption and missing bytes.
+
+Independent source review and textual checks completed. Pinned Rust formatting,
+compilation, native tests, Clippy, UBS and exact-tree qualification remain UNRUN
+after execution-host loss. Keep `fgdb-w2-recovery-rzmr` and
+`fgdb-qualify-integrated-nov22-maz0p` open.
+
 ### Cold cross-leaf node budgets — qualification pending
 
 A completed vertex leaf no longer lends its last root's node credit to a fresh
