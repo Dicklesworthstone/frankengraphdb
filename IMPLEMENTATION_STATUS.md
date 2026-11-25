@@ -12,6 +12,23 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Cold cross-leaf node budgets — qualification pending
+
+A completed vertex leaf no longer lends its last root's node credit to a fresh
+edge source in the same ordered execution. Edge roots and joined children now
+charge each distinct endpoint they own through the ordinary node allowance.
+The previous exemption remains reserved for operations that actually borrow
+the active vertex root; an identity left by an earlier UNION leaf is insufficient.
+
+A new public regression source covers both vertex-plus-edge and
+vertex-plus-fixed-join UNIONs, with and without hidden records. The literal
+result bags require 13 and 19 visible-node admissions respectively; the tests
+require refusal at 12 and 18, keep the session open after that refusal and
+check memory cleanup. Independent source review found the previous stale-root
+exemption in both paths. These are regression assertions awaiting execution,
+not measured passing thresholds. Native qualification remains UNRUN under
+`fgdb-w4-secure-view-v87` and `fgdb-qualify-integrated-nov22-maz0p`.
+
 ### Authorized cold fixed-hop joins — qualification pending
 
 Capability-scoped buffered sessions now route fixed-hop edge chains, branches

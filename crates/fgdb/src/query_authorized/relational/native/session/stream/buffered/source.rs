@@ -365,9 +365,12 @@ fn admit_edge<C, Clock: FnMut() -> u64>(
         {
             return Ok(false);
         }
-        live.vertex_node(edge.src).map_err(Control::Query)?;
+        // This edge source owns fresh endpoint records. A previous vertex
+        // leaf in the same external execution may leave pull_root behind,
+        // but its record is no longer borrowed and grants no node credit.
+        live.node().map_err(Control::Query)?;
         if edge.dst != edge.src {
-            live.vertex_node(edge.dst).map_err(Control::Query)?;
+            live.node().map_err(Control::Query)?;
         }
     }
     control(AsyncEdgeScanEvent::Candidate(edge.eid)).map_err(Control::Native)?;

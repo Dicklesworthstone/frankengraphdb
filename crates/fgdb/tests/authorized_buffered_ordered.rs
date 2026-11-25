@@ -2462,3 +2462,88 @@ fn cold_fixed_joins_compose_with_external_ordering_and_exact_aggregates() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+
+#[test]
+fn cold_edge_leaves_do_not_reuse_a_previous_vertex_leafs_node_credit() {
+    let ((), report) = run_async_under_lab(0xa8_0217, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let cx = c.query();
+        let authority = issuer();
+        let args = GqlParameters::new();
+        for hidden in [false, true] {
+            let (vfs, mut db, _, _) = fixture(&commit, hidden).await;
+            // V5 is the last admitted vertex in the leading leaf. Make it
+            // an endpoint of both a root and a child in the following join.
+            let mut extension = WriteBatch::new(R);
+            extension.add_edge(EId(104), VId(3), VId(5), vec![]);
+            let at = db.write(&commit, extension).await.unwrap();
+            for (text, required, expected) in [
+                (
+                    "MATCH (n:L) RETURN n.score AS score UNION ALL \
+                     MATCH (a)-[r:R]->(b) RETURN b.score AS score ORDER BY score",
+                    13,
+                    vec![-1, 1, 1, 1, 2, 2, 3, 3, 30],
+                ),
+                (
+                    "MATCH (n:L) RETURN n.score AS score UNION ALL \
+                     MATCH (a)-[r:R]->(b)-[s:R]->(c) \
+                     RETURN c.score AS score ORDER BY score",
+                    19,
+                    vec![-1, 1, 2, 2, 3, 3, 3, 30],
+                ),
+            ] {
+                // The completed vertex leaf costs five. Four independent
+                // roots cost eight more; the join's three child occurrences
+                // cost six. V5 cannot reuse a retired vertex owner's charge.
+                for tight in [false, true] {
+                    let token = authority
+                        .issue_at(&grant(required - u64::from(tight), 9), 100)
+                        .unwrap();
+                    let pool = memory();
+                    let (mut ordered, _) = session(
+                        &commit,
+                        &cx,
+                        &vfs,
+                        &pool,
+                        &authority,
+                        &token,
+                        at,
+                        || 100,
+                        policy(9),
+                    )
+                    .await;
+                    let prepared = ordered.prepare(&cx, text, &args).unwrap();
+                    let result = ordered
+                        .execute_ordered(&cx, &prepared, &args)
+                        .unwrap()
+                        .await;
+                    if tight {
+                        assert!(
+                            matches!(result, Err(NativeSpoolError::Authorized(error))
+                                if matches!(*error, QueryError::Authorization(
+                                    Error::LimitExceeded(LimitDimension::Nodes)))),
+                            "hidden={hidden}; required={required}",
+                        );
+                    } else {
+                        let mut cursor = result.unwrap();
+                        assert_eq!(
+                            values(&mut cursor).await,
+                            expected
+                                .iter()
+                                .copied()
+                                .map(|value| vec![scalar(value)])
+                                .collect::<Vec<_>>(),
+                            "hidden={hidden}; required={required}",
+                        );
+                    }
+                    assert!(!ordered.is_closed());
+                    drop(ordered);
+                    assert_eq!(pool.used(), 0);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
