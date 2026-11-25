@@ -25,7 +25,10 @@ use fgdb_types::{CanonicalPropertyValue, CommitSeq, EId, QueryCx};
 use std::cmp::Reverse;
 
 mod incidence;
-pub use incidence::{BufferedEdgeDirection, BufferedEdgeIncidenceScan, BufferedEdgeJoinScan};
+pub use incidence::{
+    BufferedEdgeDirection, BufferedEdgeIncidenceScan, BufferedEdgeJoinScan,
+    BufferedEdgeJoinScanState,
+};
 mod point;
 mod published;
 
@@ -101,6 +104,14 @@ pub(crate) enum EdgePropertyAccess {
     Read,
     Properties(PropertySelection),
     Skip,
+}
+
+// A root projection must retain its current-position check. An independently
+// positioned incidence lookup uses the same immutable locator without moving
+// or borrowing the root's successor position.
+enum NativePropertySource<'run> {
+    Root(&'run published::RunCursor),
+    Incidence(&'run published::RunCursor),
 }
 
 /// One complete edge and its visible endpoints, all resolved at the cursor's
@@ -1149,6 +1160,40 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         else {
             return Ok(None);
         };
+        let result = self
+            .admit_selected_candidate(
+                cx,
+                candidate,
+                relation,
+                keys,
+                endpoint_keys,
+                state.run.as_ref().map(NativePropertySource::Root),
+                location,
+                admit,
+                observe,
+            )
+            .await?;
+        if state.has_more() {
+            self.state = Some(state);
+        }
+        Ok(Some(result))
+    }
+
+    // Root and independently positioned incidence reads share the same
+    // topology-before-fields boundary and exact winning-property locator.
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_selected_candidate<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        candidate: BufferedEdgeCandidate,
+        relation: Option<RelationId>,
+        keys: PropertySelection,
+        endpoint_keys: PropertySelection,
+        run: Option<NativePropertySource<'_>>,
+        location: Option<WinningLocation>,
+        admit: &mut (impl FnMut(&BufferedEdgeTopologyEndpoints) -> Result<bool, C> + Send),
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<BufferedEdgeCandidate<BufferedEdgePropertiesEndpoints>, BufferedScanError<C>> {
         let row = if let Some(edge) = candidate
             .row
             .filter(|row| relation.is_none_or(|r| r == row.entry.relation))
@@ -1176,18 +1221,35 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 } else {
                     let expected = *edge.entry();
                     drop(edge);
-                    let selected = if let Some(run) = state.run.as_ref() {
-                        published::selected_current(
-                            self.partition,
-                            &mut self.work,
-                            run,
-                            cx,
-                            self.as_of,
-                            candidate.eid,
-                            keys,
-                            observe,
-                        )
-                        .await?
+                    let selected = if let Some(run) = run {
+                        match run {
+                            NativePropertySource::Root(run) => {
+                                published::selected_current(
+                                    self.partition,
+                                    &mut self.work,
+                                    run,
+                                    cx,
+                                    self.as_of,
+                                    candidate.eid,
+                                    keys,
+                                    observe,
+                                )
+                                .await?
+                            }
+                            NativePropertySource::Incidence(run) => {
+                                published::selected_incident(
+                                    self.partition,
+                                    &mut self.work,
+                                    run,
+                                    cx,
+                                    self.as_of,
+                                    candidate.eid,
+                                    keys,
+                                    observe,
+                                )
+                                .await?
+                            }
+                        }
                     } else {
                         let location = location.ok_or_else(invalid_load)?;
                         self.partition
@@ -1236,13 +1298,10 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         } else {
             None
         };
-        if state.has_more() {
-            self.state = Some(state);
-        }
-        Ok(Some(BufferedEdgeCandidate {
+        Ok(BufferedEdgeCandidate {
             eid: candidate.eid,
             row,
-        }))
+        })
     }
 
     async fn resolve_selected_vertex<C: Send>(

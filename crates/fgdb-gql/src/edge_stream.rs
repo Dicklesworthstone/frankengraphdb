@@ -60,14 +60,71 @@ pub enum EdgeScanPropertyDemand {
     Complete,
 }
 
-/// Bounded property fields used by a complete single-edge evaluator. Endpoint
-/// keys are the union for both logical vertices: either physical endpoint may
-/// occupy either binding slot under incoming or undirected traversal. Reading
-/// this selection still requires independent topology and property authority.
+/// Bounded property fields used by a complete edge evaluator. Endpoint keys
+/// are the union for its logical vertices; edge keys are the union for its
+/// captured edges. Any physical record may occupy more than one binding under
+/// incoming, undirected or joined traversal. Reading this selection still
+/// requires independent topology and property authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EdgeScanPropertySelection {
     pub edge: PropertySelection,
     pub endpoints: PropertySelection,
+}
+
+impl EdgeScanPropertySelection {
+    // Shared by local and fixed-hop proofs. These operations only accumulate
+    // demands; they never evaluate, remove or reorder an instruction.
+    fn include_instruction(&mut self, instruction: &GlaOperator) -> Option<()> {
+        match instruction {
+            GlaOperator::Select { predicates, .. } => {
+                for key in predicates.iter().filter_map(VertexPredicate::property_key) {
+                    self.endpoints.insert(key).ok()?;
+                }
+            }
+            GlaOperator::VertexIdentity { .. } | GlaOperator::CapturePath { .. } => {}
+            GlaOperator::CompareProperties {
+                left_key,
+                right_key,
+                ..
+            } => {
+                self.endpoints.insert(*left_key).ok()?;
+                self.endpoints.insert(*right_key).ok()?;
+            }
+            GlaOperator::SelectBoolean { expression } => {
+                for (_, key) in expression.referenced_vertex_properties() {
+                    self.endpoints.insert(key).ok()?;
+                }
+                for (_, key) in expression.referenced_edge_properties() {
+                    self.edge.insert(key).ok()?;
+                }
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    fn include_projection(&mut self, column: &ValueProjection) -> Option<()> {
+        match column {
+            ValueProjection::Vertex { .. }
+            | ValueProjection::Path {
+                function:
+                    GraphPathFunction::Value
+                    | GraphPathFunction::Length
+                    | GraphPathFunction::Nodes
+                    | GraphPathFunction::Edges
+                    | GraphPathFunction::Edge,
+                ..
+            } => {}
+            ValueProjection::Property { key, .. } => {
+                self.endpoints.insert(*key).ok()?;
+            }
+            ValueProjection::EdgeProperty { key, .. } => {
+                self.edge.insert(*key).ok()?;
+            }
+            _ => return None,
+        }
+        Some(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,55 +230,13 @@ impl EdgeScanPlan {
             endpoints: PropertySelection::EMPTY,
         };
         for instruction in self.instructions.iter() {
-            match instruction {
-                GlaOperator::Select { predicates, .. } => {
-                    for key in predicates.iter().filter_map(VertexPredicate::property_key) {
-                        selected.endpoints.insert(key).ok()?;
-                    }
-                }
-                GlaOperator::VertexIdentity { .. } | GlaOperator::CapturePath { .. } => {}
-                GlaOperator::CompareProperties {
-                    left_key,
-                    right_key,
-                    ..
-                } => {
-                    selected.endpoints.insert(*left_key).ok()?;
-                    selected.endpoints.insert(*right_key).ok()?;
-                }
-                GlaOperator::SelectBoolean { expression } => {
-                    for (_, key) in expression.referenced_vertex_properties() {
-                        selected.endpoints.insert(key).ok()?;
-                    }
-                    for (_, key) in expression.referenced_edge_properties() {
-                        selected.edge.insert(key).ok()?;
-                    }
-                }
-                _ => return None,
-            }
+            selected.include_instruction(instruction)?;
         }
         let GlaOperator::ProjectValues { columns } = self.projection.as_ref() else {
             return None;
         };
         for column in columns {
-            match column {
-                ValueProjection::Vertex { .. }
-                | ValueProjection::Path {
-                    function:
-                        GraphPathFunction::Value
-                        | GraphPathFunction::Length
-                        | GraphPathFunction::Nodes
-                        | GraphPathFunction::Edges
-                        | GraphPathFunction::Edge,
-                    ..
-                } => {}
-                ValueProjection::Property { key, .. } => {
-                    selected.endpoints.insert(*key).ok()?;
-                }
-                ValueProjection::EdgeProperty { key, .. } => {
-                    selected.edge.insert(*key).ok()?;
-                }
-                _ => return None,
-            }
+            selected.include_projection(column)?;
         }
         Some(selected)
     }

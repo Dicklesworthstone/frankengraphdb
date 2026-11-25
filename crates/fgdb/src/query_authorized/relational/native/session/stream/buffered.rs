@@ -11,7 +11,8 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::PropertySelection;
 use fgdb_delta_types::catalog::SymbolCatalog;
 use fgdb_gql::edge_stream::{
-    AsyncEdgeScanCursor, AsyncEdgeScanPlan, EdgeScanPropertySelection, EdgeScanState,
+    AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeScanCursor, AsyncEdgeScanPlan,
+    EdgeScanPropertySelection, EdgeScanState,
 };
 use fgdb_gql::stream::{AsyncVertexScanCursor, AsyncVertexScanPlan, VertexScanPropertyDemand};
 use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
@@ -21,7 +22,7 @@ use fgdb_types::CommitCx;
 #[path = "buffered/source.rs"]
 mod source;
 use fgdb_strata::store::BufferedVertexScanState;
-use fgdb_strata::tiered::edge_scan::BufferedEdgeScanState;
+use fgdb_strata::tiered::edge_scan::{BufferedEdgeJoinScanState, BufferedEdgeScanState};
 pub use source::OutputGuard as AuthorizedBufferedOutputGuard;
 use source::Source;
 
@@ -138,9 +139,11 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     /// consumed, so no second root selection or resident fallback can occur.
     ///
     /// Use the returned canonical session's prepare and stream methods. This
-    /// profile supports native ordered vertex-local and single-edge patterns
-    /// with one, any or a finite set of relation types, selected edge and
-    /// endpoint properties, local predicates, SKIP and LIMIT.
+    /// profile supports native ordered vertex-local, single-edge and fixed-hop
+    /// join patterns with one, any or finite relation selectors, selected edge
+    /// and endpoint properties, local predicates, paths, SKIP and LIMIT.
+    /// Each root and child edge is authorized before selected fields decode;
+    /// a final root keeps its incidence owner until traversal completes.
     /// Complete native-run images are not enabled by this constructor; its
     /// private source always uses the selected-row bounded history profile.
     /// Unsupported plans refuse before candidate I/O. Initial cold admission
@@ -352,10 +355,13 @@ type VertexCursor<'q, V, C> =
     AsyncVertexScanCursor<Source<'q, V, C, BufferedVertexScanState>, Checkpoint<'q>, GraphValueRow>;
 type EdgeCursor<'q, V, C> =
     AsyncEdgeScanCursor<Source<'q, V, C, BufferedEdgeScanState>, Checkpoint<'q>>;
+type JoinCursor<'q, V, C> =
+    AsyncEdgeJoinCursor<Source<'q, V, C, BufferedEdgeJoinScanState>, Checkpoint<'q>>;
 
 enum Native<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> {
     Vertex(Box<VertexCursor<'q, V, C>>),
     Edge(Box<EdgeCursor<'q, V, C>>),
+    Join(Box<JoinCursor<'q, V, C>>),
 }
 
 impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
@@ -363,6 +369,12 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
         match self {
             Self::Vertex(cursor) => cursor.state(),
             Self::Edge(cursor) => match cursor.state() {
+                EdgeScanState::Open => VertexScanState::Open,
+                EdgeScanState::Exhausted => VertexScanState::Exhausted,
+                EdgeScanState::Closed => VertexScanState::Closed,
+                EdgeScanState::Failed => VertexScanState::Failed,
+            },
+            Self::Join(cursor) => match cursor.state() {
                 EdgeScanState::Open => VertexScanState::Open,
                 EdgeScanState::Exhausted => VertexScanState::Exhausted,
                 EdgeScanState::Closed => VertexScanState::Closed,
@@ -381,6 +393,11 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
                     .map_err(source::vertex_error)
             }),
             Self::Edge(cursor) => cursor.next().await.map(|result| {
+                result
+                    .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
+                    .map_err(source::edge_error)
+            }),
+            Self::Join(cursor) => cursor.next().await.map(|result| {
                 result
                     .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
                     .map_err(source::edge_error)
@@ -496,6 +513,7 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> AuthorizedBufferedRowCursor<'_, V
 enum Scan {
     Vertex(AsyncVertexScanPlan<GraphValueRow>),
     Edge(AsyncEdgeScanPlan),
+    Join(AsyncEdgeJoinPlan),
 }
 
 struct Plan {
@@ -521,6 +539,14 @@ impl Plan {
         }
     }
 
+    fn join(plan: AsyncEdgeJoinPlan, selection: EdgeScanPropertySelection) -> Self {
+        Self {
+            scan: Scan::Join(plan),
+            keys: selection.edge,
+            endpoint_keys: selection.endpoints,
+        }
+    }
+
     /// Reserve the selected cursor's fixed allocation before opening any scan.
     /// On refusal the caller still owns its original backend. Successful
     /// sources park it in the return slot when they close or unwind.
@@ -536,6 +562,7 @@ impl Plan {
         let cursor_bytes = match &self.scan {
             Scan::Vertex(_) => size_of::<VertexCursor<'q, V, C>>(),
             Scan::Edge(_) => size_of::<EdgeCursor<'q, V, C>>(),
+            Scan::Join(_) => size_of::<JoinCursor<'q, V, C>>(),
         };
         let metadata = backend
             .view
@@ -591,6 +618,32 @@ impl Plan {
                     source, plan, policy, checkpoint,
                 )))
             }
+            Scan::Join(plan) => {
+                let relation = plan.root_relation();
+                let position =
+                    if excludes_all_relations(relation, execution.borrow().permit.predicates()) {
+                        None
+                    } else {
+                        let partition = backend.view.partition_mut();
+                        let scan = match relation.one() {
+                            Some(relation) => partition.edge_scan_relation(cx, at, relation),
+                            None => partition.edge_scan(cx, at),
+                        }?;
+                        Some(scan.into_join_scan().into_state())
+                    };
+                let source = Source::new(
+                    slot.take().expect("admitted backend"),
+                    returned.clone(),
+                    position,
+                    self.keys,
+                    self.endpoint_keys,
+                    cx,
+                    execution.clone(),
+                );
+                Native::Join(Box::new(AsyncEdgeJoinCursor::new(
+                    source, plan, policy, checkpoint,
+                )))
+            }
         };
         Ok((native, metadata))
     }
@@ -626,15 +679,26 @@ fn compile(
         pattern.plan().operators().first(),
         Some(GlaOperator::ScanEdges { .. })
     ) {
-        let plan = AsyncEdgeScanPlan::compile(pattern.plan()).map_err(|error| {
-            QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(error)))
-        })?;
-        let mut keys = plan
-            .selected_property_demand()
-            .ok_or(QueryError::StreamingUnsupported { facade })?;
-        keys.edge = select(keys.edge);
-        keys.endpoints = select(keys.endpoints);
-        Ok(Plan::edge(plan, keys))
+        // Physical preparation is complete before opening either source. A
+        // failed runtime read never retries through another implementation.
+        if let Ok(plan) = AsyncEdgeScanPlan::compile(pattern.plan()) {
+            let mut keys = plan
+                .selected_property_demand()
+                .ok_or(QueryError::StreamingUnsupported { facade })?;
+            keys.edge = select(keys.edge);
+            keys.endpoints = select(keys.endpoints);
+            Ok(Plan::edge(plan, keys))
+        } else {
+            let plan = AsyncEdgeJoinPlan::compile(pattern.plan()).map_err(|error| {
+                QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(error)))
+            })?;
+            let mut keys = plan
+                .selected_property_demand()
+                .ok_or(QueryError::StreamingUnsupported { facade })?;
+            keys.edge = select(keys.edge);
+            keys.endpoints = select(keys.endpoints);
+            Ok(Plan::join(plan, keys))
+        }
     } else {
         let plan = AsyncVertexScanPlan::compile(pattern.plan()).map_err(plan_error)?;
         let keys = match plan.property_demand() {

@@ -7,6 +7,7 @@ use super::{
     Authority, CapabilityToken, CommitCx, Database, Error, Execution, TxnCx, Vfs, Workspace,
     WriteTxnError, chain,
 };
+use crate::write_txn::CompletionCheckpoint;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertStats};
 use fgdb_gql::{
@@ -711,6 +712,10 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
     /// Live authority and cancellation are checked by the native completion
     /// checkpoints before publication. Semantic conflict/unknown outcomes keep
     /// their native meaning; this method never retries or replays statements.
+    /// Intervening history polls host cancellation without charging signed work
+    /// or sampling the clock per hidden record. The original mutation footprint
+    /// stays charged, and live authority is checked again after validation,
+    /// before either its result or a protected error can escape.
     pub async fn commit<V: Vfs + Clone>(
         mut self,
         database: &mut Database<V>,
@@ -731,9 +736,20 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
                 state
                     .workspace
                     .transaction()
-                    .complete_controlled(database, &self.cx, None, false, || {
-                        state.execution.checkpoint()
-                    })
+                    .complete_with_validation_controlled(
+                        database,
+                        &self.cx,
+                        None,
+                        false,
+                        None,
+                        |phase| match phase {
+                            CompletionCheckpoint::Logical
+                            | CompletionCheckpoint::ValidationComplete => {
+                                state.execution.checkpoint()
+                            }
+                            CompletionCheckpoint::PrivateValidation => state.execution.poll(),
+                        },
+                    )
                     .await
             })
             .await

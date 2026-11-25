@@ -1569,3 +1569,371 @@ fn active_join_conversion_keeps_root_position_and_final_root_children() {
         assert_eq!(pool.used(), 0);
     });
 }
+
+#[test]
+fn admitted_incidence_preserves_projected_histories_and_root_positions_across_detach() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        for cut in [0, 1, 3] {
+            for direction in [
+                BufferedEdgeDirection::Outgoing,
+                BufferedEdgeDirection::Incoming,
+                BufferedEdgeDirection::Undirected,
+            ] {
+                let mut position = view
+                    .edge_scan(&cx, CommitSeq(cut))
+                    .unwrap()
+                    .into_join_scan()
+                    .into_state();
+                let mut after = None;
+                let mut work = 0;
+                let mut seen = Vec::new();
+                loop {
+                    let mut scan = view.resume_edge_join_scan(&cx, position).unwrap();
+                    assert_eq!(scan.work_used(), work);
+                    let request = Incidence {
+                        endpoint: VId(1),
+                        relation: None,
+                        direction,
+                        after,
+                    };
+                    let wanted = expected(request);
+                    // Alternate selected keys while retaining the same child
+                    // heap. A previous field selection must never be reused.
+                    let keys = if seen.len() % 2 == 0 {
+                        PropertySelection::one(P)
+                    } else {
+                        PropertySelection::one(PropertyKeyId(u64::MAX))
+                    };
+                    let candidate = scan
+                        .next_incident_admitted_properties_and_endpoint_properties(
+                            &cx,
+                            request.endpoint,
+                            request.relation,
+                            request.direction,
+                            request.after,
+                            keys,
+                            PropertySelection::one(P),
+                            &mut |topology| {
+                                assert_eq!(topology.source_vertex().labels(), &[LabelId(9)]);
+                                assert_eq!(topology.target_vertex().labels(), &[LabelId(9)]);
+                                // A denied live identity must retain its
+                                // successor position without selected values.
+                                Ok::<_, ()>(topology.edge().entry().eid != EId(6))
+                            },
+                            &mut |_| Ok(()),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(candidate.as_ref().map(|row| row.eid), wanted.map(|row| row.0));
+                    assert!(scan.work_used() > work);
+                    work = scan.work_used();
+                    let Some(candidate) = candidate else {
+                        position = scan.into_state();
+                        break;
+                    };
+                    let (_, src, dst) = wanted.unwrap();
+                    let visible_value = visible(candidate.eid.0, cut)
+                        .filter(|_| candidate.eid != EId(6));
+                    assert_eq!(candidate.row.is_some(), visible_value.is_some());
+                    if let Some(row) = candidate.row {
+                        assert_eq!(row.source_vertex().vid(), src);
+                        assert_eq!(row.target_vertex().vid(), dst);
+                        let value = visible_value.unwrap();
+                        let expected_properties = if keys == PropertySelection::one(P) {
+                            vec![(P, CanonicalScalar::Int(value).into())]
+                        } else {
+                            Vec::new()
+                        };
+                        assert_eq!(row.edge().properties(), expected_properties.as_slice());
+                        let source_value = if src == VId(1) && cut == 3 {
+                            11
+                        } else {
+                            src.0 as i64 * 10
+                        };
+                        let target_value = if dst == VId(1) && cut == 3 {
+                            11
+                        } else {
+                            dst.0 as i64 * 10
+                        };
+                        assert_eq!(
+                            row.source_properties(),
+                            &[(P, CanonicalScalar::Int(source_value).into())]
+                        );
+                        assert_eq!(
+                            row.target_properties(),
+                            &[(P, CanonicalScalar::Int(target_value).into())]
+                        );
+                    }
+                    seen.push(candidate.eid);
+                    after = Some(candidate.eid);
+                    position = scan.into_state();
+                    assert_eq!(position.snapshot_seq(), CommitSeq(cut));
+                    assert_eq!(position.work_used(), work);
+                    assert!(!position.is_closed());
+                }
+                // Child exhaustion and detach did not consume the root. The
+                // complete root still reports all historical full-width IDs.
+                let mut scan = view.resume_edge_join_scan(&cx, position).unwrap();
+                let mut roots = Vec::new();
+                while let Some(candidate) = scan
+                    .next_admitted_properties_and_endpoint_properties(
+                        &cx,
+                        None,
+                        PropertySelection::EMPTY,
+                        PropertySelection::EMPTY,
+                        &mut |_| Ok::<_, ()>(true),
+                        &mut |_| Ok(()),
+                    )
+                    .await
+                    .unwrap()
+                {
+                    roots.push(candidate.eid);
+                }
+                assert_eq!(
+                    roots,
+                    TOPOLOGY.iter().map(|row| EId(row.0)).collect::<Vec<_>>()
+                );
+                assert!(!scan.is_closed());
+                let position = scan.into_state();
+                let mut scan = view.resume_edge_join_scan(&cx, position).unwrap();
+                let last_child = scan
+                    .next_incident_admitted_properties_and_endpoint_properties(
+                        &cx,
+                        VId(9),
+                        Some(R),
+                        BufferedEdgeDirection::Outgoing,
+                        None,
+                        PropertySelection::one(P),
+                        PropertySelection::one(P),
+                        &mut |_| Ok::<_, ()>(true),
+                        &mut |_| Ok(()),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(last_child.eid, EId(7));
+                assert_eq!(last_child.row.is_some(), cut == 3);
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn admitted_incidence_hides_damaged_sidecars_until_topology_is_allowed() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let properties = vec![vec![(P, CanonicalScalar::Int(70).into())]];
+        let sidecar = store
+            .put_edge_property_patch(
+                &contexts.commit(),
+                &encode_property_patch(&properties).unwrap(),
+            )
+            .await
+            .unwrap();
+        let sidecar_path = store.path(sidecar.0);
+        let original = std::fs::read(&sidecar_path).unwrap();
+        let mut damaged = original.clone();
+        let last = damaged.len() - 1;
+        damaged[last] ^= 1;
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        drop(view.reserve_scan_bytes(&cx, pool.limit()));
+        std::fs::write(&sidecar_path, &damaged).unwrap();
+        let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+        let hidden = scan
+            .next_incident_admitted_properties_and_endpoint_properties(
+                &cx,
+                VId(9),
+                Some(R),
+                BufferedEdgeDirection::Outgoing,
+                None,
+                PropertySelection::one(P),
+                PropertySelection::one(P),
+                &mut |topology| {
+                    assert_eq!(topology.edge().entry().eid, EId(7));
+                    assert_eq!(topology.source_vertex().vid(), VId(9));
+                    assert_eq!(topology.target_vertex().vid(), VId(10));
+                    Ok::<_, ()>(false)
+                },
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(hidden.eid, EId(7));
+        assert!(hidden.row.is_none());
+        assert!(!scan.is_closed());
+        let position = scan.into_state();
+        let mut scan = view.resume_edge_join_scan(&cx, position).unwrap();
+        let allowed = scan
+            .next_incident_admitted_properties_and_endpoint_properties(
+                &cx,
+                VId(9),
+                Some(R),
+                BufferedEdgeDirection::Outgoing,
+                None,
+                PropertySelection::one(P),
+                PropertySelection::one(P),
+                &mut |_| Ok::<_, ()>(true),
+                &mut |_| Ok(()),
+            )
+            .await;
+        assert!(matches!(allowed, Err(BufferedScanError::Read(_))));
+        assert!(scan.is_closed());
+        let work = scan.work_used();
+        let position = scan.into_state();
+        let mut scan = view.resume_edge_join_scan(&cx, position).unwrap();
+        assert!(
+            scan.next_incident_admitted_properties_and_endpoint_properties(
+                &cx,
+                VId(9),
+                Some(R),
+                BufferedEdgeDirection::Outgoing,
+                None,
+                PropertySelection::one(P),
+                PropertySelection::one(P),
+                &mut |_| -> Result<bool, ()> { panic!("terminal admission") },
+                &mut |_| -> Result<(), ()> { panic!("terminal work") },
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(scan.work_used(), work);
+        drop(scan);
+        std::fs::write(&sidecar_path, original).unwrap();
+        let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+        assert!(matches!(
+            scan.next_incident_admitted_properties_and_endpoint_properties(
+                &cx,
+                VId(9),
+                Some(R),
+                BufferedEdgeDirection::Outgoing,
+                None,
+                PropertySelection::one(P),
+                PropertySelection::one(P),
+                &mut |_| Err("admission refused"),
+                &mut |_| Ok(()),
+            )
+            .await,
+            Err(BufferedScanError::Control("admission refused"))
+        ));
+        assert!(scan.is_closed());
+        drop(scan);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn detached_admitted_incidence_keeps_work_limits_and_rejects_foreign_owners() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let mut exact = 0;
+        for allowed in [None, Some(false), Some(true)] {
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            let baseline = pool.used();
+            let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+            if let Some(short) = allowed {
+                scan.driver.as_mut().unwrap().root.work.limit =
+                    if short { exact - 1 } else { exact };
+            }
+            let mut after = None;
+            let mut failed = false;
+            for eid in [EId(4), EId(6)] {
+                let result = scan
+                    .next_incident_admitted_properties_and_endpoint_properties(
+                        &cx,
+                        VId(1),
+                        Some(R),
+                        BufferedEdgeDirection::Outgoing,
+                        after,
+                        PropertySelection::one(P),
+                        PropertySelection::one(P),
+                        &mut |_| Ok::<_, ()>(true),
+                        &mut |_| Ok(()),
+                    )
+                    .await;
+                if allowed == Some(true) && eid == EId(6) {
+                    assert!(matches!(
+                        result,
+                        Err(BufferedScanError::Read(BufferedReadError::Limit { .. }))
+                    ));
+                    assert!(scan.is_closed());
+                    failed = true;
+                    break;
+                }
+                let candidate = result.unwrap().unwrap();
+                assert_eq!(candidate.eid, eid);
+                assert!(candidate.row.is_some());
+                drop(candidate);
+                after = Some(eid);
+                let work = scan.work_used();
+                let position = scan.into_state();
+                assert_eq!(position.work_used(), work);
+                scan = view.resume_edge_join_scan(&cx, position).unwrap();
+                assert_eq!(scan.work_used(), work);
+            }
+            if allowed.is_none() {
+                exact = scan.work_used();
+                assert!(exact > 1);
+            } else {
+                assert_eq!(failed, allowed == Some(true));
+            }
+            drop(scan);
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            assert_eq!(pool.used(), baseline);
+        }
+        let other_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut other = store
+            .open_buffered_root(&cx, id, other_pool.clone(), limits())
+            .await
+            .unwrap();
+        let position = view
+            .edge_scan(&cx, CommitSeq(3))
+            .unwrap()
+            .into_join_scan()
+            .into_state();
+        let before = other.stats();
+        assert!(matches!(
+            other.resume_edge_join_scan(&cx, position),
+            Err(BufferedReadError::Buffer(BufferError::InvalidLoad))
+        ));
+        let after = other.stats();
+        assert_eq!(after.hits + after.misses, before.hits + before.misses);
+
+        // Even a closed position remains bound to its source profile.
+        let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+        scan.close();
+        let position = scan.into_state();
+        view.set_native_run_limits(&cx, Some(crate::tiered::sealed::SealedLimits::default()))
+            .unwrap();
+        assert!(matches!(
+            view.resume_edge_join_scan(&cx, position),
+            Err(BufferedReadError::Buffer(BufferError::InvalidLoad))
+        ));
+        drop(other);
+        drop(view);
+        assert_eq!(other_pool.used(), 0);
+        assert_eq!(pool.used(), 0);
+    });
+}

@@ -1575,10 +1575,19 @@ impl<V: Vfs> CommitCoordinator<V> {
     /// These are the residue of commits that crashed between D1 and D2. They
     /// are NOT partial commits — they are bytes nobody referenced — and
     /// reclaiming them is ordinary maintenance rather than recovery.
+    ///
+    /// An interrupted marker publication makes the retained chain insufficient
+    /// to prove absence: the durable log may already name a capsule that this
+    /// handle has not adopted. Refuse while poisoned, before inspecting any
+    /// pathname. Reopen must resolve that uncertainty before orphan discovery
+    /// can classify the capsule as unreferenced.
     pub async fn orphan_capsules(
         &self,
         cx: &impl StorageReadCx,
     ) -> Result<Vec<ObjectId>, CommitError> {
+        if self.poisoned {
+            return Err(CommitError::Poisoned);
+        }
         let referenced: Vec<ObjectId> = self
             .chain
             .entries()

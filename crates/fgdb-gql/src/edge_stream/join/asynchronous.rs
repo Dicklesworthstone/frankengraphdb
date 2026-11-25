@@ -117,6 +117,48 @@ impl AsyncEdgeJoinPlan {
         self.inner.direction
     }
 
+    /// Prove bounded edge and endpoint key sets for every fixed-hop stage and
+    /// output cell, including predicates and compiler-owned hidden sort keys.
+    /// The selections are unions across all bindings; repeated field reads
+    /// share one key. Their bounds are independent, and overflow refuses.
+    ///
+    /// This is only a payload-demand proof. A source must still admit each
+    /// relation and both same-cut endpoint topologies before loading selected
+    /// values, and intersect both sets with the current property authority.
+    /// Every nested expansion retains its own relation selector.
+    ///
+    /// Optional scopes, probes, collections, complete metadata and unproved
+    /// instructions return `None`, even under LIMIT zero. The ordinary join
+    /// compiler and its complete-record execution profiles remain unchanged.
+    #[must_use]
+    pub fn selected_property_demand(&self) -> Option<EdgeScanPropertySelection> {
+        if self.optional.is_some() {
+            return None;
+        }
+        let joined = self.inner.joined.as_ref()?;
+        let mut selected = EdgeScanPropertySelection {
+            edge: PropertySelection::EMPTY,
+            endpoints: PropertySelection::EMPTY,
+        };
+        for instruction in joined.stages.iter().flatten() {
+            let Instruction::Native(instruction) = instruction else {
+                return None;
+            };
+            // Edge-uniqueness checks compare only complete EIds. All payload
+            // consumers share the same exhaustive proof as a single edge.
+            if !matches!(instruction, GlaOperator::DifferentEdges { .. }) {
+                selected.include_instruction(instruction)?;
+            }
+        }
+        let GlaOperator::ProjectValues { columns } = self.inner.projection.as_ref() else {
+            return None;
+        };
+        for column in columns {
+            selected.include_projection(column)?;
+        }
+        Some(selected)
+    }
+
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         Self::check_access(plan)?;
         Ok(Self::from_inner(compile_output(plan, Output::OrderedRows)?))

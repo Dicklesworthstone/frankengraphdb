@@ -867,3 +867,189 @@ fn invisible_candidates_are_charged_but_do_not_resurrect_as_join_bindings() {
         "nested candidates share root admission"
     );
 }
+
+
+fn selected_key(ordinal: u64) -> PropertyKeyId {
+    PropertyKeyId((1_u64 << 40) | ordinal)
+}
+
+fn selected_definition(text: &str) -> PreparedGraphPattern<GraphValueRow> {
+    PreparedGraphText::prepare(text, |kind, name| match (kind, name) {
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
+        (GraphSymbolKind::Property, name) if name.starts_with('p') => name[1..]
+            .parse::<u64>()
+            .ok()
+            .map(|ordinal| GraphSymbol::Property(selected_key(ordinal))),
+        _ => symbols(kind, name),
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
+}
+
+#[test]
+fn selected_join_properties_cover_every_hop_filter_and_projection() {
+    for text in [
+        "MATCH (a {p0:1})-[r:R]->(b {p1:2})-[s:S]->(c {p2:3}) \
+         WHERE a.p3 = c.p4 AND (r.p5 > 0 OR s.p6 < 4) \
+         RETURN r,a,s,c.p7 AS value,s.p8 AS score LIMIT 0",
+        "MATCH (a {p0:1})<-[r:R]-(b {p1:2})-[s:S]-(c {p2:3}) \
+         WHERE a.p3 = c.p4 AND (r.p5 > 0 OR s.p6 < 4) \
+         RETURN r,a,s,c.p7 AS value,s.p8 AS score LIMIT 0",
+        "MATCH (a {p0:1})-[r]->(b {p1:2})-[s:R|S]->(c {p2:3}) \
+         WHERE a.p3 = c.p4 AND (r.p5 > 0 OR s.p6 < 4) \
+         RETURN r,a,s,c.p7 AS value,s.p8 AS score LIMIT 0",
+    ] {
+        let definition = selected_definition(text);
+        let frozen = definition.canonical_bytes();
+        let compiled = AsyncEdgeJoinPlan::compile(definition.plan()).unwrap();
+        assert_eq!(compiled.hop_count(), 2);
+        let selected = compiled.selected_property_demand().unwrap();
+        assert_eq!(
+            selected.edge.keys(),
+            &[selected_key(5), selected_key(6), selected_key(8)]
+        );
+        assert_eq!(
+            selected.endpoints.keys(),
+            &[
+                selected_key(0),
+                selected_key(1),
+                selected_key(2),
+                selected_key(3),
+                selected_key(4),
+                selected_key(7),
+            ]
+        );
+        // The legacy complete-record API retains its conservative contract;
+        // only the explicitly selected async join surface gains this proof.
+        let legacy = EdgeScanPlan::compile(definition.plan()).unwrap();
+        assert_eq!(legacy.property_demand(), EdgeScanPropertyDemand::Complete);
+        assert!(legacy.selected_property_demand().is_none());
+        assert_eq!(definition.canonical_bytes(), frozen);
+    }
+
+    let topology = plan("MATCH (a)-[r:R]-(b)-[s:R]-(a) RETURN r,a,s");
+    let selected = topology.selected_property_demand().unwrap();
+    assert!(selected.edge.is_empty());
+    assert!(selected.endpoints.is_empty());
+}
+
+#[test]
+fn selected_join_properties_include_hidden_sort_keys_at_zero_limit() {
+    let definition = selected_definition(
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) \
+         RETURN c.p1 AS value ORDER BY r.p2 DESC,s.p3 SKIP 1 LIMIT 0",
+    );
+    let (compiled, tail) = AsyncEdgeJoinPlan::compile_sort_input(definition.plan()).unwrap();
+    assert_eq!(tail.offset(), 1);
+    assert_eq!(tail.count(), Some(0));
+    let selected = compiled.selected_property_demand().unwrap();
+    assert_eq!(selected.edge.keys(), &[selected_key(2), selected_key(3)]);
+    assert_eq!(selected.endpoints.keys(), &[selected_key(1)]);
+}
+
+#[test]
+fn selected_join_property_bounds_are_independent_and_never_truncate() {
+    use crate::algebra::BindingSlot;
+
+    let definition = prepared(CHAIN);
+    let mut operators = definition.plan().operators().to_vec();
+    let projection = operators
+        .iter_mut()
+        .find_map(|operator| match operator {
+            GlaOperator::ProjectValues { columns } => Some(columns),
+            _ => None,
+        })
+        .unwrap();
+    projection.truncate(3); // The complete root/orientation/next-edge prefix.
+    let keys: Vec<_> = (0..PropertySelection::CAPACITY as u64)
+        .map(selected_key)
+        .collect();
+    for &key in &keys {
+        projection.push(ValueProjection::EdgeProperty { capture: 0, key });
+        projection.push(ValueProjection::Property {
+            slot: BindingSlot(2),
+            key,
+        });
+    }
+    // Duplicates remain legal at the exact capacity on either family.
+    projection.push(ValueProjection::EdgeProperty {
+        capture: 1,
+        key: keys[0],
+    });
+    projection.push(ValueProjection::Property {
+        slot: BindingSlot(0),
+        key: keys[0],
+    });
+    let exact = GlaPlan::from_operators(operators.clone());
+    let selected = AsyncEdgeJoinPlan::compile(&exact)
+        .unwrap()
+        .selected_property_demand()
+        .unwrap();
+    assert_eq!(selected.edge.keys(), keys);
+    assert_eq!(selected.endpoints.keys(), keys);
+
+    for extra in [
+        ValueProjection::EdgeProperty {
+            capture: 1,
+            key: selected_key(PropertySelection::CAPACITY as u64),
+        },
+        ValueProjection::Property {
+            slot: BindingSlot(1),
+            key: selected_key(PropertySelection::CAPACITY as u64),
+        },
+    ] {
+        let mut overflow = operators.clone();
+        let projection = overflow
+            .iter_mut()
+            .find_map(|operator| match operator {
+                GlaOperator::ProjectValues { columns } => Some(columns),
+                _ => None,
+            })
+            .unwrap();
+        projection.push(extra);
+        let overflow = GlaPlan::from_operators(overflow);
+        let compiled = AsyncEdgeJoinPlan::compile(&overflow).unwrap();
+        assert!(compiled.selected_property_demand().is_none());
+    }
+}
+
+#[test]
+fn selected_join_properties_refuse_nested_scopes_before_execution() {
+    use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder};
+
+    let probe = plan(
+        "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } \
+         RETURN r,a,b LIMIT 0",
+    );
+    assert!(probe.selected_property_demand().is_none());
+
+    let definition = prepared(
+        "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[s:R]->(c) \
+         RETURN r,a,s,c LIMIT 0",
+    );
+    let (optional, _) = AsyncEdgeJoinPlan::compile_sort_input(definition.plan()).unwrap();
+    assert!(optional.selected_property_demand().is_none());
+
+    let mut outer = GraphPatternBuilder::new();
+    outer.vertex("a").unwrap().vertex("b").unwrap();
+    outer.edge("a", R, GlaDirection::Forward, "b").unwrap();
+    outer.capture_edge("r", 0).unwrap();
+    let mut inner = GraphPatternBuilder::new();
+    inner.vertex("b").unwrap().vertex("c").unwrap();
+    inner.edge("b", R, GlaDirection::Forward, "c").unwrap();
+    let definition = outer
+        .prepare_values_with_clauses(
+            &[GraphMatchClause::collect(&inner, Some("c"))],
+            &[
+                GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                GraphColumn::vertex("a", "a"),
+                GraphColumn::collection("found", 0),
+            ],
+            0,
+            Some(0),
+        )
+        .unwrap();
+    let collection = AsyncEdgeJoinPlan::compile(definition.plan()).unwrap();
+    assert!(collection.selected_property_demand().is_none());
+}

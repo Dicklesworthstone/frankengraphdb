@@ -2549,7 +2549,7 @@ impl<'a> Parser<'a> {
 
     /// The visible row column named by the current word when no property
     /// read, call or subscript follows it and its type is accepted.
-    fn row_bare_column(
+    pub(super) fn row_bare_column(
         &self,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
         accepts: impl Fn(GraphSetColumnType) -> bool,
@@ -2709,10 +2709,10 @@ impl<'a> Parser<'a> {
         Ok(!tighter_than_comparison(&mut lexer)?)
     }
 
-    /// Whether two open (Any) row columns, or an open column and an
-    /// element-typed row column, are compared here with `=`, `<>` or `!=`, in
-    /// either order. Both open values may hold graph identities, lists or
-    /// maps, so their equality must use the value language (fgdb-hj2nw).
+    /// Whether an open (Any) row column or bare comprehension local is compared
+    /// with another bare value, literal or parameter using `=`, `<>` or `!=`.
+    /// An open value may hold a graph identity, list or map even when the other
+    /// operand is scalar, so equality must use the value language (fgdb-hj2nw).
     /// A list-local
     /// predicate's correlated Apply binds `p` of `[p IN posts WHERE NOT p =
     /// person AND (p)-->()]` as such a column (68812ac2), and it may hold an
@@ -2726,34 +2726,48 @@ impl<'a> Parser<'a> {
         if self.indexed_element_compared_at(self.current, &self.lexer, route)? {
             return Ok(true);
         }
-        let bare = |token: Token<'a>,
-                    lexer: &Lexer<'a>|
-         -> Result<Option<&'a str>, GraphPatternTextError> {
-            let TokenKind::Word(word) = token.kind else {
-                return Ok(None);
+        // Leave the lookahead immediately after one complete operand. Name
+        // resolution still belongs to the ordinary reader; locals shadow rows.
+        let operand = |token: Token<'a>,
+                       lexer: &mut Lexer<'a>|
+         -> Result<Option<bool>, GraphPatternTextError> {
+            let kind = if let TokenKind::Word(word) = token.kind {
+                if self.elements.contains(&word) {
+                    // Locals have the full value domain too. In particular,
+                    // two nested locals can both hold graph identities. Their
+                    // names shadow every row column, regardless of its type.
+                    Some(GraphSetColumnType::Any)
+                } else {
+                    route.row.and_then(|schema| {
+                        schema[..self.visible_width(schema)]
+                            .iter()
+                            .find(|(name, _)| name.text == word)
+                            .map(|(_, kind)| *kind)
+                    })
+                }
+            } else {
+                None
             };
-            if self.elements.contains(&word)
-                || matches!(
-                    lexer.clone().next()?.kind,
-                    TokenKind::Punct(b'(' | b'.' | b'[' | b':')
-                )
-            {
+            if kind.is_none() {
+                let Some(consumed) = Self::scalar_atom_tokens_at(token, lexer)? else {
+                    return Ok(None);
+                };
+                for _ in 1..consumed {
+                    lexer.next()?;
+                }
+            }
+            if matches!(
+                lexer.clone().next()?.kind,
+                TokenKind::Punct(b'(' | b'.' | b'[' | b':')
+            ) {
                 return Ok(None);
             }
-            Ok(Some(word))
-        };
-        let kind = |word: &str| {
-            route.row.and_then(|schema| {
-                schema
-                    .iter()
-                    .find(|(name, _)| name.text == word)
-                    .map(|(_, kind)| *kind)
-            })
-        };
-        let Some(left) = bare(self.current, &self.lexer)? else {
-            return Ok(false);
+            Ok(Some(kind == Some(GraphSetColumnType::Any)))
         };
         let mut lexer = self.lexer.clone();
+        let Some(left_open) = operand(self.current, &mut lexer)? else {
+            return Ok(false);
+        };
         let follows = match lexer.next()?.kind {
             TokenKind::Punct(b'=') => true,
             TokenKind::Punct(b'<') => matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
@@ -2764,17 +2778,10 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         let right = lexer.next()?;
-        let Some(right) = bare(right, &lexer)? else {
+        let Some(right_open) = operand(right, &mut lexer)? else {
             return Ok(false);
         };
-        let (left, right) = (kind(left), kind(right));
-        let open_element = |open: Option<GraphSetColumnType>, other: Option<GraphSetColumnType>| {
-            open == Some(GraphSetColumnType::Any)
-                && other
-                    .is_some_and(|kind| kind == GraphSetColumnType::Any || is_element_column(kind))
-        };
-        Ok((open_element(left, right) || open_element(right, left))
-            && !tighter_than_comparison(&mut lexer)?)
+        Ok((left_open || right_open) && !tighter_than_comparison(&mut lexer)?)
     }
 
     /// Whether a bare list-comprehension element (fgdb-20foe) and a bare

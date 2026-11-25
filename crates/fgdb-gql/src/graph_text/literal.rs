@@ -426,22 +426,56 @@ impl<'a> Parser<'a> {
     pub(in crate::graph_text) fn scan_float_literal(
         &self,
     ) -> Result<Option<(String, usize)>, GraphPatternTextError> {
-        let mut lexer = self.lexer.clone();
+        Self::scan_float_literal_at(self.current, self.lexer.clone())
+    }
+
+    /// A literal or parameter's token width, without consuming or binding it.
+    /// Comparison routing shares the numeric scanner with the operand reader,
+    /// including signed, fractional and exponent forms.
+    pub(in crate::graph_text) fn scalar_atom_tokens_at(
+        token: Token<'a>,
+        lexer: &Lexer<'a>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        if let Some((_, consumed)) = Self::scan_float_literal_at(token, lexer.clone())? {
+            return Ok(Some(consumed));
+        }
+        Ok(match token.kind {
+            TokenKind::Digits(_) | TokenKind::Quoted(_) | TokenKind::Parameter(_) => Some(1),
+            TokenKind::Word(word)
+                if ["TRUE", "FALSE", "NULL"]
+                    .iter()
+                    .any(|literal| word.eq_ignore_ascii_case(literal)) =>
+            {
+                Some(1)
+            }
+            TokenKind::Punct(b'-')
+                if matches!(lexer.clone().next()?.kind, TokenKind::Digits(_)) =>
+            {
+                Some(2)
+            }
+            _ => None,
+        })
+    }
+
+    fn scan_float_literal_at(
+        current: Token<'a>,
+        mut lexer: Lexer<'a>,
+    ) -> Result<Option<(String, usize)>, GraphPatternTextError> {
         let decimal = |digits: &str| digits.bytes().all(|byte| byte.is_ascii_digit());
-        if self.is_punct(b'.') {
+        if matches!(current.kind, TokenKind::Punct(b'.')) {
             // No integer digits: `.5`, `.1e9`. An operand never starts with a
             // property dot, so the dot must touch its digits.
             let digits = lexer.next()?;
             let TokenKind::Digits(fraction) = digits.kind else {
                 return Ok(None);
             };
-            if digits.at != self.current.at + 1 || !decimal(fraction) {
+            if digits.at != current.at + 1 || !decimal(fraction) {
                 return Ok(None);
             }
             let text = format!("0.{fraction}");
             return Self::scan_float_exponent(lexer, text, digits.at + fraction.len(), 2, true);
         }
-        let negative = self.is_punct(b'-');
+        let negative = matches!(current.kind, TokenKind::Punct(b'-'));
         let (whole, mut end, mut consumed) = if negative {
             let token = lexer.next()?;
             let TokenKind::Digits(whole) = token.kind else {
@@ -449,10 +483,10 @@ impl<'a> Parser<'a> {
             };
             (whole, token.at + whole.len(), 2)
         } else {
-            let TokenKind::Digits(whole) = self.current.kind else {
+            let TokenKind::Digits(whole) = current.kind else {
                 return Ok(None);
             };
-            (whole, self.current.at + whole.len(), 1)
+            (whole, current.at + whole.len(), 1)
         };
         // 0x1, 0o7 and 0b1 spell integers only.
         if !decimal(whole) {

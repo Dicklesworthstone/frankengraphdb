@@ -1767,3 +1767,326 @@ fn last_row_source_drop_precedes_live_delivery_and_output_reservations_outlive_s
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+async fn fixed_join_fixture(
+    cx: &CommitCx,
+    hidden: bool,
+) -> (GateVfs, Database<GateVfs>, CommitSeq, CommitSeq) {
+    let (vfs, mut db, _, _) = fixture(cx, hidden).await;
+    let mut chain = WriteBatch::new(R);
+    chain.create_vertex(
+        VId(3),
+        vec![L, H],
+        vec![
+            (P, CanonicalScalar::Int(3)),
+            (SECRET, CanonicalScalar::Int(999)),
+        ],
+    );
+    for (eid, from, to, score) in [
+        (102, 2, 3, 5),
+        (103, 2, 3, 9),
+        (104, 3, 1, 4),
+        (105, 2, 2, 6),
+    ] {
+        chain.add_edge(
+            EId(eid),
+            VId(from),
+            VId(to),
+            vec![
+                (P, CanonicalScalar::Int(score)),
+                (SECRET, CanonicalScalar::Int(999)),
+            ],
+        );
+    }
+    if hidden {
+        for id in 10..18 {
+            // These child identities precede the first visible successor.
+            // An adapter must advance privately without a candidate/node debit.
+            chain.add_edge(
+                EId(id + 70),
+                VId(2),
+                VId(id),
+                vec![(P, CanonicalScalar::Int(999))],
+            );
+        }
+    }
+    let old = db.write(cx, chain).await.unwrap();
+    let mut edit = WriteBatch::new(R);
+    edit.set_edge_property(EId(102), P, Some(CanonicalScalar::Int(50)));
+    edit.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(30)));
+    edit.delete_edge(EId(103));
+    let current = db.write(cx, edit).await.unwrap();
+    (vfs, db, old, current)
+}
+
+#[test]
+fn cold_fixed_joins_keep_last_root_children_parallel_edges_and_historical_fields() {
+    let ((), report) = run_async_under_lab(0xa6_0115, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let cx = c.query();
+        let authority = issuer();
+        let token = authority.issue_at(&grant(100), 100).unwrap();
+        for hidden in [false, true] {
+            let (vfs, _db, old, current) = fixed_join_fixture(&commit, hidden).await;
+            for (at, latest) in [(old, false), (current, true)] {
+                let pool = memory();
+                let mut reader = Database::open_buffered_publication_with_vfs(
+                    &commit,
+                    vfs.clone(),
+                    vfs.memory.database_dir(),
+                    keys(),
+                    pool.clone(),
+                    limits(),
+                )
+                .await
+                .unwrap()
+                .into_authorized_read_session(
+                    &commit,
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    at,
+                    GqlQueryPolicy::new(100, 10, 100_000, 100_000),
+                    || 100,
+                )
+                .await
+                .unwrap();
+                let rows = collect(
+                    &mut reader,
+                    &cx,
+                    "MATCH (a)-[r:R]->(b)-[s]->(c) \
+                     RETURN r,a,s,b,c,r.score,s.score,a.score,b.score,c.score,a.secret,s.secret",
+                )
+                .await;
+                // Literal occurrence table: parallel edges multiply rows,
+                // a self-loop is used once, and the final root 105 still expands.
+                let paths = [
+                    (101, 1, 102, 2, 3),
+                    (101, 1, 103, 2, 3),
+                    (101, 1, 105, 2, 2),
+                    (102, 2, 104, 3, 1),
+                    (103, 2, 104, 3, 1),
+                    (104, 3, 101, 1, 2),
+                    (105, 2, 102, 2, 3),
+                    (105, 2, 103, 2, 3),
+                ];
+                let vertex_score = |id| match id {
+                    1 => 11,
+                    2 => 2,
+                    3 if latest => 30,
+                    3 => 3,
+                    _ => unreachable!(),
+                };
+                let edge_score = |id| match id {
+                    101 => 17,
+                    102 if latest => 50,
+                    102 => 5,
+                    103 => 9,
+                    104 => 4,
+                    105 => 6,
+                    _ => unreachable!(),
+                };
+                let expected: Vec<_> = paths
+                    .into_iter()
+                    .filter(|&(r, _, s, _, _)| !latest || (r != 103 && s != 103))
+                    .map(|(r, a, s, b, c)| {
+                        GraphValueRow::from_owned_values(vec![
+                            GraphValue::Edge(EId(r)),
+                            GraphValue::Vertex(VId(a)),
+                            GraphValue::Edge(EId(s)),
+                            GraphValue::Vertex(VId(b)),
+                            GraphValue::Vertex(VId(c)),
+                            GraphValue::Scalar(CanonicalScalar::Int(edge_score(r))),
+                            GraphValue::Scalar(CanonicalScalar::Int(edge_score(s))),
+                            GraphValue::Scalar(CanonicalScalar::Int(vertex_score(a))),
+                            GraphValue::Scalar(CanonicalScalar::Int(vertex_score(b))),
+                            GraphValue::Scalar(CanonicalScalar::Int(vertex_score(c))),
+                            GraphValue::Scalar(CanonicalScalar::Null),
+                            GraphValue::Scalar(CanonicalScalar::Null),
+                        ])
+                    })
+                    .collect();
+                assert_eq!(rows, expected, "hidden={hidden}; cut={at:?}");
+                assert_eq!(
+                    collect(
+                        &mut reader,
+                        &cx,
+                        "MATCH (a)<-[r:R]-(b)<-[s:R]-(c) RETURN r,a,s,b,c LIMIT 1",
+                    )
+                    .await,
+                    vec![GraphValueRow::from_owned_values(vec![
+                        GraphValue::Edge(EId(101)),
+                        GraphValue::Vertex(VId(2)),
+                        GraphValue::Edge(EId(104)),
+                        GraphValue::Vertex(VId(1)),
+                        GraphValue::Vertex(VId(3)),
+                    ])],
+                );
+                drop(reader);
+                assert_eq!(pool.used(), 0);
+            }
+            // A child's typed relation is independent of the root restriction.
+            // The S edge 201 belongs to the existing fixture, after R edge 104.
+            let mut scope = grant(100);
+            scope.relations = Scope::only([R, S]);
+            let mixed = authority.issue_at(&scope, 100).unwrap();
+            let pool = memory();
+            let publication = Database::open_buffered_publication_with_vfs(
+                &commit,
+                vfs.clone(),
+                vfs.memory.database_dir(),
+                keys(),
+                pool.clone(),
+                limits(),
+            )
+            .await
+            .unwrap();
+            let mut reader = publication
+                .into_authorized_read_session(
+                    &commit,
+                    &cx,
+                    &authority,
+                    &mixed,
+                    "main",
+                    old,
+                    GqlQueryPolicy::new(100, 10, 100_000, 100_000),
+                    || 100,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                collect(
+                    &mut reader,
+                    &cx,
+                    "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN r,a,s,b,c LIMIT 1",
+                )
+                .await,
+                vec![GraphValueRow::from_owned_values(vec![
+                    GraphValue::Edge(EId(104)),
+                    GraphValue::Vertex(VId(3)),
+                    GraphValue::Edge(EId(201)),
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Vertex(VId(2)),
+                ])],
+            );
+            drop(reader);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_fixed_join_visible_node_boundary_and_output_owner_ignore_hidden_children() {
+    let ((), report) = run_async_under_lab(0xa6_0116, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let cx = c.query();
+        let authority = issuer();
+        let args = GqlParameters::new();
+        for hidden in [false, true] {
+            let (vfs, _db, at, _) = fixed_join_fixture(&commit, hidden).await;
+            for nodes in [3, 4] {
+                let token = authority.issue_at(&grant(nodes), 100).unwrap();
+                let pool = memory();
+                let mut reader =
+                    session(&commit, &cx, &vfs, &pool, &authority, &token, at, || 100).await;
+                // Exactly two visible records and four endpoint admissions.
+                let prepared = reader
+                    .prepare(
+                        &cx,
+                        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r,a,s,s.score LIMIT 1",
+                        &args,
+                    )
+                    .unwrap();
+                let mut cursor = reader.stream(&cx, &prepared, &args).unwrap();
+                let result = cursor.next().await.unwrap();
+                if nodes == 3 {
+                    assert!(matches!(
+                        result,
+                        Err(AuthorizedBufferedError::Query(QueryError::Authorization(
+                            Error::LimitExceeded(LimitDimension::Nodes)
+                        )))
+                    ));
+                    assert_eq!(cursor.state(), VertexScanState::Failed);
+                    assert!(cursor.next().await.is_none());
+                    drop(cursor);
+                    assert!(!reader.is_closed());
+                    drop(reader);
+                    assert_eq!(pool.used(), 0);
+                } else {
+                    let row = result.unwrap();
+                    assert_eq!(
+                        row.as_ref().values(),
+                        &[
+                            GraphValue::Edge(EId(101)),
+                            GraphValue::Vertex(VId(1)),
+                            GraphValue::Edge(EId(102)),
+                            GraphValue::Scalar(CanonicalScalar::Int(5)),
+                        ],
+                    );
+                    assert!(cursor.next().await.is_none());
+                    drop(cursor);
+                    assert!(!reader.is_closed());
+                    drop(reader);
+                    assert!(pool.used() > 0, "the delivered multi-hop copy retains its owner");
+                    drop(row);
+                    assert_eq!(pool.used(), 0);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_fixed_join_pending_drop_releases_source_owners() {
+    let ((), report) = run_async_under_lab(0xa6_0117, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let cx = c.query();
+        let (vfs, _db, at, _) = fixed_join_fixture(&commit, false).await;
+        let authority = issuer();
+        let token = authority.issue_at(&grant(4), 100).unwrap();
+        let pool = memory();
+        let mut reader =
+            session(&commit, &cx, &vfs, &pool, &authority, &token, at, || 100).await;
+        let args = GqlParameters::new();
+        let prepared = reader
+            .prepare(
+                &cx,
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r,a,s LIMIT 1",
+                &args,
+            )
+            .unwrap();
+        let baseline = pool.used();
+        vfs.reset();
+        let mut cursor = reader.stream(&cx, &prepared, &args).unwrap();
+        drop(cursor.next());
+        cursor.close();
+        drop(cursor);
+        assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.used(), baseline);
+        assert!(!reader.is_closed());
+
+        let mut cursor = reader.stream(&cx, &prepared, &args).unwrap();
+        vfs.pause.store(true, Ordering::SeqCst);
+        let mut pending = Box::pin(cursor.next());
+        poll_fn(|task| {
+            assert!(pending.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(vfs.reads.load(Ordering::SeqCst) > 0);
+        drop(pending);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+        assert!(reader.is_closed());
+        assert_eq!(pool.used(), 0);
+        vfs.pause.store(false, Ordering::SeqCst);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

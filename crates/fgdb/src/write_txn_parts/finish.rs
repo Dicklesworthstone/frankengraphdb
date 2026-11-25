@@ -12,6 +12,15 @@ enum ConflictScope {
     ReadsAndWrites,
 }
 
+/// Signed work follows the caller's logical footprint. Intervening history
+/// belongs to the host: its hidden rows must not spend a scoped allowance or
+/// determine how often the holder's clock is sampled (FG-INV-20).
+enum CompletionCheckpoint {
+    Logical,
+    PrivateValidation,
+    ValidationComplete,
+}
+
 // Completion owns cleanup across returns, Rust unwinding and dropped futures.
 // It never performs durable work in Drop or turns an unknown marker into abort.
 struct TxnCompletionGuard<'txn, 'db, V: Vfs + Clone> {
@@ -284,8 +293,36 @@ impl WriteTxn {
         cx: &CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
         require_write: bool,
-        mut rebase: Option<RebasePreparation>,
+        rebase: Option<RebasePreparation>,
         mut checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
+        self.complete_with_validation_controlled(
+            database,
+            cx,
+            crash_at,
+            require_write,
+            rebase,
+            |phase| match phase {
+                CompletionCheckpoint::Logical | CompletionCheckpoint::PrivateValidation => {
+                    checkpoint()
+                }
+                CompletionCheckpoint::ValidationComplete => Ok(()),
+            },
+        )
+        .await
+    }
+
+    // Keep the ordinary control contract above unchanged. Scoped owners alone
+    // separate private history polling from logical work and revalidate their
+    // live authority at the fixed boundary before any validation result escapes.
+    async fn complete_with_validation_controlled<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+        crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
+        require_write: bool,
+        mut rebase: Option<RebasePreparation>,
+        mut checkpoint: impl FnMut(CompletionCheckpoint) -> Result<(), WriteTxnError>,
     ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
         self.ensure_database(database)?;
         let mut attempt = TxnCompletionGuard::new(self, database);
@@ -295,7 +332,7 @@ impl WriteTxn {
         if require_write && attempt.transaction.prepared.is_none() {
             return Err(WriteTxnError::NoPreparedWrite);
         }
-        checkpoint()?;
+        checkpoint(CompletionCheckpoint::Logical)?;
         let strict_conflict = if matches!(rebase, None | Some(RebasePreparation::Automatic)) {
             let conflict = attempt
                 .transaction
@@ -330,6 +367,7 @@ impl WriteTxn {
         } else {
             None
         };
+        let mut checkpoint = || checkpoint(CompletionCheckpoint::Logical);
         if strict_conflict.is_none() {
             // Semantic replay still consumes its existing synchronous history
             // contract. Strict validation does not install an omitted prefix.
@@ -726,9 +764,10 @@ impl WriteTxn {
         &mut self,
         database: &mut Database<V>,
         cx: &CommitCx,
-        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+        checkpoint: &mut impl FnMut(CompletionCheckpoint) -> Result<(), WriteTxnError>,
     ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, WriteTxnError> {
-        let mutation_footprint = self.mutation_footprint(checkpoint)?;
+        let mutation_footprint =
+            self.mutation_footprint(&mut || checkpoint(CompletionCheckpoint::Logical))?;
         let observed = self.has_conflict_observations(&mutation_footprint);
         let basis = self.basis;
         let mut first_conflict = None;
@@ -737,29 +776,34 @@ impl WriteTxn {
         // RefCell borrows are confined to the synchronous batch helper; none
         // survives source I/O or makes the completion future require Sync.
         let transaction = &mut *self;
-        database
+        let validation_checkpoint = &mut *checkpoint;
+        let result = database
             .visit_delta_history(cx, basis, move |database, batch| {
-                checkpoint()?;
+                let mut poll = || validation_checkpoint(CompletionCheckpoint::PrivateValidation);
+                poll()?;
                 if observed && conflict.is_none() {
                     *conflict = transaction.transaction_conflict_in_batch(
                         database,
                         batch,
                         &mutation_footprint,
-                        checkpoint,
+                        &mut poll,
                     )?;
                 }
                 Ok(())
             })
-            .await
-            .map_err(|error| match error {
-                crate::delta_replay::DeltaHistoryError::Source(
-                    crate::DeltaReplayError::Interrupted(error),
-                ) => WriteTxnError::Interrupted(error),
-                crate::delta_replay::DeltaHistoryError::Source(error) => {
-                    WriteTxnError::Write(WriteError::from(error))
-                }
-                crate::delta_replay::DeltaHistoryError::Observer(error) => error,
-            })?;
+            .await;
+        // Private traversal may suspend for I/O. Recheck before disclosing a
+        // conflict or source failure as well as before accepting a clean suffix.
+        checkpoint(CompletionCheckpoint::ValidationComplete)?;
+        result.map_err(|error| match error {
+            crate::delta_replay::DeltaHistoryError::Source(
+                crate::DeltaReplayError::Interrupted(error),
+            ) => WriteTxnError::Interrupted(error),
+            crate::delta_replay::DeltaHistoryError::Source(error) => {
+                WriteTxnError::Write(WriteError::from(error))
+            }
+            crate::delta_replay::DeltaHistoryError::Observer(error) => error,
+        })?;
         Ok(first_conflict)
     }
 

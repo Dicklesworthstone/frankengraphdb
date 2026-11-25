@@ -1353,10 +1353,25 @@ fn buffered_ordered_credit_cancel_and_refusal_release_cold_and_scratch_owners() 
             .await
             .unwrap();
         resident.select(cx, "social").await.unwrap();
+        // Fixed-hop cold joins now use the native incidence source. Preserve
+        // the former refusal scenario as a successful empty-page regression.
+        let joined = "MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) RETURN a,r,b,s,c LIMIT 0";
+        let joined_resident = reader
+            .execute(cx, ExecuteMode::Read, joined, vec![])
+            .await
+            .unwrap();
+        let joined_buffered = reader
+            .execute(cx, ExecuteMode::ReadOrdered, joined, vec![])
+            .await
+            .unwrap();
+        assert_eq!(joined_buffered, joined_resident);
+        assert_eq!(joined_buffered.outcome, Outcome::Rows { seq: 2 });
+        assert!(joined_buffered.rows.is_empty());
+        super::ordered_stream::empty_scratch(&directory).await;
+
         for unsupported in [
             "MATCH (n:Person) RETURN n,properties(n) AS fields LIMIT 0",
             carried,
-            "MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) RETURN a,r,b,s,c LIMIT 0",
         ] {
             let allowed = if unsupported == carried {
                 &mut resident
@@ -1637,5 +1652,183 @@ fn buffered_server_configuration_rejects_process_local_symbol_overlays() {
             server.open_database(cx, &path, config).await,
             Err(fgdb_server::ServerError::BufferedSymbols)
         ));
+    });
+}
+
+#[test]
+fn buffered_fixed_hop_joins_keep_scoped_rows_aggregates_and_prepared_history() {
+    run(async |cx| {
+        let (addr, shutdown, mut task, directory) =
+            start_buffered_configured(cx, "buffered-fixed-hop-joins", true).await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed_endpoint_edges(cx, &mut owner).await;
+        let scope = reader_grant();
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let mut oracle = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        oracle.select(cx, "social").await.unwrap();
+
+        for pattern in [
+            "(a)-[r:KNOWS]->(b)-[s:KNOWS]->(c)",
+            "(a)<-[r:KNOWS]-(b)<-[s:KNOWS]-(c)",
+            "(a)-[r:KNOWS]-(b)-[s:KNOWS]-(c)",
+            "(a)-[r:KNOWS|WORKS_AT]->(b)-[s]->(c)",
+        ] {
+            let statement = format!(
+                "MATCH {pattern} RETURN r,a,s,r.age AS first,s.age AS second,\
+                 a.age AS start,b.age AS middle,c.age AS finish,c.name AS hidden ORDER BY r,a,s"
+            );
+            let resident = oracle
+                .execute(cx, ExecuteMode::Read, &statement, vec![])
+                .await
+                .unwrap();
+            assert!(!resident.rows.is_empty(), "{pattern}");
+            assert!(
+                resident.rows.iter().all(|row| row.last() == Some(&WireValue::Null)),
+                "masked metadata cannot cross either hop"
+            );
+            for mode in [ExecuteMode::ReadStream, ExecuteMode::ReadOrdered] {
+                let result = reader.execute(cx, mode, &statement, vec![]).await.unwrap();
+                assert_eq!(result, resident, "{mode:?}: {pattern}");
+                assert_eq!(result.outcome, Outcome::Rows { seq: 2 });
+                super::ordered_stream::empty_scratch(&directory).await;
+            }
+        }
+
+        // Nine distinct-edge two-hop occurrences: the two parallel a->b
+        // edges remain distinct, and the self-loop cannot reuse itself.
+        let summary = "MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) \
+            RETURN count(*) AS paths,sum(s.age) AS weights,count(c.name) AS hidden";
+        let aggregate = reader
+            .execute(cx, ExecuteMode::ReadOrdered, summary, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            aggregate.rows,
+            [vec![
+                WireValue::Count(9),
+                WireValue::WideInt(26),
+                WireValue::Count(0),
+            ]]
+        );
+        assert_eq!(
+            aggregate,
+            oracle.execute(cx, ExecuteMode::Read, summary, vec![]).await.unwrap()
+        );
+
+        let historical = "MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) \
+            FOR SYSTEM_TIME AS OF SEQ $cut WHERE r.age = $first \
+            RETURN r,a,s,r.age AS first,s.age AS second,a.age AS start,\
+            c.age AS finish,c.name AS hidden ORDER BY r,a,s LIMIT $take";
+        let arguments = |cut| {
+            vec![
+                ("cut".into(), WireValue::Count(cut)),
+                ("first".into(), WireValue::Int(1)),
+                ("take".into(), WireValue::Count(1)),
+            ]
+        };
+        let handle = reader
+            .prepare_read(cx, historical, arguments(2))
+            .await
+            .unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) WHERE n.age IS NOT NULL SET n.age = n.age + 100",
+                vec![],
+            )
+            .await
+            .unwrap();
+        for (cut, shift) in [(2, 0), (3, 100), (2, 0)] {
+            let expected = oracle
+                .execute(cx, ExecuteMode::Read, historical, arguments(cut))
+                .await
+                .unwrap();
+            assert_eq!(expected.rows.len(), 1);
+            assert_eq!(
+                &expected.rows[0][3..],
+                &[
+                    WireValue::Int(1),
+                    WireValue::Int(3),
+                    WireValue::Int(4 + shift),
+                    WireValue::Int(4 + shift),
+                    WireValue::Null,
+                ]
+            );
+            for mode in [
+                PreparedReadMode::SourceStream,
+                PreparedReadMode::OrderedStream,
+            ] {
+                let mut rows = Vec::new();
+                let outcome = reader
+                    .execute_prepared_streaming(
+                        cx,
+                        mode,
+                        handle,
+                        arguments(cut),
+                        |columns| {
+                            assert_eq!(columns, expected.columns);
+                            Ok(())
+                        },
+                        |row| {
+                            rows.push(row);
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(rows, expected.rows, "{mode:?}, cut {cut}");
+                assert_eq!(outcome, Outcome::Rows { seq: cut });
+                super::ordered_stream::empty_scratch(&directory).await;
+            }
+        }
+        reader.release_prepared(cx, handle).await.unwrap();
+
+        // Two endpoints admit the root edge, but cannot admit its child.
+        // A failed nested read must return the only cold-source slot.
+        let mut limited_scope = scope;
+        limited_scope.limits.max_nodes = 2;
+        let mut limited = Client::connect(cx, addr, token(&limited_scope))
+            .await
+            .unwrap();
+        limited.select(cx, "social").await.unwrap();
+        let statement = "MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) \
+            RETURN r,a,s ORDER BY r,a,s LIMIT 1";
+        for mode in [ExecuteMode::ReadStream, ExecuteMode::ReadOrdered] {
+            let mut delivered = 0;
+            let error = limited
+                .execute_streaming(
+                    cx,
+                    mode,
+                    statement,
+                    vec![],
+                    |_| Ok(()),
+                    |_| {
+                        delivered += 1;
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(server_code(error), ErrorCode::Budget);
+            assert_eq!(delivered, 0);
+            limited.ping(cx, 815).await.unwrap();
+            super::ordered_stream::empty_scratch(&directory).await;
+            assert_eq!(
+                reader.execute(cx, mode, statement, vec![]).await.unwrap().rows.len(),
+                1
+            );
+        }
+        limited.close(cx).await.unwrap();
+        reader.close(cx).await.unwrap();
+        oracle.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+        super::ordered_stream::empty_scratch(&directory).await;
     });
 }
