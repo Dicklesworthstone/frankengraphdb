@@ -567,10 +567,7 @@ fn full_width_numeric_identity_roots_agree_across_resident_and_external_queries(
                     .unwrap()
                 })
                 .collect();
-            for (prefix, predicate) in [
-                ("", "id(n)=wanted"),
-                ("WITH wanted ", "wanted=id(n)"),
-            ] {
+            for (prefix, predicate) in [("", "id(n)=wanted"), ("WITH wanted ", "wanted=id(n)")] {
                 let text = format!(
                     "UNWIND $ids AS wanted {prefix}MATCH (n) WHERE {predicate} \
                      FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value ORDER BY n"

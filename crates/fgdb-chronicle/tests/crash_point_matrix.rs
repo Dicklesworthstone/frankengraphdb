@@ -1564,13 +1564,11 @@ fn impossible_head_count_never_turns_an_acknowledged_marker_into_a_torn_tail() {
         // 2048 heads cannot fit either. Each count changes just one bit.
         for damaged_count in [1_u32 << 7, 1_u32 << 11] {
             let mut damaged = pristine.clone();
-            damaged[head_count_at..head_count_at + 4]
-                .copy_from_slice(&damaged_count.to_be_bytes());
+            damaged[head_count_at..head_count_at + 4].copy_from_slice(&damaged_count.to_be_bytes());
             damaged[first_len + 4..body_start].copy_from_slice(&damaged_len.to_be_bytes());
             write_log(&dir, &damaged);
 
-            let history =
-                CommitCoordinator::scan_committed_chain(cx, &UnixVfs::new(), &dir).await;
+            let history = CommitCoordinator::scan_committed_chain(cx, &UnixVfs::new(), &dir).await;
             assert!(
                 matches!(history, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
                 "{damaged_count} heads cannot fit this frame; the scan must refuse: {history:?}"
@@ -1586,14 +1584,25 @@ fn impossible_head_count_never_turns_an_acknowledged_marker_into_a_torn_tail() {
                 matches!(summary, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
                 "an earlier requested cut cannot hide the corrupt suffix: {summary:?}"
             );
-            assert_eq!(log_bytes(&dir), damaged, "read-only scans preserve all bytes");
+            assert_eq!(
+                log_bytes(&dir),
+                damaged,
+                "read-only scans preserve all bytes"
+            );
 
             let recovered = CommitCoordinator::open(cx, &dir, keys()).await;
             assert!(
-                matches!(recovered, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                matches!(
+                    recovered,
+                    Err(CommitError::CorruptLogEntry { commit_seq: 2 })
+                ),
                 "writable recovery must not truncate the acknowledged marker: {recovered:?}"
             );
-            assert_eq!(log_bytes(&dir), damaged, "refusal preserves the complete log");
+            assert_eq!(
+                log_bytes(&dir),
+                damaged,
+                "refusal preserves the complete log"
+            );
         }
 
         write_log(&dir, &pristine);
@@ -1674,11 +1683,18 @@ fn illegal_marker_tags_under_a_bounded_length_increase_never_truncate_committed_
                     "{name}, successor={with_successor}: even an earlier requested cut \
                      must not hide the damaged suffix; got {summary:?}"
                 );
-                assert_eq!(log_bytes(&dir), damaged, "read-only scans preserve evidence");
+                assert_eq!(
+                    log_bytes(&dir),
+                    damaged,
+                    "read-only scans preserve evidence"
+                );
 
                 let recovered = CommitCoordinator::open(cx, &dir, keys()).await;
                 assert!(
-                    matches!(recovered, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                    matches!(
+                        recovered,
+                        Err(CommitError::CorruptLogEntry { commit_seq: 2 })
+                    ),
                     "{name}, successor={with_successor}: recovery must not treat an \
                      acknowledged marker as torn staging; got {recovered:?}"
                 );

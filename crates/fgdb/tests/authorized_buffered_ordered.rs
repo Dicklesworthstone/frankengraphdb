@@ -2518,16 +2518,15 @@ fn cold_optional_and_probe_scopes_preserve_masks_history_and_exact_allowances() 
                          RETURN r,a.score AS first,s,c.score AS prior,s.score AS weight, \
                          c.secret AS hidden_vertex,s.secret AS hidden_edge ORDER BY r,s";
                     let prepared = ordered.prepare(&cx, text, &args).unwrap();
-                    let result = ordered
-                        .execute_ordered(&cx, &prepared, &args)
-                        .unwrap()
-                        .await;
+                    let execution = ordered.execute_ordered(&cx, &prepared, &args).unwrap();
                     if nodes == 9 {
-                        assert!(matches!(result, Err(NativeSpoolError::Authorized(error))
+                        assert!(
+                            matches!(execution.await, Err(NativeSpoolError::Authorized(error))
                             if matches!(*error, QueryError::Authorization(
-                                Error::LimitExceeded(LimitDimension::Nodes)))));
+                                Error::LimitExceeded(LimitDimension::Nodes))))
+                        );
                     } else {
-                        let mut cursor = result.unwrap();
+                        let mut cursor = execution.await.unwrap();
                         assert_eq!(cursor.snapshot_seq(), at);
                         assert_eq!(
                             values(&mut cursor).await,

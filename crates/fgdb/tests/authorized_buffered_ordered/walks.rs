@@ -301,15 +301,12 @@ fn cold_walk_limit_zero_keeps_exact_source_allowances_and_retryable_ownership() 
                 assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
                 assert_eq!(observations(&files), before);
                 assert_eq!(pool.used(), bytes);
-                let result = ordered
-                    .execute_ordered(&cx, &prepared, &args)
-                    .unwrap()
-                    .await;
+                let execution = ordered.execute_ordered(&cx, &prepared, &args).unwrap();
                 if pass {
-                    let mut cursor = result.unwrap();
+                    let mut cursor = execution.await.unwrap();
                     assert!(values(&mut cursor).await.is_empty());
                 } else {
-                    let error = match result {
+                    let error = match execution.await {
                         Ok(_) => panic!("a one-short route allowance must refuse"),
                         Err(error) => error,
                     };

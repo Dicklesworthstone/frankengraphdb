@@ -1882,8 +1882,7 @@ mod tests {
         // digest. Searching raw trailer bytes would misclassify the prefix
         // ending here as corruption instead of an ordinary interrupted append.
         let fake_body_len = digest_offset - super::CHAIN_HASH_BYTES;
-        marker.final_effect_digest.0[..4]
-            .copy_from_slice(&(fake_body_len as u32).to_be_bytes());
+        marker.final_effect_digest.0[..4].copy_from_slice(&(fake_body_len as u32).to_be_bytes());
         marker.final_effect_digest.0[4..8].copy_from_slice(&super::ENTRY_TRAILER_MAGIC);
         let hash = marker
             .chain_hash(crate::marker::CHAIN_ORIGIN)

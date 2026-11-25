@@ -1160,7 +1160,12 @@ mod tests {
             }
             let current_graph = db.beacon_index_snapshot(&query, &graph).unwrap();
             assert_eq!(
-                current_graph.graph_source.as_ref().unwrap().snapshot.frontier,
+                current_graph
+                    .graph_source
+                    .as_ref()
+                    .unwrap()
+                    .snapshot
+                    .frontier,
                 advanced
             );
             assert_eq!(old_graph.source_sequence(), first);
@@ -1222,7 +1227,9 @@ mod tests {
                         expected
                     );
                     assert_eq!(
-                        lagging.search(&query, search, ReadPolicy::default()).unwrap(),
+                        lagging
+                            .search(&query, search, ReadPolicy::default())
+                            .unwrap(),
                         expected
                     );
                 }

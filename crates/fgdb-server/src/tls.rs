@@ -419,9 +419,7 @@ mod tests {
     use asupersync::runtime::RuntimeBuilder;
     use asupersync::time::{TimerDriverHandle, VirtualClock};
     use asupersync::types::{CancelKind, Time};
-    use fgdb_protocol::body::{
-        Auth, AuthOk, Body, Credential, Hello, Ping, Ready, SelectDatabase,
-    };
+    use fgdb_protocol::body::{Auth, AuthOk, Body, Credential, Hello, Ping, Ready, SelectDatabase};
     use fgdb_protocol::{Binding, Decoder, Frame, FrameKind, FrameLimits, StreamId};
     use std::collections::VecDeque;
     use std::io::{Read as _, Write as _};
@@ -523,12 +521,7 @@ mod tests {
         }
     }
 
-    fn fgp_message(
-        kind: FrameKind,
-        request: u64,
-        binding: Binding,
-        body: impl Body,
-    ) -> Vec<u8> {
+    fn fgp_message(kind: FrameKind, request: u64, binding: Binding, body: impl Body) -> Vec<u8> {
         let limits = FrameLimits::new(4096).unwrap();
         Frame::new(
             kind,
@@ -595,8 +588,7 @@ mod tests {
         for protocol in [Protocol::Fgp, Protocol::Bolt] {
             for fragmented in [false, true] {
                 with_setup_clock(|cx, clock, timer| {
-                    let server =
-                        crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
+                    let server = crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
                     let wire = Arc::new(SetupWire::default());
                     let request = setup_request(protocol);
                     if fragmented {
@@ -615,7 +607,7 @@ mod tests {
                     assert!(connection.as_mut().poll(&mut task).is_pending());
                     let before = wakes.0.load(Ordering::Relaxed);
                     clock.advance_to(Time::from_secs(30));
-                    timer.process_timers();
+                    assert_eq!(timer.process_timers(), 1);
                     assert!(wakes.0.load(Ordering::Relaxed) > before);
                     assert!(connection.as_mut().poll(&mut task).is_ready());
                     drop(connection);
@@ -632,8 +624,7 @@ mod tests {
         for protocol in [Protocol::Fgp, Protocol::Bolt] {
             for flush in [false, true] {
                 with_setup_clock(|cx, clock, timer| {
-                    let server =
-                        crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
+                    let server = crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
                     let wire = Arc::new(SetupWire::default());
                     wire.block_write.store(!flush, Ordering::Release);
                     wire.block_flush.store(flush, Ordering::Release);
@@ -643,7 +634,7 @@ mod tests {
                     assert!(connection.as_mut().poll(&mut task).is_pending());
                     assert_eq!(wire.outbound.lock().unwrap().is_empty(), !flush);
                     clock.advance_to(Time::from_secs(30));
-                    timer.process_timers();
+                    assert_eq!(timer.process_timers(), 1);
                     assert!(connection.as_mut().poll(&mut task).is_ready());
                     drop(connection);
                     assert!(wire.dropped.load(Ordering::Acquire));
@@ -658,8 +649,7 @@ mod tests {
         for protocol in [Protocol::Fgp, Protocol::Bolt] {
             for cancel in [false, true] {
                 with_setup_clock(|cx, _, timer| {
-                    let server =
-                        crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
+                    let server = crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
                     let wire = Arc::new(SetupWire::default());
                     let mut connection = setup_connection(protocol, cx, &server, &wire);
                     let wakes = Arc::new(crate::recovery::tests::WakeCounter::default());
@@ -742,8 +732,7 @@ mod tests {
                             ));
                             assert!(connection.as_mut().poll(&mut task).is_pending());
                             let authenticated = fgp_response(&wire, FrameKind::AuthOk);
-                            let session =
-                                AuthOk::decode(authenticated.payload()).unwrap().session;
+                            let session = AuthOk::decode(authenticated.payload()).unwrap().session;
                             // Authentication alone cannot retire FGP setup:
                             // this connection still has no selected database.
                             assert_eq!(timer.pending_count(), 1);
@@ -771,9 +760,7 @@ mod tests {
                                     ("scheme".into(), Value::string("bearer")),
                                     (
                                         "credentials".into(),
-                                        Value::string(fgdb_protocol::json::hex(
-                                            &token.encode(),
-                                        )),
+                                        Value::string(fgdb_protocol::json::hex(&token.encode())),
                                     ),
                                 ])],
                             ));
@@ -785,7 +772,7 @@ mod tests {
                     };
                     assert_eq!(timer.pending_count(), usize::from(block_final_flush));
                     clock.advance_to(Time::from_secs(3_600));
-                    timer.process_timers();
+                    assert_eq!(timer.process_timers(), usize::from(block_final_flush));
                     if block_final_flush {
                         assert!(connection.as_mut().poll(&mut task).is_ready());
                     } else {

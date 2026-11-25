@@ -189,11 +189,13 @@ impl SchemaState {
         let [coordinate] = batch.coordinate_entries() else {
             return false;
         };
-        let [DeltaRow::Schema {
-            transition_oid,
-            before_epoch,
-            after_epoch,
-        }] = coordinate.rows.as_slice()
+        let [
+            DeltaRow::Schema {
+                transition_oid,
+                before_epoch,
+                after_epoch,
+            },
+        ] = coordinate.rows.as_slice()
         else {
             return false;
         };
@@ -912,8 +914,7 @@ mod tests {
                     }
                     2 => coordinate.schema_epoch.0 += 1,
                     3 => {
-                        let DeltaRow::Schema { after_epoch, .. } = &mut coordinate.rows[0]
-                        else {
+                        let DeltaRow::Schema { after_epoch, .. } = &mut coordinate.rows[0] else {
                             unreachable!("the committed catalog tick has one Schema row");
                         };
                         after_epoch.0 += 1;

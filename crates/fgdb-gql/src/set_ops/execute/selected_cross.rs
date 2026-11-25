@@ -41,8 +41,7 @@ pub(crate) fn scalar_to_identity(value: &GraphValue, text: bool) -> Option<u128>
             // The predicate retains overflowing id() operands as u128 and
             // compares them exactly with Float. Source seeds and join keys
             // must retain the same domain, including identities above i64.
-            const U128_EXCLUSIVE_MAX: f64 =
-                340_282_366_920_938_463_463_374_607_431_768_211_456.0;
+            const U128_EXCLUSIVE_MAX: f64 = 340_282_366_920_938_463_463_374_607_431_768_211_456.0;
             if !raw.is_finite() || raw < 0.0 || raw >= U128_EXCLUSIVE_MAX {
                 return None;
             }
@@ -257,7 +256,9 @@ pub(crate) fn required_id_keys<E>(
 
 fn right_element_identity(value: &GraphValue) -> Option<u128> {
     match value {
-        GraphValue::Vertex(fgdb_types::VId(id)) | GraphValue::Edge(fgdb_types::EId(id)) => Some(*id),
+        GraphValue::Vertex(fgdb_types::VId(id)) | GraphValue::Edge(fgdb_types::EId(id)) => {
+            Some(*id)
+        }
         _ => None,
     }
 }
@@ -297,8 +298,8 @@ fn compare_id_keys<E>(
             scalar_to_identity(&left.values()[a], text)
         }
         .expect("id_eligible checked left key");
-        let rhs = right_element_identity(&right.values()[b])
-            .expect("id_eligible checked right key");
+        let rhs =
+            right_element_identity(&right.values()[b]).expect("id_eligible checked right key");
         let order = lhs.cmp(&rhs);
         if order != Ordering::Equal {
             return Ok(order);
