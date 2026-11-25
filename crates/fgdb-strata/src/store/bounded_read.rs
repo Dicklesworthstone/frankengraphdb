@@ -564,14 +564,14 @@ impl<V: Vfs> BlockStore<V> {
         {
             for (at, reference) in named.iter().enumerate() {
                 let limit = remaining.min(crate::root_segment::MAX_SEGMENT_BYTES as u64);
-                let (segment, references) = self
+                let (size, (references, admitted)) = self
                     .read_object_proven(
                         cx,
                         super::StoredObjectKind::Segment,
                         reference.segment_id,
                         limit,
                         |bytes| async move {
-                            let references = crate::root_segment::read_segment(
+                            let membership = crate::root_segment::read_bound_segment(
                                 self.k_oid.expose(),
                                 self.namespace,
                                 &bytes,
@@ -583,17 +583,22 @@ impl<V: Vfs> BlockStore<V> {
                             .map_err(|error| {
                                 StoreError::MalformedRoot(crate::root::RootError::Segment(error))
                             })?;
-                            Ok((bytes, references))
+                            Ok((bytes.len(), membership))
                         },
                     )
                     .await?;
-                remaining = remaining.saturating_sub(segment.len() as u64);
+                remaining = remaining.saturating_sub(size as u64);
                 list.push(references);
                 if tails.is_some() {
-                    let (_, _, admitted) = crate::root_segment::decode_described_segment(&segment)
-                        .map_err(|error| {
-                            StoreError::MalformedRoot(crate::root::RootError::Segment(error))
-                        })?;
+                    // V6 requires V2 descriptors. A successfully decoded
+                    // segment without them is an authenticated V1 segment.
+                    let admitted = admitted.ok_or(StoreError::MalformedRoot(
+                        crate::root::RootError::Segment(
+                            crate::root_segment::SegmentError::UnsupportedFormat {
+                                format: crate::root_segment::SEGMENT_FORMAT_V1,
+                            },
+                        ),
+                    ))?;
                     descriptors.append(admitted);
                 }
             }

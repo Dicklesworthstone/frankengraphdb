@@ -2381,6 +2381,77 @@ fn a_keyed_root_cannot_bypass_cross_object_identity_history() {
 }
 
 #[test]
+fn cold_edge_and_vertex_history_reuse_the_same_admission_budget() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let at = CommitSeq(1);
+        let mut root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(2),
+            partition: 0,
+            published_at: at,
+            blocks: Vec::new(),
+            vertex_patches: Vec::new(),
+        };
+        for source in 0..4 {
+            let ids = source * 96..(source + 1) * 96;
+            let edges: Vec<_> = ids
+                .clone()
+                .map(|id| edge(id, source, id, 1, None))
+                .collect();
+            let vertices: Vec<_> = ids.map(|id| scan_vertex(id, 1, None, 7)).collect();
+            let block = store
+                .put(&commit, &encode_block(0, None, &edges).unwrap())
+                .await
+                .unwrap();
+            let patch = store
+                .put_patch(&commit, &encode_patch(&vertices).unwrap())
+                .await
+                .unwrap();
+            root.blocks.push(BlockRef {
+                block_id: block.0,
+                first_seq: at,
+                last_seq: at,
+            });
+            root.vertex_patches.push(PatchRef {
+                patch_id: patch.0,
+                first_seq: at,
+                last_seq: at,
+            });
+        }
+        let id = store.put_root(&commit, &root).await.unwrap();
+        let read = BufferedReadLimits {
+            max_source_bytes: 256 * 1024,
+            max_work: 16_384,
+            ..limits()
+        };
+        // One object workspace and either 384-entry validation history fit.
+        // Keeping the completed edge history throughout the vertex walk does
+        // not. A smaller pool still refuses before successful admission.
+        let pool = MemoryPool::new(1_400_000, 0).unwrap();
+        let view = store
+            .open_buffered_root(&query, id, pool.clone(), read)
+            .await
+            .unwrap();
+        assert_eq!(view.root(), &root);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        let small = MemoryPool::new(1_200_000, 0).unwrap();
+        assert!(matches!(
+            store
+                .open_buffered_root(&query, id, small.clone(), read)
+                .await,
+            Err(BufferedReadError::Memory(
+                MemoryError::ResourceExhausted { .. }
+            ))
+        ));
+        assert_eq!(small.used(), 0);
+    });
+}
+
+#[test]
 fn recomputed_v6_identity_cannot_turn_false_descriptors_into_admission() {
     run(|contexts, dir| async move {
         let commit = contexts.commit();

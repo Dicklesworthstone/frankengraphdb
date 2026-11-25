@@ -106,9 +106,8 @@ impl BufferedReadLimits {
     /// simultaneous encoded frames, V4 segment vectors, flattened references,
     /// descriptors, and bounded cache-policy bookkeeping. Payload and history
     /// use separate reservations. After root decoding, unused decode slack is
-    /// refunded while both staged descriptor sets remain charged. After
-    /// admission, only retained metadata capacities and the cache-policy
-    /// allowance remain charged to the view.
+    /// refunded. The same descriptor vectors are verified during admission
+    /// and kept by the view together with the cache-policy allowance.
     pub fn metadata_bytes(self) -> Result<usize, BufferedReadError> {
         let policy = self.metadata_policy_bytes()?;
         self.max_root_bytes
@@ -738,38 +737,20 @@ impl<V: Vfs + Clone> BlockStore<V> {
             );
         }
         let certified = trusted.is_some();
-        let untrusted = published;
-        let (mut blocks, mut patches) = trusted.map_or_else(
-            || {
-                (
-                    Vec::with_capacity(root.blocks.len()),
-                    Vec::with_capacity(root.vertex_patches.len()),
-                )
-            },
-            |descriptors| (descriptors.blocks.clone(), descriptors.patches.clone()),
-        );
-        // Root frames and segment-decode workspaces have dropped. Keep the
-        // actual reference capacities and BOTH descriptor sets charged, but
-        // release vanished decode slack before admitting payloads. In
-        // particular, an incoming vertex patch and its refaulted birth patch
-        // each still reserve their complete independent object workspace.
-        let (staged_blocks, staged_patches) = untrusted.as_ref().map_or((0, 0), |descriptors| {
-            (
-                descriptors.blocks.capacity(),
-                descriptors.patches.capacity(),
-            )
-        });
-        let admission_metadata = limits.retained_metadata_bytes(
-            &root,
-            blocks
-                .capacity()
-                .checked_add(staged_blocks)
-                .ok_or(BufferedReadError::SizeOverflow)?,
-            patches
-                .capacity()
-                .checked_add(staged_patches)
-                .ok_or(BufferedReadError::SizeOverflow)?,
-        )?;
+        let verify_published = published.is_some();
+        let (mut blocks, mut patches) = match (published, trusted) {
+            (Some(stored), _) => (stored.blocks, stored.patches),
+            (None, Some(admitted)) => (admitted.blocks.clone(), admitted.patches.clone()),
+            (None, None) => (
+                Vec::with_capacity(root.blocks.len()),
+                Vec::with_capacity(root.vertex_patches.len()),
+            ),
+        };
+        // Retain one charged descriptor per reference. A cold V6 open compares
+        // each entry with its payload. A legacy open fills the reserved slots.
+        // Incoming and refaulted objects keep their independent reservations.
+        let admission_metadata =
+            limits.retained_metadata_bytes(&root, blocks.capacity(), patches.capacity())?;
         let excess = metadata.bytes().checked_sub(admission_metadata).ok_or(
             MemoryError::ResourceExhausted {
                 requested: admission_metadata,
@@ -784,8 +765,11 @@ impl<V: Vfs + Clone> BlockStore<V> {
         );
         let mut work = 0;
         if !certified {
-            // Declaration order keeps the charges alive until the validators drop.
-            let mut history_charges = Vec::new();
+            let mut descriptors_match = !verify_published
+                || (blocks.len() == root.blocks.len()
+                    && patches.len() == root.vertex_patches.len());
+            // One growing charge outlives all edge-history allocations.
+            let mut edge_history_charge = pool.reserve(cx, 0)?;
             let mut walk = RootWalk::default();
             let mut vertex_history =
                 admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
@@ -839,16 +823,14 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     )
                     .await?;
                 let (entries, _, predecessor) = &read.resolved;
-                history_charges.push(
-                    pool.reserve(
-                        cx,
-                        entries
-                            .len()
-                            .checked_add(1)
-                            .and_then(|rows| rows.checked_mul(HISTORY_ENTRY_BYTES))
-                            .ok_or(BufferedReadError::SizeOverflow)?,
-                    )?,
-                );
+                edge_history_charge.grow(
+                    cx,
+                    entries
+                        .len()
+                        .checked_add(1)
+                        .and_then(|rows| rows.checked_mul(HISTORY_ENTRY_BYTES))
+                        .ok_or(BufferedReadError::SizeOverflow)?,
+                )?;
                 if let Some(first) = entries.first() {
                     let family = (first.src, first.relation);
                     let expected = walk.chain_heads.get(&family).copied();
@@ -867,7 +849,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 walk.history
                     .observe_block(at, entries)
                     .map_err(StoreError::MalformedRoot)?;
-                blocks.push(BlockDescriptor {
+                let actual = BlockDescriptor {
                     block: descriptor(reference.block_id, &read.bytes)?,
                     properties: read
                         .property_patch
@@ -876,8 +858,17 @@ impl<V: Vfs + Clone> BlockStore<V> {
                         .transpose()?,
                     summary: BlockSummary::from_entries(entries),
                     rows: entries.len(),
-                });
+                };
+                if verify_published {
+                    descriptors_match &= blocks.get(at) == Some(&actual);
+                } else {
+                    blocks.push(actual);
+                }
             }
+            // Vertex history reads only vertex patches. Release the completed
+            // edge validator, then its reservations, before this second walk.
+            drop(walk);
+            drop(edge_history_charge);
             for (at, reference) in root.vertex_patches.iter().enumerate() {
                 let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
                 let (rows, bytes) = self
@@ -886,20 +877,21 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 vertex_history
                     .observe_patch(cx, at, &rows, &mut observe)
                     .await?;
-                patches.push(PatchDescriptor {
+                let actual = PatchDescriptor {
                     extent: descriptor(reference.patch_id, &bytes)?,
                     first: rows.first().map(|row| (row.vid, row.created_at)),
                     last: rows.last().map(|row| row.vid),
                     rows: rows.len(),
-                });
+                };
+                if verify_published {
+                    descriptors_match &= patches.get(at) == Some(&actual);
+                } else {
+                    patches.push(actual);
+                }
             }
             drop(vertex_history);
-            drop(walk);
-            drop(history_charges);
-            if untrusted
-                .as_ref()
-                .is_some_and(|claimed| claimed.blocks != blocks || claimed.patches != patches)
-            {
+            // Preserve the priority of a later source, quota or history error.
+            if !descriptors_match {
                 return Err(
                     StoreError::MalformedRoot(crate::root::RootError::InvalidDescriptor).into(),
                 );
@@ -911,28 +903,6 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 advance(&mut work, 1, limits.max_work)?;
             }
         }
-        // Published descriptors are temporary admission evidence; their copies
-        // must die before releasing their allowance. The root-segment vectors,
-        // unused decode slack and cold history validators have already dropped.
-        drop(untrusted);
-        let retained =
-            limits.retained_metadata_bytes(&root, blocks.capacity(), patches.capacity())?;
-        let excess =
-            metadata
-                .bytes()
-                .checked_sub(retained)
-                .ok_or(MemoryError::ResourceExhausted {
-                    requested: retained,
-                    available: metadata.bytes(),
-                    limit: metadata.bytes(),
-                })?;
-        // Keep the original, early-declared owner so later failures drop the
-        // decoded vectors before their charge. Directories charge themselves.
-        drop(
-            metadata
-                .split_off(excess)
-                .ok_or(BufferedReadError::SizeOverflow)?,
-        );
         let patch_directory =
             patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut || {
                 cx.buffered_checkpoint()

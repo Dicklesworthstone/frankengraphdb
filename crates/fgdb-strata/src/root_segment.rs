@@ -403,9 +403,29 @@ fn bytes32_at(bytes: &[u8], at: usize) -> [u8; 32] {
 /// Decode a segment, re-checking its length, class and digest. Returns the
 /// segment and its verified logical digest.
 pub fn decode_segment(bytes: &[u8]) -> Result<(RootSegment, [u8; 32]), SegmentError> {
+    let (segment, digest, _) = decode_segment_with_descriptors(bytes)?;
+    Ok((segment, digest))
+}
+
+fn decode_segment_with_descriptors(
+    bytes: &[u8],
+) -> Result<
+    (
+        RootSegment,
+        [u8; 32],
+        Option<crate::root::descriptor::RootDescriptors>,
+    ),
+    SegmentError,
+> {
     if bytes.get(4..6) == Some(&SEGMENT_FORMAT_V2.to_be_bytes()) {
-        return decode_described_segment(bytes).map(|(segment, digest, _)| (segment, digest));
+        let (segment, digest, descriptors) = decode_described_segment(bytes)?;
+        return Ok((segment, digest, Some(descriptors)));
     }
+    let (segment, digest) = decode_plain_segment(bytes)?;
+    Ok((segment, digest, None))
+}
+
+fn decode_plain_segment(bytes: &[u8]) -> Result<(RootSegment, [u8; 32]), SegmentError> {
     let ((graph, branch, partition), class, declared) = decode_header(
         bytes,
         (SEGMENT_MAGIC, SEGMENT_FORMAT_V1),
@@ -507,7 +527,7 @@ pub(crate) fn decode_described_segment(
     let mut original = bytes[..SEGMENT_BYTES].to_vec();
     original[4..6].copy_from_slice(&SEGMENT_FORMAT_V1.to_be_bytes());
     original[OFF_DIGEST..OFF_DIGEST + 32].copy_from_slice(&base);
-    let (segment, _) = decode_segment(&original)?;
+    let (segment, _) = decode_plain_segment(&original)?;
     let descriptors = crate::root::descriptor::decode(class, &segment.entries, payload)
         .map_err(|_| SegmentError::InvalidDescriptor)?;
     Ok((segment, recomputed, descriptors))
@@ -553,6 +573,26 @@ pub fn read_segment(
     coordinate: (GraphId, BranchId, u64),
     class: SegmentClass,
 ) -> Result<Vec<SegmentEntry>, SegmentError> {
+    read_bound_segment(k_oid, namespace, bytes, named, at, coordinate, class)
+        .map(|(entries, _)| entries)
+}
+
+/// Retains the descriptors validated alongside the membership of a V2 segment.
+pub(crate) fn read_bound_segment(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    named: &SegmentRef,
+    at: usize,
+    coordinate: (GraphId, BranchId, u64),
+    class: SegmentClass,
+) -> Result<
+    (
+        Vec<SegmentEntry>,
+        Option<crate::root::descriptor::RootDescriptors>,
+    ),
+    SegmentError,
+> {
     let actual = segment_id(k_oid, namespace, bytes);
     if actual != named.segment_id {
         return Err(SegmentError::IdentityMismatch {
@@ -560,7 +600,7 @@ pub fn read_segment(
             actual,
         });
     }
-    let (segment, digest) = decode_segment(bytes)?;
+    let (segment, digest, descriptors) = decode_segment_with_descriptors(bytes)?;
     if (segment.graph, segment.branch, segment.partition) != coordinate {
         return Err(SegmentError::Binding {
             at,
@@ -576,7 +616,7 @@ pub fn read_segment(
     if segment_span(&segment.entries) != (named.first_seq, named.last_seq) {
         return Err(SegmentError::Binding { at, what: "span" });
     }
-    Ok(segment.entries)
+    Ok((segment.entries, descriptors))
 }
 
 /// An index segment's canonical logical digest: UNKEYED, domain-separated,
