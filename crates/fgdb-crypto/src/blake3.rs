@@ -117,9 +117,16 @@ fn compress(
         block_len,
         flags,
     ];
-    for schedule in &MSG_SCHEDULE {
-        round(&mut state, block_words, schedule);
-    }
+    // A fixed schedule at each call lets the scalar round load its sixteen
+    // message words directly, without dynamic indices in the compression loop.
+    let [r0, r1, r2, r3, r4, r5, r6] = &MSG_SCHEDULE;
+    round(&mut state, block_words, r0);
+    round(&mut state, block_words, r1);
+    round(&mut state, block_words, r2);
+    round(&mut state, block_words, r3);
+    round(&mut state, block_words, r4);
+    round(&mut state, block_words, r5);
+    round(&mut state, block_words, r6);
     for i in 0..8 {
         state[i] ^= state[i + 8];
         state[i + 8] ^= chaining_value[i];
