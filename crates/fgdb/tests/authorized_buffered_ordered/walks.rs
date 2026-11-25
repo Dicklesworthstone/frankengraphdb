@@ -159,7 +159,9 @@ fn cold_walk_fields_zero_hops_ordered_pages_and_aggregates_share_one_scope() {
         let token = authority.issue_at(&grant(1000, 100), 100).unwrap();
         let args = GqlParameters::new();
         let (vfs, _db, old, current) = fixture(&commit, true).await;
-        for (at, first, selected) in [(old, 3, 7), (current, 30, 17)] {
+        // The historical root predicate matches vertices 1 and 3. Only
+        // vertex 1 still matches after its score changes to 30.
+        for (at, first, selected, roots) in [(old, 3, 7, 2), (current, 30, 17, 1)] {
             let pool = memory();
             let (mut ordered, _) = session(
                 &commit,
@@ -179,10 +181,9 @@ fn cold_walk_fields_zero_hops_ordered_pages_and_aggregates_share_one_scope() {
                         "MATCH p = (a {{score:{first}}})-[:R*0..2 {{score:{selected}}}]->(b) \
                              RETURN a.score,b.score,length(p) AS hops ORDER BY hops"
                     ),
-                    vec![
-                        vec![scalar(first), scalar(first), scalar(0)],
-                        vec![scalar(first), scalar(1), scalar(1)],
-                    ],
+                    std::iter::repeat_n(vec![scalar(first), scalar(first), scalar(0)], roots)
+                        .chain([vec![scalar(first), scalar(1), scalar(1)]])
+                        .collect(),
                 ),
                 // Every real edge fails a denied property predicate. The
                 // empty route has no hop predicate to evaluate and survives.

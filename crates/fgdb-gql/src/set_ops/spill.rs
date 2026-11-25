@@ -473,6 +473,21 @@ impl AsyncSpillSetPlan {
     pub fn compile_pattern(
         pattern: PreparedGraphPattern<GraphValueRow>,
     ) -> Result<Self, SpillSetBuildError> {
+        Self::compile_standalone(pattern, false)
+    }
+
+    /// Preserve a standalone RETURN's order and page on a host that supplies
+    /// both same-cut vertex roots and independently positioned incidence reads.
+    pub fn compile_pattern_with_bounded_walks(
+        pattern: PreparedGraphPattern<GraphValueRow>,
+    ) -> Result<Self, SpillSetBuildError> {
+        Self::compile_standalone(pattern, true)
+    }
+
+    fn compile_standalone(
+        pattern: PreparedGraphPattern<GraphValueRow>,
+        bounded_walks: bool,
+    ) -> Result<Self, SpillSetBuildError> {
         let types: Vec<_> = pattern
             .value_columns()
             .iter()
@@ -488,7 +503,7 @@ impl AsyncSpillSetPlan {
             offset: 0,
             count: None,
         };
-        Self::compile_graph_source(pattern, vec![output], false)
+        Self::compile_graph_source(pattern, vec![output], bounded_walks)
     }
 
     /// Admit native variable-length graph leaves for a host with a vertex

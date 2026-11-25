@@ -18,14 +18,21 @@ pub(in super::super) struct BoundAggregateOrder {
 
 fn compile_graph_input(
     definition: &fgdb_gql::PreparedGraphAggregate,
+    allow_vertex_probes: bool,
 ) -> core::result::Result<
     AsyncSpillAggregatePlan,
     fgdb_gql::spill_aggregate::SpillAggregateBuildError,
 > {
-    // Complete relation inputs can contain walks in any branch. A direct
-    // variable-path aggregate also normalizes through the native complete
-    // relation, preserving occurrence order before COUNT or COLLECT.
-    if definition.input_relation().is_some() || has_walk(definition.input_pattern()) {
+    let input = definition.input_pattern();
+    let operators = input.plan().operators();
+    let vertex_probe = allow_vertex_probes
+        && matches!(operators.first(), Some(GlaOperator::ScanVertices))
+        && operators
+            .iter()
+            .any(|op| matches!(op, GlaOperator::Probe { .. }));
+    // The complete relation preserves source occurrences before reduction.
+    // The cold host supplies independent incidence reads for vertex probes.
+    if definition.input_relation().is_some() || has_walk(input) || vertex_probe {
         AsyncSpillAggregatePlan::compile_with_bounded_walks(definition).or_else(|_| {
             AsyncSpillAggregatePlan::compile_with_repeated_procedures_and_bounded_walks(definition)
         })
@@ -38,6 +45,7 @@ pub(in super::super) fn bind_aggregate_definition(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
     default: CommitSeq,
+    allow_vertex_probes: bool,
 ) -> core::result::Result<BoundAggregateOrder, QueryError> {
     let unsupported = || QueryError::StreamingUnsupported {
         facade: prepared.facade_class(),
@@ -48,7 +56,7 @@ pub(in super::super) fn bind_aggregate_definition(
                 .bind_parameters(params)
                 .map_err(QueryError::PatternText)?;
             (
-                compile_graph_input(&definition),
+                compile_graph_input(&definition, allow_vertex_probes),
                 template.columns(),
                 template.output_slots(),
                 default,
@@ -77,7 +85,7 @@ pub(in super::super) fn bind_aggregate_definition(
                 .map_err(QueryError::TemporalText)?;
             let plan = match selected.aggregate() {
                 fgdb_gql::TemporalAggregatePlan::Graph(definition) => {
-                    compile_graph_input(definition)
+                    compile_graph_input(definition, allow_vertex_probes)
                 }
                 fgdb_gql::TemporalAggregatePlan::Relation(definition) => {
                     AsyncSpillAggregatePlan::compile_relation_with_bounded_walks(definition).or_else(
@@ -130,7 +138,7 @@ fn bind_aggregate_order(
     params: &GqlParameters,
     default: CommitSeq,
 ) -> core::result::Result<BoundAggregateOrder, QueryError> {
-    let bound = bind_aggregate_definition(prepared, params, default)?;
+    let bound = bind_aggregate_definition(prepared, params, default, false)?;
     admit_external_sources(&bound.input)?;
     Ok(bound)
 }

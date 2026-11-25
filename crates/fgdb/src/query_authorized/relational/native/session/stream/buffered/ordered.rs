@@ -320,7 +320,10 @@ fn bind_relation(
                 .bind_parameters(params)
                 .map_err(QueryError::PatternText)
                 .map_err(authorized)?;
-            (AsyncSpillSetPlan::compile_pattern(pattern), default)
+            (
+                AsyncSpillSetPlan::compile_pattern_with_bounded_walks(pattern),
+                default,
+            )
         }
         PreparedNativeRead::TemporalPattern(template) => {
             let bound = template
@@ -328,7 +331,7 @@ fn bind_relation(
                 .map_err(QueryError::TemporalText)
                 .map_err(authorized)?;
             (
-                AsyncSpillSetPlan::compile_pattern(bound.pattern().clone()),
+                AsyncSpillSetPlan::compile_pattern_with_bounded_walks(bound.pattern().clone()),
                 bound.as_of(),
             )
         }
@@ -337,14 +340,20 @@ fn bind_relation(
                 .bind_parameters(params)
                 .map_err(QueryError::SetText)
                 .map_err(authorized)?;
-            (AsyncSpillSetPlan::compile(&query), default)
+            (
+                AsyncSpillSetPlan::compile_with_bounded_walks(&query),
+                default,
+            )
         }
         PreparedNativeRead::TemporalSet(template) => {
             let bound = template
                 .bind_parameters(params)
                 .map_err(QueryError::TemporalSetText)
                 .map_err(authorized)?;
-            (AsyncSpillSetPlan::compile(bound.query()), bound.as_of())
+            (
+                AsyncSpillSetPlan::compile_with_bounded_walks(bound.query()),
+                bound.as_of(),
+            )
         }
         _ => return Err(unsupported(prepared.facade_class())),
     };
@@ -358,7 +367,7 @@ fn bind_aggregate(
     params: &GqlParameters,
     default: CommitSeq,
 ) -> Result<(BoundAggregateOrder, CommitSeq)> {
-    let bound = bind_aggregate_definition(prepared, params, default).map_err(authorized)?;
+    let bound = bind_aggregate_definition(prepared, params, default, true).map_err(authorized)?;
     admit(&bound.input, prepared.facade_class())?;
     let at = bound.at;
     Ok((bound, at))
