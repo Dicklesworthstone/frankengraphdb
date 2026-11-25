@@ -719,7 +719,7 @@ impl<'a> Parser<'a> {
         head: &mut GraphProjectionHead<'a>,
         offset: usize,
     ) -> Result<(), GraphSetTextError> {
-        self.hoist_boundary_reads_with_imports(head, offset, &[])
+        self.hoist_boundary_reads_with_imports(head, offset, &[], false)
     }
 
     /// A leading row may carry identities this MATCH does not bind. Their
@@ -731,6 +731,7 @@ impl<'a> Parser<'a> {
         head: &mut GraphProjectionHead<'a>,
         offset: usize,
         imports: &[(Name<'a>, GraphSetColumnType)],
+        optional_match: bool,
     ) -> Result<(), GraphSetTextError> {
         self.grouped_comprehensions = None;
         if !head.with {
@@ -888,6 +889,10 @@ impl<'a> Parser<'a> {
                 self.boolean_operand_at = token.at;
             }
             if (hoist_candidate(token.kind, after_dot) || bare)
+                // The optional join can supply a row with no graph match.
+                // Evaluate subqueries on that completed row so COUNT, EXISTS
+                // and list results retain their empty-input values.
+                && !optional_match
                 && carried.is_none()
                 && pending.is_none()
                 && !self.syntax.distinct
@@ -914,6 +919,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if (hoist_candidate(token.kind, after_dot) || bare)
+                && !optional_match
                 && grouping.is_some()
                 && pending.is_none()
                 && !self.syntax.distinct

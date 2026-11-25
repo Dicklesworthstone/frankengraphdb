@@ -4198,6 +4198,68 @@ fn collections_require_proven_input_order_and_distinct_can_restore_that_proof() 
 }
 
 #[test]
+fn collections_keep_distinct_row_order_when_import_restoration_hides_the_sort_key() {
+    let args = arguments(vec![GraphSetColumnType::Vertex]);
+    let source = right();
+    let join = RowJoinSpec::cross(args.column_types(), source.column_types()).unwrap();
+    let body = args
+        .join(source, join)
+        .unwrap()
+        .project(
+            vec![
+                GraphSetProjection::new("rank", GraphSetValue::Column(1)),
+                GraphSetProjection::new("member", GraphSetValue::Column(2)),
+            ],
+            GraphSetQuantifier::Distinct,
+        )
+        .unwrap()
+        .cross_join(arguments(vec![GraphSetColumnType::Vertex]))
+        .unwrap()
+        .project(
+            vec![GraphSetProjection::new("member", GraphSetValue::Column(1))],
+            GraphSetQuantifier::All,
+        )
+        .unwrap()
+        .group_by(
+            &[],
+            &[
+                GraphAggregate::collect("members", 0),
+                GraphAggregate::collect_distinct("unique", 0),
+            ],
+        )
+        .unwrap();
+    let query = outer().apply(body, vec![1]).unwrap();
+    let mut circuit = FilteredCircuit::new(&query);
+    let left = left_rows(3);
+    let expected = |members: &[u128], unique: &[u128]| {
+        bag(left.iter().map(|(outer, weight)| {
+            let mut values = outer.values().to_vec();
+            for list in [members, unique] {
+                values.push(collected_list(list.iter().copied().map(vertex).collect()));
+            }
+            (row(values), weight.to_i128().unwrap())
+        }))
+    };
+    let entry = |rank, member, weight| (row(vec![vertex(rank), vertex(member)]), weight);
+    let source = bag([
+        entry(1, 9, 2),
+        entry(2, 8, 1),
+        entry(3, 9, 1),
+        (row(vec![vertex(4), scalar(None)]), 1),
+    ]);
+    let initial = expected(&[9, 8, 9], &[9, 8]);
+    assert_eq!(circuit.tick(&left, &source).unwrap(), initial);
+    let retract_one = bag([entry(1, 9, -1)]);
+    assert!(circuit.tick(&bag([]), &retract_one).unwrap().is_empty());
+    let after = expected(&[8, 9], &[8, 9]);
+    assert_eq!(
+        circuit.tick(&bag([]), &retract_one).unwrap(),
+        difference(&after, &initial)
+    );
+    assert_eq!(circuit.rows(), &after);
+}
+
+#[test]
 fn native_correlated_collections_keep_schema_identity_and_cancellation() {
     for text in [
         "MATCH (a:L) WITH a CALL (a) { MATCH (b:L) WHERE b <> a RETURN sum(1) AS total,collect(b) AS values } RETURN a,total,values",

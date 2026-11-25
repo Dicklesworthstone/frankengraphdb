@@ -150,33 +150,24 @@ impl PreparedGraphSet {
             return Ok(None);
         }
         let mut stages = Vec::new();
-        let Some(base) = body_with_window(
-            right,
-            imports.is_empty(),
-            true,
-            terminal,
-            &mut stages,
-            control,
-        )?
+        let Some(source) =
+            count::summary_stages(right, imports, terminal, None, &mut stages, control)?
         else {
+            return Ok(None);
+        };
+        let Some(base) = body_base(source, imports.is_empty()) else {
             return Ok(None);
         };
         let mut has_distinct = false;
         for stage in &stages {
             control(GlaExecutionEvent::Work)?;
-            if let Stage::Project(query, projection) = stage {
-                has_distinct |= matches!(
-                    &query.node,
-                    SetNode::Project {
-                        quantifier: GraphSetQuantifier::Distinct,
-                        ..
-                    }
-                );
-                for cell in *projection {
-                    control(GlaExecutionEvent::Work)?;
-                    if !cell.value().is_scan_local() {
-                        return Ok(None);
-                    }
+            match stage {
+                count::SummaryStage::Project(_, _, quantifier) => {
+                    has_distinct |= *quantifier == GraphSetQuantifier::Distinct;
+                }
+                count::SummaryStage::Filter(_) | count::SummaryStage::Restore(_, _) => {}
+                count::SummaryStage::Unwind(_, _) | count::SummaryStage::CollectionOrder(_) => {
+                    return Ok(None);
                 }
             }
         }
@@ -200,16 +191,21 @@ impl PreparedGraphSet {
             }
             None => Vec::new(),
         };
-        let Some(outer) = keyed_outer(&left.types, &arguments, control)? else {
+        charge(arguments.len(), control)?;
+        let mut key_slots = arguments.clone();
+        let restored = count::restored_columns(stages.iter(), &mut key_slots, control)?;
+        let Some(outer) = keyed_outer(&left.types, &key_slots, control)? else {
             return Ok(None);
         };
         let left_width = left.types.len();
         let argument_width = arguments.len();
         let key_width = outer.column_types().len() - left_width;
+        let private_width = key_width + restored.len();
         let right_width = base.right.types.len();
-        charge(argument_width + key_width, control)?;
+        charge(argument_width + private_width, control)?;
         let mut values: Vec<_> = arguments.into_iter().map(GraphSetValue::Column).collect();
         values.extend((left_width..left_width + key_width).map(GraphSetValue::Column));
+        values.extend(restored.iter().copied().map(GraphSetValue::Column));
         let Some(arguments) = projection(
             outer.column_types(),
             values,
@@ -232,7 +228,7 @@ impl PreparedGraphSet {
         if let Some(code) = base.spec.and_then(RowJoinSpec::predicate) {
             charge(argument_width + right_width, control)?;
             let slots: Vec<_> = (0..argument_width)
-                .chain((0..right_width).map(|column| argument_width + key_width + column))
+                .chain((0..right_width).map(|column| argument_width + private_width + column))
                 .collect();
             let code = rebound(code, &slots, control)?;
             let Ok(selected) = join.with_predicate(&code) else {
@@ -242,57 +238,39 @@ impl PreparedGraphSet {
         }
         // Restore the original body frame before running its unchanged VM
         // expressions. The invocation key is carried as a private suffix.
-        charge(argument_width + right_width + key_width, control)?;
+        charge(argument_width + right_width + private_width, control)?;
         let values = (0..argument_width)
-            .chain(argument_width + key_width..argument_width + key_width + right_width)
-            .chain(argument_width..argument_width + key_width)
+            .chain(argument_width + private_width..argument_width + private_width + right_width)
+            .chain(argument_width..argument_width + private_width)
             .map(GraphSetValue::Column)
             .collect();
         let input_types: Vec<_> = join.column_types().collect();
         let Some(frame) = project(&input_types, values, control)? else {
             return Ok(None);
         };
-        let mut types = frame.column_types().to_vec();
-        let mut width = argument_width + right_width;
-        let mut body = vec![frame];
-        for stage in stages {
-            control(GlaExecutionEvent::Work)?;
-            let step = match stage {
-                Stage::Project(query, cells) => {
-                    let SetNode::Project { quantifier, .. } = &query.node else {
-                        return Ok(None);
-                    };
-                    charge(cells.len() + key_width, control)?;
-                    let mut values: Vec<_> =
-                        cells.iter().map(|cell| cell.value().clone()).collect();
-                    values.extend((width..width + key_width).map(GraphSetValue::Column));
-                    let Some(step) = projection(&types, values, *quantifier, control)? else {
-                        return Ok(None);
-                    };
-                    if step.column_types().get(..cells.len()) != Some(query.types.as_slice()) {
-                        return Ok(None);
-                    }
-                    width = cells.len();
-                    step
-                }
-                Stage::Filter(code) => {
-                    charge(types.len() + code.len(), control)?;
-                    let Ok(step) =
-                        RowProjectionSpec::selection(types.clone(), names(types.len()), code)
-                    else {
-                        return Ok(None);
-                    };
-                    step
-                }
+        let Some((mut body, None)) =
+            count::summary_steps(frame, stages, &restored, key_width, control)?
+        else {
+            return Ok(None);
+        };
+        let width = right.types.len();
+        if !restored.is_empty() {
+            // Restored originals have served their last body projection. The
+            // window and restoration join consume just the invocation key.
+            let types = body.last().expect("body frame").column_types();
+            charge(width + key_width, control)?;
+            let values = (0..width + key_width).map(GraphSetValue::Column).collect();
+            let Some(output) = project(types, values, control)? else {
+                return Ok(None);
             };
-            types = step.column_types().to_vec();
-            body.push(step);
+            body.push(output);
         }
+        let types = body.last().expect("body frame").column_types();
         charge(key_width, control)?;
         let keys: Vec<_> = (0..key_width)
             .map(|key| (left_width + key, width + key))
             .collect();
-        let Ok(restore) = RowJoinSpec::new(outer.column_types(), &types, &keys) else {
+        let Ok(restore) = RowJoinSpec::new(outer.column_types(), types, &keys) else {
             return Ok(None);
         };
         let restore = restore.with_kind(if *kind == ApplyKind::Optional {

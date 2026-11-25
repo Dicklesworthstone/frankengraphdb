@@ -4243,7 +4243,7 @@ impl<'a> Parser<'a> {
                 .collect(),
         };
         if self.write_prefix && !self.call_body {
-            self.hoist_boundary_reads_with_imports(&mut head, combined.len(), combined)?;
+            self.hoist_boundary_reads_with_imports(&mut head, combined.len(), combined, false)?;
             if !head.inputs.is_empty() {
                 return Err(expected(at, "carried row reads after a read subquery"));
             }
@@ -4799,7 +4799,7 @@ impl<'a> Parser<'a> {
             } else {
                 &[]
             };
-            self.hoist_boundary_reads_with_imports(&mut head, offset, imports)?;
+            self.hoist_boundary_reads_with_imports(&mut head, offset, imports, optional)?;
         }
         let graph_page = if head.with {
             None

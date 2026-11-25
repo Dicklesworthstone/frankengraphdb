@@ -452,13 +452,37 @@ fn bounded_property_pages_exclude_inactive_huge_collections_and_refuse_unsound_g
             .unwrap(),
         );
         assert!(GraphValue::from_property_value(&huge).is_none());
+        let conversion =
+            GraphValue::admit_property_value::<fgdb_gql::GraphIntegerError>(&huge, &mut |_| Ok(()))
+                .unwrap_err();
+        assert_eq!(
+            conversion.kind,
+            fgdb_gql::GraphIntegerErrorKind::StoredValueBounds
+        );
+        let before = db.frontier().unwrap();
+        let mut oversize = WriteBatch::new(R);
+        oversize.create_vertex_values(VId(99), vec![], vec![(P, huge)]);
+        assert!(matches!(
+            db.write(&commit, oversize).await.unwrap_err(),
+            crate::WriteError::VertexStorageAdmission { vid: VId(99), source }
+                if matches!(source.as_ref(), fgdb_strata::vertex::VertexPatchError::RowExceedsStorageLimit { bytes, limit }
+                    if *bytes == 1_310_792 && *limit == 16_384)
+        ));
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(db.vertex(VId(99)).unwrap().is_none());
+
+        // Exercise the guard and subsequent activation on an actual durable row.
+        // Eight hundred integer elements fit in the 16 KiB vertex patch.
+        let stored = CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![CanonicalScalar::Int(0).into(); 800]).unwrap(),
+        );
         let mut initial = WriteBatch::new(R);
         for id in [1, 90, 99] {
             initial.create_vertex(VId(id), vec![], vec![]);
         }
         initial.create_vertex(VId(10), vec![], vec![(P, CanonicalScalar::Int(9))]);
         initial.create_vertex(VId(11), vec![], vec![(P, CanonicalScalar::Int(8))]);
-        initial.set_vertex_property_value(VId(99), P, Some(huge));
+        initial.set_vertex_property_value(VId(99), P, Some(stored));
         for (id, a, b) in [(1, 1, 10), (2, 1, 11), (3, 90, 99), (4, 90, 10)] {
             initial.add_edge(EId(id), VId(a), VId(b), vec![]);
         }

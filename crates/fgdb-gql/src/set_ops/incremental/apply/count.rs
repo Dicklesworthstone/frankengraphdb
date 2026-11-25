@@ -157,12 +157,11 @@ fn aggregate_summary<'a, E>(
 }
 
 /// A collection observes occurrences, not merely the aggregate input bag.
-/// Canonical complete rows need no extra state. An explicit sort may be
-/// followed only by total copies/constants and restoration of this invocation's
-/// single argument row; its original complete row becomes the ordering witness.
+/// Canonical complete rows need no extra state. Preserve the complete row of
+/// a sort or DISTINCT when later copies and argument restoration hide its order.
 enum CollectionInputOrder<'a> {
     Canonical,
-    Explicit(&'a PreparedGraphSet),
+    Witness(&'a PreparedGraphSet),
 }
 
 fn collection_input_order<'a, E>(
@@ -189,16 +188,20 @@ fn collection_input_order<'a, E>(
             if matches!(current.node, SetNode::Filter { .. }) {
                 return Ok(None);
             }
-            return Ok(Some(CollectionInputOrder::Explicit(current)));
+            return Ok(Some(CollectionInputOrder::Witness(current)));
         }
         current = match &current.node {
             SetNode::Scope(input) => input,
             SetNode::Project {
+                quantifier: GraphSetQuantifier::Distinct,
+                ..
+            } => return Ok(Some(CollectionInputOrder::Witness(current))),
+            SetNode::Project {
                 input,
                 projection,
                 quantifier: GraphSetQuantifier::All,
-                preserve_order: true,
-            } => {
+                preserve_order,
+            } if *preserve_order || input.preserves_row_order() => {
                 for cell in projection {
                     control(GlaExecutionEvent::Work)?;
                     if !matches!(
@@ -224,7 +227,7 @@ fn collection_input_order<'a, E>(
     }
 }
 
-enum SummaryStage<'a> {
+pub(super) enum SummaryStage<'a> {
     Project(
         &'a PreparedGraphSet,
         &'a [GraphSetProjection],
@@ -236,19 +239,44 @@ enum SummaryStage<'a> {
     CollectionOrder(&'a PreparedGraphSet),
 }
 
-struct CapturedCollectionOrder<'a> {
+pub(super) struct CapturedCollectionOrder<'a> {
     order: &'a [GraphValueOrder],
     width: usize,
 }
 
 type SummarySteps<'a> = (Vec<RowProjectionSpec>, Option<CapturedCollectionOrder<'a>>);
 
+/// A scoped WITH may reintroduce an original, nullable argument after a
+/// DISTINCT. Include it in the invocation key and retain its unmapped value.
+pub(super) fn restored_columns<'a, 's: 'a, E>(
+    stages: impl Iterator<Item = &'a SummaryStage<'s>>,
+    key_slots: &mut Vec<usize>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Vec<usize>, E> {
+    let mut restored = Vec::new();
+    for stage in stages {
+        control(GlaExecutionEvent::Work)?;
+        if let SummaryStage::Restore(_, columns) = stage {
+            for column in columns {
+                charge(1 + restored.len() + key_slots.len(), control)?;
+                if !restored.contains(column) {
+                    restored.push(*column);
+                }
+                if !key_slots.contains(column) {
+                    key_slots.push(*column);
+                }
+            }
+        }
+    }
+    Ok(restored)
+}
+
 /// Peel row stages on either side of the aggregate without moving them across
 /// its conversion boundary. Rejoining a projection of Arguments contributes
 /// exactly one row from this invocation, even when an imported value is NULL.
 /// Only the proved collection-order boundary may carry an input comparator;
 /// deeper ordering and every input page still refuse.
-fn summary_stages<'a, E>(
+pub(super) fn summary_stages<'a, E>(
     query: &'a PreparedGraphSet,
     imports: &[usize],
     terminal: Option<&PreparedGraphSet>,
@@ -289,12 +317,12 @@ fn summary_stages<'a, E>(
                 Some(SummaryStage::Project(query, projection, *quantifier)),
             ))
         }
-        SetNode::Filter { input, .. } => {
-            let Some((_, code)) = query.incremental_filter() else {
-                return Ok(None);
-            };
-            Some((input.as_ref(), Some(SummaryStage::Filter(code))))
-        }
+        // The certified terminal page runs after its predicate. The guard
+        // above still rejects intermediate pages and unconsumed ordering.
+        SetNode::Filter { input, predicate } => Some((
+            input.as_ref(),
+            Some(SummaryStage::Filter(predicate.instructions())),
+        )),
         SetNode::CrossJoin { left, right } => argument_slots(right, imports, control)?
             .map(|columns| (left.as_ref(), Some(SummaryStage::Restore(query, columns)))),
         _ => None,
@@ -323,9 +351,9 @@ fn summary_stages<'a, E>(
 /// The private suffix contains the non-null join key and any original nullable
 /// values restored by WITH. They depend only on the invocation, so retaining
 /// them across DISTINCT preserves its original per-invocation multiplicity.
-/// After an explicit collection sort, append its complete row as a witness.
-/// Later pure stages retain that witness, even when they drop the sort keys.
-fn summary_steps<'a, E>(
+/// Retain the complete sorted or DISTINCT row through later projections,
+/// even when they drop every original ordering column.
+pub(super) fn summary_steps<'a, E>(
     initial: RowProjectionSpec,
     stages: Vec<SummaryStage<'a>>,
     restored: &[usize],
@@ -343,7 +371,6 @@ fn summary_steps<'a, E>(
         let (query, mut values, quantifier) = match stage {
             SummaryStage::CollectionOrder(query) => {
                 if captured.is_some()
-                    || query.order.is_empty()
                     || query.offset != 0
                     || query.count.is_some()
                     || types.get(..width) != Some(query.types.as_slice())
@@ -442,8 +469,8 @@ fn summary_steps<'a, E>(
         steps.push(step);
     }
     if let Some(order) = &captured {
-        // The existing collection kernel compares explicit keys, then complete
-        // rows. Put the original sorted row FIRST, so that tie break is exact.
+        // The collection kernel compares any explicit keys, then complete rows.
+        // Put the original row first to preserve the full DISTINCT order or tie break.
         // Within one invocation all later cells are copies/constants of that
         // witness and its arguments; equal witnesses cannot acquire a new tie.
         let types = steps.last().expect("body frame").column_types();
@@ -592,7 +619,7 @@ impl PreparedGraphSet {
             None
         };
         let collection_boundary = match input_order {
-            Some(CollectionInputOrder::Explicit(query)) => Some(query),
+            Some(CollectionInputOrder::Witness(query)) => Some(query),
             _ => None,
         };
         let mut stages = Vec::new();
@@ -691,21 +718,7 @@ impl PreparedGraphSet {
                 values.push(GraphSetValue::TypedNull(left.types[slot]));
             }
         }
-        let mut restored = Vec::new();
-        for stage in stages.iter().chain(&tail) {
-            control(GlaExecutionEvent::Work)?;
-            if let SummaryStage::Restore(_, columns) = stage {
-                for column in columns {
-                    charge(1 + restored.len() + key_slots.len(), control)?;
-                    if !restored.contains(column) {
-                        restored.push(*column);
-                    }
-                    if !key_slots.contains(column) {
-                        key_slots.push(*column);
-                    }
-                }
-            }
-        }
+        let restored = restored_columns(stages.iter().chain(&tail), &mut key_slots, control)?;
         let Some(outer) = distinct::keyed_outer(&left.types, &key_slots, control)? else {
             return Ok(None);
         };
@@ -788,7 +801,9 @@ impl PreparedGraphSet {
             };
             active = next;
         }
-        if let Some(order) = &collection_order {
+        if let Some(order) = &collection_order
+            && !order.order.is_empty()
+        {
             charge(order.order.len(), control)?;
             let Ok(ordered) = active.with_order_by(order.order) else {
                 return Ok(None);
@@ -864,12 +879,13 @@ impl PreparedGraphSet {
             };
             aggregates.push(aggregate);
         }
-        // Canonical inputs still need the reconstructed relation's proof: a
-        // body expansion must not silently canonicalize an unknown sequence.
-        // Explicit inputs instead retain the complete original ordering witness
-        // and comparator, including the native whole-row tie break.
+        // Canonical inputs, including a retained DISTINCT row, still require
+        // a canonical reconstructed relation. An explicit comparator instead
+        // ranks the retained row and uses its complete tuple to break ties.
         if collects
-            && collection_order.is_none()
+            && collection_order
+                .as_ref()
+                .is_none_or(|order| order.order.is_empty())
             && !active
                 .incremental_result_order()
                 .is_some_and(|(order, _)| order.is_empty())
@@ -1111,14 +1127,7 @@ impl PreparedGraphSet {
             return Ok(None);
         };
         let mut stages = Vec::new();
-        let Some(base) = body(
-            summary.input(),
-            imports.is_empty(),
-            false,
-            &mut stages,
-            control,
-        )?
-        else {
+        let Some(base) = body(summary.input(), imports.is_empty(), &mut stages, control)? else {
             return Ok(None);
         };
         if base.spec.is_some_and(|spec| spec.predicate().is_some())

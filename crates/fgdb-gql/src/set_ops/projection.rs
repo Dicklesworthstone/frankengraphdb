@@ -1959,16 +1959,12 @@ impl UnwindRows {
             // it, and then the same bounds its Range arm reads.
             control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
             evaluation.nodes += 1;
-            let bounds = synchronous::range_bounds(
-                start,
-                end,
-                step.as_deref(),
+            let bounds = unwind_range_bounds(
+                (start, end, step.as_deref()),
                 &row,
                 column,
                 control,
-                0,
                 &mut evaluation,
-                &|_| Ok::<(), E>(()),
             )?;
             return Self::from_range(row, bounds, control);
         }
@@ -3781,10 +3777,10 @@ projection_evaluator!(
 );
 projection_evaluator!(asynchronous, [async], AsyncSpillElementSource, [+ Send], [+ Sync], evaluate_value_at_inner);
 
-/// The synchronous evaluator, type-erased: one copy serves every host error
-/// type (71 copies, 4.7 MB of a release CLI before). The caller's control or
-/// element-read error comes back exactly as raised; node counts and the row
-/// ordinal flow back to the caller's evaluation.
+// Resident recursion needs no spill reservation. Keep the callback type
+// independent of the caller for both value and range-bound evaluation.
+const RESIDENT_RESERVE: fn(usize) -> Result<(), Stop> = |_| Ok(());
+
 fn evaluate_value_at<E>(
     value: &GraphSetValue,
     row: &GraphValueRow,
@@ -3793,6 +3789,51 @@ fn evaluate_value_at<E>(
     depth: usize,
     nodes: &mut Evaluation<'_, '_, E>,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
+    with_erased_evaluation(control, nodes, |mut stop, erased| {
+        synchronous::evaluate_value_at(
+            value,
+            row,
+            column,
+            &mut stop,
+            depth,
+            erased,
+            &RESIDENT_RESERVE,
+        )
+    })
+}
+
+fn unwind_range_bounds<E>(
+    (start, end, step): (&GraphSetValue, &GraphSetValue, Option<&GraphSetValue>),
+    row: &GraphValueRow,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    nodes: &mut Evaluation<'_, '_, E>,
+) -> Result<Option<(i64, i64, i64)>, ProjectionFailure<E>> {
+    with_erased_evaluation(control, nodes, |mut stop, erased| {
+        synchronous::range_bounds(
+            start,
+            end,
+            step,
+            row,
+            column,
+            &mut stop,
+            0,
+            erased,
+            &RESIDENT_RESERVE,
+        )
+    })
+}
+
+/// Share the recursive synchronous evaluator across host callbacks and error
+/// types. Restore the original error and evaluation counters on every exit.
+fn with_erased_evaluation<E, T>(
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    nodes: &mut Evaluation<'_, '_, E>,
+    evaluate: impl FnOnce(
+        &mut dyn FnMut(GlaExecutionEvent) -> Result<(), Stop>,
+        &mut Evaluation<'_, '_, Stop>,
+    ) -> Result<T, ProjectionFailure<Stop>>,
+) -> Result<T, ProjectionFailure<E>> {
     let failed = core::cell::Cell::new(None);
     let mut relay = Relay {
         read: &mut *nodes.read,
@@ -3809,11 +3850,7 @@ fn evaluate_value_at<E>(
             Stop
         })
     };
-    let mut stop: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), Stop> = &mut stop;
-    let result =
-        synchronous::evaluate_value_at(value, row, column, &mut stop, depth, &mut erased, &|_| {
-            Ok::<(), Stop>(())
-        });
+    let result = evaluate(&mut stop, &mut erased);
     (nodes.nodes, nodes.ordinal) = (erased.nodes, erased.ordinal);
     result.map_err(|failure| match failure {
         ProjectionFailure::Control(Stop) => ProjectionFailure::Control(
@@ -3886,16 +3923,12 @@ pub(super) fn constant_range_members<E>(
     let mut read = no_element_reads;
     let mut evaluation = Evaluation::new(None, &mut read);
     evaluation.nodes += 1;
-    let bounds = synchronous::range_bounds(
-        start,
-        end,
-        step,
+    let bounds = unwind_range_bounds(
+        (start, end, step),
         &GraphValueRow::unit(),
         column,
         control,
-        0,
         &mut evaluation,
-        &|_| Ok::<(), E>(()),
     )?;
     let Some((start, end, step)) = bounds else {
         return Ok(0);

@@ -732,7 +732,7 @@ fn every_apply_registration_and_rebuild_checkpoint_keeps_old_circuits_private() 
 }
 
 #[test]
-fn per_invocation_scopes_and_fallible_rhs_refuse_even_beneath_empty_outer_and_limit_zero() {
+fn canonical_per_invocation_pages_activate_while_unproven_outer_pages_and_fallible_rhs_refuse() {
     let ((), report) = run_async_under_lab(0x6170_7005, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
@@ -751,13 +751,28 @@ fn per_invocation_scopes_and_fallible_rhs_refuse_even_beneath_empty_outer_and_li
                 policy(),
             )
             .unwrap();
-        let before = saved(&db.standing_queries);
         let params = GqlParameters::new();
+        let mut pages = Vec::new();
         for text in [
             "MATCH (a:L) CALL (a) { MATCH (a)-[:R]->(b) RETURN b AS child LIMIT 1 } \
              RETURN a,child",
             "MATCH (a:L) CALL (a) { MATCH (a)-[:R]->(b) RETURN DISTINCT b AS child LIMIT 1 } \
              RETURN a,child",
+        ] {
+            let read = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+            read.subscription_footprint(&cx, &params).unwrap();
+            let handle = read
+                .register_standing(&mut db, &cx, &params, policy())
+                .unwrap();
+            check_text(&db, &cx, text, &handle, &Bag::new());
+            pages.push((text, handle));
+        }
+        let before = saved(&db.standing_queries);
+        let mut refused: Vec<_> = pages
+            .iter()
+            .map(|(text, _)| format!("{text} LIMIT 0"))
+            .collect();
+        for text in [
             "MATCH (a:L) CALL (a) { MATCH (a)-[:R]->(b) RETURN count(b.p) AS total } \
              RETURN a,total",
             "MATCH (a:L) CALL (a) { MATCH (b:M) RETURN 12 / b.p AS quotient } \
@@ -769,22 +784,38 @@ fn per_invocation_scopes_and_fallible_rhs_refuse_even_beneath_empty_outer_and_li
                     .value
                     .is_empty()
             );
-            for zero in [false, true] {
-                let statement = if zero {
-                    format!("{text} LIMIT 0")
-                } else {
-                    text.to_owned()
-                };
-                let prepared = PreparedNativeRead::prepare(&statement, &params, symbols).unwrap();
-                assert!(matches!(
-                    prepared.subscription_footprint(&cx, &params),
-                    Err(StandingQueryError::Unsupported)
-                ));
-                assert!(matches!(
-                    prepared.register_standing(&mut db, &cx, &params, policy()),
-                    Err(StandingQueryError::Unsupported)
-                ));
-                assert_eq!(saved(&db.standing_queries), before);
+            refused.extend([text.to_owned(), format!("{text} LIMIT 0")]);
+        }
+        for statement in refused {
+            let prepared = PreparedNativeRead::prepare(&statement, &params, symbols).unwrap();
+            assert!(matches!(
+                prepared.subscription_footprint(&cx, &params),
+                Err(StandingQueryError::Unsupported)
+            ));
+            assert!(matches!(
+                prepared.register_standing(&mut db, &cx, &params, policy()),
+                Err(StandingQueryError::Unsupported)
+            ));
+            assert_eq!(saved(&db.standing_queries), before);
+        }
+        let mut activate = WriteBatch::new(R);
+        activate.create_vertex(VId(1), vec![L], vec![]);
+        activate.create_vertex(VId(4), vec![M], vec![]);
+        for (edge, child) in [(10, 4), (11, 2), (12, 2)] {
+            activate.add_edge(EId(edge), VId(1), VId(child), vec![]);
+        }
+        db.write(&commit, activate).await.unwrap();
+        for (remove, expected_child) in [(None, 2), (Some(11), 2), (Some(12), 4)] {
+            if let Some(edge) = remove {
+                let mut change = WriteBatch::new(R);
+                change.delete_edge(EId(edge));
+                db.write(&commit, change).await.unwrap();
+            }
+            let expected = bag([(optional_row(1, Some(expected_child)), 1)]);
+            for (text, handle) in &pages {
+                check_text(&db, &cx, text, handle, &expected);
+                db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+                check_text(&db, &cx, text, handle, &expected);
             }
         }
         db.standing_native_query(&cx, &sibling, policy()).unwrap();

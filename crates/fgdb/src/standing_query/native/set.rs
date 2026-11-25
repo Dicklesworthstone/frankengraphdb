@@ -19,7 +19,8 @@ use fgdb_gql::{
     GraphSetQuantifier, GraphSetValue, PreparedGraphSet,
 };
 use fgdb_prism::{
-    FnxAlgorithm, FnxOutput, FnxWeightSpec, FoundationAlgorithm, ParallelEdgePolicy, SelfLoopPolicy,
+    Directedness, FnxAlgorithm, FnxOutput, FnxWeightSpec, FoundationAlgorithm, ParallelEdgePolicy,
+    SelfLoopPolicy,
 };
 
 pub(super) enum AnalyticTopology {
@@ -307,8 +308,11 @@ pub(super) fn analytic_procedure(
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
+        // The maintained kernel collapses opposite arcs to one neighbour.
+        // Directed core instead counts incoming and outgoing incidence.
         FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber)
-            if options.projection.self_loops == SelfLoopPolicy::Drop =>
+            if options.projection.directedness == Directedness::Undirected
+                && options.projection.self_loops == SelfLoopPolicy::Drop =>
         {
             (
                 core_source(relations, labels, scoped)?,
@@ -755,9 +759,16 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         policy: GqlQueryPolicy,
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
-        // Drop the operator preparation frame before descending a binary set
-        // tree. Its recipe and state temporaries are large on debug builds.
-        if let Some(index) = self.compile_operator(cx, query, policy, checkpoint)? {
+        // Each family releases its preparation frame on a miss. A nested
+        // projection does not retain temporary states for every Apply recipe.
+        checkpoint()?;
+        if let Some(index) = self.compile_source(cx, query, policy, checkpoint)? {
+            return Ok(index);
+        }
+        if let Some(index) = self.compile_apply(cx, query, policy, checkpoint)? {
+            return Ok(index);
+        }
+        if let Some(index) = self.compile_relation(cx, query, policy, checkpoint)? {
             return Ok(index);
         }
         let (operation, quantifier, left, right) = query
@@ -777,14 +788,13 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         Ok(index)
     }
 
-    fn compile_operator(
+    fn compile_source(
         &mut self,
         cx: &QueryCx,
         query: &PreparedGraphSet,
         policy: GqlQueryPolicy,
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<Option<usize>, StandingQueryError> {
-        checkpoint()?;
         let index = if query.operand_count() == 0 {
             let state = self
                 .database
@@ -951,7 +961,21 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 query.column_types(),
             )?;
             self.append(StandingQuery::Group(Box::new(state)))
-        } else if let Some(plan) =
+        } else {
+            return Ok(None);
+        };
+        checkpoint()?;
+        Ok(Some(index))
+    }
+
+    fn compile_apply(
+        &mut self,
+        cx: &QueryCx,
+        query: &PreparedGraphSet,
+        policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+    ) -> Result<Option<usize>, StandingQueryError> {
+        let index = if let Some(plan) =
             query.incremental_apply_count_with_control(&mut |_| checkpoint())?
         {
             self.compile_count_recipe(
@@ -1291,7 +1315,21 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 checkpoint()?;
             }
             input
-        } else if let Some(input) = query.incremental_scope() {
+        } else {
+            return Ok(None);
+        };
+        checkpoint()?;
+        Ok(Some(index))
+    }
+
+    fn compile_relation(
+        &mut self,
+        cx: &QueryCx,
+        query: &PreparedGraphSet,
+        policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+    ) -> Result<Option<usize>, StandingQueryError> {
+        let index = if let Some(input) = query.incremental_scope() {
             return self.compile(cx, input, policy, checkpoint).map(Some);
         } else if let Some((input, projection, quantifier)) = query.incremental_projection() {
             let captured = query.incremental_captured_unwind_projection(&mut |_| checkpoint())?;

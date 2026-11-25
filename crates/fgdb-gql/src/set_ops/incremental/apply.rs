@@ -84,42 +84,22 @@ fn project<E>(
 fn body<'a, E>(
     query: &'a PreparedGraphSet,
     no_imports: bool,
-    allow_distinct: bool,
-    stages: &mut Vec<Stage<'a>>,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<Option<Base<'a>>, E> {
-    body_with_window(query, no_imports, allow_distinct, None, stages, control)
-}
-
-// Peel precisely one terminal window; every preceding page retains its
-// ordinary refusal, including a hidden LIMIT 0.
-fn body_with_window<'a, E>(
-    query: &'a PreparedGraphSet,
-    no_imports: bool,
-    allow_distinct: bool,
-    terminal: Option<&PreparedGraphSet>,
     stages: &mut Vec<Stage<'a>>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<Base<'a>>, E> {
     control(GlaExecutionEvent::Work)?;
-    if !query.unadorned_incremental_node()
-        && !terminal.is_some_and(|window| core::ptr::eq(window, query))
-    {
+    if !query.unadorned_incremental_node() {
         return Ok(None);
     }
     match &query.node {
-        SetNode::Scope(input) => {
-            body_with_window(input, no_imports, allow_distinct, terminal, stages, control)
-        }
+        SetNode::Scope(input) => body(input, no_imports, stages, control),
         SetNode::Project {
             input,
             projection,
-            quantifier,
+            quantifier: GraphSetQuantifier::All,
             ..
-        } if *quantifier == GraphSetQuantifier::All || allow_distinct => {
-            let Some(base) =
-                body_with_window(input, no_imports, allow_distinct, terminal, stages, control)?
-            else {
+        } => {
+            let Some(base) = body(input, no_imports, stages, control)? else {
                 return Ok(None);
             };
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -130,9 +110,7 @@ fn body_with_window<'a, E>(
             let Some((_, code)) = query.incremental_filter() else {
                 return Ok(None);
             };
-            let Some(base) =
-                body_with_window(input, no_imports, allow_distinct, terminal, stages, control)?
-            else {
+            let Some(base) = body(input, no_imports, stages, control)? else {
                 return Ok(None);
             };
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -420,7 +398,7 @@ impl PreparedGraphSet {
         }
         let optional = *kind == ApplyKind::Optional;
         let mut stages = Vec::new();
-        let Some(base) = body(body_query, imports.is_empty(), false, &mut stages, control)? else {
+        let Some(base) = body(body_query, imports.is_empty(), &mut stages, control)? else {
             return Ok(None);
         };
         if !independent(base.right, control)? {

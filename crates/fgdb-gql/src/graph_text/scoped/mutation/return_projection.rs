@@ -1097,7 +1097,7 @@ impl<'a> Parser<'a> {
                 inputs: core::mem::take(&mut inputs),
                 outputs,
             };
-            self.hoist_boundary_reads_with_imports(&mut head, width, &schema[..width])?;
+            self.hoist_boundary_reads_with_imports(&mut head, width, &schema[..width], false)?;
             inputs = head.inputs;
             let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
             types.extend(inputs.iter().map(projection_type));
@@ -1240,7 +1240,7 @@ impl<'a> Parser<'a> {
             inputs: core::mem::take(inputs),
             outputs,
         };
-        self.hoist_boundary_reads_with_imports(&mut head, width, &schema[..width])?;
+        self.hoist_boundary_reads_with_imports(&mut head, width, &schema[..width], false)?;
         *inputs = head.inputs;
         Ok(head.outputs)
     }
@@ -1368,7 +1368,7 @@ impl<'a> Parser<'a> {
             inputs: core::mem::take(inputs),
             outputs,
         };
-        self.hoist_boundary_reads_with_imports(&mut head, width, &schema[..width])?;
+        self.hoist_boundary_reads_with_imports(&mut head, width, &schema[..width], false)?;
         *inputs = head.inputs;
         Ok((head.outputs, distinct, at))
     }

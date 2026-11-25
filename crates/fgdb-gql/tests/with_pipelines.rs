@@ -2788,17 +2788,16 @@ fn local_equality_keeps_scalar_peers_shadowing_and_governed_limits() {
                 GraphValue::Scalar(CanonicalScalar::Null),
             ],
         )
-        .unwrap()
-        .with_int64("needle", 1)
         .unwrap();
-    let bind = |text: &str| {
+    let with_needle = arguments.clone().with_int64("needle", 1).unwrap();
+    let bind = |text: &str, supplied: &GqlParameters| {
         PreparedGraphSetText::prepare_with_parameter_types(
             text,
             &[("items", fgdb_gql::GqlParameterType::List)],
             symbols,
         )
         .expect(text)
-        .bind_parameters(&arguments)
+        .bind_parameters(supplied)
         .expect(text)
     };
     for (peer, matches_integer) in [
@@ -2827,8 +2826,13 @@ fn local_equality_keeps_scalar_peers_shadowing_and_governed_limits() {
                     })
                     .collect(),
             );
+            let supplied = if peer == "$needle" {
+                &with_needle
+            } else {
+                &arguments
+            };
             assert_eq!(
-                run(&bind(&text), &[], wide(), &mut || Ok(()))
+                run(&bind(&text, supplied), &[], wide(), &mut || Ok(()))
                     .unwrap()
                     .value,
                 vec![GraphValueRow::from_owned_values(vec![
@@ -2842,6 +2846,7 @@ fn local_equality_keeps_scalar_peers_shadowing_and_governed_limits() {
     let shadowed = bind(
         "UNWIND [0] AS x WITH x,$items AS items \
          RETURN [x IN items | [x IN [1] | x = 1]] AS shadowed",
+        &arguments,
     );
     assert_eq!(
         run(&shadowed, &[], wide(), &mut || Ok(())).unwrap().value,
@@ -2863,13 +2868,16 @@ fn local_equality_keeps_scalar_peers_shadowing_and_governed_limits() {
             expected
         ])]
     );
-    let invalid =
-        bind("UNWIND [0] AS seed WITH $items AS items RETURN [x IN items | x+1 = 2] AS values");
+    let invalid = bind(
+        "UNWIND [0] AS seed WITH $items AS items RETURN [x IN items | x+1 = 2] AS values",
+        &arguments,
+    );
     assert!(run(&invalid, &[], wide(), &mut || Ok(())).is_err());
 
     let query = bind(
         "UNWIND [0] AS seed WITH $items AS items \
          RETURN [x IN items | [y IN items | x = y]] AS matrix",
+        &arguments,
     );
     let calls = Cell::new(0);
     let measured = run(&query, &[], wide(), &mut || {

@@ -218,6 +218,10 @@ pub(super) struct RowPredicate {
     code: Box<[GraphSetPredicateOp]>,
 }
 impl RowPredicate {
+    pub(super) fn instructions(&self) -> &[GraphSetPredicateOp] {
+        &self.code
+    }
+
     pub(super) fn prepare(
         types: &[GraphSetColumnType],
         code: &[GraphSetPredicateOp],
@@ -645,7 +649,7 @@ impl PreparedGraphSet {
             return None;
         }
         match &self.node {
-            SetNode::Filter { input, predicate } => Some((input, &predicate.code)),
+            SetNode::Filter { input, predicate } => Some((input, predicate.instructions())),
             _ => None,
         }
     }
