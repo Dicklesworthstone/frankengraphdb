@@ -43,6 +43,9 @@ const S: RelationId = RelationId(8);
 const T: RelationId = RelationId(9);
 const U: RelationId = RelationId(10);
 
+#[path = "authorized_buffered_read/vertex_probes.rs"]
+mod vertex_probes;
+
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0xa5; 32], NS, [0xa7; 32])
 }

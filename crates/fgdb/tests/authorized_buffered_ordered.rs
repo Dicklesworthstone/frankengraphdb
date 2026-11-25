@@ -36,6 +36,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+#[path = "authorized_buffered_ordered/walks.rs"]
+mod walks;
+
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0xa8; 32]);
 const L: LabelId = LabelId(1);
 const H: LabelId = LabelId(2);
@@ -44,6 +47,9 @@ const SECRET: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(7);
 const S: RelationId = RelationId(8);
 const T: RelationId = RelationId(9);
+
+#[path = "authorized_buffered_ordered/vertex_probes.rs"]
+mod vertex_probes;
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0xa9; 32], NS, [0xaa; 32])
@@ -1198,7 +1204,10 @@ fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_
                 "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN a,r,b,s,c,properties(c) LIMIT 0",
                 false,
             ),
-            ("MATCH (a)-[r:R*1..2]->(b) RETURN a,b LIMIT 0", false),
+            (
+                "MATCH (a)-[r:R*1..2]->(b) RETURN a,properties(b) LIMIT 0",
+                false,
+            ),
             (
                 "UNWIND [] AS item CALL() { MATCH (n:L) WITH n AS carried RETURN properties([carried][0]) AS fields } RETURN fields LIMIT 0",
                 false,

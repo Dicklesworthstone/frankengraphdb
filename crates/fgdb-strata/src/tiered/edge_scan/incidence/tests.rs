@@ -1631,7 +1631,10 @@ fn admitted_incidence_preserves_projected_histories_and_root_positions_across_de
                         )
                         .await
                         .unwrap();
-                    assert_eq!(candidate.as_ref().map(|row| row.eid), wanted.map(|row| row.0));
+                    assert_eq!(
+                        candidate.as_ref().map(|row| row.eid),
+                        wanted.map(|row| row.0)
+                    );
                     assert!(scan.work_used() > work);
                     work = scan.work_used();
                     let Some(candidate) = candidate else {
@@ -1639,8 +1642,8 @@ fn admitted_incidence_preserves_projected_histories_and_root_positions_across_de
                         break;
                     };
                     let (_, src, dst) = wanted.unwrap();
-                    let visible_value = visible(candidate.eid.0, cut)
-                        .filter(|_| candidate.eid != EId(6));
+                    let visible_value =
+                        visible(candidate.eid.0, cut).filter(|_| candidate.eid != EId(6));
                     assert_eq!(candidate.row.is_some(), visible_value.is_some());
                     if let Some(row) = candidate.row {
                         assert_eq!(row.source_vertex().vid(), src);

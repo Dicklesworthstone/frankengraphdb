@@ -313,6 +313,42 @@ impl AsyncGraphWalkPlan {
     pub fn maximum_hops(&self) -> usize {
         self.bounds.maximum() as usize
     }
+
+    /// Prove bounded property selections for the complete route evaluator.
+    /// Root and endpoint predicates, every traversed edge's property map,
+    /// projected fields and private ordering cells all participate. Path
+    /// captures and repetition/length predicates consume identities only.
+    ///
+    /// The endpoint selection also applies to the independently admitted root,
+    /// including zero-hop routes and isolates. These fields convey no read
+    /// authority: a source must intersect both selections with its capability
+    /// and admit each same-cut topology before loading any selected values.
+    /// An unproved instruction or either key-set overflow returns `None`.
+    #[must_use]
+    pub fn selected_property_demand(&self) -> Option<EdgeScanPropertySelection> {
+        let mut selected = EdgeScanPropertySelection {
+            edge: PropertySelection::EMPTY,
+            endpoints: PropertySelection::EMPTY,
+        };
+        for predicate in self.edge_predicates.iter() {
+            selected.edge.insert(predicate.key).ok()?;
+        }
+        for instruction in self.prefix.iter().chain(self.suffix.iter()) {
+            match instruction {
+                GlaOperator::DifferentEdges { .. }
+                | GlaOperator::SelectPathLength { .. }
+                | GlaOperator::SelectPathNull { .. } => {}
+                instruction => selected.include_instruction(instruction)?,
+            }
+        }
+        let GlaOperator::ProjectValues { columns } = self.projection.as_ref() else {
+            return None;
+        };
+        for column in columns {
+            selected.include_projection(column)?;
+        }
+        Some(selected)
+    }
 }
 
 fn predicate_valid(op: &GlaOperator, width: u32, edge_capture: bool) -> bool {

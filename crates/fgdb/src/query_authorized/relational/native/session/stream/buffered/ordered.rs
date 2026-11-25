@@ -46,8 +46,13 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     /// any/finite relation selectors, compose through the existing external
     /// set, row-join, stage, CALL and grouping owners. Carried identities can
     /// read selected properties through a same-cut scoped point reader.
-    /// Complete element metadata, variable walks, probes, OPTIONAL and
-    /// procedures refuse recursively before candidate or scratch access.
+    /// Fixed-hop existential probes, terminal OPTIONAL and native variable
+    /// paths use the same selected root/incidence reader. Zero-hop routes keep
+    /// real vertices and isolates; shortest and repetition modes retain their
+    /// native semantics. All route occurrences reach the external ordering
+    /// owner before DISTINCT, SKIP or LIMIT can determine final output.
+    /// Complete element metadata, procedures and unproved nested scopes refuse
+    /// recursively before candidate or scratch access.
     /// Selected leaf properties, including both endpoints of a single edge,
     /// retain the same staged visibility admission before value decoding.
     /// This is an explicit cold execution capability, not a server default or
@@ -264,6 +269,20 @@ fn admit(plan: &AsyncSpillSetPlan, facade: crate::NativeReadClass) -> Result<()>
                 Ok(())
             }
         }
+        AsyncSpillSetSourcePlan::VertexProbe(plan) => {
+            if plan.selected_property_demand().is_none() {
+                Err(unsupported(facade))
+            } else {
+                Ok(())
+            }
+        }
+        AsyncSpillSetSourcePlan::Walk(plan) => {
+            if plan.selected_property_demand().is_none() {
+                Err(unsupported(facade))
+            } else {
+                Ok(())
+            }
+        }
         AsyncSpillSetSourcePlan::Binary(plan) => {
             admit(plan.left(), facade)?;
             admit(plan.right(), facade)
@@ -286,9 +305,7 @@ fn admit(plan: &AsyncSpillSetPlan, facade: crate::NativeReadClass) -> Result<()>
             }
             admit(plan.input(), facade)
         }
-        AsyncSpillSetSourcePlan::VertexProbe(_)
-        | AsyncSpillSetSourcePlan::Walk(_)
-        | AsyncSpillSetSourcePlan::Procedure(_) => Err(unsupported(facade)),
+        AsyncSpillSetSourcePlan::Procedure(_) => Err(unsupported(facade)),
     }
 }
 
@@ -523,6 +540,18 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> SpoolInput for Input<'_, V, C> {
                 cursor.row_stats(),
                 cursor.evaluator_stats(),
             ),
+            Native::VertexProbe(cursor) => (
+                cursor.snapshot_seq(),
+                ScanKind::Vertex,
+                cursor.row_stats(),
+                cursor.evaluator_stats(),
+            ),
+            Native::Walk(cursor) => (
+                cursor.snapshot_seq(),
+                ScanKind::Edge,
+                cursor.row_stats(),
+                cursor.evaluator_stats(),
+            ),
             Native::Edge(cursor) => (
                 cursor.snapshot_seq(),
                 ScanKind::Edge,
@@ -600,6 +629,22 @@ impl<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> Host<'q, V, C> {
                     keys.edge = selected_keys(keys.edge, scope);
                     keys.endpoints = selected_keys(keys.endpoints, scope);
                     Plan::join(plan.clone(), keys)
+                }
+                AsyncSpillSetSourcePlan::VertexProbe(plan) => {
+                    let mut keys = plan
+                        .selected_property_demand()
+                        .ok_or_else(|| unsupported(crate::NativeReadClass::Set))?;
+                    keys.edge = selected_keys(keys.edge, scope);
+                    keys.endpoints = selected_keys(keys.endpoints, scope);
+                    Plan::vertex_probe(plan.clone(), keys)
+                }
+                AsyncSpillSetSourcePlan::Walk(plan) => {
+                    let mut keys = plan
+                        .selected_property_demand()
+                        .ok_or_else(|| unsupported(crate::NativeReadClass::Set))?;
+                    keys.edge = selected_keys(keys.edge, scope);
+                    keys.endpoints = selected_keys(keys.endpoints, scope);
+                    Plan::walk(plan.clone(), keys)
                 }
                 _ => return Err(unsupported(crate::NativeReadClass::Set)),
             }

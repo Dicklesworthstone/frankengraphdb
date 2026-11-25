@@ -74,7 +74,7 @@ pub struct EdgeScanPropertySelection {
 impl EdgeScanPropertySelection {
     // Shared by local and fixed-hop proofs. These operations only accumulate
     // demands; they never evaluate, remove or reorder an instruction.
-    fn include_instruction(&mut self, instruction: &GlaOperator) -> Option<()> {
+    pub(crate) fn include_instruction(&mut self, instruction: &GlaOperator) -> Option<()> {
         match instruction {
             GlaOperator::Select { predicates, .. } => {
                 for key in predicates.iter().filter_map(VertexPredicate::property_key) {
@@ -103,7 +103,7 @@ impl EdgeScanPropertySelection {
         Some(())
     }
 
-    fn include_projection(&mut self, column: &ValueProjection) -> Option<()> {
+    pub(crate) fn include_projection(&mut self, column: &ValueProjection) -> Option<()> {
         match column {
             ValueProjection::Vertex { .. }
             | ValueProjection::Path {

@@ -1146,6 +1146,123 @@ fn native_with_edge_properties(plan: &GlaPlan<GraphValueRow>, data: &Data) -> Ve
 }
 
 #[test]
+fn selected_walk_fields_preserve_root_hop_endpoint_and_path_semantics() {
+    for search in [
+        GraphWalkSearch::All,
+        GraphWalkSearch::Trail,
+        GraphWalkSearch::Acyclic,
+        GraphWalkSearch::Simple,
+        GraphWalkSearch::AnyShortest,
+        GraphWalkSearch::AllShortest,
+    ] {
+        let logical = definition(
+            "MATCH path = (a {p:1})-[:R*0..3 {p:7,q:false}]->(b {p:2}) \
+             WHERE length(path) >= 1 RETURN a,b,path,a.q,b.missing",
+            search,
+            false,
+        );
+        let (physical, _) = AsyncGraphWalkPlan::compile_sort_input(&logical).unwrap();
+        let selected = physical.selected_property_demand().unwrap();
+        assert_eq!(selected.edge.keys(), &[P, Q]);
+        assert_eq!(selected.endpoints.keys(), &[P, Q, PropertyKeyId(5)]);
+        let mut source = scalar_edges(31);
+        let data = Arc::get_mut(&mut source.data).unwrap();
+        for (index, properties) in data.vertices.values_mut().enumerate() {
+            properties.push((Q, CanonicalScalar::Int(index as i64 + 20).into()));
+            properties.push((PropertyKeyId(99), CanonicalScalar::Int(999).into()));
+        }
+        for properties in data.edge_properties.values_mut() {
+            properties.push((PropertyKeyId(99), CanonicalScalar::Int(999).into()));
+        }
+        let expected = native_with_edge_properties(&logical, data);
+        assert_eq!(expected.len(), 1);
+        assert_eq!(expected[0][3], GraphValue::Scalar(CanonicalScalar::Int(20)));
+        for properties in data.vertices.values_mut() {
+            properties.retain(|(key, _)| selected.endpoints.contains(*key));
+        }
+        for properties in data.edge_properties.values_mut() {
+            properties.retain(|(key, _)| selected.edge.contains(*key));
+        }
+        assert_eq!(drain(logical, source), expected, "{search:?}");
+    }
+
+    // A zero-hop result has no edge record to supply the root's fields.
+    let logical = prepared("MATCH path = (a)-[:R*0..0]->(b) RETURN a.p,b.p,path");
+    let (physical, _) = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap();
+    let selected = physical.selected_property_demand().unwrap();
+    assert!(selected.edge.is_empty());
+    assert_eq!(selected.endpoints.keys(), &[P]);
+    let source = Source::new(0);
+    let expected = native_with_edge_properties(logical.plan(), &source.data);
+    assert_eq!(expected.len(), IDS.len());
+    assert_eq!(drain(logical.plan().clone(), source), expected);
+}
+
+#[test]
+fn walk_field_bounds_are_independent_and_never_drop_hidden_sort_fields() {
+    let logical = prepared("MATCH path = (a)-[:R*0..2]->(b) RETURN a,b,path ORDER BY b.q");
+    let (physical, _) = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap();
+    let selected = physical.selected_property_demand().unwrap();
+    assert_eq!(selected.endpoints.keys(), &[Q]);
+    assert!(selected.edge.is_empty());
+
+    let logical = prepared("MATCH path = (a)-[:R*0..2]->(b) RETURN a,b,path");
+    let (mut physical, _) = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap();
+    assert_eq!(
+        physical.selected_property_demand(),
+        Some(EdgeScanPropertySelection {
+            edge: PropertySelection::EMPTY,
+            endpoints: PropertySelection::EMPTY,
+        })
+    );
+    let GlaOperator::ProjectValues { columns } = physical.projection.as_ref() else {
+        panic!("compiled projection");
+    };
+    let ValueProjection::Vertex { slot } = columns[0] else {
+        panic!("projected root");
+    };
+    // Both classes may use their complete bound at once, even with repeated
+    // consumers. One extra edge or endpoint field refuses instead of silently
+    // turning an observed field into NULL or accepting a false hop predicate.
+    let endpoint_columns: Vec<_> = (0..PropertySelection::CAPACITY)
+        .map(|index| ValueProjection::Property {
+            slot,
+            key: PropertyKeyId(index as u64),
+        })
+        .collect();
+    let edge_predicates: Vec<_> = (0..PropertySelection::CAPACITY)
+        .map(|index| WalkEdgePredicate {
+            key: PropertyKeyId(100 + index as u64),
+            value: CanonicalScalar::Int(1).into(),
+        })
+        .collect();
+    physical.projection = Arc::new(GlaOperator::ProjectValues {
+        columns: endpoint_columns.clone(),
+    });
+    physical.edge_predicates = Arc::from(edge_predicates.clone());
+    let selected = physical.selected_property_demand().unwrap();
+    assert_eq!(selected.edge.len(), PropertySelection::CAPACITY);
+    assert_eq!(selected.endpoints.len(), PropertySelection::CAPACITY);
+    let mut too_many_edges = edge_predicates.clone();
+    too_many_edges.push(WalkEdgePredicate {
+        key: PropertyKeyId(u64::MAX),
+        value: CanonicalScalar::Int(1).into(),
+    });
+    physical.edge_predicates = Arc::from(too_many_edges);
+    assert!(physical.selected_property_demand().is_none());
+    physical.edge_predicates = Arc::from(edge_predicates);
+    let mut too_many_endpoints = endpoint_columns;
+    too_many_endpoints.push(ValueProjection::Property {
+        slot,
+        key: PropertyKeyId(u64::MAX),
+    });
+    physical.projection = Arc::new(GlaOperator::ProjectValues {
+        columns: too_many_endpoints,
+    });
+    assert!(physical.selected_property_demand().is_none());
+}
+
+#[test]
 fn scalar_edge_maps_match_literal_edge_selection_and_native_complete_routes() {
     // Accepted identities are literal facts about this fixture, independent
     // of the native comparator and the cursor's per-candidate pruning.

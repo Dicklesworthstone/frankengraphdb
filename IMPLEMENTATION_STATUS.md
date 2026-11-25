@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-24 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-25 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,48 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Authorized cold probes, optional matches and graph paths — qualification pending
+
+Capability-scoped buffered reads now admit fixed-hop correlated EXISTS and
+NOT EXISTS from edge or vertex roots, plus terminal OPTIONAL MATCH from an
+edge root. Ordered reads additionally admit the existing native variable-path
+executor, including zero-hop routes, isolates, repetition modes and shortest
+selection. These sources compose with external ordering, DISTINCT, pagination
+and exact aggregate inputs; FGP text and prepared ordered reads use that same
+route. Ordinary source streaming does not expose path traversal order.
+
+Admission proves independent bounded edge and endpoint field sets across
+predicates, optional projections and hidden ordering cells, then intersects
+them with property authority. Every root and child admits its same-cut
+topology before reading selected payloads. Independent vertex roots and edge
+incidence share one detached storage owner and cumulative physical meter.
+Root exhaustion does not discard final-root children. Denied relations still
+permit valid zero-hop routes; invisible endpoints cannot witness a probe.
+Returned values own their reservations independently of active routes and
+shortest-path scratch. Complete metadata, variable-hop probe bodies,
+independent probe scans and unproved collection scopes still refuse before
+source construction, including under LIMIT zero.
+
+Regression sources cover masked fields and labels, denied relations, parallel
+edges and self-loops, full-width identities, historical updates and deletions,
+isolates, all three directions and six path search modes, hidden sort cells,
+optional null extension, retained output memory, pending-drop cleanup, exact
+and one-short node/native-record limits, and retry after refusal. Path result
+bags have an independent edge-sequence oracle. Served coverage compares
+literal results with resident execution and rebinds one prepared path handle
+across cuts 2, 3 and 2. These are unexecuted assertions, not passing results.
+
+Independent source reviews, scoped pinned formatting and whitespace checks
+completed. Partial UBS scans ran without Cargo or ast-grep; the broader scan's
+sole critical finding is a pre-existing snapshot-sequence comparison, with no
+new production finding identified. Locked dependencies fetched successfully,
+but native checking stopped first at dependency metadata with ENOSPC and then
+inside the pinned asupersync dependency with SIGKILL. Compilation, runtime
+tests, Clippy and full exact-tree qualification remain UNRUN. Keep
+`fgdb-w4-secure-view-v87`, `fgdb-w5-executor-olp` and
+`fgdb-qualify-integrated-nov22-maz0p` open. This extends the selected cold
+profile; it does not change the default server startup or prove full GQL.
 
 ### Beacon maintenance across additive catalog commits — qualification pending
 
@@ -96,9 +138,9 @@ Both sets are intersected with property authority before source access.
 Each root and child admits its relation and both same-cut endpoint topologies
 before selected fields are loaded. Hidden or retired historical candidates
 advance only their private physical position; visible admissions retain the
-existing signed/native allowances. Nested OPTIONAL, probe and collection
-scopes, variable-length walks and complete metadata remain outside this
-selected cold profile and refuse before source construction.
+existing signed/native allowances. The later cold probes, optional matches and
+graph paths extension above widens this selected profile; complete metadata
+and unproved nested scopes still refuse before source construction.
 
 The detached storage owner retains root and child positions, the existing
 bounded incidence continuation, native relation owners, cumulative physical
