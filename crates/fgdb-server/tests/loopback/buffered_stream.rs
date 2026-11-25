@@ -1656,6 +1656,238 @@ fn buffered_server_configuration_rejects_process_local_symbol_overlays() {
 }
 
 #[test]
+fn buffered_probes_optional_and_walks_keep_scoped_rows_and_prepared_history() {
+    run(async |cx| {
+        let (addr, shutdown, mut task, directory) =
+            start_buffered_configured(cx, "buffered-probes-optional-walks", true).await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed_endpoint_edges(cx, &mut owner).await;
+        let scope = reader_grant();
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let mut oracle = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        oracle.select(cx, "social").await.unwrap();
+
+        // Only the age-4 root reaches the age-9 endpoint. The root without
+        // an age has no visible outgoing edge. Neither a denied relation
+        // nor an edge incident to the Company vertex can witness a probe.
+        for (statement, expected) in [
+            (
+                "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[r:KNOWS]->(m) \
+                 WHERE r.age <= 2 AND m.age = 9 AND m.name IS NULL } \
+                 RETURN n.age AS age,n.name AS hidden ORDER BY n",
+                vec![vec![WireValue::Int(4), WireValue::Null]],
+            ),
+            (
+                "MATCH (n:Person) WHERE NOT EXISTS { MATCH (n)-[:KNOWS]->(m) } \
+                 RETURN n.age AS age,n.name AS hidden ORDER BY n",
+                vec![vec![WireValue::Null, WireValue::Null]],
+            ),
+            (
+                "MATCH (n:Person) WHERE EXISTS { \
+                 MATCH (n)-[r:KNOWS|WORKS_AT]->(m) WHERE r.age = 999 } \
+                 RETURN n.age AS age,n.name AS hidden ORDER BY n",
+                vec![],
+            ),
+        ] {
+            let resident = oracle
+                .execute(cx, ExecuteMode::Read, statement, vec![])
+                .await
+                .unwrap();
+            assert_eq!(resident.rows, expected, "{statement}");
+            for mode in [ExecuteMode::ReadStream, ExecuteMode::ReadOrdered] {
+                let result = reader.execute(cx, mode, statement, vec![]).await.unwrap();
+                assert_eq!(result.columns, ["age", "hidden"]);
+                assert_eq!(result.rows, expected, "{mode:?}: {statement}");
+                assert_eq!(result, resident, "{mode:?}: {statement}");
+                assert_eq!(result.outcome, Outcome::Rows { seq: 2 });
+                super::ordered_stream::empty_scratch(&directory).await;
+            }
+        }
+
+        // Both parallel a->b roots find b->a; each remaining root gets one
+        // null-extended row. The optional endpoint's stored name is masked.
+        let optional = "MATCH (a)-[r:KNOWS]->(b) \
+            OPTIONAL MATCH (b)-[s:KNOWS]->(c) WHERE s.age = 3 AND c.name IS NULL \
+            RETURN r.age AS first,s.age AS second,c.age AS finish,c.name AS hidden \
+            ORDER BY first";
+        let optional_rows = vec![
+            vec![
+                WireValue::Int(1),
+                WireValue::Int(3),
+                WireValue::Int(4),
+                WireValue::Null,
+            ],
+            vec![
+                WireValue::Int(2),
+                WireValue::Int(3),
+                WireValue::Int(4),
+                WireValue::Null,
+            ],
+            vec![
+                WireValue::Int(3),
+                WireValue::Null,
+                WireValue::Null,
+                WireValue::Null,
+            ],
+            vec![
+                WireValue::Int(4),
+                WireValue::Null,
+                WireValue::Null,
+                WireValue::Null,
+            ],
+            vec![
+                WireValue::Int(5),
+                WireValue::Null,
+                WireValue::Null,
+                WireValue::Null,
+            ],
+        ];
+        let result = reader
+            .execute(cx, ExecuteMode::ReadOrdered, optional, vec![])
+            .await
+            .unwrap();
+        assert_eq!(result.columns, ["first", "second", "finish", "hidden"]);
+        assert_eq!(result.rows, optional_rows);
+        assert_eq!(result.outcome, Outcome::Rows { seq: 2 });
+        assert_eq!(
+            result,
+            oracle
+                .execute(cx, ExecuteMode::Read, optional, vec![])
+                .await
+                .unwrap()
+        );
+        super::ordered_stream::empty_scratch(&directory).await;
+
+        // There are two one-hop a->b trails and two two-hop trails through
+        // a's self-loop. Projecting equal values must retain all four rows.
+        let historical = "MATCH p = TRAIL (a:Person)-[:KNOWS*1..2]->(b) \
+            FOR SYSTEM_TIME AS OF SEQ $cut WHERE a.age = $start AND b.age = $finish \
+            RETURN length(p) AS hops,a.age AS start,b.age AS finish,b.name AS hidden \
+            ORDER BY hops,start,finish";
+        let arguments = |cut, shift| {
+            vec![
+                ("cut".into(), WireValue::Count(cut)),
+                ("start".into(), WireValue::Int(4 + shift)),
+                ("finish".into(), WireValue::Int(9 + shift)),
+            ]
+        };
+        let handle = reader
+            .prepare_read(cx, historical, arguments(2, 0))
+            .await
+            .unwrap();
+        let updated = owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) WHERE n.age IS NOT NULL SET n.age = n.age + 100",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            updated.outcome,
+            Outcome::WriteCommitted { seq: 3, .. }
+        ));
+        for (cut, shift) in [(2, 0), (3, 100), (2, 0)] {
+            let expected = [1, 1, 2, 2]
+                .map(|hops| {
+                    vec![
+                        WireValue::Int(hops),
+                        WireValue::Int(4 + shift),
+                        WireValue::Int(9 + shift),
+                        WireValue::Null,
+                    ]
+                })
+                .to_vec();
+            let resident = oracle
+                .execute(cx, ExecuteMode::Read, historical, arguments(cut, shift))
+                .await
+                .unwrap();
+            assert_eq!(resident.rows, expected, "cut {cut}");
+            let text_result = reader
+                .execute(
+                    cx,
+                    ExecuteMode::ReadOrdered,
+                    historical,
+                    arguments(cut, shift),
+                )
+                .await
+                .unwrap();
+            assert_eq!(text_result, resident, "cut {cut}");
+            let mut rows = Vec::new();
+            let outcome = reader
+                .execute_prepared_streaming(
+                    cx,
+                    PreparedReadMode::OrderedStream,
+                    handle,
+                    arguments(cut, shift),
+                    |columns| {
+                        assert_eq!(columns, ["hops", "start", "finish", "hidden"]);
+                        Ok(())
+                    },
+                    |row| {
+                        rows.push(row);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(rows, expected, "prepared cut {cut}");
+            assert_eq!(outcome, Outcome::Rows { seq: cut });
+            super::ordered_stream::empty_scratch(&directory).await;
+        }
+        reader.release_prepared(cx, handle).await.unwrap();
+
+        // Walks inside probes remain outside selected-field admission.
+        // LIMIT 0 cannot bypass that proof or emit a schema before refusal.
+        let unsupported = "MATCH (n:Person) WHERE EXISTS { \
+            MATCH (n)-[:KNOWS*1..2]->(m) } RETURN n.age ORDER BY n LIMIT 0";
+        let mut schemas = 0;
+        let mut delivered = 0;
+        let error = reader
+            .execute_streaming(
+                cx,
+                ExecuteMode::ReadOrdered,
+                unsupported,
+                vec![],
+                |_| {
+                    schemas += 1;
+                    Ok(())
+                },
+                |_| {
+                    delivered += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(error), ErrorCode::Statement);
+        assert_eq!((schemas, delivered), (0, 0));
+        reader.ping(cx, 816).await.unwrap();
+        assert_eq!(
+            reader
+                .execute(cx, ExecuteMode::ReadOrdered, historical, arguments(2, 0))
+                .await
+                .unwrap()
+                .rows
+                .len(),
+            4,
+            "refusal must return the only cold-source slot"
+        );
+        reader.close(cx).await.unwrap();
+        oracle.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+        super::ordered_stream::empty_scratch(&directory).await;
+    });
+}
+
+#[test]
 fn buffered_fixed_hop_joins_keep_scoped_rows_aggregates_and_prepared_history() {
     run(async |cx| {
         let (addr, shutdown, mut task, directory) =

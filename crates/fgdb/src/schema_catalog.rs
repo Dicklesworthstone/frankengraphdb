@@ -88,6 +88,15 @@ impl From<CanonicalError> for SymbolCatalogError {
     }
 }
 
+/// An admitted generation may carry the exact immutable-name transition that
+/// produced it. A checkpoint root alone proves the catalog, not that transition.
+#[derive(Clone, Debug)]
+struct AdmittedCatalogGeneration {
+    reference: CatalogRef,
+    catalog: Arc<SchemaCatalog>,
+    transition: Option<SchemaTransitionVersion>,
+}
+
 /// Names and their root travel with the same immutable snapshot as the graph.
 #[derive(Clone, Debug)]
 pub(super) struct SchemaState {
@@ -95,7 +104,7 @@ pub(super) struct SchemaState {
     pub(super) catalog: Arc<SchemaCatalog>,
     // Keep admitted generations flat: recursive predecessor chains can
     // overflow the stack when a long-lived handle releases its history.
-    history: Arc<BTreeMap<CommitSeq, (CatalogRef, Arc<SchemaCatalog>)>>,
+    history: Arc<BTreeMap<CommitSeq, AdmittedCatalogGeneration>>,
     origin_available: bool,
 }
 
@@ -112,10 +121,10 @@ impl SchemaState {
     /// Select an already-admitted generation without storage I/O. Historical
     /// preparation is synchronous and must never borrow a newer schema epoch.
     pub(super) fn at(&self, basis: CommitSeq) -> Result<Self, RebuildError> {
-        if let Some((_, (reference, catalog))) = self.history.range(..basis).next_back() {
+        if let Some((_, generation)) = self.history.range(..basis).next_back() {
             return Ok(Self {
-                reference: Some(*reference),
-                catalog: Arc::clone(catalog),
+                reference: Some(generation.reference),
+                catalog: Arc::clone(&generation.catalog),
                 history: Arc::clone(&self.history),
                 origin_available: self.origin_available,
             });
@@ -150,14 +159,62 @@ impl SchemaState {
             ));
         }
         let catalog = Arc::new(catalog);
-        let history =
-            BTreeMap::from([(catalog.changed_after(), (reference, Arc::clone(&catalog)))]);
+        let history = BTreeMap::from([(
+            catalog.changed_after(),
+            AdmittedCatalogGeneration {
+                reference,
+                catalog: Arc::clone(&catalog),
+                transition: None,
+            },
+        )]);
         Ok(Self {
             reference: Some(reference),
             catalog,
             history: Arc::new(history),
             origin_available: false,
         })
+    }
+
+    /// Prove that this exact committed tick only extended immutable names or
+    /// allocation floors. Beacon definitions select numeric IDs and therefore
+    /// keep the same corpus across this change. This is not a compatibility
+    /// judgment for metadata-returning queries or arbitrary schema effects.
+    /// Callers supply an authenticated native delta batch; this compatibility
+    /// check does not replace marker or payload authentication.
+    ///
+    /// Only apply_entries records a transition after validating both catalog
+    /// generations and the ordered predecessor. Root-only opens deliberately
+    /// lack that evidence; checkpoint catch-up retains its rebuild fallback.
+    pub(super) fn admits_name_only_delta(&self, batch: &LogicalDeltaBatch) -> bool {
+        let [coordinate] = batch.coordinate_entries() else {
+            return false;
+        };
+        let [DeltaRow::Schema {
+            transition_oid,
+            before_epoch,
+            after_epoch,
+        }] = coordinate.rows.as_slice()
+        else {
+            return false;
+        };
+        let sequence = batch.commit_seq();
+        let Some(basis) = sequence.0.checked_sub(1).map(CommitSeq) else {
+            return false;
+        };
+        let Some(generation) = self.history.get(&basis) else {
+            return false;
+        };
+        batch.frontier() == sequence
+            && batch.commit_marker_identity().commit_seq == sequence
+            && (coordinate.graph, coordinate.branch) == (GRAPH, BRANCH)
+            && coordinate.schema_transition == Some(*transition_oid)
+            && coordinate.schema_epoch == *before_epoch
+            && before_epoch.0.checked_add(1) == Some(after_epoch.0)
+            && generation.transition == Some(SchemaTransitionVersion(*transition_oid))
+            && generation.reference.epoch == *after_epoch
+            && generation.catalog.epoch() == *after_epoch
+            && after_epoch.0 <= self.catalog.epoch().0
+            && generation.catalog.changed_after() == basis
     }
 
     /// Admit schema effects before D1, or replay the same admission from the
@@ -260,7 +317,11 @@ impl SchemaState {
                     let mut history = Arc::clone(&self.history);
                     Arc::make_mut(&mut history).insert(
                         catalog.changed_after(),
-                        (transition.after, Arc::clone(&catalog)),
+                        AdmittedCatalogGeneration {
+                            reference: transition.after,
+                            catalog: Arc::clone(&catalog),
+                            transition: Some(SchemaTransitionVersion(transition_oid)),
+                        },
                     );
                     next = Self {
                         reference: Some(transition.after),
@@ -815,6 +876,84 @@ mod tests {
             vec![(PROPERTY, CanonicalScalar::Int(score))],
         );
         write
+    }
+
+    #[test]
+    fn name_only_delta_admission_requires_the_exact_validated_transition() {
+        let ((), report) = run_async_under_lab(0x5ca1_0021, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+            let first = db.register_symbols(&cx, &bindings()).await.unwrap();
+            let first_batch = db.snapshot.delta_index.get(first).unwrap().clone();
+            let mut later = SymbolCatalog::default();
+            later.reserve_through(CatalogSymbol::Property(PropertyKeyId(99)));
+            let last = db.register_symbols(&cx, &later).await.unwrap();
+            let last_batch = db.snapshot.delta_index.get(last).unwrap().clone();
+            assert!(db.snapshot.schema.admits_name_only_delta(&first_batch));
+            assert!(db.snapshot.schema.admits_name_only_delta(&last_batch));
+            let historical = db.snapshot.schema.at(first).unwrap();
+            assert!(historical.admits_name_only_delta(&first_batch));
+            assert!(!historical.admits_name_only_delta(&last_batch));
+
+            for corruption in 0..7 {
+                let mut coordinates = first_batch.coordinate_entries().to_vec();
+                let coordinate = &mut coordinates[0];
+                match corruption {
+                    0 => coordinate.schema_transition = None,
+                    1 => {
+                        let oid = fgdb_types::ids::ObjectId([0xa7; 32]);
+                        coordinate.schema_transition = Some(oid);
+                        let DeltaRow::Schema { transition_oid, .. } = &mut coordinate.rows[0]
+                        else {
+                            unreachable!("the committed catalog tick has one Schema row");
+                        };
+                        *transition_oid = oid;
+                    }
+                    2 => coordinate.schema_epoch.0 += 1,
+                    3 => {
+                        let DeltaRow::Schema { after_epoch, .. } = &mut coordinate.rows[0]
+                        else {
+                            unreachable!("the committed catalog tick has one Schema row");
+                        };
+                        after_epoch.0 += 1;
+                    }
+                    4 => coordinate.rows.push(coordinate.rows[0].clone()),
+                    5 => coordinate.graph = GraphId(GRAPH.0 + 1),
+                    _ => coordinates.push(coordinates[0].clone()),
+                }
+                let forged = LogicalDeltaBatch::from_parts_for_test(
+                    coordinates,
+                    *first_batch.source_template_digest(),
+                    first_batch.commit_marker_identity(),
+                    first,
+                    first,
+                );
+                assert!(
+                    !db.snapshot.schema.admits_name_only_delta(&forged),
+                    "corruption {corruption} must not acquire a catalog proof"
+                );
+            }
+
+            let wrong_cut = LogicalDeltaBatch::from_parts_for_test(
+                first_batch.coordinate_entries().to_vec(),
+                *first_batch.source_template_digest(),
+                first_batch.commit_marker_identity(),
+                last,
+                last,
+            );
+            assert!(!db.snapshot.schema.admits_name_only_delta(&wrong_cut));
+
+            // Loading an authenticated root does not prove which transition
+            // produced it. A checkpoint consumer must rebuild or authenticate
+            // the missing history, rather than inventing schema compatibility.
+            let loaded = SchemaState::load(&cx, &db.store, db.snapshot.schema.reference, last)
+                .await
+                .unwrap();
+            assert!(!loaded.admits_name_only_delta(&first_batch));
+            assert!(!loaded.admits_name_only_delta(&last_batch));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

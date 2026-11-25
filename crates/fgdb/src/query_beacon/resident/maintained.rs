@@ -247,6 +247,7 @@ impl Registry {
                 let mut scratch = 0;
                 entry.resident.collect_affected(
                     batch,
+                    &snapshot.schema,
                     &mut affected,
                     &mut scratch,
                     entry.maintenance,

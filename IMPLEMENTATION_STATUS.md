@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-24 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-25 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,147 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Full-width numeric identity lookups — qualification pending
+
+Numeric identity seeds and indexed equality joins now retain the same full
+128-bit identity domain as the ordinary id() predicate. Exact finite,
+nonnegative integer floats below 2^128 can select vertices and edges above
+the old i64 ceiling. Fractions, nonfinite values, negatives and the exclusive
+upper bound remain ineligible; adjacent identities are never rounded into a
+match. The shared conversion covers resident and buffered external source
+selection as well as selected-cross lookup and exact counts.
+
+Regression sources compare indexed occurrences and counts with the native
+predicate and a literal pair matrix, including duplicates and reversed
+operands. A public durable fixture compares resident, seeded external and
+scan-fallback results at two historical cuts, with an absent identity,
+one-short admission and memory release. Source review and textual checks
+completed; native formatting, compilation, tests, Clippy, UBS and exact-tree
+qualification remain UNRUN after execution-host loss. Keep `fgdb-2acff`,
+`fgdb-w5-executor-olp` and `fgdb-qualify-integrated-nov22-maz0p` open.
+
+### Bounded FGP and Bolt establishment — qualification pending
+
+FGP and Bolt connections have one absolute 30-second protocol-establishment
+allowance after the optional, separately bounded TLS handshake. Partial
+messages, unsuccessful database selections and blocked response writes or
+flushes do not renew it. The connection's runtime clock drives the timer;
+cancellation and drain retain explicit wake paths. FGP retires the allowance
+only after READY flushes, and Bolt only after its authenticated HELLO response
+flushes. Authenticated connections retain their existing lifetime semantics.
+
+The shared private owner uses the foundation timer and cancellation receiver,
+without a background task. Connection futures remain boxed. Regression
+sources drive both real protocol dispatchers with empty and fragmented setup,
+blocked writes/flushes, cancellation/drain, final-response backpressure and
+an authenticated connection that remains usable after an hour of virtual time.
+Independent source and pinned-foundation API reviews completed. Native
+formatting, compilation, tests, Clippy, UBS and full exact-tree proof remain
+UNRUN after execution-host loss. Keep `fgdb-w10-fgp-core-5b1`,
+`fgdb-w10-server-rte` and `fgdb-qualify-integrated-nov22-maz0p` open.
+
+### Authorized cold probes, optional matches and graph paths — qualification pending
+
+Capability-scoped buffered reads now admit fixed-hop correlated EXISTS and
+NOT EXISTS from edge or vertex roots, plus terminal OPTIONAL MATCH from an
+edge root. Ordered reads additionally admit the existing native variable-path
+executor, including zero-hop routes, isolates, repetition modes and shortest
+selection. These sources compose with external ordering, DISTINCT, pagination
+and exact aggregate inputs; FGP text and prepared ordered reads use that same
+route. Ordinary source streaming does not expose path traversal order.
+
+Admission proves independent bounded edge and endpoint field sets across
+predicates, optional projections and hidden ordering cells, then intersects
+them with property authority. Every root and child admits its same-cut
+topology before reading selected payloads. Independent vertex roots and edge
+incidence share one detached storage owner and cumulative physical meter.
+Root exhaustion does not discard final-root children. Denied relations still
+permit valid zero-hop routes; invisible endpoints cannot witness a probe.
+Returned values own their reservations independently of active routes and
+shortest-path scratch. Complete metadata, variable-hop probe bodies,
+independent probe scans and unproved collection scopes still refuse before
+source construction, including under LIMIT zero.
+
+Regression sources cover masked fields and labels, denied relations, parallel
+edges and self-loops, full-width identities, historical updates and deletions,
+isolates, all three directions and six path search modes, hidden sort cells,
+optional null extension, retained output memory, pending-drop cleanup, exact
+and one-short node/native-record limits, and retry after refusal. Path result
+bags have an independent edge-sequence oracle. Served coverage compares
+literal results with resident execution and rebinds one prepared path handle
+across cuts 2, 3 and 2. These are unexecuted assertions, not passing results.
+
+Independent source reviews, scoped pinned formatting and whitespace checks
+completed. Partial UBS scans ran without Cargo or ast-grep; the broader scan's
+sole critical finding is a pre-existing snapshot-sequence comparison, with no
+new production finding identified. Locked dependencies fetched successfully,
+but native checking stopped first at dependency metadata with ENOSPC and then
+inside the pinned asupersync dependency with SIGKILL. Compilation, runtime
+tests, Clippy and full exact-tree qualification remain UNRUN. Keep
+`fgdb-w4-secure-view-v87`, `fgdb-w5-executor-olp` and
+`fgdb-qualify-integrated-nov22-maz0p` open. This extends the selected cold
+profile; it does not change the default server startup or prove full GQL.
+
+### Beacon maintenance across additive catalog commits — qualification pending
+
+Maintained text/vector indexes and their optional graph-source pins now advance
+across validated immutable-name registrations and symbol-allocation-floor
+changes. These catalog operations preserve the numeric label/property identities
+in an existing Beacon definition, so their committed tick has no changed
+documents to reindex.
+
+The schema owner retains the exact transition identity only after admitting its
+catalog successor and predecessor. Maintenance requires that retained proof,
+the single-row schema shape, matching graph/branch, epochs and sequence before
+treating the tick as a no-document update. The existing work meter, failure
+fence, final atomic publication and historical pins remain active. Explicit
+retained-history refresh uses the same rule. A root-only open carries no
+transition proof; checkpoint catch-up keeps its existing authoritative rebuild
+fallback when that evidence is absent.
+
+Regression sources cover exact and forged admission proofs, historical cuts,
+plain and graph-enabled registrations, unchanged text/vector results, old pins,
+zero document/scratch allowances, zero-work refusal and the next ordinary graph
+write compared with a fresh index. General standing-query schema handling is
+still outside this change.
+
+Independent source review and textual checks completed. Pinned Rust formatting,
+compilation, native tests, Clippy, UBS and exact-tree qualification remain UNRUN
+after execution-host loss. Keep `fgdb-t38fv`,
+`fgdb-rc1111-durable-watermarks-c1g98` and
+`fgdb-qualify-integrated-nov22-maz0p` open.
+
+### Chronicle malformed-marker recovery — qualification pending
+
+Recovery now distinguishes a missing canonical marker field from an illegal tag
+already present in the captured log. A damaged frame length can no longer hide
+an illegal effect-source, predecessor, merge-reference or payload-availability
+tag behind the torn-tail outcome. Both read-only scanning and writable recovery
+refuse that corruption; writable recovery preserves the damaged bytes and any
+following committed entries. The public marker decoder and durable encoding are
+unchanged.
+
+The prefix decoder also checks that the head-update count and minimum fixed
+suffix fit the declared canonical body before allocation or update reads.
+The bound uses the actual frame declaration, not only the global maximum.
+A new acknowledged-commit regression changes one count bit and one length bit;
+both scanner postures and writable recovery must refuse without truncation,
+then reopen the independently repaired bytes. Direct and streamed boundary
+cases retain legal missing-byte outcomes and reject impossible counts.
+
+Regression sources cover all five discriminant sites in final and middle
+entries, both scanner postures, writer recovery, byte preservation and recovery
+after independent repair. A separate direct/streamed decoder control exercises
+every prefix of a valid frame with all optional fields and a convincing false
+trailer embedded in a digest. The classifier does not search arbitrary payload
+bytes for trailer sentinels. This closes the identified illegal-tag case, not
+every possible ambiguity between coordinated corruption and missing bytes.
+
+Independent source review and textual checks completed. Pinned Rust formatting,
+compilation, native tests, Clippy, UBS and exact-tree qualification remain UNRUN
+after execution-host loss. Keep `fgdb-w2-recovery-rzmr` and
+`fgdb-qualify-integrated-nov22-maz0p` open.
 
 ### Cold cross-leaf node budgets — qualification pending
 
@@ -44,9 +185,9 @@ Both sets are intersected with property authority before source access.
 Each root and child admits its relation and both same-cut endpoint topologies
 before selected fields are loaded. Hidden or retired historical candidates
 advance only their private physical position; visible admissions retain the
-existing signed/native allowances. Nested OPTIONAL, probe and collection
-scopes, variable-length walks and complete metadata remain outside this
-selected cold profile and refuse before source construction.
+existing signed/native allowances. The later cold probes, optional matches and
+graph paths extension above widens this selected profile; complete metadata
+and unproved nested scopes still refuse before source construction.
 
 The detached storage owner retains root and child positions, the existing
 bounded incidence continuation, native relation owners, cumulative physical

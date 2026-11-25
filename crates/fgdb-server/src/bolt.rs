@@ -391,6 +391,23 @@ pub(crate) async fn run(
     stream: Box<dyn DuplexIo>,
     local: Option<std::net::SocketAddr>,
 ) {
+    let establishment = crate::tls::Establishment::default();
+    establishment
+        .serve(
+            cx,
+            &server.shutdown,
+            Box::pin(run_inner(cx, server, stream, local, &establishment)),
+        )
+        .await;
+}
+
+async fn run_inner(
+    cx: &Cx,
+    server: &Server,
+    stream: Box<dyn DuplexIo>,
+    local: Option<std::net::SocketAddr>,
+    establishment: &crate::tls::Establishment,
+) {
     let waiter = server.shutdown.waiter();
     let mut io = Io {
         stream,
@@ -447,6 +464,9 @@ pub(crate) async fn run(
             || close
         {
             return;
+        }
+        if connection.token.is_some() {
+            establishment.complete();
         }
     }
 }

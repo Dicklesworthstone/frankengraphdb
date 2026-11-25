@@ -423,7 +423,14 @@ impl ResidentIndex {
                         })?;
                     cx.checkpoint()
                         .map_err(crate::DerivedCheckpointError::Interrupted)?;
-                    self.collect_affected(&batch, &mut affected, &mut scratch, policy, &work)?;
+                    self.collect_affected(
+                        &batch,
+                        &database.snapshot.schema,
+                        &mut affected,
+                        &mut scratch,
+                        policy,
+                        &work,
+                    )?;
                 }
                 self.apply_affected(
                     &database.snapshot,
@@ -487,7 +494,14 @@ impl ResidentIndex {
                     return Err(Error::IncompleteDelta { after, through });
                 }
                 after = batch.commit_seq();
-                self.collect_affected(batch, &mut affected, &mut scratch, policy, work)?;
+                self.collect_affected(
+                    batch,
+                    &database.snapshot.schema,
+                    &mut affected,
+                    &mut scratch,
+                    policy,
+                    work,
+                )?;
             }
         }
         self.apply_affected(&database.snapshot, through, affected, scratch, policy, work)
@@ -495,9 +509,12 @@ impl ResidentIndex {
 
     /// The same row-family admission serves explicit delta-window refresh and
     /// one-tick commit maintenance. An unknown family never advances a watermark.
+    /// Name-only transitions need the owner's exact admission proof: the frozen
+    /// numeric-ID projection is unchanged, but its source frontier still advances.
     fn collect_affected(
         &self,
         batch: &LogicalDeltaBatch,
+        schema: &crate::schema_catalog::SchemaState,
         affected: &mut BTreeSet<VId>,
         scratch: &mut usize,
         policy: ReadPolicy,
@@ -506,6 +523,12 @@ impl ResidentIndex {
         for coordinate in batch.coordinate_entries() {
             work.borrow_mut().charge(1)?;
             if coordinate.schema_transition.is_some() {
+                if schema.admits_name_only_delta(batch) {
+                    // The proof admits exactly one Schema row. Account that
+                    // row without rescanning or rebuilding unchanged documents.
+                    work.borrow_mut().charge(1)?;
+                    continue;
+                }
                 return Err(Error::UnsupportedDelta);
             }
             for row in &coordinate.rows {
@@ -1072,6 +1095,142 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn admitted_name_ticks_preserve_live_indexes_and_retained_refresh() {
+        use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+
+        let ((), report) = run_async_under_lab(0xbeac_1105, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            db.write(&commit, document(1)).await.unwrap();
+            let first = db.write(&commit, document(2)).await.unwrap();
+            let mut lagging = db.prepare_beacon_index(&query, &options()).unwrap();
+            let old = lagging.snapshot();
+            let plain = db
+                .register_beacon_index(&query, &options(), ReadPolicy::default())
+                .unwrap();
+            let graph = db
+                .register_beacon_graph_index(&query, &options(), ReadPolicy::default())
+                .unwrap();
+            let fenced = db
+                .register_beacon_index(
+                    &query,
+                    &options(),
+                    ReadPolicy {
+                        max_work_units: 0,
+                        ..ReadPolicy::default()
+                    },
+                )
+                .unwrap();
+            let old_graph = db.beacon_index_snapshot(&query, &graph).unwrap();
+
+            let mut names = SymbolCatalog::default();
+            names
+                .bind_all([
+                    ("text", CatalogSymbol::Property(PropertyKeyId(1))),
+                    ("vector", CatalogSymbol::Property(PropertyKeyId(2))),
+                    ("R", CatalogSymbol::Relation(RelationId(1))),
+                ])
+                .unwrap();
+            let named = db.register_symbols(&commit, &names).await.unwrap();
+            let mut floors = SymbolCatalog::default();
+            floors.reserve_through(CatalogSymbol::Property(PropertyKeyId(99)));
+            let advanced = db.register_symbols(&commit, &floors).await.unwrap();
+            assert!(advanced > named);
+
+            for handle in [&plain, &graph] {
+                let status = db.beacon_index_status(&query, handle).unwrap();
+                assert!(status.failure.is_none());
+                assert_eq!(status.source_sequence, advanced);
+                assert_eq!(status.last_refresh.from, named);
+                assert_eq!(status.last_refresh.through, advanced);
+                assert_eq!(status.last_refresh.touched_vertices, 0);
+                let pin = db.beacon_index_snapshot(&query, handle).unwrap();
+                assert_eq!(pin.stats(), old.stats());
+                for search in searches() {
+                    assert_eq!(
+                        pin.search(&query, search, ReadPolicy::default()).unwrap(),
+                        old.search(&query, search, ReadPolicy::default()).unwrap()
+                    );
+                }
+            }
+            let current_graph = db.beacon_index_snapshot(&query, &graph).unwrap();
+            assert_eq!(
+                current_graph.graph_source.as_ref().unwrap().snapshot.frontier,
+                advanced
+            );
+            assert_eq!(old_graph.source_sequence(), first);
+            assert_eq!(
+                old_graph.graph_source.as_ref().unwrap().snapshot.frontier,
+                first
+            );
+
+            // A name-only tick still owes its work allowance and cannot revive
+            // an already fenced registration on a later catalog change.
+            let failed = db.beacon_index_status(&query, &fenced).unwrap();
+            assert_eq!(failed.source_sequence, first);
+            assert_eq!(failed.failure.as_ref().unwrap().at, named);
+            assert!(matches!(
+                failed.failure.as_ref().unwrap().cause.as_ref(),
+                Error::Index(BeaconError::WorkBudgetExceeded)
+            ));
+
+            // Refresh the older generation through two distinct, validated
+            // catalog transitions without admitting even one changed document.
+            let no_documents = ReadPolicy {
+                max_staging_rows: 0,
+                max_source_scratch: 0,
+                ..ReadPolicy::default()
+            };
+            let mut historical = lagging.clone();
+            let report = historical
+                .refresh(&query, &db, Some(named), no_documents)
+                .unwrap();
+            assert_eq!(report.through, named);
+            assert_eq!(report.commits, 1);
+            assert_eq!(report.touched_vertices, 0);
+            let report = lagging
+                .refresh(&query, &db, Some(advanced), no_documents)
+                .unwrap();
+            assert_eq!(report.commits, 2);
+            assert_eq!(report.touched_vertices, 0);
+            assert_eq!(lagging.snapshot().stats(), old.stats());
+
+            // The next graph mutation uses the newer schema epoch. Both live
+            // maintenance and explicit catch-up still update their real corpus.
+            let next = db.write(&commit, document(3)).await.unwrap();
+            lagging
+                .refresh(&query, &db, Some(next), ReadPolicy::default())
+                .unwrap();
+            let rebuilt = db.prepare_beacon_index(&query, &options()).unwrap();
+            for handle in [&plain, &graph] {
+                let status = db.beacon_index_status(&query, handle).unwrap();
+                assert!(status.failure.is_none());
+                assert_eq!(status.source_sequence, next);
+                assert_eq!(status.last_refresh.touched_vertices, 1);
+                for search in searches() {
+                    let expected = rebuilt
+                        .search(&query, search, ReadPolicy::default())
+                        .unwrap();
+                    assert_eq!(
+                        db.search_beacon_index(&query, handle, search, ReadPolicy::default())
+                            .unwrap(),
+                        expected
+                    );
+                    assert_eq!(
+                        lagging.search(&query, search, ReadPolicy::default()).unwrap(),
+                        expected
+                    );
+                }
+            }
+            assert_eq!(old.source_sequence(), first);
+            assert_eq!(old.stats().documents, 2);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

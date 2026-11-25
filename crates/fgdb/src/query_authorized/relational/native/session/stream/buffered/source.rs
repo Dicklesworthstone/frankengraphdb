@@ -7,7 +7,7 @@ use fgdb_delta_types::LabelId;
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaDirection, GraphValue};
 use fgdb_gql::edge_stream::{
     AsyncEdgeCandidate, AsyncEdgeJoinSource, AsyncEdgeScanEvent, AsyncEdgeScanRecord,
-    AsyncEdgeScanSource, EdgeExpansionSourceError, EdgeScanSourceError,
+    AsyncEdgeScanSource, AsyncGraphWalkSource, EdgeExpansionSourceError, EdgeScanSourceError,
 };
 use fgdb_gql::stream::{
     AsyncVertexCandidate, AsyncVertexScanEvent, AsyncVertexScanRecord, AsyncVertexScanSource,
@@ -378,6 +378,22 @@ fn admit_edge<C, Clock: FnMut() -> u64>(
 }
 
 impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send, P> Source<'_, V, Clock, P> {
+    fn retain_vertex(
+        &self,
+        fields: BufferedVertexProperties,
+    ) -> Result<VertexRecord, AuthorizedBufferedError> {
+        let mut charge = self
+            .pool
+            .reserve(self.cx, 0)
+            .map_err(BufferedReadError::Memory)?;
+        let labels = labels(fields.labels(), self.cx, &self.execution, &mut charge)?;
+        Ok(VertexRecord {
+            labels,
+            fields,
+            scratch: Arc::new(Mutex::new(charge)),
+        })
+    }
+
     fn retain_edge(
         &self,
         fields: BufferedEdgePropertiesEndpoints,
@@ -805,6 +821,177 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncEdgeJoinSource
             scratch(self.cx, &guard._evaluation)?;
         }
         Ok(())
+    }
+}
+
+impl<V: Vfs + Clone, Clock: FnMut() -> u64 + Send> AsyncGraphWalkSource
+    for Source<'_, V, Clock, BufferedEdgeJoinScanState>
+{
+    type RootRecord = VertexRecord;
+
+    async fn next_root_candidate<C: Send>(
+        &mut self,
+        control: &mut (impl FnMut(AsyncVertexScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<AsyncVertexCandidate<VertexRecord>>, EdgeScanSourceError<Self::Error, C>>
+    {
+        loop {
+            let Some(state) = self.position.take() else {
+                return Ok(None);
+            };
+            let backend = self.backend.as_mut().expect("source owns backend");
+            let mut scan = backend
+                .view
+                .partition_mut()
+                .resume_edge_join_scan(self.cx, state)
+                .map_err(|error| EdgeScanSourceError::Source(error.into()))?;
+            let execution = &self.execution;
+            let mut admit = |vid, original: &[LabelId]| {
+                {
+                    let mut live = execution.borrow_mut();
+                    live.poll_fresh().map_err(Control::Query)?;
+                    if !live.permit.predicates().allows_vertex(original) {
+                        return Ok(false);
+                    }
+                    live.root_node(vid).map_err(Control::Query)?;
+                }
+                control(AsyncVertexScanEvent::Candidate(vid)).map_err(Control::Native)?;
+                Ok(true)
+            };
+            let mut observe = |_| {
+                execution
+                    .borrow_mut()
+                    .reserve_work(0)
+                    .map_err(Control::Query)
+            };
+            let result = self
+                .cx
+                .with_restriction_async(scan.next_admitted_vertex_properties_candidate_with(
+                    self.cx,
+                    self.endpoint_keys,
+                    &mut admit,
+                    &mut observe,
+                ))
+                .erase_send()
+                .await;
+            self.position = Some(scan.into_state());
+            let Some(candidate) = result.map_err(edge_control)? else {
+                return Ok(None);
+            };
+            let Some(fields) = candidate.row else {
+                continue;
+            };
+            return Ok(Some(AsyncVertexCandidate {
+                vid: candidate.vid,
+                record: Some(
+                    self.retain_vertex(fields)
+                        .map_err(EdgeScanSourceError::Source)?,
+                ),
+            }));
+        }
+    }
+
+    fn root_evaluation_event(
+        &self,
+        root: &VertexRecord,
+        event: GlaExecutionEvent,
+    ) -> Result<(), Self::Error> {
+        if event == GlaExecutionEvent::ScratchEntry {
+            scratch(self.cx, &root.scratch)?;
+        }
+        Ok(())
+    }
+
+    fn reserve_walk_output<C>(
+        &self,
+        root: &VertexRecord,
+        records: &[EdgeRecord],
+        columns: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<OutputGuard, EdgeScanSourceError<Self::Error, C>> {
+        // Output bytes have an independent owner: probe witnesses and active
+        // routes can drop, and shortest-path scratch can reset, without
+        // refunding any returned value. Include the root even for zero hops.
+        let mut guard = self.reserve_join_output(records, columns, control)?;
+        let mut bytes = 1024usize;
+        for (_, value) in root.fields.properties() {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+            let payload = value
+                .canonical_encoded_len()
+                .map_err(|_| EdgeScanSourceError::Source(BufferedReadError::SizeOverflow.into()))?;
+            bytes = payload
+                .checked_mul(4)
+                .and_then(|payload| payload.checked_add(256))
+                .and_then(|payload| bytes.checked_add(payload))
+                .ok_or_else(|| {
+                    EdgeScanSourceError::Source(BufferedReadError::SizeOverflow.into())
+                })?;
+        }
+        let bytes = bytes
+            .checked_mul(columns.max(1))
+            .ok_or_else(|| EdgeScanSourceError::Source(BufferedReadError::SizeOverflow.into()))?;
+        control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
+        guard
+            ._copy
+            .grow(self.cx, bytes)
+            .map_err(BufferedReadError::Memory)
+            .map_err(|error| EdgeScanSourceError::Source(error.into()))?;
+        Ok(guard)
+    }
+
+    fn reserve_shortest_state<C>(
+        &self,
+        bytes: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<MemoryCharge, EdgeScanSourceError<Self::Error, C>> {
+        control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
+        self.pool
+            .reserve(self.cx, bytes)
+            .map_err(BufferedReadError::Memory)
+            .map_err(|error| EdgeScanSourceError::Source(error.into()))
+    }
+
+    fn reserve_shortest_output<C>(
+        &self,
+        root: &VertexRecord,
+        records: &[EdgeRecord],
+        hops: usize,
+        columns: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<OutputGuard, EdgeScanSourceError<Self::Error, C>> {
+        let mut guard = self.reserve_walk_output(root, records, columns, control)?;
+        // The shortest driver retains just the final incoming record. Its
+        // complete path/edge/node-list backing therefore needs a separate
+        // bound, including repeats across projected and hidden sort cells.
+        let bytes = hops
+            .checked_mul(size_of::<GraphValue>().max(size_of::<(EId, VId)>()))
+            .and_then(|bytes| bytes.checked_mul(8))
+            .and_then(|bytes| bytes.checked_mul(columns.max(1)))
+            .ok_or_else(|| EdgeScanSourceError::Source(BufferedReadError::SizeOverflow.into()))?;
+        control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
+        guard
+            ._copy
+            .grow(self.cx, bytes)
+            .map_err(BufferedReadError::Memory)
+            .map_err(|error| EdgeScanSourceError::Source(error.into()))?;
+        Ok(guard)
+    }
+
+    fn release_shortest_temporaries(&self, root: &VertexRecord, records: &[EdgeRecord]) {
+        // Labels share the evaluator's root/edge charge and remain live.
+        // Source payloads and output copies have separate reservations.
+        let release = |charge: &Arc<Mutex<MemoryCharge>>, labels: usize| {
+            let mut charge = charge.lock().unwrap_or_else(|error| error.into_inner());
+            let retained = labels * size_of::<LabelId>();
+            let temporary = charge.bytes().saturating_sub(retained);
+            drop(charge.split_off(temporary));
+        };
+        release(&root.scratch, root.labels.capacity());
+        for record in records {
+            release(
+                &record.scratch,
+                record.source_labels.capacity() + record.target_labels.capacity(),
+            );
+        }
     }
 }
 

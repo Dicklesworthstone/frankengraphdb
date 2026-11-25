@@ -1524,14 +1524,10 @@ impl<V: Vfs> CommitCoordinator<V> {
         }
         let total = ENTRY_HEADER_BYTES + body_len + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES;
         if bytes.len() < total {
-            // A complete marker prefix followed by the full fixed suffix means
-            // the physical frame is present under its intrinsic body extent.
-            // The leading length is therefore damaged; silently calling this a
-            // torn tail would discard an acknowledged final commit.
-            if Self::has_complete_intrinsic_entry_extent(bytes) {
-                return Err(EntryDefect::Corrupt);
-            }
-            return Err(EntryDefect::Truncated);
+            // A damaged leading length must not hide a present illegal marker
+            // tag. Distinguish corrupt bytes from missing fields before any
+            // caller can classify this suffix as disposable torn staging.
+            return Err(Self::incomplete_entry_defect(bytes, body_len));
         }
         let body_end = ENTRY_HEADER_BYTES + body_len;
         let marker = crate::marker::decode_canonical(&bytes[ENTRY_HEADER_BYTES..body_end])
@@ -1551,23 +1547,32 @@ impl<V: Vfs> CommitCoordinator<V> {
         Ok((marker, Digest(chain_hash), total))
     }
 
-    /// Does `bytes` contain a whole version-3 entry under the marker's
-    /// self-described canonical extent, independently of the leading length?
-    fn has_complete_intrinsic_entry_extent(bytes: &[u8]) -> bool {
+    /// Classify a frame whose declared extent runs past the captured EOF.
+    /// Present illegal tags and head counts that cannot fit the declared body
+    /// are corruption even if the canonical body cannot finish decoding.
+    /// A complete body plus the fixed framing suffix also
+    /// proves a damaged leading length. Do not search for trailer bytes inside
+    /// the body: arbitrary digests can contain a convincing trailer by chance.
+    fn incomplete_entry_defect(bytes: &[u8], body_len: usize) -> EntryDefect {
         let Some(marker_and_suffix) = bytes.get(ENTRY_HEADER_BYTES..) else {
-            return false;
+            return EntryDefect::Truncated;
         };
-        let Some((_, intrinsic_body_len)) =
-            crate::marker::decode_canonical_prefix(marker_and_suffix)
-        else {
-            return false;
-        };
+        let intrinsic_body_len =
+            match crate::marker::decode_canonical_prefix(marker_and_suffix, body_len) {
+                Ok((_, len)) => len,
+                Err(crate::marker::MarkerDecodeError::Truncated) => return EntryDefect::Truncated,
+                Err(crate::marker::MarkerDecodeError::Corrupt) => return EntryDefect::Corrupt,
+            };
         if intrinsic_body_len > MAX_ENTRY_BODY {
-            return false;
+            return EntryDefect::Corrupt;
         }
         let intrinsic_total =
             ENTRY_HEADER_BYTES + intrinsic_body_len + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES;
-        bytes.len() >= intrinsic_total
+        if bytes.len() >= intrinsic_total {
+            EntryDefect::Corrupt
+        } else {
+            EntryDefect::Truncated
+        }
     }
 
     /// Capsules on disk that no committed marker names.
@@ -1834,6 +1839,124 @@ mod tests {
                     .unwrap()
             })
             .collect()
+    }
+
+    #[test]
+    fn every_honest_frame_prefix_remains_torn_even_with_an_embedded_fake_trailer() {
+        use crate::marker::{HeadUpdate, IdentityCounters};
+        use fgdb_types::{BranchId, GraphId, MarkerRef};
+
+        let frames = scan_fixture_frames();
+        let (mut marker, _, _) =
+            CommitCoordinator::<UnixVfs>::decode_entry(&frames[1]).expect("complete fixture");
+        let previous = MarkerRef {
+            marker_oid: ObjectId([0x91; 32]),
+            commit_seq: CommitSeq::FIRST,
+        };
+        marker.prev_global = Some(previous);
+        marker.head_updates = vec![
+            HeadUpdate {
+                graph: GraphId(1),
+                branch: BranchId(1),
+                expected_previous: Some(previous),
+            },
+            HeadUpdate {
+                graph: GraphId(1),
+                branch: BranchId(2),
+                expected_previous: None,
+            },
+        ];
+        marker.merge_record_oid = Some(ObjectId([0x92; 32]));
+        marker.payload_availability_certificate_oid = Some(ObjectId([0x93; 32]));
+        marker = marker.with_identity_counters(IdentityCounters {
+            vertex: 7,
+            edge: 11,
+        });
+        marker.final_effect_digest = Digest([0xa5; 32]);
+        let body = marker.canonical_bytes().expect("marker encodes");
+        let digest_offset = body
+            .windows(32)
+            .position(|window| window == [0xa5; 32])
+            .expect("unique fixture digest");
+        // Make an internally consistent short-frame trailer inside a legal
+        // digest. Searching raw trailer bytes would misclassify the prefix
+        // ending here as corruption instead of an ordinary interrupted append.
+        let fake_body_len = digest_offset - super::CHAIN_HASH_BYTES;
+        marker.final_effect_digest.0[..4]
+            .copy_from_slice(&(fake_body_len as u32).to_be_bytes());
+        marker.final_effect_digest.0[4..8].copy_from_slice(&super::ENTRY_TRAILER_MAGIC);
+        let hash = marker
+            .chain_hash(crate::marker::CHAIN_ORIGIN)
+            .expect("marker hashes");
+        let frame = CommitCoordinator::<UnixVfs>::encode_entry(&marker, hash).expect("frame");
+        for length in 0..frame.len() {
+            assert!(
+                matches!(
+                    CommitCoordinator::<UnixVfs>::decode_entry(&frame[..length]),
+                    Err(EntryDefect::Truncated)
+                ),
+                "honest frame prefix of {length} bytes must remain repairable"
+            );
+            let mut reader = &frame[..length];
+            let mut retained = Vec::new();
+            let Poll::Ready(result) = poll_once(CommitCoordinator::<UnixVfs>::read_next_entry(
+                &mut reader,
+                &mut retained,
+            )) else {
+                panic!("a slice reader cannot suspend");
+            };
+            let result = result.expect("slice reader");
+            if length == 0 {
+                assert!(result.is_none(), "boundary EOF is not a partial frame");
+            } else {
+                assert!(
+                    matches!(result, Some(Err(EntryDefect::Truncated))),
+                    "streaming prefix of {length} bytes must remain repairable"
+                );
+            }
+        }
+        let (decoded, actual_hash, consumed) =
+            CommitCoordinator::<UnixVfs>::decode_entry(&frame).expect("complete frame");
+        assert_eq!(decoded, marker);
+        assert_eq!(actual_hash, hash);
+        assert_eq!(consumed, frame.len());
+    }
+
+    #[test]
+    fn head_counts_must_leave_room_for_the_fixed_suffix_before_reading_updates() {
+        // Independent format offsets: the fixed fields through the absent
+        // global predecessor occupy 82 body bytes, then the u32 head count.
+        let count_at = super::ENTRY_HEADER_BYTES + 82;
+        let mut prefix = scan_fixture_frames()[0][..count_at + 4].to_vec();
+        for (body_len, head_count, expected) in [
+            (268_u32, 0_u32, EntryDefect::Truncated),
+            (300, 1, EntryDefect::Corrupt),
+            (301, 1, EntryDefect::Truncated),
+            (65_509, 1_977, EntryDefect::Truncated),
+            (65_536, 1_978, EntryDefect::Corrupt),
+            (65_536, u32::MAX, EntryDefect::Corrupt),
+        ] {
+            prefix[4..8].copy_from_slice(&body_len.to_be_bytes());
+            prefix[count_at..count_at + 4].copy_from_slice(&head_count.to_be_bytes());
+            assert_eq!(
+                CommitCoordinator::<UnixVfs>::decode_entry(&prefix),
+                Err(expected),
+                "declared body {body_len}, head count {head_count}"
+            );
+            let mut reader = prefix.as_slice();
+            let mut retained = Vec::new();
+            let Poll::Ready(result) = poll_once(CommitCoordinator::<UnixVfs>::read_next_entry(
+                &mut reader,
+                &mut retained,
+            )) else {
+                panic!("a slice reader cannot suspend");
+            };
+            assert_eq!(
+                result.expect("slice reader"),
+                Some(Err(expected)),
+                "streamed declared body {body_len}, head count {head_count}"
+            );
+        }
     }
 
     // Change the physical log after its first complete entry has passed the

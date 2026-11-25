@@ -1014,21 +1014,80 @@ fn selected_join_property_bounds_are_independent_and_never_truncate() {
 }
 
 #[test]
-fn selected_join_properties_refuse_nested_scopes_before_execution() {
+fn selected_join_properties_include_fixed_probe_and_optional_scopes() {
+    for predicate in ["EXISTS", "NOT EXISTS"] {
+        let definition = selected_definition(&format!(
+            "MATCH (a {{p0:1}})-[r:R]->(b) WHERE {predicate} {{ \
+             MATCH (b)-[s:S]->(c {{p1:2}}) WHERE s.p2 > 0 AND b.p3 = c.p4 \
+             }} RETURN r,a,b.p5 LIMIT 0",
+        ));
+        let compiled = AsyncEdgeJoinPlan::compile(definition.plan()).unwrap();
+        let selected = compiled.selected_property_demand().unwrap();
+        assert_eq!(selected.edge.keys(), &[selected_key(2)]);
+        assert_eq!(
+            selected.endpoints.keys(),
+            &[
+                selected_key(0),
+                selected_key(1),
+                selected_key(3),
+                selected_key(4),
+                selected_key(5),
+            ],
+        );
+    }
+
+    let definition = selected_definition(
+        "MATCH (a {p0:1})-[r:R]->(b) OPTIONAL MATCH (b)-[s:S]->(c {p1:2}) \
+         WHERE s.p2 > 0 AND b.p3 = c.p4 \
+         RETURN r,a,s,c.p5,s.p6 ORDER BY r.p7 DESC LIMIT 0",
+    );
+    let (optional, _) = AsyncEdgeJoinPlan::compile_sort_input(definition.plan()).unwrap();
+    let selected = optional.selected_property_demand().unwrap();
+    assert_eq!(
+        selected.edge.keys(),
+        &[selected_key(2), selected_key(6), selected_key(7)],
+    );
+    assert_eq!(
+        selected.endpoints.keys(),
+        &[
+            selected_key(0),
+            selected_key(1),
+            selected_key(3),
+            selected_key(4),
+            selected_key(5),
+        ],
+    );
+}
+
+#[test]
+fn selected_join_properties_bound_the_entire_correlated_scope() {
+    // Every key is individually legal and the last key belongs only to the
+    // probe. Refuse the union's overflow instead of returning an incomplete
+    // record that would silently turn TRUE into NULL/absence.
+    let predicates = (0..PropertySelection::CAPACITY)
+        .map(|key| format!("b.p{key} = 1"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    for extra in [0, PropertySelection::CAPACITY] {
+        let definition = selected_definition(&format!(
+            "MATCH (a)-[r:R]->(b) WHERE {predicates} AND EXISTS {{ \
+             MATCH (b)-[s:S]->(c) WHERE c.p{extra} = 1 \
+             }} RETURN r,a,b LIMIT 0",
+        ));
+        let compiled = AsyncEdgeJoinPlan::compile(definition.plan()).unwrap();
+        assert_eq!(compiled.selected_property_demand().is_some(), extra == 0);
+    }
+}
+
+#[test]
+fn selected_join_properties_refuse_unproved_scopes_before_execution() {
     use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder};
 
     let probe = plan(
-        "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } \
+        "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R*1..2]->(c) } \
          RETURN r,a,b LIMIT 0",
     );
     assert!(probe.selected_property_demand().is_none());
-
-    let definition = prepared(
-        "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[s:R]->(c) \
-         RETURN r,a,s,c LIMIT 0",
-    );
-    let (optional, _) = AsyncEdgeJoinPlan::compile_sort_input(definition.plan()).unwrap();
-    assert!(optional.selected_property_demand().is_none());
 
     let mut outer = GraphPatternBuilder::new();
     outer.vertex("a").unwrap().vertex("b").unwrap();

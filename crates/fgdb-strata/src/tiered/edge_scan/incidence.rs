@@ -405,6 +405,51 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         result
     }
 
+    /// Advance the independent vertex root through topology-first admission,
+    /// then materialize only selected fields of the same historical winner.
+    /// Denied or retired roots advance their private position with no payload.
+    /// Vertex and incidence reads share this driver's cumulative work limit;
+    /// detaching, reattaching and moving to another root never reset it.
+    /// Error or dropping a polled pending pull closes every source position.
+    pub async fn next_admitted_vertex_properties_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        keys: PropertySelection,
+        admit: &mut (impl FnMut(VId, &[fgdb_delta_types::LabelId]) -> Result<bool, C> + Send),
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate<BufferedVertexProperties>>, BufferedScanError<C>>
+    {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        self.continuation = None;
+        let mut scan = driver.root.partition.vertex_scan_from_state(
+            cx,
+            self.as_of,
+            driver.vertices.take(),
+            driver.root.work.used,
+            driver.root.work.limit,
+        )?;
+        let used = &mut self.work;
+        let result = scan
+            .next_admitted_properties_candidate_with(cx, keys, admit, &mut |event| {
+                observe(event)?;
+                if event == BufferedScanEvent::Work {
+                    *used = used.saturating_add(1);
+                }
+                Ok(())
+            })
+            .await;
+        self.work = scan.work_used();
+        let state = scan.into_state();
+        driver.root.work.used = self.work;
+        if result.is_ok() {
+            driver.vertices = Some(state);
+            self.driver = Some(driver);
+        }
+        result
+    }
+
     pub async fn next_with_endpoints<C: Send>(
         &mut self,
         cx: &QueryCx,

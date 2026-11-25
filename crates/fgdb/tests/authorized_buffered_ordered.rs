@@ -36,6 +36,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+#[path = "authorized_buffered_ordered/walks.rs"]
+mod walks;
+
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0xa8; 32]);
 const L: LabelId = LabelId(1);
 const H: LabelId = LabelId(2);
@@ -44,6 +47,9 @@ const SECRET: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(7);
 const S: RelationId = RelationId(8);
 const T: RelationId = RelationId(9);
+
+#[path = "authorized_buffered_ordered/vertex_probes.rs"]
+mod vertex_probes;
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0xa9; 32], NS, [0xaa; 32])
@@ -1198,7 +1204,10 @@ fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_
                 "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN a,r,b,s,c,properties(c) LIMIT 0",
                 false,
             ),
-            ("MATCH (a)-[r:R*1..2]->(b) RETURN a,b LIMIT 0", false),
+            (
+                "MATCH (a)-[r:R*1..2]->(b) RETURN a,properties(b) LIMIT 0",
+                false,
+            ),
             (
                 "UNWIND [] AS item CALL() { MATCH (n:L) WITH n AS carried RETURN properties([carried][0]) AS fields } RETURN fields LIMIT 0",
                 false,
@@ -2468,6 +2477,165 @@ fn cold_fixed_joins_compose_with_external_ordering_and_exact_aggregates() {
                 assert!(!ordered.is_closed());
                 drop(ordered);
                 assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_optional_and_probe_scopes_preserve_masks_history_and_exact_allowances() {
+    use GraphAggregateValue::{Count, Integer};
+    let ((), report) = run_async_under_lab(0xa8_0218, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let cx = c.query();
+        let authority = issuer();
+        let args = GqlParameters::new();
+        for hidden in [false, true] {
+            let (vfs, _db, old, current) = fixture(&commit, hidden).await;
+            for (at, first, weight, total) in [(old, 3, 7, 16), (current, 30, 17, 26)] {
+                for nodes in [9, 10] {
+                    // Three roots and two visible OPTIONAL witnesses own ten
+                    // endpoint records. Copying the active outer binding does
+                    // not reread it; hidden incoming edges grant no witness.
+                    let token = authority.issue_at(&grant(nodes, 4), 100).unwrap();
+                    let pool = memory();
+                    let (mut ordered, _) = session(
+                        &commit,
+                        &cx,
+                        &vfs,
+                        &pool,
+                        &authority,
+                        &token,
+                        at,
+                        || 100,
+                        policy(4),
+                    )
+                    .await;
+                    let text = "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (a)<-[s:R|S]-(c) \
+                         WHERE s.score > 0 AND c.score > 0 \
+                         RETURN r,a.score AS first,s,c.score AS prior,s.score AS weight, \
+                         c.secret AS hidden_vertex,s.secret AS hidden_edge ORDER BY r,s";
+                    let prepared = ordered.prepare(&cx, text, &args).unwrap();
+                    let result = ordered
+                        .execute_ordered(&cx, &prepared, &args)
+                        .unwrap()
+                        .await;
+                    if nodes == 9 {
+                        assert!(matches!(result, Err(NativeSpoolError::Authorized(error))
+                            if matches!(*error, QueryError::Authorization(
+                                Error::LimitExceeded(LimitDimension::Nodes)))));
+                    } else {
+                        let mut cursor = result.unwrap();
+                        assert_eq!(cursor.snapshot_seq(), at);
+                        assert_eq!(
+                            values(&mut cursor).await,
+                            vec![
+                                vec![
+                                    GraphValue::Edge(EId(101)),
+                                    scalar(first),
+                                    null(),
+                                    null(),
+                                    null(),
+                                    null(),
+                                    null()
+                                ],
+                                vec![
+                                    GraphValue::Edge(EId(102)),
+                                    scalar(first),
+                                    null(),
+                                    null(),
+                                    null(),
+                                    null(),
+                                    null()
+                                ],
+                                vec![
+                                    GraphValue::Edge(EId(103)),
+                                    scalar(1),
+                                    GraphValue::Edge(EId(101)),
+                                    scalar(first),
+                                    scalar(weight),
+                                    null(),
+                                    null()
+                                ],
+                                vec![
+                                    GraphValue::Edge(EId(103)),
+                                    scalar(1),
+                                    GraphValue::Edge(EId(102)),
+                                    scalar(first),
+                                    scalar(9),
+                                    null(),
+                                    null()
+                                ],
+                            ],
+                            "hidden={hidden}; cut={at:?}",
+                        );
+                    }
+                    assert!(!ordered.is_closed());
+                    // Both terminal exhaustion and an exact one-short refusal
+                    // return the cold backend for another execution.
+                    let retry = ordered
+                        .prepare(&cx, "MATCH (a)-[r:R]->(b) RETURN r ORDER BY r", &args)
+                        .unwrap();
+                    let mut cursor = ordered
+                        .execute_ordered(&cx, &retry, &args)
+                        .unwrap()
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        values(&mut cursor).await,
+                        [101, 102, 103]
+                            .map(|id| vec![GraphValue::Edge(EId(id))])
+                            .to_vec(),
+                    );
+                    drop(cursor);
+                    if nodes == 10 {
+                        for body in [
+                            "(a)<-[s:R]-(c) WHERE c.secret = 999 OR s.secret = 999",
+                            "(a)<-[s:S]-(c)",
+                        ] {
+                            let text = format!(
+                                "MATCH (a)-[r:R]->(b) OPTIONAL MATCH {body} \
+                                 RETURN r,s,c ORDER BY r",
+                            );
+                            let prepared = ordered.prepare(&cx, &text, &args).unwrap();
+                            let mut cursor = ordered
+                                .execute_ordered(&cx, &prepared, &args)
+                                .unwrap()
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                values(&mut cursor).await,
+                                [101, 102, 103]
+                                    .map(|id| vec![GraphValue::Edge(EId(id)), null(), null()])
+                                    .to_vec(),
+                                "hidden={hidden}; cut={at:?}; body={body}",
+                            );
+                        }
+                        let aggregate = ordered
+                            .prepare(
+                                &cx,
+                                "MATCH (a)-[r:R]->(b) WHERE EXISTS { \
+                                 MATCH (b)-[s:R]->(c) WHERE s.score = 5 AND c.score = 3 \
+                                 } RETURN count(*) AS rows,sum(r.score) AS total",
+                                &args,
+                            )
+                            .unwrap();
+                        let mut cursor = ordered
+                            .execute_ordered_aggregate(&cx, &aggregate, &args)
+                            .unwrap()
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            aggregates(&mut cursor).await,
+                            vec![vec![Count(2), Integer(total)]],
+                        );
+                    }
+                    assert!(!ordered.is_closed());
+                    drop(ordered);
+                    assert_eq!(pool.used(), 0);
+                }
             }
         }
     });

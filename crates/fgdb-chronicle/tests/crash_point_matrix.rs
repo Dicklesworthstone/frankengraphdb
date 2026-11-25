@@ -1492,6 +1492,215 @@ fn a_bounded_length_increase_on_the_final_durable_entry_fails_closed() {
 }
 
 #[test]
+fn impossible_head_count_never_turns_an_acknowledged_marker_into_a_torn_tail() {
+    let dir = scratch_dir("bounded-length-impossible-head-count");
+    under_lab(0x4845_4144, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        commit_ok(&mut coordinator, cx, 1).await;
+        let first_len = log_bytes(&dir).len();
+        coordinator
+            .commit(cx, &capsule_bytes(2), |allocated, capsule_ref| {
+                assert_eq!(allocated, 2);
+                CommitMarker {
+                    logical_command_seq: 20,
+                    commit_seq: allocated,
+                    effect_source: EffectSource::Local {
+                        capsule_ref,
+                        logical_delta_template_digest: digest(0),
+                    },
+                    prev_global: None,
+                    head_updates: Vec::new(),
+                    merge_record_oid: None,
+                    coordinate_schema_transition_digest: digest(0),
+                    topology_epoch: 0,
+                    policy_epoch: 0,
+                    revocation_index: 0,
+                    txn_token: [0; 16],
+                    commit_hlc: 1_002,
+                    final_effect_digest: digest(0),
+                    authorization_decision_digest: digest(0),
+                    resource_effect_digest: digest(0),
+                    payload_availability_certificate_oid: None,
+                    flags: 0,
+                    identity_counters: None,
+                }
+                .with_identity_counters(IdentityCounters::default())
+            })
+            .await
+            .expect("the marker must actually cross D2 and be acknowledged");
+        let expected_chain = coordinator.chain().clone();
+        drop(coordinator);
+
+        let pristine = log_bytes(&dir);
+        let body_start = first_len + 8;
+        let body_len = u32::from_be_bytes(
+            pristine[first_len + 4..body_start]
+                .try_into()
+                .expect("second entry body length"),
+        );
+        assert_eq!(body_len, 284, "identity-counter fixture layout");
+        let head_count_at = body_start + 8 + 8 + 1 + 32 + 32 + 1;
+        assert_eq!(
+            &pristine[head_count_at..head_count_at + 4],
+            &[0; 4],
+            "the acknowledged marker has no head updates"
+        );
+        // Without the frame-size bound, the fixed suffix becomes six
+        // synthetic 33-byte heads. The next head consumes the genuine chain
+        // hash as its two identities and the duplicate length's first byte
+        // as its absent-predecessor tag; the following head then hits EOF.
+        // This requires no forged chain hash, trailer, or illegal tag.
+        for offset in [118, 151, 184, 217, 250, 283, 316] {
+            assert_eq!(pristine[body_start + offset], 0, "synthetic head tag");
+        }
+        let damaged_len = body_len | (1_u32 << 12);
+        assert_eq!(body_len & (1_u32 << 12), 0);
+        assert!((damaged_len as usize) <= MAX_ENTRY_BODY);
+        assert!((damaged_len as usize) > pristine.len() - first_len);
+        // 128 heads fit the global profile but not this declared frame;
+        // 2048 heads cannot fit either. Each count changes just one bit.
+        for damaged_count in [1_u32 << 7, 1_u32 << 11] {
+            let mut damaged = pristine.clone();
+            damaged[head_count_at..head_count_at + 4]
+                .copy_from_slice(&damaged_count.to_be_bytes());
+            damaged[first_len + 4..body_start].copy_from_slice(&damaged_len.to_be_bytes());
+            write_log(&dir, &damaged);
+
+            let history =
+                CommitCoordinator::scan_committed_chain(cx, &UnixVfs::new(), &dir).await;
+            assert!(
+                matches!(history, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                "{damaged_count} heads cannot fit this frame; the scan must refuse: {history:?}"
+            );
+            let summary = CommitCoordinator::scan_committed_prefix(
+                cx,
+                &UnixVfs::new(),
+                &dir,
+                CommitSeq::FIRST,
+            )
+            .await;
+            assert!(
+                matches!(summary, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                "an earlier requested cut cannot hide the corrupt suffix: {summary:?}"
+            );
+            assert_eq!(log_bytes(&dir), damaged, "read-only scans preserve all bytes");
+
+            let recovered = CommitCoordinator::open(cx, &dir, keys()).await;
+            assert!(
+                matches!(recovered, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                "writable recovery must not truncate the acknowledged marker: {recovered:?}"
+            );
+            assert_eq!(log_bytes(&dir), damaged, "refusal preserves the complete log");
+        }
+
+        write_log(&dir, &pristine);
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("independently repaired bytes must reopen after the refusal");
+        assert_eq!(reopened.chain().entries(), expected_chain.entries());
+        assert_eq!(reopened.chain().verify(), Ok(()));
+        assert_eq!(reopened.discarded_tail_bytes(), 0);
+        assert_eq!(log_bytes(&dir), pristine);
+    });
+}
+
+#[test]
+fn illegal_marker_tags_under_a_bounded_length_increase_never_truncate_committed_history() {
+    let dir = scratch_dir("bounded-length-illegal-tags");
+    under_lab(0x5441_4753, move |cx| async move {
+        let cx = &cx;
+        let (pristine, first_len) = three_commit_log(&dir, cx).await;
+        let second_body_len = u32::from_be_bytes(
+            pristine[first_len + 4..first_len + 8]
+                .try_into()
+                .expect("second entry length"),
+        ) as usize;
+        let second_end = first_len + 8 + second_body_len + 32 + 8;
+        assert!(second_end < pristine.len(), "the fixture has a successor");
+
+        // The second canonical marker has one branch update with a previous
+        // head, and absent global, merge and payload-availability references.
+        // Name every discriminant independently of the decoder under test.
+        let effect_tag = 8 + 8;
+        let global_tag = effect_tag + 1 + 32 + 32;
+        let head_previous_tag = global_tag + 1 + 4 + 16 + 16;
+        let merge_tag = head_previous_tag + 1 + 32 + 8;
+        let availability_tag = merge_tag + 1 + 32 + 8 + 8 + 8 + 16 + 8 + 32 + 32 + 32;
+        let tags = [
+            ("effect", effect_tag, 1),
+            ("global predecessor", global_tag, 0),
+            ("branch predecessor", head_previous_tag, 1),
+            ("merge", merge_tag, 0),
+            ("payload availability", availability_tag, 0),
+        ];
+        for with_successor in [false, true] {
+            let end = if with_successor {
+                pristine.len()
+            } else {
+                second_end
+            };
+            for (name, offset, original_tag) in tags {
+                let mut damaged = pristine[..end].to_vec();
+                let tag = first_len + 8 + offset;
+                assert_eq!(damaged[tag], original_tag, "{name} fixture tag");
+                damaged[tag] = 0x7f;
+                damaged[first_len + 4..first_len + 8]
+                    .copy_from_slice(&(MAX_ENTRY_BODY as u32).to_be_bytes());
+                assert!(
+                    damaged.len() - first_len < MAX_ENTRY_BODY,
+                    "the corrupted declaration must run past captured EOF"
+                );
+                write_log(&dir, &damaged);
+
+                let history =
+                    CommitCoordinator::scan_committed_chain(cx, &UnixVfs::new(), &dir).await;
+                assert!(
+                    matches!(history, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                    "{name}, successor={with_successor}: a read-only scan must refuse \
+                     present corruption; got {history:?}"
+                );
+                let summary = CommitCoordinator::scan_committed_prefix(
+                    cx,
+                    &UnixVfs::new(),
+                    &dir,
+                    CommitSeq::FIRST,
+                )
+                .await;
+                assert!(
+                    matches!(summary, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                    "{name}, successor={with_successor}: even an earlier requested cut \
+                     must not hide the damaged suffix; got {summary:?}"
+                );
+                assert_eq!(log_bytes(&dir), damaged, "read-only scans preserve evidence");
+
+                let recovered = CommitCoordinator::open(cx, &dir, keys()).await;
+                assert!(
+                    matches!(recovered, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
+                    "{name}, successor={with_successor}: recovery must not treat an \
+                     acknowledged marker as torn staging; got {recovered:?}"
+                );
+                assert_eq!(
+                    log_bytes(&dir),
+                    damaged,
+                    "failed recovery preserves both the damaged marker and its successors"
+                );
+            }
+        }
+        // A refusal must release the writer lease, and no decoder failure may
+        // contaminate a subsequent independently repaired open.
+        write_log(&dir, &pristine);
+        let recovered = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("the restored committed bytes remain recoverable");
+        assert_eq!(recovered.chain().len(), 3);
+        assert_eq!(recovered.chain().verify(), Ok(()));
+    });
+}
+
+#[test]
 fn a_corrupt_final_entry_trailer_length_fails_closed() {
     let dir = scratch_dir("corrupt-trailer-length");
     under_lab(38, move |cx| async move {

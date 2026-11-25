@@ -2,7 +2,9 @@
 //! This explicit capability leaves the ordinary row-local source unchanged.
 
 use super::*;
-use crate::edge_stream::{AsyncGraphWalkSource, EdgeScanError, EdgeScanSourceError};
+use crate::edge_stream::{
+    AsyncGraphWalkSource, EdgeScanError, EdgeScanPropertySelection, EdgeScanSourceError,
+};
 
 /// A vertex scan with correlated EXISTS/NOT EXISTS bindings. Fixed edges and
 /// finite variable-length atoms reuse the native probe compiler and endpoint
@@ -53,6 +55,44 @@ impl<Row: VertexScanOutput> AsyncVertexProbePlan<Row> {
             _ => unreachable!("native vertex projection"),
         };
         Self { inner, columns }
+    }
+
+    /// Prove the selected fields needed by the root, every fixed-hop probe
+    /// binding, and all projected cells, including hidden ordering inputs.
+    /// Root keys share the endpoint set because a probe can revisit its root.
+    /// This is only a demand proof; the source still authorizes each topology
+    /// and intersects both selections with the current property scope.
+    /// Variable walks, independent scans, collections and complete metadata
+    /// remain outside this bounded selection profile.
+    #[must_use]
+    pub fn selected_property_demand(&self) -> Option<EdgeScanPropertySelection> {
+        let mut selected = EdgeScanPropertySelection {
+            edge: PropertySelection::EMPTY,
+            endpoints: PropertySelection::EMPTY,
+        };
+        for test in self.inner.tests.iter() {
+            match test {
+                Test::Predicate(predicate) => {
+                    if let Some(key) = predicate.property_key() {
+                        selected.endpoints.insert(key).ok()?;
+                    }
+                }
+                Test::Identity(_) => {}
+                Test::Binding(instruction) => selected.include_instruction(instruction)?,
+                Test::Probe(probe) => probe.include_selected_properties(&mut selected)?,
+                Test::Collect(_) => return None,
+            }
+        }
+        match self.inner.projection.as_ref() {
+            GlaOperator::Project { .. } => {}
+            GlaOperator::ProjectValues { columns } => {
+                for column in columns {
+                    selected.include_projection(column)?;
+                }
+            }
+            _ => return None,
+        }
+        Some(selected)
     }
 }
 

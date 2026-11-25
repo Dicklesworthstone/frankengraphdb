@@ -842,17 +842,34 @@ impl MarkerChain {
 /// after a crash) from corruption (not), and only the caller knows which
 /// position the entry occupied.
 pub fn decode_canonical(bytes: &[u8]) -> Option<CommitMarker> {
-    let (marker, consumed) = decode_canonical_prefix(bytes)?;
+    let (marker, consumed) = decode_canonical_prefix(bytes, bytes.len()).ok()?;
     (consumed == bytes.len()).then_some(marker)
+}
+
+/// Why a canonical prefix cannot be decoded.
+///
+/// A missing byte can be a torn append. A present illegal tag or impossible
+/// head count cannot: recovery must preserve that distinction even when the
+/// outer frame length is damaged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarkerDecodeError {
+    Truncated,
+    Corrupt,
 }
 
 /// Decode one canonical marker prefix and report its exact byte extent.
 ///
-/// The commit-log framing layer uses this only when the declared frame length
-/// runs past EOF. Finding a complete marker plus the fixed framing suffix proves
-/// that the bytes are a complete damaged frame, not a genuinely torn write.
+/// The commit-log framing layer uses this when the declared frame length runs
+/// past EOF. A complete marker plus the fixed framing suffix proves that the
+/// bytes are a complete damaged frame. A present illegal tag independently
+/// proves corruption; only missing fields remain eligible for torn-tail repair.
+/// `max_body_len` is the caller's canonical-body bound, independent of the
+/// available prefix: a count that cannot fit that bound is already corruption.
 /// Other callers must use [`decode_canonical`], which rejects trailing bytes.
-pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usize)> {
+pub(crate) fn decode_canonical_prefix(
+    bytes: &[u8],
+    max_body_len: usize,
+) -> Result<(CommitMarker, usize), MarkerDecodeError> {
     let mut cursor = ByteReader::new(bytes);
 
     let logical_command_seq = cursor.u64()?;
@@ -865,12 +882,28 @@ pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usi
         },
         // An unknown arm tag is rejected, never skipped: a reader that does
         // not know a tag must not pretend to have understood the marker.
-        _ => return None,
+        _ => return Err(MarkerDecodeError::Corrupt),
     };
 
     let prev_global = cursor.optional_marker_ref()?;
 
     let head_count = cursor.u32()? as usize;
+    // Every update needs two 128-bit identities and an option tag. The fixed
+    // suffix still needs its merge/availability tags, schema and effect
+    // digests, epochs, token, HLC and flags; optional values only add bytes.
+    // Refuse before allocating or reading updates. Otherwise an impossible
+    // count followed by EOF looks like a torn append and permits truncating
+    // an acknowledged frame whose leading length was also damaged.
+    const MIN_HEAD_UPDATE_BYTES: usize = 16 + 16 + 1;
+    const MIN_TRAILING_BYTES: usize = 1 + 32 + 8 + 8 + 8 + 16 + 8 + 32 + 32 + 32 + 1 + 4;
+    let minimum_body_len = head_count
+        .checked_mul(MIN_HEAD_UPDATE_BYTES)
+        .and_then(|heads| cursor.position().checked_add(heads))
+        .and_then(|prefix| prefix.checked_add(MIN_TRAILING_BYTES))
+        .ok_or(MarkerDecodeError::Corrupt)?;
+    if minimum_body_len > max_body_len {
+        return Err(MarkerDecodeError::Corrupt);
+    }
     let mut head_updates = Vec::with_capacity(head_count.min(1024));
     for _ in 0..head_count {
         head_updates.push(HeadUpdate {
@@ -883,7 +916,7 @@ pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usi
     let merge_record_oid = match cursor.byte()? {
         0x00 => None,
         0x01 => Some(ObjectId(cursor.array32()?)),
-        _ => return None,
+        _ => return Err(MarkerDecodeError::Corrupt),
     };
     let coordinate_schema_transition_digest = Digest(cursor.array32()?);
     let topology_epoch = cursor.u64()?;
@@ -897,7 +930,7 @@ pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usi
     let payload_availability_certificate_oid = match cursor.byte()? {
         0x00 => None,
         0x01 => Some(ObjectId(cursor.array32()?)),
-        _ => return None,
+        _ => return Err(MarkerDecodeError::Corrupt),
     };
     let flags = cursor.u32()?;
     let identity_counters = if flags & MARKER_FLAG_IDENTITY_COUNTERS != 0 {
@@ -910,7 +943,7 @@ pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usi
     };
 
     let consumed = cursor.position();
-    Some((
+    Ok((
         CommitMarker {
             logical_command_seq,
             commit_seq,
@@ -935,8 +968,8 @@ pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usi
     ))
 }
 
-/// A bounds-checked big-endian reader. Every accessor returns `Option` so a
-/// truncated buffer can never produce a partially-populated marker.
+/// A bounds-checked big-endian reader. Missing input remains distinguishable
+/// from invalid tags, so an incomplete frame cannot hide present corruption.
 struct ByteReader<'a> {
     bytes: &'a [u8],
     position: usize,
@@ -951,61 +984,67 @@ impl<'a> ByteReader<'a> {
         self.position
     }
 
-    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
-        let end = self.position.checked_add(len)?;
-        let slice = self.bytes.get(self.position..end)?;
+    fn take(&mut self, len: usize) -> Result<&'a [u8], MarkerDecodeError> {
+        let end = self
+            .position
+            .checked_add(len)
+            .ok_or(MarkerDecodeError::Corrupt)?;
+        let slice = self
+            .bytes
+            .get(self.position..end)
+            .ok_or(MarkerDecodeError::Truncated)?;
         self.position = end;
-        Some(slice)
+        Ok(slice)
     }
 
-    fn byte(&mut self) -> Option<u8> {
+    fn byte(&mut self) -> Result<u8, MarkerDecodeError> {
         self.take(1).map(|slice| slice[0])
     }
 
-    fn u32(&mut self) -> Option<u32> {
+    fn u32(&mut self) -> Result<u32, MarkerDecodeError> {
         let slice = self.take(4)?;
-        Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+        Ok(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
     }
 
-    fn u64(&mut self) -> Option<u64> {
+    fn u64(&mut self) -> Result<u64, MarkerDecodeError> {
         let slice = self.take(8)?;
         let mut value = [0u8; 8];
         value.copy_from_slice(slice);
-        Some(u64::from_be_bytes(value))
+        Ok(u64::from_be_bytes(value))
     }
 
-    fn u128(&mut self) -> Option<u128> {
+    fn u128(&mut self) -> Result<u128, MarkerDecodeError> {
         let slice = self.take(16)?;
         let mut value = [0u8; 16];
         value.copy_from_slice(slice);
-        Some(u128::from_be_bytes(value))
+        Ok(u128::from_be_bytes(value))
     }
 
-    fn array16(&mut self) -> Option<[u8; 16]> {
+    fn array16(&mut self) -> Result<[u8; 16], MarkerDecodeError> {
         let slice = self.take(16)?;
         let mut value = [0u8; 16];
         value.copy_from_slice(slice);
-        Some(value)
+        Ok(value)
     }
 
-    fn array32(&mut self) -> Option<[u8; 32]> {
+    fn array32(&mut self) -> Result<[u8; 32], MarkerDecodeError> {
         let slice = self.take(32)?;
         let mut value = [0u8; 32];
         value.copy_from_slice(slice);
-        Some(value)
+        Ok(value)
     }
 
     /// The `Option<MarkerRef>` encoding: a presence byte then, if present, the
-    /// oid and sequence. The outer Option is "did the bytes parse"; the inner
-    /// one is "was a ref present".
-    fn optional_marker_ref(&mut self) -> Option<Option<MarkerRef>> {
+    /// oid and sequence. An absent presence byte is truncated; an illegal
+    /// presence byte is corrupt even when later fields are missing.
+    fn optional_marker_ref(&mut self) -> Result<Option<MarkerRef>, MarkerDecodeError> {
         match self.byte()? {
-            0x00 => Some(None),
-            0x01 => Some(Some(MarkerRef {
+            0x00 => Ok(None),
+            0x01 => Ok(Some(MarkerRef {
                 marker_oid: ObjectId(self.array32()?),
                 commit_seq: CommitSeq(self.u64()?),
             })),
-            _ => None,
+            _ => Err(MarkerDecodeError::Corrupt),
         }
     }
 }

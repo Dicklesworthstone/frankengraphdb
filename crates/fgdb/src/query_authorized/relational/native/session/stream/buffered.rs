@@ -12,9 +12,12 @@ use fgdb_delta_types::PropertySelection;
 use fgdb_delta_types::catalog::SymbolCatalog;
 use fgdb_gql::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeScanCursor, AsyncEdgeScanPlan,
-    EdgeScanPropertySelection, EdgeScanState,
+    AsyncGraphWalkCursor, AsyncGraphWalkPlan, EdgeScanPropertySelection, EdgeScanState,
 };
-use fgdb_gql::stream::{AsyncVertexScanCursor, AsyncVertexScanPlan, VertexScanPropertyDemand};
+use fgdb_gql::stream::{
+    AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexScanCursor, AsyncVertexScanPlan,
+    VertexScanPropertyDemand,
+};
 use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::CommitCx;
@@ -142,6 +145,8 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     /// profile supports native ordered vertex-local, single-edge and fixed-hop
     /// join patterns with one, any or finite relation selectors, selected edge
     /// and endpoint properties, local predicates, paths, SKIP and LIMIT.
+    /// Vertex-rooted fixed-hop EXISTS/NOT EXISTS use this same cold incidence
+    /// source; a witness never multiplies the admitted outer root.
     /// Each root and child edge is authorized before selected fields decode;
     /// a final root keeps its incidence owner until traversal completes.
     /// Complete native-run images are not enabled by this constructor; its
@@ -357,17 +362,35 @@ type EdgeCursor<'q, V, C> =
     AsyncEdgeScanCursor<Source<'q, V, C, BufferedEdgeScanState>, Checkpoint<'q>>;
 type JoinCursor<'q, V, C> =
     AsyncEdgeJoinCursor<Source<'q, V, C, BufferedEdgeJoinScanState>, Checkpoint<'q>>;
+type VertexProbeCursor<'q, V, C> = AsyncVertexProbeCursor<
+    Source<'q, V, C, BufferedEdgeJoinScanState>,
+    Checkpoint<'q>,
+    GraphValueRow,
+>;
+type WalkCursor<'q, V, C> =
+    AsyncGraphWalkCursor<Source<'q, V, C, BufferedEdgeJoinScanState>, Checkpoint<'q>>;
 
 enum Native<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> {
     Vertex(Box<VertexCursor<'q, V, C>>),
     Edge(Box<EdgeCursor<'q, V, C>>),
     Join(Box<JoinCursor<'q, V, C>>),
+    VertexProbe(Box<VertexProbeCursor<'q, V, C>>),
+    // Walks are private input for the external ordering owner. Their DFS/BFS
+    // occurrence order must never be exposed as an ordinary ordered stream.
+    Walk(Box<WalkCursor<'q, V, C>>),
 }
 
 impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
     fn state(&self) -> VertexScanState {
         match self {
             Self::Vertex(cursor) => cursor.state(),
+            Self::VertexProbe(cursor) => cursor.state(),
+            Self::Walk(cursor) => match cursor.state() {
+                EdgeScanState::Open => VertexScanState::Open,
+                EdgeScanState::Exhausted => VertexScanState::Exhausted,
+                EdgeScanState::Closed => VertexScanState::Closed,
+                EdgeScanState::Failed => VertexScanState::Failed,
+            },
             Self::Edge(cursor) => match cursor.state() {
                 EdgeScanState::Open => VertexScanState::Open,
                 EdgeScanState::Exhausted => VertexScanState::Exhausted,
@@ -391,6 +414,16 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
                 result
                     .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
                     .map_err(source::vertex_error)
+            }),
+            Self::VertexProbe(cursor) => cursor.next().await.map(|result| {
+                result
+                    .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
+                    .map_err(source::vertex_error)
+            }),
+            Self::Walk(cursor) => cursor.next().await.map(|result| {
+                result
+                    .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
+                    .map_err(source::edge_error)
             }),
             Self::Edge(cursor) => cursor.next().await.map(|result| {
                 result
@@ -514,6 +547,8 @@ enum Scan {
     Vertex(AsyncVertexScanPlan<GraphValueRow>),
     Edge(AsyncEdgeScanPlan),
     Join(AsyncEdgeJoinPlan),
+    VertexProbe(AsyncVertexProbePlan<GraphValueRow>),
+    Walk(AsyncGraphWalkPlan),
 }
 
 struct Plan {
@@ -547,6 +582,25 @@ impl Plan {
         }
     }
 
+    fn vertex_probe(
+        plan: AsyncVertexProbePlan<GraphValueRow>,
+        selection: EdgeScanPropertySelection,
+    ) -> Self {
+        Self {
+            scan: Scan::VertexProbe(plan),
+            keys: selection.edge,
+            endpoint_keys: selection.endpoints,
+        }
+    }
+
+    fn walk(plan: AsyncGraphWalkPlan, selection: EdgeScanPropertySelection) -> Self {
+        Self {
+            scan: Scan::Walk(plan),
+            keys: selection.edge,
+            endpoint_keys: selection.endpoints,
+        }
+    }
+
     /// Reserve the selected cursor's fixed allocation before opening any scan.
     /// On refusal the caller still owns its original backend. Successful
     /// sources park it in the return slot when they close or unwind.
@@ -563,6 +617,8 @@ impl Plan {
             Scan::Vertex(_) => size_of::<VertexCursor<'q, V, C>>(),
             Scan::Edge(_) => size_of::<EdgeCursor<'q, V, C>>(),
             Scan::Join(_) => size_of::<JoinCursor<'q, V, C>>(),
+            Scan::VertexProbe(_) => size_of::<VertexProbeCursor<'q, V, C>>(),
+            Scan::Walk(_) => size_of::<WalkCursor<'q, V, C>>(),
         };
         let metadata = backend
             .view
@@ -644,6 +700,52 @@ impl Plan {
                     source, plan, policy, checkpoint,
                 )))
             }
+            Scan::VertexProbe(plan) => {
+                // The joined driver keeps independent root and incidence
+                // positions over the same cut and cumulative physical meter.
+                // Vertex-only/empty-edge graphs still own real root rows.
+                let position = backend
+                    .view
+                    .partition_mut()
+                    .edge_scan(cx, at)?
+                    .into_join_scan()
+                    .into_state();
+                let source = Source::new(
+                    slot.take().expect("admitted backend"),
+                    returned.clone(),
+                    Some(position),
+                    self.keys,
+                    self.endpoint_keys,
+                    cx,
+                    execution.clone(),
+                );
+                Native::VertexProbe(Box::new(AsyncVertexProbeCursor::new(
+                    source, plan, policy, checkpoint,
+                )))
+            }
+            Scan::Walk(plan) => {
+                // Root vertices are independent of the edge selector: even a
+                // denied relation can have valid zero-hop results and isolates.
+                // Every real hop is admitted by the scoped incidence source.
+                let position = backend
+                    .view
+                    .partition_mut()
+                    .edge_scan(cx, at)?
+                    .into_join_scan()
+                    .into_state();
+                let source = Source::new(
+                    slot.take().expect("admitted backend"),
+                    returned.clone(),
+                    Some(position),
+                    self.keys,
+                    self.endpoint_keys,
+                    cx,
+                    execution.clone(),
+                );
+                Native::Walk(Box::new(AsyncGraphWalkCursor::new(
+                    source, plan, policy, checkpoint,
+                )))
+            }
         };
         Ok((native, metadata))
     }
@@ -699,8 +801,7 @@ fn compile(
             keys.endpoints = select(keys.endpoints);
             Ok(Plan::join(plan, keys))
         }
-    } else {
-        let plan = AsyncVertexScanPlan::compile(pattern.plan()).map_err(plan_error)?;
+    } else if let Ok(plan) = AsyncVertexScanPlan::compile(pattern.plan()) {
         let keys = match plan.property_demand() {
             VertexScanPropertyDemand::Topology => PropertySelection::EMPTY,
             VertexScanPropertyDemand::Properties(keys) => select(keys),
@@ -709,6 +810,14 @@ fn compile(
             }
         };
         Ok(Plan::vertex(plan, keys))
+    } else {
+        let plan = AsyncVertexProbePlan::compile(pattern.plan()).map_err(plan_error)?;
+        let mut keys = plan
+            .selected_property_demand()
+            .ok_or(QueryError::StreamingUnsupported { facade })?;
+        keys.edge = select(keys.edge);
+        keys.endpoints = select(keys.endpoints);
+        Ok(Plan::vertex_probe(plan, keys))
     }
 }
 
