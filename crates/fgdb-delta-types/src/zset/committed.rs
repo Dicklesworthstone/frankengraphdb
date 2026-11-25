@@ -6,6 +6,8 @@
 //! translate edge/vertex deletion before-images into exact signed tuples.
 //! Properties, labels and valid-time filtering are not part of this projection.
 //! Schema/constraint changes refuse rather than silently changing its meaning.
+//! A live publisher may attest an immutable-name-only catalog lineage for one
+//! exact borrowed batch; detached readers never infer that compatibility.
 //!
 //! Every tick consumes one WHOLE committed batch, including all of its relation
 //! coordinates. The input arrangement and consumed marker advance only when the
@@ -96,6 +98,78 @@ impl Anchor {
             marker: batch.commit_marker_identity(),
             template: *batch.source_template_digest(),
         }
+    }
+}
+
+/// One live publisher's attestation of an immutable-name-only catalog lineage.
+///
+/// The evidence borrows the exact authenticated batch; it cannot be applied to
+/// another batch or retained in a checkpoint. The publisher must already have
+/// validated this batch against its authoritative catalog and proved that all
+/// epochs from the origin through `current_epoch` differ only by additions of
+/// immutable names or allocation floors. A schema row additionally requires
+/// validation of the referenced before/after catalog objects and transition.
+///
+/// `CommitCx` witnesses the publisher's authority, not cryptographic validity
+/// or schema compatibility by itself. Epoch arithmetic alone is not evidence.
+/// This attestation is only for numeric-ID topology; metadata-returning query
+/// definitions need their own compatibility judgment.
+pub struct CommittedSchemaCompatibility<'a> {
+    batch: &'a LogicalDeltaBatch,
+    graph: GraphId,
+    branch: BranchId,
+    current_epoch: SchemaEpoch,
+}
+
+impl<'a> CommittedSchemaCompatibility<'a> {
+    /// Attest the already-validated catalog contract described above. The
+    /// input adapter still checks the complete batch envelope, succession,
+    /// coordinate scope, epoch bounds and the exact schema-tick shape.
+    pub fn attest_name_only_catalog(
+        _cx: &CommitCx,
+        batch: &'a LogicalDeltaBatch,
+        graph: GraphId,
+        branch: BranchId,
+        current_epoch: SchemaEpoch,
+    ) -> Self {
+        Self {
+            batch,
+            graph,
+            branch,
+            current_epoch,
+        }
+    }
+
+    /// Match the exact borrowed input, not a reconstructed or projected batch.
+    /// Compositions must check this before reading any side-channel projection
+    /// (such as vertex membership) from a separately supplied batch argument.
+    pub fn matches_batch(&self, batch: &LogicalDeltaBatch) -> bool {
+        core::ptr::eq(self.batch, batch)
+    }
+
+    fn admits_epoch(&self, epoch: SchemaEpoch) -> bool {
+        epoch.0 <= self.current_epoch.0
+    }
+
+    fn admits_schema_tick(&self) -> bool {
+        let [coordinate] = self.batch.coordinate_entries() else {
+            return false;
+        };
+        let [
+            DeltaRow::Schema {
+                transition_oid,
+                before_epoch,
+                after_epoch,
+            },
+        ] = coordinate.rows.as_slice()
+        else {
+            return false;
+        };
+        (coordinate.graph, coordinate.branch) == (self.graph, self.branch)
+            && coordinate.schema_transition == Some(*transition_oid)
+            && coordinate.schema_epoch == *before_epoch
+            && before_epoch.0.checked_add(1) == Some(after_epoch.0)
+            && self.admits_epoch(*after_epoch)
     }
 }
 
@@ -191,7 +265,7 @@ impl CommittedEdgeInput {
         }
         let next = after.checked_successor().map_err(IndexError::from)?;
         let batch = checked_batch(index, next)?;
-        self.prepare_batch(batch, limbs, control).map(Some)
+        self.prepare_batch(batch, None, limbs, control).map(Some)
     }
 
     /// Consume the next batch from the SAME live, authenticated commit source.
@@ -231,16 +305,41 @@ impl CommittedEdgeInput {
             .checked_successor()
             .map_err(IndexError::from)?;
         validate_batch(batch, next)?;
-        self.prepare_batch(batch, limbs, control)
+        self.prepare_batch(batch, None, limbs, control)
+    }
+
+    /// Consume the exact borrowed batch attested by the live catalog publisher.
+    /// The ordinary and indexed entrypoints remain strict. This lane admits
+    /// old prepared graph writes only within the attested compatible lineage;
+    /// it never rewrites the batch, marker or source-template digest.
+    pub fn prepare_catalog_successor<E>(
+        &mut self,
+        _cx: &CommitCx,
+        compatibility: &CommittedSchemaCompatibility<'_>,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<EdgeInputUpdate<'_>, EdgeInputError<E>> {
+        event(control, ZSetEvent::Work)?;
+        if (self.graph, self.branch) != (compatibility.graph, compatibility.branch) {
+            return Err(EdgeInputError::SchemaChanged);
+        }
+        let next = self
+            .frontier()
+            .checked_successor()
+            .map_err(IndexError::from)?;
+        validate_batch(compatibility.batch, next)?;
+        self.prepare_batch(compatibility.batch, Some(compatibility), limbs, control)
     }
 
     fn prepare_batch<E>(
         &mut self,
         batch: &LogicalDeltaBatch,
+        compatibility: Option<&CommittedSchemaCompatibility<'_>>,
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<EdgeInputUpdate<'_>, EdgeInputError<E>> {
         let anchor = Anchor::of(batch);
+        let name_only_tick = compatibility.is_some_and(|proof| proof.admits_schema_tick());
         let mut created = BTreeMap::new();
         let mut removed = BTreeMap::new();
         let mut epochs = BTreeMap::new();
@@ -254,22 +353,27 @@ impl CommittedEdgeInput {
             if coordinate.graph != self.graph || coordinate.branch != self.branch {
                 continue;
             }
-            if coordinate.schema_transition.is_some() {
+            if coordinate.schema_transition.is_some() && !name_only_tick {
                 return Err(EdgeInputError::SchemaChanged);
             }
             let known = epochs
                 .get(&coordinate.relation)
                 .or_else(|| self.epochs.get(&coordinate.relation));
-            match known {
-                Some(epoch) if *epoch != coordinate.schema_epoch => {
+            if let Some(proof) = compatibility {
+                if !proof.admits_epoch(coordinate.schema_epoch)
+                    || known.is_some_and(|epoch| !proof.admits_epoch(*epoch))
+                {
                     return Err(EdgeInputError::SchemaChanged);
                 }
-                Some(_) => {}
-                None => {
-                    event(control, ZSetEvent::ScratchEntry)?;
-                    event(control, ZSetEvent::ScratchEntry)?;
-                    epochs.insert(coordinate.relation, coordinate.schema_epoch);
-                }
+            } else if known.is_some_and(|epoch| *epoch != coordinate.schema_epoch) {
+                return Err(EdgeInputError::SchemaChanged);
+            }
+            if known != Some(&coordinate.schema_epoch) {
+                // The replacement remains private until the same guard that
+                // publishes topology and the original history anchor commits.
+                event(control, ZSetEvent::ScratchEntry)?;
+                event(control, ZSetEvent::ScratchEntry)?;
+                epochs.insert(coordinate.relation, coordinate.schema_epoch);
             }
             for row in &coordinate.rows {
                 event(control, ZSetEvent::Work)?;
@@ -295,6 +399,7 @@ impl CommittedEdgeInput {
                         created.insert(*eid, tuple);
                         delta.accumulate(tuple, ZWeight::ONE, limbs, control)?;
                     }
+                    DeltaRow::Schema { .. } if name_only_tick => {}
                     DeltaRow::Schema { .. } | DeltaRow::Constraint { .. } => {
                         return Err(EdgeInputError::SchemaChanged);
                     }
