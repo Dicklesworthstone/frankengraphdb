@@ -1195,7 +1195,7 @@ fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_
                 false,
             ),
             (
-                "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN a,r,b,s,c LIMIT 0",
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN a,r,b,s,c,properties(c) LIMIT 0",
                 false,
             ),
             ("MATCH (a)-[r:R*1..2]->(b) RETURN a,b LIMIT 0", false),
@@ -1246,6 +1246,31 @@ fn cold_effect_and_cut_admission_precedes_payloads_and_scratch_even_under_empty_
         assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
         assert_eq!(observations(&files), before);
         assert!(!ordered.is_closed());
+        // The original fixed-hop LIMIT-zero input is now supported. It still
+        // cannot suppress admission failures once execution is polled.
+        let joined = ordered
+            .prepare(
+                &cx,
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN a,r,b,s,c LIMIT 0",
+                &args,
+            )
+            .unwrap();
+        let before = observations(&files);
+        let bytes = pool.used();
+        let execution = ordered.execute_ordered(&cx, &joined, &args).unwrap();
+        drop(execution);
+        assert_eq!(vfs.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(observations(&files), before);
+        assert_eq!(pool.used(), bytes);
+        assert!(matches!(
+            ordered.execute_ordered(&cx, &joined, &args).unwrap().await,
+            Err(NativeSpoolError::Authorized(error))
+                if matches!(*error, QueryError::Authorization(
+                    Error::LimitExceeded(LimitDimension::Nodes)
+                ))
+        ));
+        assert!(!ordered.is_closed());
+
         let selected = GqlParameters::new().with_uint64("cut", current.0).unwrap();
         let prepared = ordered
             .prepare(
@@ -2306,6 +2331,134 @@ fn cold_point_pending_reads_and_copied_payloads_keep_the_affine_owner() {
         drop(pending);
         assert!(ordered.is_closed());
         assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_fixed_joins_compose_with_external_ordering_and_exact_aggregates() {
+    use GraphAggregateValue::{Average, Count, Integer};
+    let ((), report) = run_async_under_lab(0xa8_0216, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let cx = c.query();
+        let authority = issuer();
+        // Three roots and two child occurrences admit ten endpoints. Native
+        // source rows remain private; only the two final rows spend max_rows.
+        let token = authority.issue_at(&grant(10, 2), 100).unwrap();
+        let args = GqlParameters::new();
+        for hidden in [false, true] {
+            let (vfs, _db, old, current) = fixture(&commit, hidden).await;
+            for (at, first, high, low, total) in
+                [(old, 3, 9, 7, 16), (current, 30, 17, 9, 26)]
+            {
+                let pool = memory();
+                let (mut ordered, _) = session(
+                    &commit,
+                    &cx,
+                    &vfs,
+                    &pool,
+                    &authority,
+                    &token,
+                    at,
+                    || 100,
+                    policy(2),
+                )
+                .await;
+                let text =
+                    "MATCH (a)-[r:R]->(b)-[s:R]->(c) \
+                     RETURN a.score AS first,b.score AS middle,c.score AS last, \
+                     r.score AS weight,s.score AS following,s.secret AS hidden \
+                     ORDER BY weight DESC";
+                let prepared = ordered.prepare(&cx, text, &args).unwrap();
+                let execution = ordered.execute_ordered(&cx, &prepared, &args).unwrap();
+                assert_send(&execution);
+                let mut cursor = execution.await.unwrap();
+                assert_send(&cursor);
+                assert_eq!(cursor.snapshot_seq(), at);
+                assert_eq!(
+                    values(&mut cursor).await,
+                    vec![
+                        vec![scalar(first), scalar(1), scalar(3), scalar(high), scalar(5), null()],
+                        vec![scalar(first), scalar(1), scalar(3), scalar(low), scalar(5), null()],
+                    ],
+                    "hidden={hidden}; cut={at:?}",
+                );
+                drop(cursor);
+                assert!(!ordered.is_closed());
+                let empty = ordered
+                    .prepare(
+                        &cx,
+                        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN a,r,b,s,c LIMIT 0",
+                        &args,
+                    )
+                    .unwrap();
+                let mut cursor = ordered
+                    .execute_ordered(&cx, &empty, &args)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                assert!(values(&mut cursor).await.is_empty());
+                drop(cursor);
+                assert!(!ordered.is_closed());
+
+                let prepared = ordered
+                    .prepare(
+                        &cx,
+                        "MATCH (a)-[r:R]->(b)-[s:R]->(c) \
+                         RETURN count(*) AS rows,sum(r.score) AS total, \
+                         sum(c.score) AS endpoints,avg(s.score) AS mean, \
+                         count(s.secret) AS hidden",
+                        &args,
+                    )
+                    .unwrap();
+                let execution = ordered
+                    .execute_ordered_aggregate(&cx, &prepared, &args)
+                    .unwrap();
+                assert_send(&execution);
+                let mut cursor = execution.await.unwrap();
+                assert_eq!(
+                    aggregates(&mut cursor).await,
+                    vec![vec![
+                        Count(2),
+                        Integer(total),
+                        Integer(6),
+                        Average(GraphExactAverage::new(5, 1).unwrap()),
+                        Count(0),
+                    ]],
+                    "hidden={hidden}; cut={at:?}",
+                );
+                drop(cursor);
+                assert!(!ordered.is_closed());
+                drop(ordered);
+                assert_eq!(pool.used(), 0);
+
+                let tight = authority.issue_at(&grant(9, 2), 100).unwrap();
+                let (mut ordered, _) = session(
+                    &commit,
+                    &cx,
+                    &vfs,
+                    &pool,
+                    &authority,
+                    &tight,
+                    at,
+                    || 100,
+                    policy(2),
+                )
+                .await;
+                let prepared = ordered.prepare(&cx, text, &args).unwrap();
+                assert!(matches!(
+                    ordered.execute_ordered(&cx, &prepared, &args).unwrap().await,
+                    Err(NativeSpoolError::Authorized(error))
+                        if matches!(*error, QueryError::Authorization(
+                            Error::LimitExceeded(LimitDimension::Nodes)
+                        ))
+                ));
+                assert!(!ordered.is_closed());
+                drop(ordered);
+                assert_eq!(pool.used(), 0);
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

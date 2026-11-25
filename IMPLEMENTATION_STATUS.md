@@ -12,6 +12,49 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Authorized cold fixed-hop joins — qualification pending
+
+Capability-scoped buffered sessions now route fixed-hop edge chains, branches
+and identity-constrained cycles through the existing native asynchronous join
+executor. The same source is available to identity-ordered row streaming,
+external ordering and exact aggregate inputs, including the FGP text and
+prepared-read consumers. Every hop keeps its own direction and typed, finite
+or any-relation selector; parallel edges retain their occurrence multiplicity.
+
+Preparation computes separate bounded edge and endpoint property selections
+across all fixed-hop stages, predicates, projections and hidden sort cells.
+Both sets are intersected with property authority before source access.
+Each root and child admits its relation and both same-cut endpoint topologies
+before selected fields are loaded. Hidden or retired historical candidates
+advance only their private physical position; visible admissions retain the
+existing signed/native allowances. Nested OPTIONAL, probe and collection
+scopes, variable-length walks and complete metadata remain outside this
+selected cold profile and refuse before source construction.
+
+The detached storage owner retains root and child positions, the existing
+bounded incidence continuation, native relation owners, cumulative physical
+work and source-profile identity. Root exhaustion still permits children of
+the final root. Reattachment cannot transplant a position to another admitted
+partition. Native selected-property reads distinguish the current root from
+independently positioned children while preserving exact winner checks.
+Failure, cancellation and dropped polled pulls retain terminal ownership;
+delivered values retain their own memory reservations.
+
+New regression sources cover full-width/historical identities, parallel edges,
+self-loops, mixed directions and relations, property masks, hidden-state
+controls, selected fields from real sealed runs, final-root children,
+detach/resume, exact and one-short node/work limits, damaged hidden sidecars,
+retained output memory and pending-drop cleanup. FGP coverage compares the
+served source and ordered paths with resident results, checks exact aggregates,
+rebinds prepared historical reads and retries after a child-budget refusal.
+
+Independent source reviews and text checks completed. The pinned baseline
+formatter passed before these edits; formatting of the new source, native
+compilation/runtime tests, Clippy and full exact-tree qualification remain
+UNRUN after shared disk exhaustion and executor loss. No gate or invariant
+claim is promoted. `fgdb-w5-executor-olp` and
+`fgdb-qualify-integrated-nov22-maz0p` remain open.
+
 ### Detached authorized transaction validation — qualification pending
 
 Detached authorized write transactions now keep private intervening-history

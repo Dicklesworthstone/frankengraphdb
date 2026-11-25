@@ -42,11 +42,11 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     /// Files must be private host-owned backends; request code cannot attach
     /// another file or extract their private input/result spools.
     ///
-    /// Native vertex and single-edge leaves, including any/finite relation
-    /// selectors, compose through the existing external set, row-join,
-    /// stage, CALL and grouping owners. Carried identities can read selected
-    /// properties through a same-cut scoped point reader. Complete element
-    /// metadata, walks, probes, fixed-edge joins and
+    /// Native vertex, single-edge and fixed-hop join leaves, including
+    /// any/finite relation selectors, compose through the existing external
+    /// set, row-join, stage, CALL and grouping owners. Carried identities can
+    /// read selected properties through a same-cut scoped point reader.
+    /// Complete element metadata, variable walks, probes, OPTIONAL and
     /// procedures refuse recursively before candidate or scratch access.
     /// Selected leaf properties, including both endpoints of a single edge,
     /// retain the same staged visibility admission before value decoding.
@@ -257,6 +257,13 @@ fn admit(plan: &AsyncSpillSetPlan, facade: crate::NativeReadClass) -> Result<()>
                 Ok(())
             }
         }
+        AsyncSpillSetSourcePlan::Join(plan) => {
+            if plan.selected_property_demand().is_none() {
+                Err(unsupported(facade))
+            } else {
+                Ok(())
+            }
+        }
         AsyncSpillSetSourcePlan::Binary(plan) => {
             admit(plan.left(), facade)?;
             admit(plan.right(), facade)
@@ -280,7 +287,6 @@ fn admit(plan: &AsyncSpillSetPlan, facade: crate::NativeReadClass) -> Result<()>
             admit(plan.input(), facade)
         }
         AsyncSpillSetSourcePlan::VertexProbe(_)
-        | AsyncSpillSetSourcePlan::Join(_)
         | AsyncSpillSetSourcePlan::Walk(_)
         | AsyncSpillSetSourcePlan::Procedure(_) => Err(unsupported(facade)),
     }
@@ -523,6 +529,12 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> SpoolInput for Input<'_, V, C> {
                 cursor.row_stats(),
                 cursor.evaluator_stats(),
             ),
+            Native::Join(cursor) => (
+                cursor.snapshot_seq(),
+                ScanKind::Edge,
+                cursor.row_stats(),
+                cursor.evaluator_stats(),
+            ),
         }
     }
 }
@@ -580,6 +592,14 @@ impl<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> Host<'q, V, C> {
                     keys.edge = selected_keys(keys.edge, scope);
                     keys.endpoints = selected_keys(keys.endpoints, scope);
                     Plan::edge(plan.clone(), keys)
+                }
+                AsyncSpillSetSourcePlan::Join(plan) => {
+                    let mut keys = plan
+                        .selected_property_demand()
+                        .ok_or_else(|| unsupported(crate::NativeReadClass::Set))?;
+                    keys.edge = selected_keys(keys.edge, scope);
+                    keys.endpoints = selected_keys(keys.endpoints, scope);
+                    Plan::join(plan.clone(), keys)
                 }
                 _ => return Err(unsupported(crate::NativeReadClass::Set)),
             }
