@@ -122,6 +122,49 @@ pub enum TextMatch {
     },
 }
 
+/// Prepare corpus-wide decisions once for a complete search of a pinned snapshot.
+pub(crate) struct PreparedTextQuery<'a> {
+    terms: AnalyzedText,
+    matcher: PreparedMatch<'a>,
+}
+
+enum PreparedMatch<'a> {
+    Any,
+    Conjunction(TextMatch),
+    Fuzzy {
+        expansion: fuzzy::Expansion<'a>,
+        require_all: bool,
+    },
+    Empty,
+}
+
+impl<'a> PreparedTextQuery<'a> {
+    pub(crate) fn new(
+        terms: AnalyzedText,
+        mode: TextMatch,
+        corpus: &'a CorpusStats,
+        limit: usize,
+        work: &mut dyn WorkControl,
+    ) -> Result<Self, BeaconError> {
+        let matcher = match mode {
+            _ if limit == 0 || terms.frequencies.is_empty() || corpus.total_length == 0 => {
+                PreparedMatch::Empty
+            }
+            TextMatch::Any => PreparedMatch::Any,
+            TextMatch::All | TextMatch::Phrase => PreparedMatch::Conjunction(mode),
+            TextMatch::Fuzzy {
+                distance,
+                require_all,
+                max_expansions,
+            } => PreparedMatch::Fuzzy {
+                expansion: fuzzy::Expansion::build(&terms, corpus, distance, max_expansions, work)?,
+                require_all,
+            },
+        };
+        Ok(Self { terms, matcher })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextHit {
     pub id: VId,
@@ -362,8 +405,7 @@ impl TextSegment {
     #[allow(clippy::too_many_arguments)]
     pub fn search_into(
         &self,
-        query: &AnalyzedText,
-        mode: TextMatch,
+        query: &PreparedTextQuery<'_>,
         config: &Bm25Config,
         corpus: &CorpusStats,
         limit: usize,
@@ -371,36 +413,24 @@ impl TextSegment {
         best: &mut BinaryHeap<Ranked>,
         work: &mut dyn WorkControl,
     ) -> Result<(), BeaconError> {
-        match mode {
-            TextMatch::Fuzzy {
-                distance,
+        match &query.matcher {
+            PreparedMatch::Empty => return Ok(()),
+            PreparedMatch::Fuzzy {
+                expansion,
                 require_all,
-                max_expansions,
             } => {
                 return self.search_fuzzy_into(
-                    query,
-                    distance,
-                    require_all,
-                    max_expansions,
-                    config,
-                    corpus,
-                    limit,
-                    eligible,
-                    best,
-                    work,
+                    expansion, *require_all, config, corpus, limit, eligible, best, work,
                 );
             }
-            TextMatch::All | TextMatch::Phrase => {
+            PreparedMatch::Conjunction(mode) => {
                 return self.search_conjunction_into(
-                    query, mode, config, corpus, limit, eligible, best, work,
+                    &query.terms, *mode, config, corpus, limit, eligible, best, work,
                 );
             }
-            TextMatch::Any => {}
+            PreparedMatch::Any => {}
         }
-        let terms = &query.frequencies;
-        if limit == 0 || terms.is_empty() || corpus.documents == 0 || corpus.total_length == 0 {
-            return Ok(());
-        }
+        let terms = &query.terms.frequencies;
         let mut streams = Vec::new();
         for term in terms.keys() {
             work.charge(1)?;
@@ -606,13 +636,14 @@ impl Bm25 {
         work: &mut dyn WorkControl,
     ) -> Result<Vec<TextHit>, BeaconError> {
         let terms = self.config.query_terms(query, work)?;
+        let limit = k.min(self.corpus.documents);
+        let query = PreparedTextQuery::new(terms, mode, &self.corpus, limit, work)?;
         let mut best = BinaryHeap::new();
         self.segment.search_into(
-            &terms,
-            mode,
+            &query,
             &self.config,
             &self.corpus,
-            k.min(self.corpus.documents),
+            limit,
             &eligible,
             &mut best,
             work,
