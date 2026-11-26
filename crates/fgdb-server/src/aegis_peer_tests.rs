@@ -133,3 +133,52 @@ fn quorum_failover_and_recovery_replace_an_uncommitted_minority_suffix() {
         assert_eq!(floors, [(read, commit_index)]);
     });
 }
+
+#[test]
+fn cancelled_and_delayed_read_rounds_release_one_slot_and_one_floor() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    runtime.block_on(async {
+        let voters = [MemberId(1), MemberId(2), MemberId(3)];
+        let config = Configuration::stable(Domain([1; 32]), [2; 32], voters, []).unwrap();
+        let mut nodes = voters.map(|id| Member {
+            coordinator: AegisReplicaCoordinator::from_configuration(
+                id, config.clone(), Limits::default(), 1,
+            )
+            .unwrap(),
+            publisher: SingleMemberPublisher::new(),
+        });
+        let leader = &mut nodes[0];
+        let election = leader.coordinator.campaign(&mut leader.publisher).await.unwrap();
+        deliver(&mut nodes, voters[0], election, &voters).await;
+
+        // Hold all ordinary append replies. Dedicated probes still refer to
+        // the published leader and do not advance either replica's data log.
+        let leader = &mut nodes[0];
+        let (old, _) = leader.coordinator.read_index(&mut leader.publisher).await.unwrap();
+        assert!(matches!(
+            leader.coordinator.read_index(&mut leader.publisher).await,
+            Err(ReplicaError::ReadBackpressure)
+        ));
+        let old_probe = leader.coordinator.read_index_probes(&old).unwrap()[0];
+        let follower = &nodes[1].coordinator;
+        assert_eq!(old_probe.to, follower.member_id());
+        assert!(follower.acknowledge_read_index(voters[2], old_probe).is_err());
+        let delayed = follower.acknowledge_read_index(voters[0], old_probe).unwrap();
+
+        let leader = &mut nodes[0];
+        assert!(leader.coordinator.cancel_read(&old));
+        assert!(!leader.coordinator.cancel_read(&old));
+        let (current, _) = leader.coordinator.read_index(&mut leader.publisher).await.unwrap();
+        assert!(leader.coordinator.confirm_read_index(&old, voters[1], delayed).is_err());
+        assert!(leader.coordinator.confirm_read_index(&current, voters[1], delayed).is_err());
+        let probe = leader.coordinator.read_index_probes(&current).unwrap()[0];
+        let ack = nodes[1].coordinator.acknowledge_read_index(voters[0], probe).unwrap();
+        let leader = &mut nodes[0];
+        assert!(leader.coordinator.confirm_read_index(&current, voters[2], ack).is_err());
+        let ready = leader.coordinator.confirm_read_index(&current, voters[1], ack).unwrap().unwrap();
+        assert_eq!(ready.id(), &current);
+        assert_eq!(ready.index(), leader.publisher.latest().unwrap().commit_index());
+        assert!(leader.coordinator.confirm_read_index(&current, voters[1], ack).is_err());
+        assert!(!leader.coordinator.cancel_read(&current));
+    });
+}

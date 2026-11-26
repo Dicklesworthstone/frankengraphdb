@@ -7,10 +7,10 @@
 
 use fgdb_order::{
     Committed, Configuration, Domain, Envelope, Error as OrderError, Event, Limits, MemberId,
-    PersistentState, Role,
+    PersistentState, ReadIndexAck, ReadIndexError, ReadIndexProbe, Role,
 };
 use fgdb_repl::driver::RaftPublisher;
-use fgdb_repl::replica::{ReadIndexId, ReadResolution, Replica, ReplicaError, ReplicaOutput};
+use fgdb_repl::replica::{ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput};
 
 /// In-process durability publisher retaining the latest published [`PersistentState`]
 /// for hosts that sequence single-member or embedded replica transitions.
@@ -184,6 +184,46 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
         publisher: &mut P,
     ) -> Result<(ReadIndexId, ReplicaOutput<C>), ReplicaError<P::Error>> {
         self.replica.read_index(publisher).await
+    }
+
+    /// Release a pending request on disconnect or deadline, freeing its read slot.
+    /// IDs are scoped to the originating coordinator incarnation.
+    #[must_use]
+    pub fn cancel_read(&mut self, id: &ReadIndexId) -> bool {
+        self.replica.cancel_read(id)
+    }
+
+    /// Obtain dedicated quorum probes for an admitted read whose append replies
+    /// are delayed. Retries cover the same round and only its unconfirmed voters.
+    pub fn read_index_probes(&self, id: &ReadIndexId) -> Result<Vec<ReadIndexProbe>, ReadIndexError> {
+        self.replica.read_index_probes(id)
+    }
+
+    /// Answer from published voter state on a channel authenticated as `peer`.
+    pub fn acknowledge_read_index(
+        &self,
+        peer: MemberId,
+        probe: ReadIndexProbe,
+    ) -> Result<ReadIndexAck, ReadIndexError> {
+        if probe.from != peer {
+            return Err(OrderError::InvalidMessage.into());
+        }
+        self.replica.acknowledge_read_index(probe)
+    }
+
+    /// Credit a peer's authenticated response to the original local request.
+    /// A ready floor still requires application and audit visibility through
+    /// that index before the host can serve an authorized snapshot.
+    pub fn confirm_read_index(
+        &mut self,
+        id: &ReadIndexId,
+        peer: MemberId,
+        ack: ReadIndexAck,
+    ) -> Result<Option<ReadIndexReady>, ReadIndexError> {
+        if ack.from != peer {
+            return Err(OrderError::InvalidMessage.into());
+        }
+        self.replica.confirm_read_index(id, ack)
     }
 
     /// Extract ready read floors from a [`ReplicaOutput`].
