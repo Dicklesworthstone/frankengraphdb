@@ -35,7 +35,9 @@ fn parse(args: &[String]) -> Result<Options<'_>, Failure> {
             "--kek-passphrase-file" if passphrase.is_none() => passphrase = Some(Path::new(value)),
             "--through" if through.is_none() => {
                 if !value.bytes().all(|byte| byte.is_ascii_digit()) {
-                    return Err(Failure::usage("--through requires a positive u64 commit sequence"));
+                    return Err(Failure::usage(
+                        "--through requires a positive u64 commit sequence",
+                    ));
                 }
                 through = Some(value.parse::<NonZeroU64>().map_err(|_| {
                     Failure::usage("--through requires a positive u64 commit sequence")
@@ -43,11 +45,17 @@ fn parse(args: &[String]) -> Result<Options<'_>, Failure> {
             }
             "--expect-chain" if expected.is_none() => {
                 if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    return Err(Failure::usage("--expect-chain requires 64 hexadecimal characters"));
+                    return Err(Failure::usage(
+                        "--expect-chain requires 64 hexadecimal characters",
+                    ));
                 }
                 expected = Some(value.as_str());
             }
-            _ => return Err(Failure::usage(format!("unknown or repeated verify-history option {flag}"))),
+            _ => {
+                return Err(Failure::usage(format!(
+                    "unknown or repeated verify-history option {flag}"
+                )));
+            }
         }
     }
     Ok(Options {
@@ -79,18 +87,27 @@ pub(super) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
     })?;
     let hash = hex(&hash.0);
     let seq = options.through;
-    if options.expected.is_some_and(|expected| !expected.eq_ignore_ascii_case(&hash)) {
+    if options
+        .expected
+        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&hash))
+    {
         return Err(Failure::io(format!(
             "verified history through commit {seq} differs from --expect-chain"
         )));
     }
     if robot {
-        emit(out, &format!(
-            r#"{{"v":1,"event":"result","kind":"verified_history","seq":{seq},"chain_hash":"{hash}"}}"#
-        ))
+        emit(
+            out,
+            &format!(
+                r#"{{"v":1,"event":"result","kind":"verified_history","seq":{seq},"chain_hash":"{hash}"}}"#
+            ),
+        )
     } else {
-        writeln!(out, "verified marker history and capsules through commit {seq}, chain {hash}")
-            .map_err(Failure::io)
+        writeln!(
+            out,
+            "verified marker history and capsules through commit {seq}, chain {hash}"
+        )
+        .map_err(Failure::io)
     }
 }
 
@@ -108,7 +125,11 @@ mod tests {
             assert!(parse(&bad).is_err());
         }
         assert!(parse(&args[..4]).is_err());
-        for extra in [["--through", "1"], ["--expect-chain", "abc"], ["--overwrite", "yes"]] {
+        for extra in [
+            ["--through", "1"],
+            ["--expect-chain", "abc"],
+            ["--overwrite", "yes"],
+        ] {
             let mut bad = args.to_vec();
             bad.extend(extra.map(str::to_owned));
             assert!(parse(&bad).is_err());

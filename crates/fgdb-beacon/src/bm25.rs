@@ -420,12 +420,26 @@ impl TextSegment {
                 require_all,
             } => {
                 return self.search_fuzzy_into(
-                    expansion, *require_all, config, corpus, limit, eligible, best, work,
+                    expansion,
+                    *require_all,
+                    config,
+                    corpus,
+                    limit,
+                    eligible,
+                    best,
+                    work,
                 );
             }
             PreparedMatch::Conjunction(mode) => {
                 return self.search_conjunction_into(
-                    &query.terms, *mode, config, corpus, limit, eligible, best, work,
+                    &query.terms,
+                    *mode,
+                    config,
+                    corpus,
+                    limit,
+                    eligible,
+                    best,
+                    work,
                 );
             }
             PreparedMatch::Any => {}

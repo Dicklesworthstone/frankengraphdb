@@ -851,7 +851,11 @@ fn multi_label_counts_at_pinned_and_partial_populations_share_the_scan_budget() 
         let exact = db.execute_graph_aggregate_governed(&cx, &q, three).unwrap();
         assert_eq!(exact.rows.snapshot_records, 3);
         assert_eq!(exact.value[0].values()[0].as_count(), Some(7));
-        assert_eq!(db.query(&cx, text, &GqlParameters::new(), symbols, three).unwrap(), count_result(7));
+        assert_eq!(
+            db.query(&cx, text, &GqlParameters::new(), symbols, three)
+                .unwrap(),
+            count_result(7)
+        );
         assert!(matches!(db.execute_graph_aggregate_governed(
             &cx, &q, GqlQueryPolicy::new(2, 1, 10_000, 1_000)
         ), Err(GqlQueryError::Rows(e)) if e.dimension == GqlBudgetDimension::SnapshotRecords && e.observed == 3));
@@ -859,18 +863,40 @@ fn multi_label_counts_at_pinned_and_partial_populations_share_the_scan_budget() 
         let mut edit = WriteBatch::new(R);
         edit.set_vertex_label(VId(0), LabelId(1), false);
         db.write(&commit, edit).await.unwrap();
-        let actual = db.execute_graph_aggregate_governed(&cx, &q, policy()).unwrap();
+        let actual = db
+            .execute_graph_aggregate_governed(&cx, &q, policy())
+            .unwrap();
         assert_eq!(actual.value[0].values()[0].as_count(), Some(6));
         assert!(actual.rows.snapshot_records > 3);
         let limit = actual.rows.snapshot_records - 1;
         assert!(matches!(db.execute_graph_aggregate_governed(
             &cx, &q, GqlQueryPolicy::new(limit, 1, 1_000_000, 100_000)
         ), Err(GqlQueryError::Rows(e)) if e.dimension == GqlBudgetDimension::SnapshotRecords && e.limit == limit && e.observed == limit + 1));
-        assert_eq!(pinned.execute_graph_aggregate_governed(&cx, &q, three).unwrap(), exact);
-        assert_eq!(db.execute_graph_aggregate_governed_at(&cx, &q, CommitSeq(1), policy()).unwrap().value, exact.value);
+        assert_eq!(
+            pinned
+                .execute_graph_aggregate_governed(&cx, &q, three)
+                .unwrap(),
+            exact
+        );
+        assert_eq!(
+            db.execute_graph_aggregate_governed_at(&cx, &q, CommitSeq(1), policy())
+                .unwrap()
+                .value,
+            exact.value
+        );
         let absent = aggregate("MATCH (n:L:M:Missing) RETURN COUNT(*) AS total");
-        assert_eq!(db.execute_graph_aggregate_governed(&cx, &absent, GqlQueryPolicy::new(4, 1, 10_000, 1_000))
-            .unwrap().value[0].values()[0].as_count(), Some(0));
+        assert_eq!(
+            db.execute_graph_aggregate_governed(
+                &cx,
+                &absent,
+                GqlQueryPolicy::new(4, 1, 10_000, 1_000)
+            )
+            .unwrap()
+            .value[0]
+                .values()[0]
+                .as_count(),
+            Some(0)
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

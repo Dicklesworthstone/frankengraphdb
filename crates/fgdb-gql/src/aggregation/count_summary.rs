@@ -288,8 +288,12 @@ impl PreparedGraphAggregate {
     /// The proof checks overlap at execution against the selected generation.
     #[must_use]
     pub fn can_count_label_intersection(&self) -> bool {
-        matches!(self.input.plan().operators().first(), Some(GlaOperator::ScanVertices))
-            && self.count_shape(true).is_some_and(|shape| shape.source == CountInput::LabelIntersection)
+        matches!(
+            self.input.plan().operators().first(),
+            Some(GlaOperator::ScanVertices)
+        ) && self
+            .count_shape(true)
+            .is_some_and(|shape| shape.source == CountInput::LabelIntersection)
     }
 
     /// Bind a trusted source's exact, already admitted counts to this query.

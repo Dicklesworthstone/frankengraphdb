@@ -514,10 +514,12 @@ impl CapsuleKeys {
         verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Vec<u8>, CapsuleError> {
         if descriptor.object_kind != self.object_kind {
-            return Err(CapsuleError::DescriptorMismatch(IdentityMismatch::ObjectKind {
-                expected: self.object_kind,
-                actual: descriptor.object_kind,
-            }));
+            return Err(CapsuleError::DescriptorMismatch(
+                IdentityMismatch::ObjectKind {
+                    expected: self.object_kind,
+                    actual: descriptor.object_kind,
+                },
+            ));
         }
         recover(
             descriptor,

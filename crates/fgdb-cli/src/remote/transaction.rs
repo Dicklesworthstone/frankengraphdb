@@ -412,14 +412,29 @@ impl<W: Write> TransactionOutput<'_, W> {
                         return Err(unconfirmed(error, self.sent));
                     }
                 };
-                (end.basis, end.statements, end.rows, outcome, completed, Some(seq))
+                (
+                    end.basis,
+                    end.statements,
+                    end.rows,
+                    outcome,
+                    completed,
+                    Some(seq),
+                )
             }
-            Completion::Rollback(end) => {
-                (end.basis, end.statements, end.rows, "rolled_back", "rollback", None)
-            }
+            Completion::Rollback(end) => (
+                end.basis,
+                end.statements,
+                end.rows,
+                "rolled_back",
+                "rollback",
+                None,
+            ),
         };
         // ROLLED_BACK echoes the handle; it does not report a database revision.
-        let position = seq.map_or_else(|| format!("from basis seq {basis}"), |seq| format!("at seq {seq}"));
+        let position = seq.map_or_else(
+            || format!("from basis seq {basis}"),
+            |seq| format!("at seq {seq}"),
+        );
         let incomplete = |mut error: Failure| {
             error.message = format!(
                 "{}; transaction {completed} {position} is confirmed, but output is incomplete after {} provisional row(s); do not retry the transaction",
@@ -450,7 +465,9 @@ impl<W: Write> TransactionOutput<'_, W> {
                 "transaction {completed} confirmed at seq {seq} from basis seq {basis}: {statements} statement(s), {rows} row(s)"
             )
         } else {
-            format!("transaction rollback confirmed from basis seq {basis}: {statements} statement(s), {rows} provisional row(s)")
+            format!(
+                "transaction rollback confirmed from basis seq {basis}: {statements} statement(s), {rows} provisional row(s)"
+            )
         };
         let output = emit(self.out, &line).and_then(|()| self.out.flush().map_err(Failure::io));
         output.map_err(incomplete)
@@ -475,7 +492,6 @@ fn unconfirmed(mut error: Failure, sent: u64) -> Failure {
     );
     error
 }
-
 
 #[cfg(test)]
 mod tests {

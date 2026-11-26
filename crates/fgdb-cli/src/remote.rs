@@ -250,7 +250,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         return Err(Failure::usage("--read-mode applies only to query"));
     }
     if rollback_transaction && verb != "transaction" {
-        return Err(Failure::usage("--rollback applies only to remote transaction"));
+        return Err(Failure::usage(
+            "--rollback applies only to remote transaction",
+        ));
     }
     if read_only_transaction && verb != "transaction" {
         return Err(Failure::usage(

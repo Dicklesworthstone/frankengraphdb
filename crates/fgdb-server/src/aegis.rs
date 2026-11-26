@@ -10,7 +10,9 @@ use fgdb_order::{
     PersistentState, ReadIndexAck, ReadIndexError, ReadIndexProbe, Role,
 };
 use fgdb_repl::driver::RaftPublisher;
-use fgdb_repl::replica::{ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput};
+use fgdb_repl::replica::{
+    ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput,
+};
 
 /// In-process durability publisher retaining the latest published [`PersistentState`]
 /// for hosts that sequence single-member or embedded replica transitions.
@@ -195,7 +197,10 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
 
     /// Obtain dedicated quorum probes for an admitted read whose append replies
     /// are delayed. Retries cover the same round and only its unconfirmed voters.
-    pub fn read_index_probes(&self, id: &ReadIndexId) -> Result<Vec<ReadIndexProbe>, ReadIndexError> {
+    pub fn read_index_probes(
+        &self,
+        id: &ReadIndexId,
+    ) -> Result<Vec<ReadIndexProbe>, ReadIndexError> {
         self.replica.read_index_probes(id)
     }
 

@@ -829,7 +829,13 @@ fn managed_preview_reads_its_staged_graph_then_rolls_back_without_advancing_the_
             .execute(cx, ExecuteMode::Write, "CREATE (:Person {age:99})", vec![])
             .await
             .unwrap();
-        assert_eq!(seed.outcome, Outcome::WriteCommitted { seq: 1, statements: 1 });
+        assert_eq!(
+            seed.outcome,
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1
+            }
+        );
 
         let select = "MATCH (n:Person) RETURN n.age AS age ORDER BY age";
         let mut preview_rows = Vec::new();
@@ -839,7 +845,10 @@ fn managed_preview_reads_its_staged_graph_then_rolls_back_without_advancing_the_
                 cx,
                 vec![
                     statement(ExecuteMode::Write, "MATCH (n:Person) SET n.age=0"),
-                    statement(ExecuteMode::Write, "UNWIND range(1,6) AS age CREATE (:Person {age:age})"),
+                    statement(
+                        ExecuteMode::Write,
+                        "UNWIND range(1,6) AS age CREATE (:Person {age:age})",
+                    ),
                     statement(ExecuteMode::Read, select),
                 ],
                 false,
@@ -868,12 +877,17 @@ fn managed_preview_reads_its_staged_graph_then_rolls_back_without_advancing_the_
         assert_eq!(result_ends, [(0, 0), (1, 0), (2, 7)]);
         assert_eq!(
             preview_rows,
-            (0..=6).map(|age| vec![WireValue::Int(age)]).collect::<Vec<_>>()
+            (0..=6)
+                .map(|age| vec![WireValue::Int(age)])
+                .collect::<Vec<_>>()
         );
 
         // A fresh client sees the old property and none of the staged inserts.
         let mut observer = connect(cx, addr, &grant(Rights::Read)).await;
-        let observed = observer.execute(cx, ExecuteMode::Read, select, vec![]).await.unwrap();
+        let observed = observer
+            .execute(cx, ExecuteMode::Read, select, vec![])
+            .await
+            .unwrap();
         assert_eq!(observed.outcome, Outcome::Rows { seq: 1 });
         assert_eq!(observed.rows, [vec![WireValue::Int(99)]]);
         // The acknowledged rollback releases the original connection's owner.
@@ -881,8 +895,17 @@ fn managed_preview_reads_its_staged_graph_then_rolls_back_without_advancing_the_
             .execute(cx, ExecuteMode::Write, "CREATE (:Person {age:100})", vec![])
             .await
             .unwrap();
-        assert_eq!(next.outcome, Outcome::WriteCommitted { seq: 2, statements: 1 });
-        assert_eq!(ages(cx, &mut observer).await, [vec![WireValue::Int(99)], vec![WireValue::Int(100)]]);
+        assert_eq!(
+            next.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1
+            }
+        );
+        assert_eq!(
+            ages(cx, &mut observer).await,
+            [vec![WireValue::Int(99)], vec![WireValue::Int(100)]]
+        );
         writer.close(cx).await.unwrap();
         observer.close(cx).await.unwrap();
         shutdown.trigger();

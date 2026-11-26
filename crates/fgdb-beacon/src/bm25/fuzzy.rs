@@ -707,8 +707,8 @@ mod tests {
             }
         }
         let mut build = WorkBudget::new(usize::MAX);
-        let mut index = BeaconIndex::build(IndexConfig::default(), [document(1, &words)], &mut build)
-            .unwrap();
+        let mut index =
+            BeaconIndex::build(IndexConfig::default(), [document(1, &words)], &mut build).unwrap();
         for id in 2..=8 {
             index
                 .apply_batch([IndexMutation::Upsert(document(id, "abcdefg"))], &mut build)
@@ -733,7 +733,13 @@ mod tests {
         assert_eq!(rows, expected);
         let used = 2 * compact_work - budget.remaining();
         assert_eq!(
-            segmented.text_search("abcdefg", 8, query, |_| true, &mut WorkBudget::new(used - 1)),
+            segmented.text_search(
+                "abcdefg",
+                8,
+                query,
+                |_| true,
+                &mut WorkBudget::new(used - 1)
+            ),
             Err(BeaconError::WorkBudgetExceeded)
         );
     }

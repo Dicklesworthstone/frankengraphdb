@@ -155,9 +155,8 @@ fn scan_or_count_labels(
     let mut remaining = usage.remaining(policy);
     if let Some(count) = count {
         // The stream compiler already proved every output scan-local.
-        let result = cx.with_restriction(|| {
-            count.execute_governed(records, remaining, || cx.checkpoint())
-        });
+        let result =
+            cx.with_restriction(|| count.execute_governed(records, remaining, || cx.checkpoint()));
         return usage.finish(policy, result);
     }
     if let Some(limit) = policy.rows.max_snapshot_records() {
@@ -172,7 +171,9 @@ fn scan_or_count_labels(
             execution.rows.snapshot_records += records;
             Ok(execution)
         }
-        Err(GqlQueryError::Rows(mut error)) if error.dimension == GqlBudgetDimension::SnapshotRecords => {
+        Err(GqlQueryError::Rows(mut error))
+            if error.dimension == GqlBudgetDimension::SnapshotRecords =>
+        {
             error.limit += records;
             error.observed += records;
             Err(GqlQueryError::Rows(error))

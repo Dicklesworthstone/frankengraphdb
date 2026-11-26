@@ -35,14 +35,30 @@ impl core::fmt::Display for HistoryVerificationError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Marker(error) => write!(f, "history verification: {error}"),
-            Self::Unreached { requested, verified } => write!(
-                f, "requested commit {} is absent; verified through {}", requested.0, verified.0
+            Self::Unreached {
+                requested,
+                verified,
+            } => write!(
+                f,
+                "requested commit {} is absent; verified through {}",
+                requested.0, verified.0
             ),
-            Self::Capsule { commit_seq, object_id, source } => write!(
-                f, "commit {} capsule {object_id:?} cannot be recovered: {source}", commit_seq.0
+            Self::Capsule {
+                commit_seq,
+                object_id,
+                source,
+            } => write!(
+                f,
+                "commit {} capsule {object_id:?} cannot be recovered: {source}",
+                commit_seq.0
             ),
-            Self::TemplateDigestMismatch { commit_seq, object_id } => write!(
-                f, "commit {} capsule {object_id:?} has the wrong logical template digest", commit_seq.0
+            Self::TemplateDigestMismatch {
+                commit_seq,
+                object_id,
+            } => write!(
+                f,
+                "commit {} capsule {object_id:?} has the wrong logical template digest",
+                commit_seq.0
             ),
         }
     }
@@ -102,7 +118,8 @@ impl<V: Vfs> CommitCoordinator<V> {
             loop {
                 scan_checkpoint(cx)?;
                 let decoded = Self::read_next_entry(&mut reader, &mut entry, prefix.chain_value())
-                    .await.map_err(CommitError::Io)?;
+                    .await
+                    .map_err(CommitError::Io)?;
                 let (marker, hash, _) = match decoded {
                     Some(Ok(frame)) => frame,
                     None | Some(Err(EntryDefect::Truncated)) => {
@@ -114,15 +131,21 @@ impl<V: Vfs> CommitCoordinator<V> {
                     Some(Err(EntryDefect::Corrupt)) => {
                         return Err(CommitError::CorruptLogEntry {
                             commit_seq: prefix.next_commit_seq().map_err(CommitError::from)?.0,
-                        }.into());
+                        }
+                        .into());
                     }
                 };
-                let EffectSource::Local { capsule_ref, logical_delta_template_digest } =
-                    marker.effect_source;
-                prefix.recover(marker, hash).map_err(recovered_marker_error)?;
+                let EffectSource::Local {
+                    capsule_ref,
+                    logical_delta_template_digest,
+                } = marker.effect_source;
+                prefix
+                    .recover(marker, hash)
+                    .map_err(recovered_marker_error)?;
                 let commit_seq = prefix.frontier();
                 let bytes = Self::read_capsule_from(vfs, dir, keys, capsule_ref, &mut Vec::new())
-                    .await.map_err(|source| HistoryVerificationError::Capsule {
+                    .await
+                    .map_err(|source| HistoryVerificationError::Capsule {
                         commit_seq,
                         object_id: capsule_ref,
                         source,
@@ -138,6 +161,7 @@ impl<V: Vfs> CommitCoordinator<V> {
                     return Ok(hash);
                 }
             }
-        }).await
+        })
+        .await
     }
 }

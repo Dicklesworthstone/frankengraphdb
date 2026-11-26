@@ -601,6 +601,7 @@ impl EncodedObject {
     ) -> Result<Self, IdentityMismatch> {
         if let Err(error) = cipher_descriptor.registered_aead_profile() {
             let failure = match error {
+                IdentityMismatch::ObjectKind { .. } => VerificationFailureClass::LogicalIdentity,
                 IdentityMismatch::UnsupportedDataCryptoProfile { .. } => {
                     VerificationFailureClass::UnsupportedDataCryptoProfile
                 }

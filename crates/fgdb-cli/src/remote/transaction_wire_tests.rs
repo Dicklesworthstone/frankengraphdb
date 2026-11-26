@@ -932,7 +932,9 @@ fn preview_requires_a_matching_rollback_ack_and_never_commits() {
                 };
                 replies.push((
                     provisional_chunk(
-                        read_request, Some(vec!["p".into()]), vec![vec![WireValue::Int(42)]],
+                        read_request,
+                        Some(vec!["p".into()]),
+                        vec![vec![WireValue::Int(42)]],
                     ),
                     flushed,
                 ));
@@ -954,26 +956,49 @@ fn preview_requires_a_matching_rollback_ack_and_never_commits() {
                 let written = Arc::clone(&io.written);
                 let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
                 client.select(&root, "social").await.unwrap();
-                let mut out = Output { bytes: vec![], flushes, fail_on: None };
-                let result = transaction.execute(&root, &mut client, true, &mut out).await;
+                let mut out = Output {
+                    bytes: vec![],
+                    flushes,
+                    fail_on: None,
+                };
+                let result = transaction
+                    .execute(&root, &mut client, true, &mut out)
+                    .await;
                 let text = String::from_utf8(out.bytes).unwrap();
                 assert!(text.contains(r#""provisional":true"#));
-                let receipt = text.lines().find(|line| line.contains(r#""event":"result""#));
+                let receipt = text
+                    .lines()
+                    .find(|line| line.contains(r#""event":"result""#));
                 if acknowledged_handle == Some(HANDLE) {
                     result.unwrap_or_else(|error| panic!("{}", error.message));
-                    assert_eq!(receipt.unwrap(), format!(
-                        r#"{{"v":1,"event":"result","kind":"transaction","outcome":"rolled_back","basis_seq":7,"statements":{read_ordinal},"count":1}}"#
-                    ));
+                    assert_eq!(
+                        receipt.unwrap(),
+                        format!(
+                            r#"{{"v":1,"event":"result","kind":"transaction","outcome":"rolled_back","basis_seq":7,"statements":{read_ordinal},"count":1}}"#
+                        )
+                    );
                 } else {
                     assert!(result.is_err());
                     assert!(receipt.is_none());
                 }
                 let frames = sent_frames(&written.lock().unwrap());
-                let begin = if read_only { FrameKind::BeginReadTransaction } else { FrameKind::BeginTransaction };
+                let begin = if read_only {
+                    FrameKind::BeginReadTransaction
+                } else {
+                    FrameKind::BeginTransaction
+                };
                 assert_submission_mode(&frames, read_ordinal as usize, 0, begin);
-                let rollbacks: Vec<_> = frames.iter().filter(|frame| frame.header().kind() == FrameKind::RollbackTransaction).collect();
+                let rollbacks: Vec<_> = frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::RollbackTransaction)
+                    .collect();
                 assert_eq!(rollbacks.len(), 1);
-                assert_eq!(TransactionSelector::decode(rollbacks[0].payload()).unwrap().handle, HANDLE);
+                assert_eq!(
+                    TransactionSelector::decode(rollbacks[0].payload())
+                        .unwrap()
+                        .handle,
+                    HANDLE
+                );
             }
         }
     });

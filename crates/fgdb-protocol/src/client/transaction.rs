@@ -260,7 +260,11 @@ impl Client {
         let batch = self
             .run_transaction_batch(cx, statements, read_only, on_columns, on_row, on_result_end)
             .await?;
-        batch.owner.client.rollback_transaction(cx, batch.begun.handle).await?;
+        batch
+            .owner
+            .client
+            .rollback_transaction(cx, batch.begun.handle)
+            .await?;
         Ok(TransactionBatchRollback {
             basis: batch.begun.basis,
             statements: batch.statements,
@@ -280,7 +284,11 @@ impl Client {
         let batch = self
             .run_transaction_batch(cx, statements, read_only, on_columns, on_row, on_result_end)
             .await?;
-        let outcome = batch.owner.client.commit_transaction(cx, batch.begun.handle).await?;
+        let outcome = batch
+            .owner
+            .client
+            .commit_transaction(cx, batch.begun.handle)
+            .await?;
         Ok(TransactionBatchEnd {
             basis: batch.begun.basis,
             statements: batch.statements,

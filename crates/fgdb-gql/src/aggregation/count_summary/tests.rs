@@ -479,31 +479,49 @@ fn conjunctive_label_counts_prove_only_determined_intersections() {
                 let provable = sets.contains(&0) || sets.iter().filter(|s| **s != 7).count() <= 1;
                 assert_eq!(count.is_some(), provable, "{sets:?}");
                 if let Some(count) = count {
-                    let rows = count.execute_governed::<(), ()>(4, policy, || Ok(())).unwrap();
-                    assert_eq!(rows.value[0].values()[0].as_count(), Some(u64::from((l & m & x).count_ones())));
+                    let rows = count
+                        .execute_governed::<(), ()>(4, policy, || Ok(()))
+                        .unwrap();
+                    assert_eq!(
+                        rows.value[0].values()[0].as_count(),
+                        Some(u64::from((l & m & x).count_ones()))
+                    );
                 }
             }
         }
     }
     for partial in [None, Some(4)] {
-        let result = q.prepare_count_metadata_with_universal_labels(|source| {
-            Ok::<_, ()>(if source == GraphCountSource::Label(LabelId(2)) { partial } else { Some(3) })
-        }).unwrap();
+        let result = q
+            .prepare_count_metadata_with_universal_labels(|source| {
+                Ok::<_, ()>(if source == GraphCountSource::Label(LabelId(2)) {
+                    partial
+                } else {
+                    Some(3)
+                })
+            })
+            .unwrap();
         assert!(result.is_none());
     }
     for stop in 1..=4 {
         let mut n = 0;
-        assert!(matches!(q.prepare_count_metadata_with_universal_labels(|_| {
+        assert!(
+            matches!(q.prepare_count_metadata_with_universal_labels(|_| {
             n += 1;
             if n == stop { Err(stop) } else { Ok(Some(3)) }
-        }), Err(e) if e == stop));
+        }), Err(e) if e == stop)
+        );
         assert_eq!(n, stop);
     }
     let filtered = query("MATCH (n:L:M) WHERE n.p IS NULL RETURN COUNT(*) AS n");
     assert!(!filtered.can_count_label_intersection());
-    assert!(filtered.prepare_count_metadata_with_universal_labels(|_| -> Result<Option<u64>, ()> {
-        panic!("an unproved filter touched counters")
-    }).unwrap().is_none());
+    assert!(
+        filtered
+            .prepare_count_metadata_with_universal_labels(|_| -> Result<Option<u64>, ()> {
+                panic!("an unproved filter touched counters")
+            })
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

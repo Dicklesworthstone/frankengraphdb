@@ -138,18 +138,20 @@ fn label_intersection_counts_respect_authorized_populations_and_node_allowance()
         let auth = issuer();
         let full = auth.issue_at(&grant(), 100).unwrap();
         let short = full.attenuate(Restriction::MaxNodes(5)).unwrap();
-        let hidden = full.attenuate(Restriction::Labels(Scope::only([]))).unwrap();
+        let hidden = full
+            .attenuate(Restriction::Labels(Scope::only([])))
+            .unwrap();
         let q = prepare("MATCH (n:A:B) RETURN count(n) AS n");
-        let run = |token, budget| db.execute_graph_aggregate_authorized(
-            &cx, &auth, token, "main", &q, budget, || 100
-        );
+        let run = |token, budget| {
+            db.execute_graph_aggregate_authorized(&cx, &auth, token, "main", &q, budget, || 100)
+        };
         let three = GqlQueryPolicy::new(3, 1, 10_000, 1_000);
         assert_eq!(count(&run(&full, three).unwrap()), 1);
         assert!(matches!(
             run(&short, three),
-            Err(QueryError::Authorization(fgdb_warden::Error::LimitExceeded(
-                fgdb_warden::LimitDimension::Nodes
-            )))
+            Err(QueryError::Authorization(
+                fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Nodes)
+            ))
         ));
         assert_eq!(count(&run(&hidden, policy()).unwrap()), 0);
         assert_eq!(count(&run(&full, three).unwrap()), 1);
