@@ -505,7 +505,7 @@ impl CapsuleKeys {
     }
 
     /// Recover `plaintext` from a container's descriptor and symbols, proving
-    /// it is `expected_object_id`.
+    /// it is `expected_object_id` in this authority's logical object domain.
     pub fn recover(
         &self,
         descriptor: &CapsuleDescriptor,
@@ -513,6 +513,12 @@ impl CapsuleKeys {
         expected_object_id: ObjectId,
         verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Vec<u8>, CapsuleError> {
+        if descriptor.object_kind != self.object_kind {
+            return Err(CapsuleError::DescriptorMismatch(IdentityMismatch::ObjectKind {
+                expected: self.object_kind,
+                actual: descriptor.object_kind,
+            }));
+        }
         recover(
             descriptor,
             symbols,

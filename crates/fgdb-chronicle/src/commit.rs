@@ -28,6 +28,7 @@
 //! is corruption, because entries before it were durable.
 
 pub mod restore;
+pub mod verify;
 
 use crate::capsule::{
     CapsuleError, CapsuleKeys, MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container, encode_container,
@@ -208,6 +209,14 @@ impl ScanCollector for PrefixScan {
             self.commitment = Some(self.prefix.chain_value());
         }
         Ok(())
+    }
+}
+
+fn recovered_marker_error(failure: ChainVerifyFailure) -> CommitError {
+    let commit_seq = failure.commit_seq;
+    match failure.cause {
+        ChainVerifyCause::DerivedValueMismatch => CommitError::ChainDiverged { commit_seq },
+        ChainVerifyCause::Structure(_) => CommitError::CorruptLogEntry { commit_seq },
     }
 }
 
@@ -766,18 +775,27 @@ impl<V: Vfs> CommitCoordinator<V> {
         capsule_oid: ObjectId,
         verification: &mut dyn crate::identity::CryptoVerificationSink,
     ) -> Result<Vec<u8>, CommitError> {
-        cx.with_restriction_async(async {
-            let file = self
-                .vfs
-                .open_read(&Self::capsule_path(&self.dir, capsule_oid))
-                .await?;
-            let container = read_bounded_capsule_container(file).await?;
-            let (descriptor, symbols) = decode_container(&container)?;
-            Ok(self
-                .keys
-                .recover(&descriptor, &symbols, capsule_oid, verification)?)
-        })
+        cx.with_restriction_async(Self::read_capsule_from(
+            &self.vfs,
+            &self.dir,
+            &self.keys,
+            capsule_oid,
+            verification,
+        ))
         .await
+    }
+
+    async fn read_capsule_from(
+        vfs: &V,
+        dir: &Path,
+        keys: &CapsuleKeys,
+        capsule_oid: ObjectId,
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<Vec<u8>, CommitError> {
+        let file = vfs.open_read(&Self::capsule_path(dir, capsule_oid)).await?;
+        let container = read_bounded_capsule_container(file).await?;
+        let (descriptor, symbols) = decode_container(&container)?;
+        Ok(keys.recover(&descriptor, &symbols, capsule_oid, verification)?)
     }
 
     /// Inspect the committed prefix and atomically restore each recoverable
@@ -1388,17 +1406,7 @@ impl<V: Vfs> CommitCoordinator<V> {
                 };
                 chain
                     .append_marker(marker, stored_chain_hash)
-                    .map_err(|failure| {
-                        let commit_seq = failure.commit_seq;
-                        match failure.cause {
-                            ChainVerifyCause::DerivedValueMismatch => {
-                                CommitError::ChainDiverged { commit_seq }
-                            }
-                            ChainVerifyCause::Structure(_) => {
-                                CommitError::CorruptLogEntry { commit_seq }
-                            }
-                        }
-                    })?;
+                    .map_err(recovered_marker_error)?;
                 cursor = cursor.checked_add(consumed).ok_or_else(|| {
                     CommitError::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,

@@ -4,6 +4,7 @@
 {"v":1,"event":"result","kind":"rows","count":<n>}
 {"v":1,"event":"result","kind":"created","seq":<n>}
 {"v":1,"event":"result","kind":"sealed","seq":<n>,"relation":<u64>,"retain_from":<u64>,"run":"<64-lowercase-hex>"}
+{"v":1,"event":"result","kind":"verified_history","seq":<positive-u64>,"chain_hash":"<64-lowercase-hex>"}
 {"v":1,"event":"result","kind":"adopted","files":<n>,"directories":<n>}
 {"v":1,"event":"result","kind":"written","seq":<n>,"statements":<n>}
 {"v":1,"event":"error","class":"usage|query|open|io","diagnostics":["<message>",...]}

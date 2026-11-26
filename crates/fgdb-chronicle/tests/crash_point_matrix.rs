@@ -2603,6 +2603,97 @@ mod incomplete_capsule_tests {
 /// complete entries and leaves every log byte in place. Only the next lease
 /// holder repairs the tail, exactly as before.
 #[test]
+fn verify_history_authenticates_capsules_through_the_exact_cut_beside_a_writer() {
+    use fgdb_chronicle::commit::verify::HistoryVerificationError as Failure;
+    use std::num::NonZeroU64;
+
+    fn template(bytes: &[u8]) -> Digest {
+        let mut digest = fgdb_crypto::Hasher::new();
+        digest.update(bytes);
+        digest.finalize()
+    }
+
+    let dir = scratch_dir("verify-history-cut");
+    under_lab(0x78_51, move |cx| async move {
+        let cx = &cx;
+        let vfs = UnixVfs::new();
+        let keys = keys();
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys.clone()).await.expect("open");
+        let mut first_capsule = None;
+        for seq in 1..=2 {
+            let payload = capsule_bytes(seq);
+            let value = template(&payload);
+            let chain = coordinator.chain().clone();
+            coordinator.commit(cx, &payload, |allocated, oid| {
+                let mut marker = marker_for(allocated, oid, &chain);
+                marker.effect_source = EffectSource::Local {
+                    capsule_ref: oid,
+                    logical_delta_template_digest: value,
+                };
+                marker
+            }).await.expect("commit");
+            if seq == 1 {
+                first_capsule = Some(only_capsule_path(&dir));
+            }
+        }
+        let verify = |cut| CommitCoordinator::verify_history_through(
+            cx, &vfs, &dir, &keys, NonZeroU64::new(cut).unwrap(), template,
+        );
+        assert_eq!(verify(2).await.unwrap(), coordinator.chain().chain_value());
+        assert!(matches!(verify(3).await, Err(Failure::Unreached {
+            requested: CommitSeq(3), verified: CommitSeq(2),
+        })));
+
+        let wrong_kind = CapsuleKeys::new(
+            *keys.k_oid(), keys.namespace(), *keys.dek(), 0x0275, CapsuleProfile::balanced(),
+        );
+        let rejected = CommitCoordinator::verify_history_through(
+            cx, &vfs, &dir, &wrong_kind, NonZeroU64::MIN, template,
+        ).await;
+        assert!(matches!(rejected, Err(Failure::Capsule {
+            commit_seq: CommitSeq(1),
+            source: CommitError::Capsule(fgdb_chronicle::capsule::CapsuleError::DescriptorMismatch(
+                fgdb_chronicle::identity::IdentityMismatch::ObjectKind { expected: 0x0275, actual: 0x0274 },
+            )),
+            ..
+        })));
+
+        // Recovery of one damaged symbol suffices for verification. The
+        // inspector leaves the damaged encoding exactly as it found it.
+        let path = first_capsule.as_ref().unwrap();
+        let mut damaged = std::fs::read(path).unwrap();
+        // The V1 container ends with the last symbol record’s MAC, with no trailer.
+        *damaged.last_mut().unwrap() ^= 1;
+        std::fs::write(path, &damaged).unwrap();
+        assert_eq!(verify(2).await.unwrap(), coordinator.chain().chain_value());
+        assert_eq!(std::fs::read(path).unwrap(), damaged);
+
+        // A valid capsule identity cannot satisfy a false template commitment.
+        commit_ok(&mut coordinator, cx, 3).await;
+        assert!(matches!(verify(3).await, Err(Failure::TemplateDigestMismatch {
+            commit_seq: CommitSeq(3), ..
+        })));
+
+        // Damage the third frame, then verify that the first two alone can
+        // still be proved without truncating the source or opening a writer.
+        let mut log = log_bytes(&dir);
+        *log.last_mut().unwrap() ^= 0x80;
+        write_log(&dir, &log);
+        assert_eq!(verify(2).await.unwrap(), coordinator.chain().entries()[1].chain_hash);
+        assert!(matches!(verify(3).await, Err(Failure::Marker(CommitError::CorruptLogEntry {
+            commit_seq: 3,
+        }))));
+        let path = first_capsule.unwrap();
+        std::fs::write(&path, b"lost").unwrap();
+        assert!(matches!(verify(2).await, Err(Failure::Capsule {
+            commit_seq: CommitSeq(1), ..
+        })));
+        assert_eq!(std::fs::read(path).unwrap(), b"lost");
+        assert_eq!(log_bytes(&dir), log);
+    });
+}
+
+#[test]
 fn a_lease_free_scan_reads_committed_entries_and_never_repairs_a_torn_tail() {
     let dir = scratch_dir("lease-free-scan");
     under_lab(26, move |cx| async move {
