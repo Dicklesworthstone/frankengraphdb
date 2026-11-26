@@ -288,17 +288,23 @@ impl GraphIntegerOp {
                     Some(true) => 2,
                 },
             ]),
-            Self::Compare(comparison) => bytes.extend_from_slice(&[
-                6,
-                match comparison {
-                    IntegerComparison::Equal => 0,
-                    IntegerComparison::NotEqual => 1,
-                    IntegerComparison::Less => 2,
-                    IntegerComparison::LessOrEqual => 3,
-                    IntegerComparison::Greater => 4,
-                    IntegerComparison::GreaterOrEqual => 5,
-                },
-            ]),
+            Self::Compare(comparison) => {
+                bytes.extend_from_slice(&[
+                    6,
+                    match comparison {
+                        IntegerComparison::Equal => 0,
+                        IntegerComparison::NotEqual => 1,
+                        IntegerComparison::Less => 2,
+                        IntegerComparison::LessOrEqual => 3,
+                        IntegerComparison::Greater => 4,
+                        IntegerComparison::GreaterOrEqual => 5,
+                    },
+                ]);
+                crate::set_ops::projection::membership::append_comparison_semantics(
+                    *comparison,
+                    bytes,
+                );
+            }
             Self::IsNull(is_null) => bytes.extend_from_slice(&[7, u8::from(*is_null)]),
             Self::Not => bytes.push(8),
             Self::And => bytes.push(9),
@@ -1708,17 +1714,23 @@ impl GraphIntegerExpression {
                         Some(true) => 2,
                     },
                 ]),
-                Instruction::Compare(comparison) => bytes.extend_from_slice(&[
-                    6,
-                    match comparison {
-                        IntegerComparison::Equal => 0,
-                        IntegerComparison::NotEqual => 1,
-                        IntegerComparison::Less => 2,
-                        IntegerComparison::LessOrEqual => 3,
-                        IntegerComparison::Greater => 4,
-                        IntegerComparison::GreaterOrEqual => 5,
-                    },
-                ]),
+                Instruction::Compare(comparison) => {
+                    bytes.extend_from_slice(&[
+                        6,
+                        match comparison {
+                            IntegerComparison::Equal => 0,
+                            IntegerComparison::NotEqual => 1,
+                            IntegerComparison::Less => 2,
+                            IntegerComparison::LessOrEqual => 3,
+                            IntegerComparison::Greater => 4,
+                            IntegerComparison::GreaterOrEqual => 5,
+                        },
+                    ]);
+                    crate::set_ops::projection::membership::append_comparison_semantics(
+                        *comparison,
+                        &mut bytes,
+                    );
+                }
                 Instruction::IsNull(is_null) => bytes.extend_from_slice(&[7, u8::from(*is_null)]),
                 Instruction::Not => bytes.push(8),
                 Instruction::And => bytes.push(9),

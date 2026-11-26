@@ -811,6 +811,7 @@ impl ReadValueTemplate {
                 right,
             } => {
                 bytes.extend_from_slice(&[22, comparison.tag()]);
+                bytes.extend_from_slice(crate::set_ops::projection::membership::ORDER_SEMANTICS);
                 left.append_template_transcript(bytes);
                 right.append_template_transcript(bytes);
             }
@@ -887,6 +888,10 @@ impl ReadFilterOp {
                 bytes.push(0);
                 left.append_template_transcript(bytes);
                 bytes.push(comparison_tag(*comparison));
+                crate::set_ops::projection::membership::append_comparison_semantics(
+                    *comparison,
+                    bytes,
+                );
                 right.append_template_transcript(bytes);
             }
             Self::IsNull { operand, is_null } => {

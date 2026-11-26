@@ -7,6 +7,22 @@
 use crate::GlaExecutionEvent;
 use crate::algebra::{GraphValue, IntegerComparison};
 
+/// Plan identity for representation-independent partial list ordering. This
+/// does not change durable value encodings or the separate equality law.
+/// Ordered value nodes admit every comparison tag and always bind this marker.
+pub(crate) const ORDER_SEMANTICS: &[u8] = b"fgdb:list-comparability:v2\0";
+
+/// General comparison programs dispatch equality separately; only their
+/// ordered comparisons can observe the revised compact-list semantics.
+pub(crate) fn append_comparison_semantics(comparison: IntegerComparison, bytes: &mut Vec<u8>) {
+    if !matches!(
+        comparison,
+        IntegerComparison::Equal | IntegerComparison::NotEqual
+    ) {
+        bytes.extend_from_slice(ORDER_SEMANTICS);
+    }
+}
+
 pub(crate) fn evaluate<E>(
     value: &GraphValue,
     members: &[GraphValue],
@@ -206,8 +222,60 @@ pub(crate) fn order<E>(
                 };
                 (left, right) = (left_item, right_item);
             }
-            _ => return Ok(None),
+            _ => {
+                let (Some(left_len), Some(right_len)) = (list_len(left), list_len(right)) else {
+                    return Ok(None);
+                };
+                // The ordinary List/List case above follows its deciding
+                // child. Here at least one list stores only graph identities.
+                // Equal prefixes can decide by length; an unequal identity
+                // has no language ordering, even against another identity.
+                // Borrow ordinary cells and keep compact identities on the
+                // stack rather than materializing a second list.
+                for at in 0..left_len.min(right_len) {
+                    let left = list_cell(left, at);
+                    let right = list_cell(right, at);
+                    match equal(left.as_ref(), right.as_ref(), control)? {
+                        Some(true) => {}
+                        Some(false) => {
+                            // Match the ordinary list's next loop iteration
+                            // for its deciding, unordered identity pair.
+                            control(GlaExecutionEvent::Work)?;
+                            return Ok(None);
+                        }
+                        None => return Ok(None),
+                    }
+                }
+                let lengths = left_len.cmp(&right_len);
+                return Ok(Some(match comparison {
+                    IntegerComparison::Equal => lengths.is_eq(),
+                    IntegerComparison::NotEqual => lengths.is_ne(),
+                    IntegerComparison::Less => lengths.is_lt(),
+                    IntegerComparison::LessOrEqual => lengths.is_le(),
+                    IntegerComparison::Greater => lengths.is_gt(),
+                    IntegerComparison::GreaterOrEqual => lengths.is_ge(),
+                }));
+            }
         }
+    }
+}
+
+fn list_len(value: &GraphValue) -> Option<usize> {
+    match value {
+        GraphValue::List(values) => Some(values.len()),
+        GraphValue::Vertices(values) => Some(values.len()),
+        GraphValue::Edges(values) => Some(values.len()),
+        _ => None,
+    }
+}
+
+fn list_cell(value: &GraphValue, at: usize) -> std::borrow::Cow<'_, GraphValue> {
+    use std::borrow::Cow;
+    match value {
+        GraphValue::List(values) => Cow::Borrowed(&values[at]),
+        GraphValue::Vertices(values) => Cow::Owned(GraphValue::Vertex(values[at])),
+        GraphValue::Edges(values) => Cow::Owned(GraphValue::Edge(values[at])),
+        _ => unreachable!("the caller admitted both list representations"),
     }
 }
 
@@ -396,6 +464,340 @@ mod tests {
         );
         assert_eq!(both_ways(&vertices, &int(1)), Some(false));
         assert_eq!(both_ways(&vertices, &null()), None);
+    }
+
+    #[test]
+    fn comparison_transcripts_bind_the_list_law_operator_and_both_operands() {
+        use crate::set_ops::filter::{GraphSetOperand, GraphSetPredicateOp, RowPredicate};
+        use crate::set_text::{ReadFilterOp, ReadFilterOperand, ReadValueTemplate};
+        use crate::{GraphIntegerExpression, GraphIntegerOp};
+
+        fn transcripts(comparison: IntegerComparison, left: usize, right: usize) -> [Vec<u8>; 6] {
+            let value = GraphSetValue::Ordered {
+                comparison,
+                left: Box::new(GraphSetValue::Column(left)),
+                right: Box::new(GraphSetValue::Column(right)),
+            };
+            // The public Ordered node also admits Equal and NotEqual, and
+            // still dispatches order(), so those nodes need the new identity.
+            GraphSetProjection::admit_output(&value, &[GraphSetColumnType::Any; 3], 0).unwrap();
+            let mut projection = Vec::new();
+            super::super::append_value_transcript(&value, &mut projection);
+            let mut filter = Vec::new();
+            RowPredicate::prepare(
+                &[GraphSetColumnType::Any; 3],
+                &[GraphSetPredicateOp::Compare {
+                    left: GraphSetOperand::Column(left),
+                    comparison,
+                    right: GraphSetOperand::Column(right),
+                }],
+            )
+            .unwrap()
+            .append_transcript(&mut filter);
+            let program = [
+                GraphIntegerOp::ScalarColumn(left),
+                GraphIntegerOp::ScalarColumn(right),
+                GraphIntegerOp::Compare(comparison),
+            ];
+            let mut integer_template = Vec::new();
+            for op in &program {
+                op.append_template_transcript(&mut integer_template);
+            }
+            let integer = GraphIntegerExpression::prepare_scalar(&program)
+                .unwrap()
+                .canonical_bytes();
+            let mut value_template = Vec::new();
+            ReadValueTemplate::Ordered {
+                comparison,
+                left: Box::new(ReadValueTemplate::Column(left)),
+                right: Box::new(ReadValueTemplate::Column(right)),
+            }
+            .append_template_transcript(&mut value_template);
+            let mut filter_template = Vec::new();
+            ReadFilterOp::Compare {
+                left: ReadFilterOperand::Column(left),
+                comparison,
+                right: ReadFilterOperand::Column(right),
+            }
+            .append_template_transcript(&mut filter_template);
+            [
+                projection,
+                filter,
+                integer_template,
+                integer,
+                value_template,
+                filter_template,
+            ]
+        }
+
+        // Exact pre-change byte fixtures: comparison encodings have two
+        // established tag orders, and all column ordinals are u64.
+        const COLUMN_ZERO: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0];
+        const COLUMN_ONE: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 1];
+        fn legacy(general_tag: u8, scalar_tag: u8) -> [Vec<u8>; 6] {
+            let projection = [&[22, general_tag][..], COLUMN_ZERO, COLUMN_ONE].concat();
+            let filter = [
+                &[0, 0, 0, 0, 0, 0, 0, 1, 0][..],
+                COLUMN_ZERO,
+                &[general_tag],
+                COLUMN_ONE,
+            ]
+            .concat();
+            let integer_template = vec![
+                16, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 1, 6, scalar_tag,
+            ];
+            let integer = [
+                b"fgdb:checked-integer-expression:v1\0".as_slice(),
+                &[0, 0, 0, 0, 0, 0, 0, 3],
+                integer_template.as_slice(),
+            ]
+            .concat();
+            let filter_template = [&[0][..], COLUMN_ZERO, &[scalar_tag], COLUMN_ONE].concat();
+            [
+                projection.clone(),
+                filter,
+                integer_template,
+                integer,
+                projection,
+                filter_template,
+            ]
+        }
+
+        let cases = [
+            (IntegerComparison::Equal, 0, 0, false),
+            (IntegerComparison::NotEqual, 1, 1, false),
+            (IntegerComparison::Less, 3, 2, true),
+            (IntegerComparison::LessOrEqual, 5, 3, true),
+            (IntegerComparison::Greater, 2, 4, true),
+            (IntegerComparison::GreaterOrEqual, 4, 5, true),
+        ];
+        let mut prior: Vec<[Vec<u8>; 6]> = Vec::new();
+        for (comparison, general_tag, scalar_tag, ordered) in cases {
+            let actual = transcripts(comparison, 0, 1);
+            let old = legacy(general_tag, scalar_tag);
+            let swapped = transcripts(comparison, 1, 0);
+            let other_left = transcripts(comparison, 2, 1);
+            let other_right = transcripts(comparison, 0, 2);
+            for route in 0..actual.len() {
+                let marked = ordered || route == 0 || route == 4;
+                let positions: Vec<_> = actual[route]
+                    .windows(ORDER_SEMANTICS.len())
+                    .enumerate()
+                    .filter_map(|(at, bytes)| (bytes == ORDER_SEMANTICS).then_some(at))
+                    .collect();
+                assert_eq!(positions.len(), usize::from(marked), "route {route}");
+                if marked {
+                    assert_ne!(actual[route], old[route]);
+                    let mut without_marker = actual[route].clone();
+                    let at = positions[0];
+                    drop(without_marker.drain(at..at + ORDER_SEMANTICS.len()));
+                    assert_eq!(without_marker, old[route], "route {route}");
+                } else {
+                    assert_eq!(actual[route], old[route], "equality route {route}");
+                }
+                assert_ne!(actual[route], swapped[route]);
+                assert_ne!(actual[route], other_left[route]);
+                assert_ne!(actual[route], other_right[route]);
+                for earlier in &prior {
+                    assert_ne!(actual[route], earlier[route], "operator at route {route}");
+                }
+            }
+            prior.push(actual);
+        }
+
+        // Ordinary value equality never calls order() and keeps its exact
+        // transcript, in both the unbound template and the executable plan.
+        let old_equal = [&[20][..], COLUMN_ZERO, COLUMN_ONE].concat();
+        let mut equal = Vec::new();
+        super::super::append_value_transcript(
+            &GraphSetValue::Equal {
+                left: Box::new(GraphSetValue::Column(0)),
+                right: Box::new(GraphSetValue::Column(1)),
+            },
+            &mut equal,
+        );
+        assert_eq!(equal, old_equal);
+        let mut equal_template = Vec::new();
+        ReadValueTemplate::Equal {
+            left: Box::new(ReadValueTemplate::Column(0)),
+            right: Box::new(ReadValueTemplate::Column(1)),
+        }
+        .append_template_transcript(&mut equal_template);
+        assert_eq!(equal_template, old_equal);
+    }
+
+    #[test]
+    fn compact_element_lists_keep_partial_lexicographic_order_across_representations() {
+        use core::cmp::Ordering::{Equal, Greater, Less};
+
+        const A: u128 = (1_u128 << 120) | 7;
+        const B: u128 = (2_u128 << 120) | 7;
+        let vertices = |ids: &[u128]| {
+            GraphValue::Vertices(ids.iter().copied().map(VId).collect())
+        };
+        let edges = |ids: &[u128]| GraphValue::Edges(ids.iter().copied().map(EId).collect());
+        let vertex = |id| GraphValue::Vertex(VId(id));
+        let edge = |id| GraphValue::Edge(EId(id));
+        let cases = [
+            (vertices(&[]), list(vec![]), Some(Equal)),
+            (vertices(&[]), edges(&[]), Some(Equal)),
+            (vertices(&[A]), vertices(&[A]), Some(Equal)),
+            (edges(&[A, A]), list(vec![edge(A), edge(A)]), Some(Equal)),
+            (vertices(&[A]), vertices(&[A, B]), Some(Less)),
+            (vertices(&[A]), list(vec![vertex(A), vertex(B)]), Some(Less)),
+            (list(vec![vertex(A)]), vertices(&[A, B]), Some(Less)),
+            (edges(&[A, B]), list(vec![edge(A)]), Some(Greater)),
+            (list(vec![edge(A), edge(B)]), edges(&[A]), Some(Greater)),
+            // Only the common prefix is compared: a later NULL cannot turn
+            // a proper-prefix comparison into UNKNOWN.
+            (vertices(&[]), list(vec![null()]), Some(Less)),
+            (vertices(&[A]), list(vec![vertex(A), null()]), Some(Less)),
+            (vertices(&[A]), vertices(&[B]), None),
+            (edges(&[A, B]), edges(&[A, A]), None),
+            (vertices(&[A]), edges(&[A]), None),
+            (vertices(&[A]), list(vec![null()]), None),
+            (edges(&[A, B]), list(vec![edge(A), null()]), None),
+            (vertices(&[A]), list(vec![int(7)]), None),
+            (vertices(&[A]), int(7), None),
+            (edges(&[]), null(), None),
+            (vertices(&[]), GraphValue::map(vec![]).unwrap(), None),
+            (
+                list(vec![vertices(&[A])]),
+                list(vec![list(vec![vertex(A), vertex(B)])]),
+                Some(Less),
+            ),
+            (
+                list(vec![edges(&[A, B]), int(1)]),
+                list(vec![list(vec![edge(A), edge(B)]), int(2)]),
+                Some(Less),
+            ),
+        ];
+        for (left, right, expected) in cases {
+            for (left, right, expected) in [
+                (&left, &right, expected),
+                (&right, &left, expected.map(core::cmp::Ordering::reverse)),
+            ] {
+                for comparison in [
+                    IntegerComparison::Less,
+                    IntegerComparison::LessOrEqual,
+                    IntegerComparison::Greater,
+                    IntegerComparison::GreaterOrEqual,
+                ] {
+                    let wanted = expected.map(|ordering| match comparison {
+                        IntegerComparison::Less => ordering == Less,
+                        IntegerComparison::LessOrEqual => ordering != Greater,
+                        IntegerComparison::Greater => ordering == Greater,
+                        IntegerComparison::GreaterOrEqual => ordering != Less,
+                        _ => unreachable!("only ordering predicates"),
+                    });
+                    assert_eq!(
+                        order(comparison, left, right, &mut |_| Ok::<_, ()>(())),
+                        Ok(wanted),
+                        "{comparison:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_list_order_borrows_prefixes_and_preserves_each_control_refusal() {
+        let vertices = GraphValue::Vertices(vec![VId(1), VId(2)].into_boxed_slice());
+        let plain = list(vec![GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2))]);
+        let unrelated = GraphValue::Scalar(
+            CanonicalScalar::ucs_basic_text(&"unread".repeat(1024)).unwrap(),
+        );
+        for tail in [int(3), unrelated] {
+            let right = list(vec![
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(2)),
+                tail,
+            ]);
+            let before = (vertices.clone(), right.clone());
+            let mut events = Vec::new();
+            assert_eq!(
+                order(IntegerComparison::Less, &vertices, &right, &mut |event| {
+                    events.push(event);
+                    Ok::<_, usize>(())
+                }),
+                Ok(Some(true))
+            );
+            // One list admission and two identity comparisons. Neither a
+            // copied list nor the unvisited tail consumes scratch or work.
+            assert_eq!(events, vec![GlaExecutionEvent::Work; 3]);
+            let mut plain_events = Vec::new();
+            assert_eq!(
+                order(IntegerComparison::Less, &plain, &right, &mut |event| {
+                    plain_events.push(event);
+                    Ok::<_, usize>(())
+                }),
+                Ok(Some(true))
+            );
+            assert_eq!(events, plain_events);
+            for stop in 0..events.len() {
+                let mut seen = 0;
+                let result = order(IntegerComparison::Less, &vertices, &right, &mut |_| {
+                    if seen == stop {
+                        Err(stop)
+                    } else {
+                        seen += 1;
+                        Ok(())
+                    }
+                });
+                assert_eq!(result, Err(stop));
+                assert_eq!(seen, stop);
+                assert_eq!((&vertices, &right), (&before.0, &before.1));
+            }
+            for limit in [events.len() - 1, events.len()] {
+                let mut used = 0;
+                let result = order(IntegerComparison::Less, &vertices, &right, &mut |_| {
+                    used += 1;
+                    if used > limit { Err(()) } else { Ok(()) }
+                });
+                assert_eq!(result.is_ok(), limit == events.len());
+            }
+        }
+    }
+
+    #[test]
+    fn compact_list_unknown_results_keep_the_deciding_checkpoint_and_null_boundary() {
+        let compact = GraphValue::Edges(vec![EId(1), EId(2)].into_boxed_slice());
+        let plain = list(vec![GraphValue::Edge(EId(1)), GraphValue::Edge(EId(2))]);
+        for right in [
+            list(vec![GraphValue::Edge(EId(1)), GraphValue::Edge(EId(3))]),
+            list(vec![GraphValue::Edge(EId(1)), null()]),
+            list(vec![GraphValue::Edge(EId(1)), GraphValue::Vertex(VId(2))]),
+        ] {
+            let mut events = Vec::new();
+            assert_eq!(
+                order(IntegerComparison::Less, &compact, &right, &mut |event| {
+                    events.push(event);
+                    Ok::<_, usize>(())
+                }),
+                Ok(None)
+            );
+            let mut plain_events = Vec::new();
+            assert_eq!(
+                order(IntegerComparison::Less, &plain, &right, &mut |event| {
+                    plain_events.push(event);
+                    Ok::<_, usize>(())
+                }),
+                Ok(None)
+            );
+            assert_eq!(events, plain_events);
+            for stop in 0..events.len() {
+                let mut seen = 0;
+                let result = order(IntegerComparison::Less, &compact, &right, &mut |_| {
+                    if seen == stop {
+                        Err(stop)
+                    } else {
+                        seen += 1;
+                        Ok(())
+                    }
+                });
+                assert_eq!(result, Err(stop));
+            }
+        }
     }
 
     #[test]

@@ -1703,6 +1703,7 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             right,
         } => {
             bytes.extend_from_slice(&[22, comparison.tag()]);
+            bytes.extend_from_slice(membership::ORDER_SEMANTICS);
             append_value_transcript(left, bytes);
             append_value_transcript(right, bytes);
         }

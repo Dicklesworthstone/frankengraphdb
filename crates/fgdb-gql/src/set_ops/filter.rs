@@ -366,6 +366,7 @@ impl RowPredicate {
                         IntegerComparison::GreaterOrEqual => 4,
                         IntegerComparison::LessOrEqual => 5,
                     });
+                    super::projection::membership::append_comparison_semantics(*comparison, bytes);
                     append_operand(right, bytes);
                 }
                 GraphSetPredicateOp::IsNull { operand, is_null } => {

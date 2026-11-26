@@ -633,6 +633,107 @@ fn path_element_lists_answer_every_list_operation() {
     }
 }
 
+#[test]
+fn carried_path_lists_compare_by_equal_prefix_without_ordering_element_identities() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalScalar;
+    use std::cell::Cell;
+
+    let reads = Cell::new(0);
+    let head = "MATCH p = (a)-[r:R]->(b)-[s:R]->(c) \
+                WITH a,b,c,r,s,nodes(p) AS ns,relationships(p) AS es RETURN";
+    for (expression, expected) in [
+        ("ns = [a,b,c]", Some(true)),
+        ("ns IN [[a,b,c]]", Some(true)),
+        ("es IS NOT NULL", Some(true)),
+        ("ns <= ns", Some(true)),
+        ("ns >= ns", Some(true)),
+        ("ns < ns", Some(false)),
+        ("es <= es", Some(true)),
+        ("es >= es", Some(true)),
+        ("es > es", Some(false)),
+        ("ns <= [a,b,c]", Some(true)),
+        ("[a,b,c] >= ns", Some(true)),
+        ("es >= [r,s]", Some(true)),
+        ("[r,s] <= es", Some(true)),
+        ("[a] < ns", Some(true)),
+        ("ns > [a,b]", Some(true)),
+        ("[r] < es", Some(true)),
+        ("es > [r]", Some(true)),
+        ("[] < ns", Some(true)),
+        ("es > []", Some(true)),
+        ("ns < [a,b,c,NULL]", Some(true)),
+        ("[r,s,NULL] > es", Some(true)),
+        ("ns < [a,NULL]", None),
+        ("[a,NULL] >= ns", None),
+        ("es <= [r,NULL]", None),
+        ("[r,NULL] > es", None),
+        ("ns < [a,c]", None),
+        ("[a,c] >= ns", None),
+        ("es <= [r,r]", None),
+        ("ns < es", None),
+        ("[ns] > [[a]]", Some(true)),
+        ("[es] <= [[r,s]]", Some(true)),
+        ("[ns,0] < [[a,b,c],1]", Some(true)),
+    ] {
+        let text = format!("{head} {expression} AS value");
+        let rows = chain_rows(&text, false, &reads).unwrap();
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(
+            rows[0].values(),
+            &[GraphValue::Scalar(
+                expected.map_or(CanonicalScalar::Null, CanonicalScalar::Bool)
+            )],
+            "{text}"
+        );
+    }
+    // The named variable-length relationship is the same compact edge-list
+    // representation even without a named path.
+    let text = "MATCH ()-[r:R*2]->() WITH r AS es RETURN [] < es AS value";
+    let rows = chain_rows(text, false, &reads).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].values(),
+        &[GraphValue::Scalar(CanonicalScalar::Bool(true))]
+    );
+    assert_eq!(
+        reads.get(),
+        0,
+        "list comparisons must read no graph properties"
+    );
+}
+
+#[test]
+fn optional_path_list_order_preserves_null_instead_of_inventing_an_empty_list() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalScalar;
+    use std::cell::Cell;
+
+    let reads = Cell::new(0);
+    for (expression, expected) in [
+        ("ns <= []", None),
+        ("[] >= ns", None),
+        ("es > []", None),
+        ("[] < es", None),
+        ("ns IS NULL", Some(true)),
+    ] {
+        let text = format!(
+            "MATCH (a) WHERE id(a)=4 OPTIONAL MATCH p = (a)-[:R]->(b) \
+             WITH nodes(p) AS ns,relationships(p) AS es RETURN {expression} AS value"
+        );
+        let rows = chain_rows(&text, false, &reads).unwrap();
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(
+            rows[0].values(),
+            &[GraphValue::Scalar(
+                expected.map_or(CanonicalScalar::Null, CanonicalScalar::Bool)
+            )],
+            "{text}"
+        );
+    }
+    assert_eq!(reads.get(), 0);
+}
+
 /// The two-edge chain 1 -[91]-> 2 -[92]-> 3 for element property laws: `name`
 /// is "a" on vertex 1 and "b" on vertex 2 (vertex 3 has none), and each edge
 /// carries `w` equal to its id. With `with_reader`, `x.key` on an element reads

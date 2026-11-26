@@ -12,6 +12,27 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Compact path-list comparisons — qualification pending
+
+Lists returned by `nodes(path)`, `relationships(path)` and captured
+variable-length relationships now use the existing three-valued lexicographic
+comparison law across compact and ordinary list representations. Equal
+prefixes compare by length; equal lists satisfy `<=` and `>=`. A NULL or
+unordered deciding element retains UNKNOWN. Borrowed comparison visits only the
+common prefix and preserves the ordinary list's work checkpoints without
+materializing another list. WITH aliases retain their compact types while
+entering the same whole-value comparison path.
+
+Comparison transcripts distinguish the revised semantics at prepared template,
+bound projection/filter and checked-expression boundaries. Canonical stored
+values and ordinary equality encoding remain unchanged. Regression sources
+cover full-width vertex/edge identities, both operand directions, nested
+representations, NULL extension, prefix-only work, every checkpoint refusal and
+native path queries. Source review and textual checks completed; native
+formatting, compilation, tests, Clippy, UBS and exact-tree qualification remain
+UNRUN without an attached execution computer. Keep `fgdb-w5-executor-olp` and
+`fgdb-qualify-integrated-nov22-maz0p` open.
+
 ### Standing-query continuity across additive catalog commits — qualification pending
 
 Ordinary maintained row and aggregate sources now accept an authenticated

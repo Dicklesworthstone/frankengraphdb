@@ -2551,14 +2551,22 @@ impl<'a> Parser<'a> {
     }
 
     /// The visible list-typed row column a bare name here reads, when no
-    /// `.`, call or subscript follows it (fgdb-c4i0d). A list sum or CASE
-    /// reads it as a column value directly: the value reader would hand a
-    /// bare name back to the scalar compiler, which re-reads the whole chain.
+    /// `.`, call or subscript follows it (fgdb-c4i0d). Compact path-node and
+    /// relationship lists retain their typed storage but use the same value
+    /// operations. A list sum or CASE reads the column directly: the scalar
+    /// compiler cannot consume the list's complete value.
     pub(super) fn row_list_column(
         &self,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<Option<usize>, GraphPatternTextError> {
-        self.row_bare_column(row, |kind| kind == GraphSetColumnType::List)
+        self.row_bare_column(row, |kind| {
+            matches!(
+                kind,
+                GraphSetColumnType::List
+                    | GraphSetColumnType::Vertices
+                    | GraphSetColumnType::Edges
+            )
+        })
     }
 
     /// A bare dynamically typed (Any) row column.
