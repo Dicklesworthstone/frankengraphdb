@@ -11,6 +11,7 @@ use fgdb_protocol::body::{
 };
 use fgdb_protocol::client::{
     CLIENT_MAX_FRAME, Client, ClientError, MAX_TRANSACTION_BATCH_STATEMENTS, TransactionBatchEnd,
+    TransactionBatchRollback,
 };
 use std::io::Write;
 use std::path::Path;
@@ -22,6 +23,12 @@ const MAX_INPUT_BYTES: usize = CLIENT_MAX_FRAME as usize;
 pub(super) struct TransactionScript {
     statements: Vec<Execute>,
     read_only: bool,
+    pub(super) rollback: bool,
+}
+
+enum Completion {
+    Commit(TransactionBatchEnd),
+    Rollback(TransactionBatchRollback),
 }
 
 impl TransactionScript {
@@ -160,6 +167,7 @@ impl TransactionScript {
         Ok(Self {
             statements,
             read_only,
+            rollback: false,
         })
     }
 
@@ -200,7 +208,19 @@ impl TransactionScript {
             |index, basis, columns: &[String]| lock().columns(cx, index, basis, columns);
         let on_row = |index, row: Vec<WireValue>| lock().row(cx, index, &row);
         let on_result_end = |index, rows| lock().result_end(cx, index, rows);
-        let result = if self.read_only {
+        let result = if self.rollback {
+            client
+                .preview_transaction_batch_streaming(
+                    cx,
+                    self.statements,
+                    self.read_only,
+                    on_columns,
+                    on_row,
+                    on_result_end,
+                )
+                .await
+                .map(Completion::Rollback)
+        } else if self.read_only {
             client
                 .execute_read_transaction_batch_streaming(
                     cx,
@@ -210,6 +230,7 @@ impl TransactionScript {
                     on_result_end,
                 )
                 .await
+                .map(Completion::Commit)
         } else {
             client
                 .execute_transaction_batch_streaming(
@@ -220,6 +241,7 @@ impl TransactionScript {
                     on_result_end,
                 )
                 .await
+                .map(Completion::Commit)
         };
         sink.into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -367,7 +389,7 @@ impl<W: Write> TransactionOutput<'_, W> {
         self.capture(result)
     }
 
-    fn finish(mut self, result: Result<TransactionBatchEnd, ClientError>) -> Result<(), Failure> {
+    fn finish(mut self, result: Result<Completion, ClientError>) -> Result<(), Failure> {
         let end = match result {
             Ok(end) => end,
             Err(error) => {
@@ -378,47 +400,60 @@ impl<W: Write> TransactionOutput<'_, W> {
                 return Err(unconfirmed(error, self.sent));
             }
         };
-        let (outcome, completed, seq) = match end.outcome {
-            Outcome::WriteCommitted { seq, .. } => ("write_committed", "write commit", seq),
-            Outcome::ReadClosed { seq, .. } => ("read_closed", "read close", seq),
-            Outcome::Rows { .. } => {
-                let error = self.failed.take().unwrap_or_else(|| {
-                    Failure::io("remote transaction returned no completion outcome")
-                });
-                return Err(unconfirmed(error, self.sent));
+        let (basis, statements, rows, outcome, completed, seq) = match end {
+            Completion::Commit(end) => {
+                let (outcome, completed, seq) = match end.outcome {
+                    Outcome::WriteCommitted { seq, .. } => ("write_committed", "write commit", seq),
+                    Outcome::ReadClosed { seq, .. } => ("read_closed", "read close", seq),
+                    Outcome::Rows { .. } => {
+                        let error = self.failed.take().unwrap_or_else(|| {
+                            Failure::io("remote transaction returned no completion outcome")
+                        });
+                        return Err(unconfirmed(error, self.sent));
+                    }
+                };
+                (end.basis, end.statements, end.rows, outcome, completed, Some(seq))
+            }
+            Completion::Rollback(end) => {
+                (end.basis, end.statements, end.rows, "rolled_back", "rollback", None)
             }
         };
-        // A valid completion receipt remains authoritative even when local
-        // output or its defensive consistency checks subsequently fail.
+        // ROLLED_BACK echoes the handle; it does not report a database revision.
+        let position = seq.map_or_else(|| format!("from basis seq {basis}"), |seq| format!("at seq {seq}"));
+        let incomplete = |mut error: Failure| {
+            error.message = format!(
+                "{}; transaction {completed} {position} is confirmed, but output is incomplete after {} provisional row(s); do not retry the transaction",
+                error.message, self.sent
+            );
+            error
+        };
         if let Some(error) = self.failed.take() {
-            return Err(known_completion(error, completed, seq, self.sent));
+            return Err(incomplete(error));
         }
         if self.active.is_some()
-            || self.basis != Some(end.basis)
-            || end.statements != self.expected
-            || end.statements != self.completed
-            || end.rows != self.sent
+            || self.basis != Some(basis)
+            || statements != self.expected
+            || statements != self.completed
+            || rows != self.sent
         {
-            return Err(known_completion(
-                Failure::io("remote transaction completion does not match delivered results"),
-                completed,
-                seq,
-                self.sent,
-            ));
+            return Err(incomplete(Failure::io(
+                "remote transaction completion does not match delivered results",
+            )));
         }
         let line = if self.robot {
+            let seq = seq.map_or_else(String::new, |seq| format!(r#","seq":{seq}"#));
             format!(
-                r#"{{"v":1,"event":"result","kind":"transaction","outcome":"{outcome}","seq":{seq},"basis_seq":{},"statements":{},"count":{}}}"#,
-                end.basis, end.statements, end.rows
+                r#"{{"v":1,"event":"result","kind":"transaction","outcome":"{outcome}"{seq},"basis_seq":{basis},"statements":{statements},"count":{rows}}}"#
+            )
+        } else if let Some(seq) = seq {
+            format!(
+                "transaction {completed} confirmed at seq {seq} from basis seq {basis}: {statements} statement(s), {rows} row(s)"
             )
         } else {
-            format!(
-                "transaction {completed} confirmed at seq {seq} from basis seq {}: {} statement(s), {} row(s)",
-                end.basis, end.statements, end.rows
-            )
+            format!("transaction rollback confirmed from basis seq {basis}: {statements} statement(s), {rows} provisional row(s)")
         };
         let output = emit(self.out, &line).and_then(|()| self.out.flush().map_err(Failure::io));
-        output.map_err(|error| known_completion(error, completed, seq, self.sent))
+        output.map_err(incomplete)
     }
 }
 
@@ -441,13 +476,6 @@ fn unconfirmed(mut error: Failure, sent: u64) -> Failure {
     error
 }
 
-fn known_completion(mut error: Failure, completed: &str, seq: u64, sent: u64) -> Failure {
-    error.message = format!(
-        "{}; transaction {completed} at seq {seq} is confirmed, but output is incomplete after {sent} provisional row(s); do not retry the transaction",
-        error.message
-    );
-    error
-}
 
 #[cfg(test)]
 mod tests {

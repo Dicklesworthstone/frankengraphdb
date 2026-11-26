@@ -355,6 +355,16 @@ provisional record before allowing the next step or COMMIT. Unknown completion
 emits no success and no rollback claim. A final output error after a validated
 receipt retains the known completion sequence in its diagnostic.
 
+Use `remote transaction --rollback --statements-file <file>` to preview writes.
+The mixed script executes under the same write authority and limits. Later reads
+see earlier staged writes and their rows are delivered provisionally. After the
+last statement, the client sends ROLLBACK and requires the acknowledgement for
+the original transaction handle. The final result carries `outcome:"rolled_back"`,
+`basis_seq`, `statements`, and `count`. Rollback does not publish a new sequence.
+If the acknowledgement is missing, the command reports incomplete delivery.
+`--read-only --rollback` uses the same close on the read-only owner. Rust
+clients can call `preview_transaction_batch_streaming` with either access mode.
+
 ## fgdbd: the served subset
 
 ### Explicit native transactions

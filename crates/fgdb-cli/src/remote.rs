@@ -57,6 +57,7 @@ struct RemoteOptions {
     transaction: bool,
     /// Pin a native read owner instead of opening a writer for the script.
     read_only_transaction: bool,
+    rollback_transaction: bool,
     /// Admit every parameter set against one pinned read session and share its
     /// execution allowance. The batch has one successful terminal record.
     consistent_batch: bool,
@@ -94,6 +95,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut rows_file = None;
     let mut statements_file = None;
     let mut read_only_transaction = false;
+    let mut rollback_transaction = false;
     let mut consistent_batch = false;
     let mut prepared_batch = false;
     let mut csv_types = None;
@@ -133,6 +135,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
                 statements_file = Some(PathBuf::from(value()?));
             }
             "--read-only" if !read_only_transaction => read_only_transaction = true,
+            "--rollback" if !rollback_transaction => rollback_transaction = true,
             "--consistent-batch" if !consistent_batch => consistent_batch = true,
             "--prepared-batch" if !prepared_batch => prepared_batch = true,
             "--prepared-jsonl" if prepared_jsonl.is_none() => {
@@ -245,6 +248,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     };
     if read_mode.is_some() && verb != "query" {
         return Err(Failure::usage("--read-mode applies only to query"));
+    }
+    if rollback_transaction && verb != "transaction" {
+        return Err(Failure::usage("--rollback applies only to remote transaction"));
     }
     if read_only_transaction && verb != "transaction" {
         return Err(Failure::usage(
@@ -361,6 +367,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         statements_file,
         transaction: verb == "transaction",
         read_only_transaction,
+        rollback_transaction,
         consistent_batch,
         prepared_batch,
         csv_types,
@@ -663,9 +670,10 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
         return runtime.block_on(async {
             // Admit every step before credentials, connection or BEGIN. The
             // shared client driver owns provisional delivery and final commit.
-            let script =
+            let mut script =
                 transaction::TransactionScript::read(&cx, path, options.read_only_transaction)
                     .await?;
+            script.rollback = options.rollback_transaction;
             let mut client = connect(&cx, &options).await?;
             client
                 .select(&cx, &options.database)
@@ -1399,6 +1407,11 @@ mod tests {
         let options = script(&[]).unwrap_or_else(|error| panic!("{}", error.message));
         assert!(options.transaction);
         assert!(!options.read_only_transaction);
+        assert!(!options.rollback_transaction);
+        for flags in [vec!["--rollback"], vec!["--read-only", "--rollback"]] {
+            let preview = script(&flags).unwrap_or_else(|error| panic!("{}", error.message));
+            assert!(preview.rollback_transaction);
+        }
         assert_eq!(options.statements_file, Some(PathBuf::from("steps.json")));
         assert_eq!(options.mode, ExecuteMode::Write);
         assert!(options.statement.is_empty());
@@ -1419,6 +1432,13 @@ mod tests {
         );
         for verb in ["query", "write", "subscribe"] {
             assert_eq!(
+                self::options(verb, &["--rollback"])
+                    .err()
+                    .expect("rollback preview requires a transaction")
+                    .code,
+                2
+            );
+            assert_eq!(
                 self::options(verb, &["--read-only"])
                     .err()
                     .expect("read-only transaction flag has one owner")
@@ -1431,6 +1451,7 @@ mod tests {
             vec!["RETURN 1"],
             vec!["--statements-file", "again.json"],
             vec!["--read-only", "--read-only"],
+            vec!["--rollback", "--rollback"],
             vec!["--rows-file", "rows.json"],
             vec!["--csv-types", "id=int64"],
             vec!["--prepared-jsonl", "writes.jsonl"],

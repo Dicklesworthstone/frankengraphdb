@@ -37,7 +37,7 @@ pub use read_batch::{ReadBatchAnswer, ReadBatchResult};
 mod transaction;
 pub use transaction::{
     MAX_TRANSACTION_BATCH_STATEMENTS, TransactionAnswer, TransactionBatchAnswer,
-    TransactionBatchEnd, TransactionBatchResult,
+    TransactionBatchEnd, TransactionBatchResult, TransactionBatchRollback,
 };
 
 /// What a client can fail with. Server refusals keep their public class.
