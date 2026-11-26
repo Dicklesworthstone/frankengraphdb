@@ -8,6 +8,7 @@ use crate::*;
 use fgdb_delta_types::catalog::{
     CatalogBindingError, CatalogSymbol, CatalogSymbolKind, SymbolCatalog,
 };
+use fgdb_delta_types::zset::committed::CommittedSchemaCompatibility;
 use fgdb_strata::catalog::{
     CatalogError, CatalogRef, SchemaCatalog, SchemaTransition, SchemaTransitionVersion,
 };
@@ -217,6 +218,33 @@ impl SchemaState {
             && generation.catalog.epoch() == *after_epoch
             && after_epoch.0 <= self.catalog.epoch().0
             && generation.catalog.changed_after() == basis
+    }
+
+    /// Attest a live committed topology input after publication has verified
+    /// its batch and installed the resulting catalog. A root loaded without
+    /// its catalog history cannot certify the full lineage.
+    pub(super) fn topology_compatibility<'a>(
+        &self,
+        cx: &CommitCx,
+        batch: &'a LogicalDeltaBatch,
+    ) -> Option<CommittedSchemaCompatibility<'a>> {
+        if !self.origin_available {
+            return None;
+        }
+        let has_catalog_effect = batch
+            .coordinate_entries()
+            .iter()
+            .any(|entry| entry.schema_transition.is_some());
+        if has_catalog_effect && !self.admits_name_only_delta(batch) {
+            return None;
+        }
+        Some(CommittedSchemaCompatibility::attest_name_only_catalog(
+            cx,
+            batch,
+            GRAPH,
+            BRANCH,
+            self.catalog.epoch(),
+        ))
     }
 
     /// Admit schema effects before D1, or replay the same admission from the

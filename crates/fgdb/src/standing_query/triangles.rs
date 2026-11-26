@@ -50,16 +50,23 @@ impl State {
         &mut self,
         cx: &CommitCx,
         batch: &LogicalDeltaBatch,
+        topology: Option<&CommittedSchemaCompatibility<'_>>,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         if self.frontier != self.input.frontier() {
             return Err(StandingQueryFailure::InvalidDelta);
         }
         recursive::observe_batch(batch, meter)?;
-        let pending = self
-            .input
-            .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
-            .map_err(input_error)?;
+        let mut control = |event| meter.charge(event);
+        let pending = match topology {
+            Some(proof) => self
+                .input
+                .prepare_catalog_successor(cx, proof, LIMBS, &mut control),
+            None => self
+                .input
+                .prepare_committed_successor(cx, batch, LIMBS, &mut control),
+        }
+        .map_err(input_error)?;
         // Bound the FINAL occurrence count, not support size or a transient
         // insertion-before-retraction prefix. ALL does not expand duplicates.
         result_bound(pending.total(), meter.policy)?;
@@ -273,7 +280,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                success.maintain(&commit, batch, &mut meter).unwrap();
+                success.maintain(&commit, batch, None, &mut meter).unwrap();
                 meter.stats
             };
             assert!(calls > 0 && stats.work_units > 0 && stats.scratch_entries > 0);
@@ -298,7 +305,7 @@ mod tests {
                         checkpoint: &mut checkpoint,
                     };
                     assert_eq!(
-                        state.maintain(&commit, batch, &mut meter),
+                        state.maintain(&commit, batch, None, &mut meter),
                         Err(StandingQueryFailure::Interrupted),
                         "refusal at {stop}"
                     );
@@ -328,7 +335,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                let result = state.maintain(&commit, batch, &mut meter);
+                let result = state.maintain(&commit, batch, None, &mut meter);
                 if let Some(error) = error {
                     assert_eq!(result, Err(error));
                     unchanged(&state, &before);

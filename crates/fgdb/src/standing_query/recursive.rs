@@ -127,16 +127,23 @@ impl State {
         &mut self,
         cx: &CommitCx,
         batch: &LogicalDeltaBatch,
+        topology: Option<&CommittedSchemaCompatibility<'_>>,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         if self.frontier != self.input.frontier() {
             return Err(StandingQueryFailure::InvalidDelta);
         }
         observe_batch(batch, meter)?;
-        let pending = self
-            .input
-            .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
-            .map_err(input_error)?;
+        let mut control = |event| meter.charge(event);
+        let pending = match topology {
+            Some(proof) => self
+                .input
+                .prepare_catalog_successor(cx, proof, LIMBS, &mut control),
+            None => self
+                .input
+                .prepare_committed_successor(cx, batch, LIMBS, &mut control),
+        }
+        .map_err(input_error)?;
         finish(&mut self.rows, pending, meter)
     }
 }
@@ -370,7 +377,7 @@ impl State {
                 stats: self.stats,
                 checkpoint: &mut checkpoint,
             };
-            match self.maintain(commit_cx, batch, &mut meter) {
+            match self.maintain(commit_cx, batch, None, &mut meter) {
                 Ok(()) => {
                     self.frontier = batch.commit_seq();
                     self.stats = meter.stats;

@@ -431,3 +431,73 @@ fn typed_access_and_foreign_handles_refuse_without_disrupting_healthy_views() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn live_numeric_topology_follows_catalog_ticks_and_older_prepared_writes() {
+    use fgdb_delta_types::LabelId;
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+
+    let ((), report) = run_async_under_lab(0x7472_6906, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for vertex in 1..=4 {
+            seed.create_vertex(VId(vertex), vec![], vec![]);
+        }
+        for (edge, source, target) in [(1, 1, 2), (2, 2, 3), (3, 1, 3)] {
+            seed.add_edge(EId(edge), VId(source), VId(target), vec![]);
+        }
+        assert_eq!(db.write(&commit, seed).await.unwrap(), CommitSeq(1));
+        let quantifier = TriangleQuantifier::Distinct;
+        let triangles = db
+            .register_standing_triangles(&cx, R, quantifier, policy())
+            .unwrap();
+        let reachability = db.register_standing_reachability(&cx, R, policy()).unwrap();
+        let verify = |db: &Database<MemVfs>, at, pairs: &[(u128, u128)], total| {
+            check(db, &cx, &triangles, R, quantifier);
+            assert_eq!(
+                db.standing_triangle_total(&cx, &triangles)
+                    .unwrap()
+                    .to_i128(),
+                Some(total)
+            );
+            let view = db.standing_reachability(&cx, &reachability).unwrap();
+            assert_eq!(view.frontier(), at);
+            let actual: Vec<_> = view
+                .rows()
+                .iter()
+                .map(|(&(from, to), weight)| {
+                    assert_eq!(weight.to_i128(), Some(1));
+                    (from.0, to.0)
+                })
+                .collect();
+            assert_eq!(actual, pairs);
+        };
+        let initial = [(1, 2), (1, 3), (2, 3)];
+        let expanded = [(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)];
+        verify(&db, CommitSeq(1), &initial, 1);
+
+        let mut old = WriteBatch::new(R);
+        old.add_edge(EId(4), VId(3), VId(4), vec![]);
+        let old = db.prepare_write(old).unwrap();
+        let mut catalog = SymbolCatalog::default();
+        catalog
+            .bind_all([("Added", CatalogSymbol::Label(LabelId(1)))])
+            .unwrap();
+        db.register_symbols(&commit, &catalog).await.unwrap();
+        verify(&db, CommitSeq(2), &initial, 1);
+
+        assert_eq!(
+            db.commit_prepared(&commit, old).await.unwrap(),
+            CommitSeq(3)
+        );
+        verify(&db, CommitSeq(3), &expanded, 1);
+        let mut current = WriteBatch::new(R);
+        current.add_edge(EId(5), VId(1), VId(4), vec![]);
+        assert_eq!(db.write(&commit, current).await.unwrap(), CommitSeq(4));
+        verify(&db, CommitSeq(4), &expanded, 2);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

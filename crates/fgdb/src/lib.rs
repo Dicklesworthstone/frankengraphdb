@@ -5488,7 +5488,7 @@ impl<V: Vfs + Clone> Database<V> {
                 .delta_index
                 .get(frontier)
                 .expect("successful publication retains its committed delta");
-            standing_query::publish(&mut self.standing_queries, cx, batch);
+            standing_query::publish(&mut self.standing_queries, cx, &self.snapshot.schema, batch);
             self.maintained_beacon.publish(cx, &self.snapshot, batch);
         }
         Ok(self.snapshot.frontier)

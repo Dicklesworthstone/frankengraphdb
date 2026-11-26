@@ -23,7 +23,7 @@ fn seeded(cx: &CommitCx, initial: &LogicalDeltaBatch) -> State {
         stats: StandingQueryStats::default(),
         checkpoint: &mut checkpoint,
     };
-    state.maintain(cx, initial, &mut meter).unwrap();
+    state.maintain(cx, initial, None, &mut meter).unwrap();
     state.frontier = initial.commit_seq();
     state.stats = meter.stats;
     state
@@ -65,7 +65,7 @@ fn every_recursive_maintenance_checkpoint_is_atomic_and_retryable() {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            success.maintain(&commit, &batch, &mut meter).unwrap();
+            success.maintain(&commit, &batch, None, &mut meter).unwrap();
             success.frontier = at;
         }
         for stop in 1..=calls {
@@ -86,7 +86,7 @@ fn every_recursive_maintenance_checkpoint_is_atomic_and_retryable() {
                     checkpoint: &mut checkpoint,
                 };
                 assert_eq!(
-                    state.maintain(&commit, &batch, &mut meter),
+                    state.maintain(&commit, &batch, None, &mut meter),
                     Err(StandingQueryFailure::Interrupted)
                 );
             }
@@ -102,7 +102,7 @@ fn every_recursive_maintenance_checkpoint_is_atomic_and_retryable() {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            state.maintain(&commit, &batch, &mut meter).unwrap();
+            state.maintain(&commit, &batch, None, &mut meter).unwrap();
             state.frontier = at;
             assert_eq!(state.input, success.input);
             assert_eq!(state.rows, success.rows);
@@ -115,7 +115,7 @@ fn every_recursive_maintenance_checkpoint_is_atomic_and_retryable() {
             checkpoint: &mut checkpoint,
         };
         assert_eq!(
-            limited.maintain(&commit, &batch, &mut meter),
+            limited.maintain(&commit, &batch, None, &mut meter),
             Err(StandingQueryFailure::ResultBudget)
         );
         assert_eq!(limited.input, before.input);

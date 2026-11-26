@@ -39,6 +39,7 @@ mod typed_group_tests;
 
 use crate::{Database, ReadError};
 use asupersync::fs::Vfs;
+use fgdb_delta_types::zset::committed::CommittedSchemaCompatibility;
 use fgdb_delta_types::{LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent};
 use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{GqlQueryPolicy, GraphAggregateRow, PreparedGraphAggregate};
@@ -1264,7 +1265,13 @@ impl<V: Vfs + Clone> Database<V> {
 
 /// One publication lifecycle. A failed derived view never rejects a durable
 /// database commit or prevents independently admitted sibling views advancing.
-pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &LogicalDeltaBatch) {
+pub(crate) fn publish(
+    queries: &mut [StandingQuery],
+    cx: &CommitCx,
+    schema: &crate::schema_catalog::SchemaState,
+    batch: &LogicalDeltaBatch,
+) {
+    let topology = schema.topology_compatibility(cx, batch);
     let total_len = queries.len();
     let mut active_scope: Option<(usize, usize)> = None;
     let mut index = 0;
@@ -1326,6 +1333,9 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
         } else {
             batch
         };
+        let topology = topology
+            .as_ref()
+            .filter(|proof| proof.matches_batch(effective_batch));
         let mut checkpoint = || {
             cx.checkpoint()
                 .map_err(|_| StandingQueryFailure::Interrupted)
@@ -1347,9 +1357,13 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Rows { source, output } => {
                 source.maintain_with_output(effective_batch, &mut meter, Some(output.as_mut()))
             }
-            StandingQuery::Reachability(query) => query.maintain(cx, effective_batch, &mut meter),
+            StandingQuery::Reachability(query) => {
+                query.maintain(cx, effective_batch, topology, &mut meter)
+            }
             StandingQuery::Closure(query) => query.maintain(effective_batch, prior, &mut meter),
-            StandingQuery::Triangles(query) => query.maintain(cx, effective_batch, &mut meter),
+            StandingQuery::Triangles(query) => {
+                query.maintain(cx, effective_batch, topology, &mut meter)
+            }
             StandingQuery::TriangleCounts(query) => {
                 query.maintain_with_sources(cx, effective_batch, prior, &mut meter)
             }
