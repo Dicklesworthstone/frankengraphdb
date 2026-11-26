@@ -132,6 +132,10 @@ impl ExactCounts {
             .map(|matching| matching.map(|matching| (vertices, matching)))
     }
 
+    pub(crate) fn has_relation_counts(&self) -> bool {
+        matches!(self.relations.get(), Some(Some(_)))
+    }
+
     pub(super) fn relation_builder(&self) -> Option<RelationBuilder> {
         self.relations
             .get()

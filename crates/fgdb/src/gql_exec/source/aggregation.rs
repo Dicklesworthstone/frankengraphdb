@@ -57,7 +57,7 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(|error| {
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
-        if let Some(plan) = fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(aggregate) {
+        if let Some(plan) = aggregate_scan(&self.snapshot, as_of, aggregate) {
             let view = self.read_session().map_err(|error| {
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
@@ -96,7 +96,7 @@ impl EmbeddedReadView {
         self.snapshot.check_frontier(as_of).map_err(|error| {
             GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
         })?;
-        if let Some(plan) = fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(aggregate) {
+        if let Some(plan) = aggregate_scan(&self.snapshot, as_of, aggregate) {
             return execute_scan(self, cx, &plan, as_of, policy);
         }
         cx.with_restriction(|| execute_at(self, aggregate, as_of, policy, || cx.checkpoint()))
@@ -110,6 +110,22 @@ impl EmbeddedReadView {
     ) -> AggregateResult<GqlError> {
         self.execute_graph_aggregate_governed_at(cx, query.aggregate(), query.as_of(), policy)
     }
+}
+
+// A complete relation histogram is immutable at its own frontier. Preserve
+// the streaming evaluator for an alternation at any earlier or unindexed cut.
+fn aggregate_scan(
+    snapshot: &Snapshot,
+    as_of: CommitSeq,
+    aggregate: &PreparedGraphAggregate,
+) -> Option<fgdb_gql::scan_stream::AggregateScanPlan> {
+    if as_of == snapshot.frontier
+        && snapshot.exact_counts.has_relation_counts()
+        && aggregate.can_count_relation_alternation()
+    {
+        return None;
+    }
+    fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(aggregate)
 }
 
 // The ordinary read surface can consume a pull aggregate without materializing

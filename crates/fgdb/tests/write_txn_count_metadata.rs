@@ -28,6 +28,7 @@ const A_VERTICES: &str = "MATCH (n:A) RETURN count(*) AS n";
 const B_VERTICES: &str = "MATCH (n:B) RETURN count(*) AS n";
 const ALL_EDGES: &str = "MATCH (a)-[r]->(b) RETURN count(*) AS n";
 const R_EDGES: &str = "MATCH (a)-[r:R]->(b) RETURN count(*) AS n";
+const R_OR_T_EDGES: &str = "MATCH (a)-[r:R|T]->(b) RETURN count(DISTINCT r) AS n";
 const S_EDGES: &str = "MATCH (a)-[r:S]->(b) RETURN count(*) AS n";
 const POPULATIONS: [&str; 6] = [
     VERTICES, A_VERTICES, B_VERTICES, ALL_EDGES, R_EDGES, S_EDGES,
@@ -45,6 +46,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
+        (GraphSymbolKind::Relation, "T") => Some(GraphSymbol::Relation(RelationId(3))),
         (GraphSymbolKind::Label, "A") => Some(GraphSymbol::Label(A)),
         (GraphSymbolKind::Label, "B") => Some(GraphSymbol::Label(B)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
@@ -111,7 +113,13 @@ fn assert_populations(
     cx: &QueryCx,
     expected: [u64; 6],
 ) {
-    for (text, expected) in POPULATIONS.into_iter().zip(expected) {
+    // The fixture has no T edges. Its R|T population must follow only R
+    // through staged births, cross-relation cascades and savepoint rollback.
+    for (text, expected) in POPULATIONS
+        .into_iter()
+        .zip(expected)
+        .chain([(R_OR_T_EDGES, expected[4])])
+    {
         let result = transaction
             .execute_graph_aggregate_governed(db, cx, &prepare(text), policy())
             .unwrap_or_else(|error| panic!("{text}: {error:?}"));
@@ -300,6 +308,7 @@ enum Change {
     Property,
     CreateR,
     CreateS,
+    CreateT,
     DeleteR,
     DeleteS,
     EdgeProperty,
@@ -308,6 +317,7 @@ enum Change {
 fn changed(change: Change) -> WriteBatch {
     let mut batch = WriteBatch::new(match change {
         Change::CreateS | Change::DeleteS | Change::DeleteA => S,
+        Change::CreateT => RelationId(3),
         _ => R,
     });
     match change {
@@ -335,7 +345,7 @@ fn changed(change: Change) -> WriteBatch {
         Change::Property => {
             batch.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(99)));
         }
-        Change::CreateR | Change::CreateS => {
+        Change::CreateR | Change::CreateS | Change::CreateT => {
             batch.add_edge(EId(7), VId(3), VId(4), vec![]);
         }
         Change::DeleteR => {
@@ -372,6 +382,9 @@ fn count_conflicts_cover_negative_changes_without_locking_unrelated_domains() {
             (A_VERTICES, Change::CreateB, false),
             (A_VERTICES, Change::EnterB, false),
             (A_VERTICES, Change::Property, false),
+            (R_OR_T_EDGES, Change::DeleteR, true),
+            (R_OR_T_EDGES, Change::CreateS, false),
+            (R_OR_T_EDGES, Change::CreateT, true),
             (R_EDGES, Change::DeleteR, true),
             (R_EDGES, Change::DeleteS, false),
             (R_EDGES, Change::DeleteA, true),
@@ -387,10 +400,12 @@ fn count_conflicts_cover_negative_changes_without_locking_unrelated_domains() {
         ] {
             let mut db = fixture(&commit).await;
             let mut transaction = db.begin(&txcx).unwrap();
+            let records = if text == R_OR_T_EDGES { 2 } else { 1 };
+            let budget = GqlQueryPolicy::new(records, 1, 1_000_000, 100_000);
             let result = transaction
-                .execute_graph_aggregate_governed(&db, &cx, &prepare(text), one_record())
+                .execute_graph_aggregate_governed(&db, &cx, &prepare(text), budget)
                 .unwrap();
-            assert_eq!(result.rows.snapshot_records, 1);
+            assert_eq!(result.rows.snapshot_records, records);
             let mut sentinel = WriteBatch::new(R);
             sentinel.create_vertex(VId(99), vec![], vec![]);
             transaction.write(&mut db, sentinel).unwrap();

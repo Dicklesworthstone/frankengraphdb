@@ -10,7 +10,7 @@
 //! exact-metadata input spends only its own lookup and finalization work.
 
 use super::*;
-use crate::algebra::{EdgeRelation, GlaDirection};
+use crate::algebra::{EdgeRelation, EdgeRelationSet, GlaDirection};
 use fgdb_delta_types::LabelId;
 
 /// The live source whose exact cardinality a checked count can use.
@@ -30,8 +30,23 @@ pub enum GraphCountSource {
     Relation(RelationId),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CountInput {
+    Single(GraphCountSource),
+    Alternatives(EdgeRelationSet),
+}
+
+impl CountInput {
+    fn single(self) -> Option<GraphCountSource> {
+        match self {
+            Self::Single(source) => Some(source),
+            Self::Alternatives(_) => None,
+        }
+    }
+}
+
 struct Shape {
-    source: GraphCountSource,
+    source: CountInput,
     columns: usize,
     universal_endpoint_labels: bool,
 }
@@ -72,14 +87,17 @@ impl PreparedGraphAggregate {
         }
         let operators = self.input.plan().operators();
         let (mut source, slots) = match operators.first()? {
-            GlaOperator::ScanVertices => (GraphCountSource::Vertices, 1),
+            GlaOperator::ScanVertices => (CountInput::Single(GraphCountSource::Vertices), 1),
             GlaOperator::ScanEdges {
                 relation,
                 direction: GlaDirection::Forward | GlaDirection::Reverse,
             } => (
                 match relation {
-                    EdgeRelation::One(relation) => GraphCountSource::Relation(*relation),
-                    EdgeRelation::Any => GraphCountSource::Edges,
+                    EdgeRelation::One(relation) => {
+                        CountInput::Single(GraphCountSource::Relation(*relation))
+                    }
+                    EdgeRelation::Any => CountInput::Single(GraphCountSource::Edges),
+                    EdgeRelation::Set(set) if metadata => CountInput::Alternatives(*set),
                     EdgeRelation::Set(_) => return None,
                 },
                 2,
@@ -93,7 +111,7 @@ impl PreparedGraphAggregate {
         for operator in &operators[1..] {
             match operator {
                 GlaOperator::Select { slot, predicates }
-                    if source == GraphCountSource::Vertices
+                    if source == CountInput::Single(GraphCountSource::Vertices)
                         && columns.is_none()
                         && slot.ordinal() == 0 =>
                 {
@@ -101,7 +119,7 @@ impl PreparedGraphAggregate {
                     else {
                         return None;
                     };
-                    source = GraphCountSource::Label(*label);
+                    source = CountInput::Single(GraphCountSource::Label(*label));
                 }
                 GlaOperator::Select { slot, predicates }
                     if endpoint_labels
@@ -109,7 +127,9 @@ impl PreparedGraphAggregate {
                         && columns.is_none()
                         && matches!(
                             source,
-                            GraphCountSource::Edges | GraphCountSource::Relation(_)
+                            CountInput::Single(
+                                GraphCountSource::Edges | GraphCountSource::Relation(_)
+                            )
                         )
                         && slot.ordinal() < slots
                         && predicates.iter().all(|predicate| {
@@ -124,10 +144,7 @@ impl PreparedGraphAggregate {
                     segments,
                 } if metadata
                     && columns.is_none()
-                    && matches!(
-                        source,
-                        GraphCountSource::Edges | GraphCountSource::Relation(_)
-                    )
+                    && slots == 2
                     && start.ordinal() == 0
                     && matches!(segments.as_slice(), [end] if end.ordinal() == 1)
                     && !edge_captures.contains(capture) =>
@@ -213,7 +230,7 @@ impl PreparedGraphAggregate {
     #[must_use]
     pub fn count_summary_source(&self) -> Option<GraphCountSource> {
         self.count_shape(false)
-            .and_then(|shape| match shape.source {
+            .and_then(|shape| match shape.source.single()? {
                 GraphCountSource::Edges | GraphCountSource::Label(_) => None,
                 source => Some(source),
             })
@@ -231,7 +248,8 @@ impl PreparedGraphAggregate {
     /// not: independent populations cannot prove an intersection's size.
     #[must_use]
     pub fn count_metadata_source(&self) -> Option<GraphCountSource> {
-        self.count_shape(true).map(|shape| shape.source)
+        self.count_shape(true)
+            .and_then(|shape| shape.source.single())
     }
 
     /// Keep potential exact-count definitions on the host's metadata path,
@@ -240,7 +258,21 @@ impl PreparedGraphAggregate {
     /// that proof; execution still requires the checked metadata preparation.
     pub(crate) fn count_metadata_candidate_source(&self) -> Option<GraphCountSource> {
         self.count_shape_with_labels(true, true)
-            .map(|shape| shape.source)
+            .and_then(|shape| shape.source.single())
+    }
+
+    /// Whether this directed count can sum exact populations of disjoint
+    /// relationship types. A host without a complete relation histogram at
+    /// its selected cut can keep its ordinary scan strategy.
+    #[must_use]
+    pub fn can_count_relation_alternation(&self) -> bool {
+        matches!(
+            self.input.plan().operators().first(),
+            Some(GlaOperator::ScanEdges {
+                relation: EdgeRelation::Set(_),
+                ..
+            })
+        ) && self.count_shape(true).is_some()
     }
 
     /// Bind a trusted source's exact, already admitted counts to this query.
@@ -258,7 +290,7 @@ impl PreparedGraphAggregate {
         matching: u64,
     ) -> Option<PreparedGraphCount<'_>> {
         let shape = self.count_shape(false)?;
-        if shape.source != source
+        if shape.source.single() != Some(source)
             || matches!(source, GraphCountSource::Edges | GraphCountSource::Label(_))
             || matching > examined
             || (source == GraphCountSource::Vertices && examined != matching)
@@ -287,7 +319,7 @@ impl PreparedGraphAggregate {
         matching: u64,
     ) -> Option<PreparedGraphCount<'_>> {
         let shape = self.count_shape(true)?;
-        (shape.source == source).then_some(PreparedGraphCount {
+        (shape.source.single() == Some(source)).then_some(PreparedGraphCount {
             query: self,
             shape,
             examined: 0,
@@ -296,7 +328,8 @@ impl PreparedGraphAggregate {
         })
     }
 
-    /// Bind exact current-generation counts, optionally proving endpoint
+    /// Bind exact current-generation counts, summing disjoint directed relation
+    /// alternatives from a single generation or optionally proving endpoint
     /// label predicates universal over that same live vertex population.
     ///
     /// The host supplies trusted, unrestricted counts at one exact cut and
@@ -312,8 +345,30 @@ impl PreparedGraphAggregate {
         let Some(shape) = self.count_shape_with_labels(true, true) else {
             return Ok(None);
         };
-        let Some(matching) = lookup(shape.source)? else {
-            return Ok(None);
+        let matching = match shape.source {
+            CountInput::Single(source) => {
+                let Some(count) = lookup(source)? else {
+                    return Ok(None);
+                };
+                count
+            }
+            CountInput::Alternatives(set) => {
+                // Every edge has exactly one relation. The selector has
+                // already sorted and deduplicated its members; charge and
+                // witness each required lookup, including zero populations.
+                let mut total = 0_u64;
+                for &relation in set.relations() {
+                    let Some(count) = lookup(GraphCountSource::Relation(relation))? else {
+                        return Ok(None);
+                    };
+                    let Some(next) = total.checked_add(count) else {
+                        // Inconsistent metadata cannot prove a cardinality.
+                        return Ok(None);
+                    };
+                    total = next;
+                }
+                total
+            }
         };
         if shape.universal_endpoint_labels {
             let Some(vertices) = lookup(GraphCountSource::Vertices)? else {
@@ -411,7 +466,12 @@ impl PreparedGraphCount<'_> {
             // One admitted weighted cardinality and one update per aggregate.
             1 + self.query.aggregates.len() as u128
         } else {
-            match self.shape.source {
+            match self
+                .shape
+                .source
+                .single()
+                .expect("scan summaries admit one source")
+            {
                 GraphCountSource::Vertices => u128::from(self.examined) * (2 + visit_work),
                 GraphCountSource::Edges | GraphCountSource::Label(_) => {
                     unreachable!("this input admits exact metadata, never scan summaries")

@@ -127,6 +127,79 @@ fn count(rows: &[GraphAggregateRow]) -> u64 {
 }
 
 #[test]
+fn relation_union_counts_use_exact_generation_records_only_with_full_visibility() {
+    let ((), report) = run_async_under_lab(0xc161_0015, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let authority = issuer();
+        let full = authority.issue_at(&grant(), 100).unwrap();
+        let scoped = full
+            .attenuate(Restriction::Relations(Scope::only([S])))
+            .unwrap();
+        let exact = GqlQueryPolicy::new(2, 1, 10_000, 1_000);
+        let short = GqlQueryPolicy::new(1, 1, 10_000, 1_000);
+        for text in [
+            "MATCH (a)<-[:S|R]-(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[r:S|R]->(b) RETURN COUNT(DISTINCT r) AS n",
+        ] {
+            let query = prepare(text);
+            let owner = db
+                .execute_graph_aggregate_governed(&cx, &query, exact)
+                .unwrap();
+            assert_eq!(owner.rows.snapshot_records, 2);
+            assert_eq!(count(&owner.value), 7);
+            let view = db.read_session().unwrap();
+            assert_eq!(
+                view.execute_graph_aggregate_governed(&cx, &query, exact)
+                    .unwrap(),
+                owner
+            );
+            assert!(matches!(
+                db.execute_graph_aggregate_governed(&cx, &query, short),
+                Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords && error.observed == 2
+            ));
+            assert_eq!(
+                count(
+                    &db.execute_graph_aggregate_authorized(
+                        &cx,
+                        &authority,
+                        &full,
+                        "main",
+                        &query,
+                        exact,
+                        || 100
+                    )
+                    .unwrap()
+                ),
+                7
+            );
+            assert_eq!(
+                count(
+                    &db.execute_graph_aggregate_authorized(
+                        &cx,
+                        &authority,
+                        &scoped,
+                        "main",
+                        &query,
+                        policy(),
+                        || 100
+                    )
+                    .unwrap()
+                ),
+                2
+            );
+            // At seq 2 the two parallel edges and self-loop are still live.
+            let previous = view
+                .execute_graph_aggregate_governed_at(&cx, &query, CommitSeq(2), policy())
+                .unwrap();
+            assert_eq!(count(&previous.value), 8);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn live_counts_survive_history_replay_and_generation_changes() {
     let ((), report) = run_async_under_lab(0xc161_0001, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

@@ -638,6 +638,81 @@ fn wildcard_directed_counts_admit_only_exact_metadata() {
 }
 
 #[test]
+fn relation_alternations_sum_each_disjoint_population_once() {
+    let r = GraphCountSource::Relation(RelationId(1));
+    let s = GraphCountSource::Relation(RelationId(2));
+    for text in [
+        "MATCH (a)-[:S|R|S]->(b) RETURN COUNT(*) AS n, COUNT(b) AS m",
+        "MATCH (a)<-[e:S|R]-(b) RETURN COUNT(DISTINCT e) AS n",
+    ] {
+        let query = query(text);
+        assert!(query.can_count_relation_alternation());
+        assert!(
+            query
+                .prepare_count_metadata(GraphCountSource::Edges, 99)
+                .is_none()
+        );
+        let mut reads = Vec::new();
+        let count = query
+            .prepare_count_metadata_with_universal_labels(|source| {
+                reads.push(source);
+                Ok::<_, ()>(Some(if source == r { 4 } else { 2 }))
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(reads, [r, s]);
+        let actual = count
+            .execute_governed::<(), ()>(2, GqlQueryPolicy::new(2, 1, 100, 100), || Ok(()))
+            .unwrap();
+        for cell in actual.value[0].values() {
+            assert_eq!(cell.as_count(), Some(6));
+        }
+        for missing in [r, s] {
+            let mut lookups = Vec::new();
+            let result = query
+                .prepare_count_metadata_with_universal_labels(|source| {
+                    lookups.push(source);
+                    Ok::<_, ()>((source != missing).then_some(0))
+                })
+                .unwrap();
+            assert!(result.is_none());
+            assert_eq!(lookups.last(), Some(&missing));
+        }
+        assert!(
+            query
+                .prepare_count_metadata_with_universal_labels(|_| Ok::<_, ()>(Some(u64::MAX)))
+                .unwrap()
+                .is_none()
+        );
+        let failure = query.prepare_count_metadata_with_universal_labels(|source| {
+            if source == s {
+                Err("cancelled")
+            } else {
+                Ok(Some(3))
+            }
+        });
+        assert!(matches!(failure, Err("cancelled")));
+    }
+    for text in [
+        "MATCH (a)-[:R|S]-(b) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R|S]->(b) RETURN COUNT(DISTINCT a) AS n",
+        "MATCH (a)-[e:R|S]->(b) RETURN COUNT(e.p) AS n",
+        "MATCH (a)-[:R|S]->(a) RETURN COUNT(*) AS n",
+    ] {
+        let query = query(text);
+        assert!(!query.can_count_relation_alternation(), "{text}");
+        assert!(
+            query
+                .prepare_count_metadata_with_universal_labels(|_| -> Result<Option<u64>, ()> {
+                    panic!("unsupported shape touched metadata: {text}")
+                })
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn identity_counts_require_a_proven_nonnull_occurrence() {
     for (text, source) in [
         ("MATCH (n) RETURN COUNT(n) AS n", GraphCountSource::Vertices),
