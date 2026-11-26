@@ -32,7 +32,10 @@ fn buffered_root_admission_scales_with_the_requested_pool() {
     for (memory, expected_root) in [
         (Some(8 * 1024 * 1024), 128 * 1024),
         (None, 1024 * 1024),
-        (Some(256 * 1024 * 1024), 4 * 1024 * 1024),
+        (Some(DEFAULT_MEMORY), 1024 * 1024),
+        (Some(DEFAULT_MEMORY + 1), 2 * 1024 * 1024),
+        (Some(256 * 1024 * 1024 - 1), 8 * 1024 * 1024 - 2),
+        (Some(256 * 1024 * 1024), 8 * 1024 * 1024),
     ] {
         let buffered = BufferedOptions {
             memory,
