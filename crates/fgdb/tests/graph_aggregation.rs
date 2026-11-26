@@ -175,7 +175,8 @@ fn all_five_surfaces_share_the_summary_and_one_combined_allowance() {
         let pinned = db.read_session().unwrap();
         let txn = db.begin(&txn_cx).unwrap();
         let aggregate = aggregate(true);
-        let expected = oracle(&db.vertices().unwrap(), &db.edges().unwrap());
+        let edges = db.edges().unwrap();
+        let expected = oracle(&db.vertices().unwrap(), &edges);
         assert_eq!(
             expected,
             vec![
@@ -207,10 +208,23 @@ fn all_five_surfaces_share_the_summary_and_one_combined_allowance() {
         let full = db
             .execute_graph_aggregate_governed(&cx, &aggregate, policy())
             .unwrap();
-        assert_eq!(full.rows.snapshot_records, 6);
+        // The indexed cursor charges the complete root directory and each
+        // outgoing candidate reached from a qualifying first-hop occurrence.
+        let records = edges.len() as u64
+            + edges
+                .iter()
+                .filter(|first| first.entry.relation == R)
+                .map(|first| {
+                    edges
+                        .iter()
+                        .filter(|edge| edge.entry.src == first.entry.dst)
+                        .count() as u64
+                })
+                .sum::<u64>();
+        assert_eq!(full.rows.snapshot_records, records);
         assert_eq!(full.rows.result_rows, 2);
         let exact = GqlQueryPolicy::new(
-            6,
+            records,
             2,
             full.evaluator.work_units,
             full.evaluator.scratch_entries,
@@ -221,8 +235,8 @@ fn all_five_surfaces_share_the_summary_and_one_combined_allowance() {
             full
         );
         for cap in [
-            GqlQueryPolicy::new(6, 2, full.evaluator.work_units - 1, u64::MAX),
-            GqlQueryPolicy::new(6, 2, u64::MAX, full.evaluator.scratch_entries - 1),
+            GqlQueryPolicy::new(records, 2, full.evaluator.work_units - 1, u64::MAX),
+            GqlQueryPolicy::new(records, 2, u64::MAX, full.evaluator.scratch_entries - 1),
         ] {
             assert!(
                 matches!(db.execute_graph_aggregate_governed(&cx, &aggregate, cap),
@@ -231,13 +245,13 @@ fn all_five_surfaces_share_the_summary_and_one_combined_allowance() {
         }
         assert!(
             matches!(db.execute_graph_aggregate_governed(&cx, &aggregate,
-            GqlQueryPolicy::new(6, 1, u64::MAX, u64::MAX)),
+            GqlQueryPolicy::new(records, 1, u64::MAX, u64::MAX)),
             Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::ResultRows && error.observed == 2)
         );
         assert!(
             matches!(db.execute_graph_aggregate_governed(&cx, &aggregate,
-            GqlQueryPolicy::new(5, 2, u64::MAX, u64::MAX)),
-            Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords && error.observed == 6)
+            GqlQueryPolicy::new(records - 1, 2, u64::MAX, u64::MAX)),
+            Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords && error.observed == records)
         );
         txn.abort();
     });

@@ -243,19 +243,30 @@ fn native_selected_quotas_and_late_failures_preserve_error_domains_and_completio
         }
         db.write(&commit, batch).await.unwrap();
         let parameters = GqlParameters::new();
-        for statement in [
+        let distinct = PreparedNativeRead::prepare(
             "MATCH (v:L) WITH DISTINCT v.p AS p RETURN SUM(p) AS total",
+            &parameters,
+            symbols(),
+        )
+        .unwrap();
+        let mut cursor = distinct
+            .stream_aggregate(&db, &cx, &parameters, wide())
+            .unwrap();
+        assert_eq!(
+            cursor.next().unwrap().unwrap().values()[0].as_integer(),
+            Some(1)
+        );
+        assert!(cursor.next().is_none());
+        let page = PreparedNativeRead::prepare(
             "MATCH (v:L) WITH v.p AS p LIMIT 1 RETURN COUNT(*) AS total",
-        ] {
-            // The native grammar admits this complete relation, but the
-            // vertex-only physical reducer must not substitute its first leaf.
-            let prepared = PreparedNativeRead::prepare(statement, &parameters, symbols()).unwrap();
-            assert!(
-                prepared
-                    .stream_aggregate(&db, &cx, &parameters, wide())
-                    .is_err()
-            );
-        }
+            &parameters,
+            symbols(),
+        )
+        .unwrap();
+        assert!(matches!(
+            page.stream_aggregate(&db, &cx, &parameters, wide()),
+            Err(fgdb::QueryError::AggregateStreamPlan(_))
+        ));
         let text = "MATCH (v:L) RETURN DISTINCT COUNT(*) AS total GROUP BY v.g ORDER BY SUM(v.p) DESC LIMIT 1";
         let mut full = db
             .query_aggregate_stream(&cx, text, &parameters, symbols(), wide())

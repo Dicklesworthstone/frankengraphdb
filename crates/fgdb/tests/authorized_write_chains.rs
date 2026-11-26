@@ -2112,8 +2112,17 @@ mod staged_hybrid {
                                 ),
                                 &arguments,
                             );
-                            let answer =
+                            let error =
                                 execute_on(&contexts, &mut db, &program, capability(8), policy(8))
+                                    .await
+                                    .unwrap_err();
+                            assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+                            // Whole-edge retirement requires complete property
+                            // visibility. Keep the label and relation filters.
+                            let mut retirement = capability(8);
+                            retirement.properties = Scope::All;
+                            let answer =
+                                execute_on(&contexts, &mut db, &program, retirement, policy(8))
                                     .await
                                     .unwrap();
                             assert_eq!(answer.0.created_edges, 4);
@@ -2214,6 +2223,22 @@ mod staged_hybrid {
                             );
                             let mut scope = capability(4);
                             scope.labels = Scope::only([L, REACH]);
+                            if prefix.contains("DETACH DELETE") {
+                                let error = execute_fresh(
+                                    &contexts,
+                                    &program,
+                                    hidden,
+                                    0,
+                                    scope.clone(),
+                                    policy(4),
+                                )
+                                .await
+                                .unwrap_err();
+                                assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+                                scope.labels = Scope::All;
+                                scope.relations = Scope::All;
+                                scope.properties = Scope::All;
+                            }
                             let answer =
                                 execute_fresh(&contexts, &program, hidden, 0, scope, policy(4))
                                     .await
@@ -2739,8 +2764,19 @@ mod staged_hybrid {
                             capability(0),
                             policy(4),
                         )
-                        .await
-                        .unwrap();
+                        .await;
+                        if options == "k => 0" {
+                            let error = answer.unwrap_err();
+                            assert!(matches!(
+                                search_error(&error),
+                                Some(fgdb::HybridCallError::Argument {
+                                    name: "k",
+                                    expected: "a positive integer in range",
+                                })
+                            ));
+                            continue;
+                        }
+                        let answer = answer.unwrap();
                         assert!(answer.1.value.is_empty());
                         assert_eq!(answer.0.created_vertices, 1);
                         if let Some(reference) = &reference {

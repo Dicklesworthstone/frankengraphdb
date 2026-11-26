@@ -87,6 +87,34 @@ fn terminal_order_reuses_computed_aliases_and_repeated_group_properties() {
 }
 
 #[test]
+fn having_null_test_resolves_a_nested_list_group_key() {
+    let input = [1, 1, 2].map(CanonicalScalar::Int);
+    let head = "MATCH (n) WITH [n.p,[n.p]] AS k,n.p AS x \
+        RETURN k,COUNT(*) AS copies,MAX(x) AS high GROUP BY k";
+    let expected = run(
+        &query(&format!("{head} ORDER BY copies DESC")),
+        &input,
+        wide(),
+    )
+    .value;
+    assert_eq!(expected.len(), 2);
+    assert_eq!(expected[0].values()[0].as_count(), Some(2));
+    assert_eq!(expected[1].values()[0].as_count(), Some(1));
+    let present = run(
+        &query(&format!("{head} HAVING k IS NOT NULL ORDER BY copies DESC")),
+        &input,
+        wide(),
+    );
+    assert_eq!(present.value, expected);
+    let missing = run(
+        &query(&format!("{head} HAVING k IS NULL ORDER BY copies DESC")),
+        &input,
+        wide(),
+    );
+    assert!(missing.value.is_empty());
+}
+
+#[test]
 fn terminal_deviation_ranks_share_hidden_collects_across_pipeline_owners() {
     use fgdb_gql::algebra::GraphValue;
     let input = [100, 100, 200, 210, 300, 304, 308].map(CanonicalScalar::Int);

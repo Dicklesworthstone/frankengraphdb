@@ -1112,9 +1112,15 @@ fn ordered_correlated_collections_replay_hidden_ranks_and_distinct_refills() {
         }
         assert!(subscription.poll(&db, &cx, policy()).unwrap().is_none());
         db.compact(&commit).await.unwrap();
+        let frontier = db.frontier().unwrap();
+        let previous = fgdb_types::CommitSeq(frontier.0 - 1);
         for (text, handle) in texts.iter().zip(&handles) {
             db.rebuild_standing_query(&cx, handle, policy()).unwrap();
-            assert!(db.standing_group_delta(&cx, handle).unwrap().is_none());
+            assert!(matches!(
+                db.standing_native_delta(&cx, handle, previous, policy()),
+                Err(StandingQueryError::DeltaUnavailable { from, frontier: at })
+                    if from == previous && at == frontier
+            ));
             assert_lists(&db, handle, &[], &[]);
             matches_snapshot(&db, &cx, text, &args, handle);
         }

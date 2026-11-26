@@ -1083,12 +1083,12 @@ fn authorized_computed_root_traversals_use_indexed_overlay_closures() {
                     RETURN b.id AS id";
         for restriction in 0..2 {
             let mut limited = full.clone();
+            let mut budget = tight;
             if restriction == 0 {
                 limited.limits.max_nodes = 0;
             } else {
-                // A restricted incidence domain still uses the ordinary
-                // masked source, whose 400 visible vertices exceed this cap.
                 limited.relations = Scope::only([R]);
+                budget.mutations.query.rows = fgdb_gql::GqlExecutionBudget::new(0, 100);
             }
             let token = issuer.issue_at(&limited, 100).unwrap();
             let error = db
@@ -1103,7 +1103,7 @@ fn authorized_computed_root_traversals_use_indexed_overlay_closures() {
                     &GqlParameters::new(),
                     symbols,
                     R,
-                    tight,
+                    budget,
                     || 100,
                 )
                 .await
@@ -1117,13 +1117,39 @@ fn authorized_computed_root_traversals_use_indexed_overlay_closures() {
             assert_eq!(db.frontier().unwrap(), before);
             assert_eq!(db.vertices().unwrap(), vertices);
         }
+        full.relations = Scope::only([R]);
+        let token = issuer.issue_at(&full, 100).unwrap();
+        let result = db
+            .query_write_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                tight,
+                || 100,
+            )
+            .await
+            .unwrap();
+        let fgdb::QueryResult::Rows { rows, .. } = result else {
+            panic!("the scoped path must return both parallel matches");
+        };
+        let expected = vec![fgdb::QueryValue::Value(GraphValue::Scalar(Scalar::Int(2)))];
+        assert_eq!(rows, [expected.clone(), expected]);
+        assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+        assert_eq!(scalar(&db, VId(2), COUNT), Scalar::Int(99));
         assert_eq!(txn.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
-fn authorized_seeded_matches_keep_signed_limits_and_scoped_fallback() {
+fn authorized_seeded_matches_keep_signed_limits_and_scoped_admission() {
     let ((), report) = run_async_under_lab(0x5c73_2a81, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
@@ -1196,10 +1222,10 @@ fn authorized_seeded_matches_keep_signed_limits_and_scoped_fallback() {
         let mut scoped = grant();
         scoped.limits.max_rows = 100;
         let token = issuer.issue_at(&scoped, 100).unwrap();
-        // Restricted predicates decline the index before probing or retaining
-        // hidden candidates. Their unchanged masked scan needs its real budget.
-        assert!(
-            db.query_write_authorized(
+        let mut short = tight;
+        short.mutations.query.rows = fgdb_gql::GqlExecutionBudget::new(0, 100);
+        let error = db
+            .query_write_authorized(
                 &txn,
                 &query,
                 &commit,
@@ -1210,11 +1236,14 @@ fn authorized_seeded_matches_keep_signed_limits_and_scoped_fallback() {
                 &GqlParameters::new(),
                 symbols,
                 R,
-                tight,
+                short,
                 || 100,
             )
             .await
-            .is_err()
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("SnapshotRecords"),
+            "{error:?}"
         );
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(db.vertices().unwrap(), original);
@@ -1229,7 +1258,7 @@ fn authorized_seeded_matches_keep_signed_limits_and_scoped_fallback() {
             &GqlParameters::new(),
             symbols,
             R,
-            program_policy(100),
+            tight,
             || 100,
         )
         .await

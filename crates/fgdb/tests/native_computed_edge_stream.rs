@@ -362,32 +362,52 @@ fn native_expression_failures_and_exact_quotas_never_release_partial_summaries()
 }
 
 #[test]
-fn computed_source_admission_and_unsupported_relational_children_never_fall_back() {
+fn computed_source_admission_checks_supported_and_unsupported_relational_children() {
     let ((), report) = run_async_under_lab(0xc0a5_5003, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, seed()).await.unwrap();
-        for statement in [
+        let params = GqlParameters::new();
+        let collection = PreparedNativeRead::prepare(
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.quantity+1) AS values",
+            &params,
+            symbols(),
+        )
+        .unwrap();
+        assert!(
+            collection
+                .stream_aggregate(&db, &cx, &params, wide())
+                .is_err()
+        );
+        let distinct = PreparedNativeRead::prepare(
             "MATCH (a)-[r:R]->(b) WITH DISTINCT r.quantity AS q RETURN SUM(q) AS total",
+            &params,
+            symbols(),
+        )
+        .unwrap();
+        let mut cursor = distinct
+            .stream_aggregate(&db, &cx, &params, wide())
+            .unwrap();
+        let rows = drain(&mut cursor);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_integer(), Some(8));
+        let mut refused = distinct
+            .stream_aggregate(&db, &cx, &params, GqlQueryPolicy::new(0, 0, 0, 0))
+            .unwrap();
+        assert!(refused.next().unwrap().is_err());
+        assert!(refused.next().is_none());
+        let page = PreparedNativeRead::prepare(
             "MATCH (a)-[r:R]->(b) WITH r.quantity AS q LIMIT 1 RETURN SUM(q) AS total",
-        ] {
-            let prepared =
-                PreparedNativeRead::prepare(statement, &GqlParameters::new(), symbols()).unwrap();
-            assert!(
-                prepared
-                    .stream_aggregate(
-                        &db,
-                        &cx,
-                        &GqlParameters::new(),
-                        GqlQueryPolicy::new(0, 0, 0, 0)
-                    )
-                    .is_err(),
-                "{statement}"
-            );
-        }
+            &params,
+            symbols(),
+        )
+        .unwrap();
+        assert!(matches!(
+            page.stream_aggregate(&db, &cx, &params, wide()),
+            Err(QueryError::EdgeAggregateStreamPlan(_))
+        ));
         let statement = text(0, 1, false);
         let params = arguments(1, 2);
         let prepared = PreparedNativeRead::prepare(&statement, &params, symbols()).unwrap();

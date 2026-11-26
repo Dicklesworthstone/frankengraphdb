@@ -1791,22 +1791,46 @@ fn relationship_merge_endpoint_padding_preserves_hidden_body_fields() {
 }
 
 #[test]
-fn relationship_merge_on_carried_vertex_cannot_read_its_own_relationship() {
-    // The ON action runs inside MERGE. A following standalone SET has the
-    // post-MERGE relationship reader, exercised by the positive test above.
-    let error = PreparedGraphWriteChainText::prepare(
-        "CREATE (a:Counter),(b:Outer) FOREACH (x IN [1] | \
-         MERGE (a)-[r:R {p:x}]->(b) ON CREATE SET a.q=r.p)",
-        R,
-        Catalog,
-    )
-    .expect_err("an ON action on a carried vertex cannot read the MERGE relationship");
-    assert!(
-        error
-            .to_string()
-            .contains("a value that does not read the MERGE relationship"),
-        "{error:?}"
-    );
+fn relationship_merge_on_carried_vertex_reads_its_own_relationship() {
+    let ((), report) = run_async_under_lab(0xf0ec_0043, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let chain = prepare(
+            "CREATE (a:Counter),(b:Outer) FOREACH (x IN [1] | \
+             MERGE (a)-[r:R {p:x}]->(b) ON CREATE SET a.q=r.p)",
+        );
+        let next = AtomicU64::new(100);
+        let mut txn = db.begin(&txn_cx).unwrap();
+        let (stats, rows, _) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                generous(),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!((stats.created_vertices, stats.created_edges), (2, 1));
+        assert!(rows.value.is_empty());
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap(), CommitSeq(before.0 + 1));
+        let edges = db.edges().unwrap();
+        let [edge] = edges.as_slice() else {
+            panic!("one relationship must be committed");
+        };
+        assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(1).into())]);
+        let source = db.vertex(edge.entry.src).unwrap().unwrap();
+        assert_eq!(source.labels, vec![COUNTER]);
+        assert_eq!(source.props, vec![(Q, CanonicalScalar::Int(1).into())]);
+        let destination = db.vertex(edge.entry.dst).unwrap().unwrap();
+        assert_eq!(destination.labels, vec![OUTER]);
+        assert!(destination.props.is_empty());
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

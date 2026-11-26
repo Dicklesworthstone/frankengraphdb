@@ -2380,7 +2380,7 @@ impl<'a> Parser<'a> {
         }
         // A composite operand evaluates as a let slot of this expression
         // (fgdb-o5o9t), read like a list element.
-        if self.lets.is_some() && self.composite_let_operand_here(columns)? {
+        if self.lets.is_some() && self.composite_let_operand_here(columns, depth)? {
             return self.composite_slot(columns, depth, program, at);
         }
         if self.row_entry_slot(columns, program, at)? {
@@ -2428,6 +2428,7 @@ impl<'a> Parser<'a> {
     fn composite_let_operand_here(
         &self,
         columns: &ExpressionColumns<'_, 'a>,
+        depth: usize,
     ) -> Result<bool, GraphPatternTextError> {
         let row = self.routing_row(columns);
         let collected =
@@ -2438,8 +2439,11 @@ impl<'a> Parser<'a> {
                 row.unwrap_or(&[]),
             )?
             .is_some();
-        let composite_null =
-            self.predicate_start == self.current.at && self.starts_composite_null(row)?;
+        // HAVING owns its outer null test. Resolve the complete grouping key
+        // through the operand reader without re-entering the same null test.
+        let composite_null = !(self.having_operand && self.let_base + depth == 0)
+            && self.predicate_start == self.current.at
+            && self.starts_composite_null(row)?;
         Ok(self.let_operand_here()? || collected || metadata || composite_null)
     }
 

@@ -514,23 +514,38 @@ fn durable_buffered_run_admission_preserves_limits_cancellation_and_reservation_
             assert!(checkpoints > 1);
 
             if stale {
+                // The native suffix retains topology and refaults payloads.
+                // The old 3 MiB cap now admits the original answer.
                 let pressure = source_pool
                     .reserve(&cx, source_pool.available() - 3 * 1024 * 1024)
+                    .unwrap();
+                assert_eq!(
+                    view.execute_fnx_sealed(&cx, &procedure, options(), memory(), sealing(), RAW)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+                drop(pressure);
+
+                let pressure = source_pool
+                    .reserve(&cx, source_pool.available() - 2 * 1024 * 1024)
                     .unwrap();
                 let held = source_pool.used();
                 let error = view
                     .execute_fnx_sealed(&cx, &procedure, options(), memory(), sealing(), RAW)
                     .await
                     .unwrap_err();
-                let FnxSealedReadError::Seal(SealedError::BufferedSource(error)) = error else {
-                    panic!("suffix memory admission must preserve its source error: {error:?}");
-                };
-                assert!(matches!(
-                    *error,
-                    BufferedReadError::Buffer(fgdb_strata::tiered::buffer::BufferError::Memory(
-                        fgdb::MemoryError::ResourceExhausted { .. }
-                    ))
-                ));
+                assert!(
+                    matches!(
+                        error,
+                        FnxSealedReadError::Input(FnxReadError::Read(BufferedReadError::Buffer(
+                            fgdb_strata::tiered::buffer::BufferError::Memory(
+                                fgdb::MemoryError::ResourceExhausted { requested, available, .. }
+                            )
+                        ))) if requested > available
+                    ),
+                    "suffix memory admission must preserve its source error: {error:?}"
+                );
                 assert!(
                     source_pool.used() <= held,
                     "failed suffix leaked its reservations"
