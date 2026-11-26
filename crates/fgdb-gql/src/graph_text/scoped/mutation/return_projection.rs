@@ -2562,9 +2562,7 @@ impl<'a> Parser<'a> {
         self.row_bare_column(row, |kind| {
             matches!(
                 kind,
-                GraphSetColumnType::List
-                    | GraphSetColumnType::Vertices
-                    | GraphSetColumnType::Edges
+                GraphSetColumnType::List | GraphSetColumnType::Vertices | GraphSetColumnType::Edges
             )
         })
     }
@@ -3035,7 +3033,13 @@ impl<'a> Parser<'a> {
                 skip_group(&mut lexer)?;
                 after_postfix(&mut lexer)?
             }
-            TokenKind::Word(_) if self.row_list_column(row)?.is_some() => {
+            // Compact path lists already have a presence-only row read in
+            // element_null_operand, including after WITH and OPTIONAL MATCH.
+            TokenKind::Word(_)
+                if self
+                    .row_bare_column(row, |kind| kind == GraphSetColumnType::List)?
+                    .is_some() =>
+            {
                 after_postfix(&mut lexer)?
             }
             _ => return Ok(false),

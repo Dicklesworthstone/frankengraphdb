@@ -632,9 +632,7 @@ mod tests {
 
         const A: u128 = (1_u128 << 120) | 7;
         const B: u128 = (2_u128 << 120) | 7;
-        let vertices = |ids: &[u128]| {
-            GraphValue::Vertices(ids.iter().copied().map(VId).collect())
-        };
+        let vertices = |ids: &[u128]| GraphValue::Vertices(ids.iter().copied().map(VId).collect());
         let edges = |ids: &[u128]| GraphValue::Edges(ids.iter().copied().map(EId).collect());
         let vertex = |id| GraphValue::Vertex(VId(id));
         let edge = |id| GraphValue::Edge(EId(id));
@@ -704,9 +702,8 @@ mod tests {
     fn compact_list_order_borrows_prefixes_and_preserves_each_control_refusal() {
         let vertices = GraphValue::Vertices(vec![VId(1), VId(2)].into_boxed_slice());
         let plain = list(vec![GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2))]);
-        let unrelated = GraphValue::Scalar(
-            CanonicalScalar::ucs_basic_text(&"unread".repeat(1024)).unwrap(),
-        );
+        let unrelated =
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"unread".repeat(1024)).unwrap());
         for tail in [int(3), unrelated] {
             let right = list(vec![
                 GraphValue::Vertex(VId(1)),

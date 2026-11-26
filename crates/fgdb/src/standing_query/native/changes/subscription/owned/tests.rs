@@ -563,17 +563,29 @@ fn authorized_subscriptions_hide_catalog_ticks_and_preserve_pending_deliveries()
             let next = sub.poll(&db, &cx, policy()).unwrap().unwrap();
             let expected = control.poll(&visible, &cx, policy()).unwrap().unwrap();
             assert!(!next.is_snapshot());
-            assert_eq!((next.from(), next.frontier()), (Some(CommitSeq(1)), CommitSeq(2)));
-            assert_eq!((next.from(), next.frontier()), (expected.from(), expected.frontier()));
+            assert_eq!(
+                (next.from(), next.frontier()),
+                (Some(CommitSeq(1)), CommitSeq(2))
+            );
+            assert_eq!(
+                (next.from(), next.frontier()),
+                (expected.from(), expected.frontier())
+            );
             assert_eq!(next.rows(), expected.rows(), "{text}");
             assert_eq!(
-                db.standing_native_query(&cx, &sub.handle, policy()).unwrap().1,
-                visible.query(&cx, text, &params, resolver, policy()).unwrap(),
+                db.standing_native_query(&cx, &sub.handle, policy())
+                    .unwrap()
+                    .1,
+                visible
+                    .query(&cx, text, &params, resolver, policy())
+                    .unwrap(),
                 "maintained masked output agrees with a fresh visible-only query: {text}"
             );
 
             let mut later = SymbolCatalog::default();
-            later.bind("LATER", CatalogSymbol::Relation(RelationId(100))).unwrap();
+            later
+                .bind("LATER", CatalogSymbol::Relation(RelationId(100)))
+                .unwrap();
             db.register_symbols(&commit, &later).await.unwrap();
             assert!(Arc::ptr_eq(
                 &next,
@@ -590,21 +602,30 @@ fn authorized_subscriptions_hide_catalog_ticks_and_preserve_pending_deliveries()
             }
             let last = sub.poll(&db, &cx, policy()).unwrap().unwrap();
             let expected_last = control.poll(&visible, &cx, policy()).unwrap().unwrap();
-            assert_eq!((last.from(), last.frontier()), (Some(CommitSeq(2)), CommitSeq(3)));
+            assert_eq!(
+                (last.from(), last.frontier()),
+                (Some(CommitSeq(2)), CommitSeq(3))
+            );
             assert_eq!(
                 (last.from(), last.frontier()),
                 (expected_last.from(), expected_last.frontier())
             );
             assert_eq!(last.rows(), expected_last.rows(), "{text}");
             assert_eq!(
-                db.standing_native_query(&cx, &sub.handle, policy()).unwrap().1,
-                visible.query(&cx, text, &params, resolver, policy()).unwrap(),
+                db.standing_native_query(&cx, &sub.handle, policy())
+                    .unwrap()
+                    .1,
+                visible
+                    .query(&cx, text, &params, resolver, policy())
+                    .unwrap(),
                 "{text}"
             );
             sub.acknowledge(last.receipt()).unwrap();
             control.acknowledge(expected_last.receipt()).unwrap();
             sub.close_and_release(&mut db, &cx, policy()).unwrap();
-            control.close_and_release(&mut visible, &cx, policy()).unwrap();
+            control
+                .close_and_release(&mut visible, &cx, policy())
+                .unwrap();
             assert!(db.standing_queries.is_empty());
             assert!(visible.standing_queries.is_empty());
             assert_eq!(initial.rows(), expected_initial.rows());

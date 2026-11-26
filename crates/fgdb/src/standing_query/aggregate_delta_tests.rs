@@ -353,8 +353,7 @@ fn catalog_ticks_require_the_exact_admitted_schema_transition() {
                 1 => {
                     let oid = fgdb_types::ObjectId([0xa7; 32]);
                     coordinate.schema_transition = Some(oid);
-                    let DeltaRow::Schema { transition_oid, .. } = &mut coordinate.rows[0]
-                    else {
+                    let DeltaRow::Schema { transition_oid, .. } = &mut coordinate.rows[0] else {
                         unreachable!("the committed catalog tick has one Schema row");
                     };
                     *transition_oid = oid;

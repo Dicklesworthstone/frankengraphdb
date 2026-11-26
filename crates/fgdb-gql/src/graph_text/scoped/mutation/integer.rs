@@ -970,6 +970,11 @@ impl<'a> Parser<'a> {
         nesting: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        // A bare list belongs to the enclosing IN. The nested scalar
+        // operand reader would recognize and consume that same membership.
+        if let Some(column) = self.row_list_column(self.routing_row(columns))? {
+            return self.bare_column_value(columns, column);
+        }
         let base = core::mem::replace(&mut self.let_base, nesting);
         let parsed = self.checked_expression_scoped(columns, ExpressionBoundary::Operand, true);
         self.let_base = base;

@@ -346,8 +346,7 @@ fn additive_catalog_commits_preserve_native_views_and_exact_replay() {
             let at = db.register_symbols(&commit, extension).await.unwrap();
             catalog_ticks.push(at);
             for (index, handle) in handles.iter().enumerate() {
-                let (frontier, actual) =
-                    db.standing_native_query(&cx, handle, policy()).unwrap();
+                let (frontier, actual) = db.standing_native_query(&cx, handle, policy()).unwrap();
                 assert_eq!(frontier, at);
                 assert_eq!(actual, before[index], "{}", text[index]);
                 let delta = consumers[index].poll(&db, &cx, policy()).unwrap().unwrap();
@@ -428,7 +427,9 @@ fn additive_catalog_commits_preserve_native_views_and_exact_replay() {
             consumers[index].acknowledge(delta.receipt()).unwrap();
         }
         assert_eq!(
-            db.standing_native_query(&cx, &handles[0], policy()).unwrap().1,
+            db.standing_native_query(&cx, &handles[0], policy())
+                .unwrap()
+                .1,
             integers(&[3, 4, 7, 11])
         );
         assert_eq!(
