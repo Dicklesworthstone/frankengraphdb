@@ -174,7 +174,7 @@ mod tests {
             stats: StandingQueryStats::default(),
             checkpoint,
         };
-        query.maintain(batch, &mut meter)?;
+        query.maintain(batch, None, &mut meter)?;
         query.frontier = batch.commit_seq();
         Ok(meter.stats)
     }

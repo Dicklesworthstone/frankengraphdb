@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-25 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-26 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,31 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Standing-query continuity across additive catalog commits — qualification pending
+
+Ordinary maintained row and aggregate sources now accept an authenticated
+immutable-name or allocation-floor catalog transition as an empty graph
+derivative. Their existing charged maintenance path advances the view and its
+dependent replay nodes through that exact committed tick. Unproved transitions,
+mixed schema/data batches and constraint changes retain the invalid-delta fence.
+
+Capability-projected subscriptions consume the same catalog proof at their
+private projection owner. Only its physical source position advances; visible
+frontiers, retained graph facts, downstream statistics and pending delivery
+receipts stay unchanged. The next authorized graph mutation produces the next
+visible delta, without disclosing intervening catalog work. Existing
+metadata-query eligibility and captured name bindings are unchanged.
+
+Regression sources cover ordinary rows, aggregates, selected edge properties,
+joins and downstream stages, name-only and floor-only commits, historical pins,
+empty replay ticks, pending receipts, exact proof refusal, cancellation and
+work-budget refusal. Restricted subscriptions are compared with a separate
+visible-only graph through catalog commits, masked facts, updates and cascade
+deletion. Source review and textual checks completed; native formatting,
+compilation, tests, Clippy, UBS and exact-tree qualification remain UNRUN because
+this session has no attached execution computer. Keep `fgdb-w6-views-2wz`,
+`fgdb-w6-sub-delivery-qol` and `fgdb-qualify-integrated-nov22-maz0p` open.
 
 ### Full-width numeric identity lookups — qualification pending
 

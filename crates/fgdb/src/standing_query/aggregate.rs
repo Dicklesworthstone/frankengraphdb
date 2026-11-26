@@ -368,14 +368,16 @@ impl StandingQuery {
     pub(super) fn maintain(
         &mut self,
         batch: &LogicalDeltaBatch,
+        schema: Option<&crate::schema_catalog::SchemaState>,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        self.maintain_with_output::<super::output::State>(batch, meter, None)
+        self.maintain_with_output::<super::output::State>(batch, schema, meter, None)
     }
 
     pub(super) fn maintain_with_output<D: super::sink::GroupSink>(
         &mut self,
         batch: &LogicalDeltaBatch,
+        schema: Option<&crate::schema_catalog::SchemaState>,
         meter: &mut Meter<'_>,
         downstream: Option<&mut D>,
     ) -> Result<(), StandingQueryFailure> {
@@ -389,13 +391,19 @@ impl StandingQuery {
         {
             return Err(StandingQueryFailure::InvalidDelta);
         }
+        // Admitted sources bind numeric labels/properties and selected fields,
+        // never a catalog enumeration. Only the schema owner can prove that
+        // this exact tick adds immutable names or allocation floors without
+        // changing those inputs. The ordinary derivative still charges the
+        // coordinate/row and publishes its complete empty output atomically.
+        let name_only_catalog = schema.is_some_and(|schema| schema.admits_name_only_delta(batch));
         let mut affected = BTreeSet::new();
         for entry in batch.coordinate_entries() {
             meter.charge(ZSetEvent::Work)?;
             if entry.graph != crate::GRAPH || entry.branch != crate::BRANCH {
                 continue;
             }
-            if entry.schema_transition.is_some() {
+            if entry.schema_transition.is_some() && !name_only_catalog {
                 return Err(StandingQueryFailure::InvalidDelta);
             }
             for row in &entry.rows {
@@ -405,8 +413,12 @@ impl StandingQuery {
                     .delta_rows
                     .checked_add(1)
                     .ok_or(StandingQueryFailure::WorkBudget)?;
-                if matches!(row, DeltaRow::Schema { .. } | DeltaRow::Constraint { .. }) {
-                    return Err(StandingQueryFailure::InvalidDelta);
+                match row {
+                    DeltaRow::Schema { .. } if name_only_catalog => {}
+                    DeltaRow::Schema { .. } | DeltaRow::Constraint { .. } => {
+                        return Err(StandingQueryFailure::InvalidDelta);
+                    }
+                    _ => {}
                 }
                 if let Some(vid) = affected_vertex(&self.definition, row)
                     && !affected.contains(&vid)

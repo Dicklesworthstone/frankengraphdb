@@ -142,7 +142,7 @@ fn different_edges_maintains_parallel_paths_and_complete_scope_witnesses_across_
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                state.maintain(&delta, &mut meter).unwrap();
+                state.maintain(&delta, None, &mut meter).unwrap();
                 state.frontier = at;
                 let positive = match mode {
                     GraphMatchMode::DifferentEdges => different,

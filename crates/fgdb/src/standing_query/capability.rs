@@ -258,6 +258,7 @@ impl State {
     pub(super) fn maintain(
         &mut self,
         batch: &LogicalDeltaBatch,
+        schema: &crate::schema_catalog::SchemaState,
         checkpoint: &mut dyn FnMut() -> Result<(), StandingQueryFailure>,
     ) -> Result<(), StandingQueryFailure> {
         checkpoint()?;
@@ -271,6 +272,17 @@ impl State {
             || batch.commit_marker_identity().commit_seq != at
         {
             return Err(StandingQueryFailure::InvalidDelta);
+        }
+
+        // An authenticated immutable-name/allocation-only successor changes
+        // no fact in this numeric-ID projection. Advance only the private
+        // physical frontier through the publisher's normal record path:
+        // exposing an empty downstream tick would reveal hidden catalog work.
+        if schema.admits_name_only_delta(batch) {
+            checkpoint()?;
+            self.current_delta = None;
+            self.stats = StandingQueryStats::default();
+            return Ok(());
         }
 
         let mut touched_vertices = BTreeSet::new();

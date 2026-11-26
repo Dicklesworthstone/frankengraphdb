@@ -678,7 +678,7 @@ mod tests {
             stats: StandingQueryStats::default(),
             checkpoint: &mut checkpoint,
         };
-        query.maintain(initial, &mut meter).unwrap();
+        query.maintain(initial, None, &mut meter).unwrap();
         query.frontier = initial.commit_seq();
         query
     }
@@ -728,7 +728,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                success.maintain(&batch, &mut meter).unwrap();
+                success.maintain(&batch, None, &mut meter).unwrap();
             }
             for stop in 1..=total {
                 let mut candidate = seeded(&initial);
@@ -748,7 +748,7 @@ mod tests {
                         checkpoint: &mut checkpoint,
                     };
                     assert_eq!(
-                        candidate.maintain(&batch, &mut meter),
+                        candidate.maintain(&batch, None, &mut meter),
                         Err(StandingQueryFailure::Interrupted)
                     );
                 }
@@ -764,7 +764,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                candidate.maintain(&batch, &mut meter).unwrap();
+                candidate.maintain(&batch, None, &mut meter).unwrap();
                 assert_eq!(candidate.vertices, success.vertices);
                 assert_eq!(candidate.aggregate, success.aggregate);
                 assert_eq!(candidate.rows, success.rows);
@@ -781,7 +781,7 @@ mod tests {
                 checkpoint: &mut checkpoint,
             };
             assert_eq!(
-                bounded.maintain(&batch, &mut meter),
+                bounded.maintain(&batch, None, &mut meter),
                 Err(StandingQueryFailure::ResultBudget)
             );
             assert_eq!(bounded.vertices, before.vertices);
@@ -853,7 +853,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                success.maintain(&batch, &mut meter).unwrap();
+                success.maintain(&batch, None, &mut meter).unwrap();
                 meter.stats
             };
             let (row, weight) = success.rows.iter().next().unwrap();
@@ -898,7 +898,7 @@ mod tests {
                         checkpoint: &mut checkpoint,
                     };
                     assert_eq!(
-                        candidate.maintain(&batch, &mut meter),
+                        candidate.maintain(&batch, None, &mut meter),
                         Err(StandingQueryFailure::Interrupted)
                     );
                 }
@@ -910,7 +910,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                candidate.maintain(&batch, &mut meter).unwrap();
+                candidate.maintain(&batch, None, &mut meter).unwrap();
                 same(&candidate, &success);
             }
             for reason in [
@@ -934,7 +934,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                assert_eq!(candidate.maintain(&batch, &mut meter), Err(reason));
+                assert_eq!(candidate.maintain(&batch, None, &mut meter), Err(reason));
                 same(&candidate, &before);
                 candidate.policy = policy;
                 let mut meter = Meter {
@@ -942,7 +942,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                candidate.maintain(&batch, &mut meter).unwrap();
+                candidate.maintain(&batch, None, &mut meter).unwrap();
                 same(&candidate, &success);
             }
         });

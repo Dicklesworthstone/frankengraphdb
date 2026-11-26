@@ -177,8 +177,8 @@ impl SchemaState {
     }
 
     /// Prove that this exact committed tick only extended immutable names or
-    /// allocation floors. Beacon definitions select numeric IDs and therefore
-    /// keep the same corpus across this change. This is not a compatibility
+    /// allocation floors. Derived sources bound to numeric IDs and selected
+    /// fields keep the same input across this change. This is not a compatibility
     /// judgment for metadata-returning queries or arbitrary schema effects.
     /// Callers supply an authenticated native delta batch; this compatibility
     /// check does not replace marker or payload authentication.

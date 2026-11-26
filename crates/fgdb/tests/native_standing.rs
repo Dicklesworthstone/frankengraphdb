@@ -251,3 +251,202 @@ fn delivery_refusals_do_not_fence_views_and_rebuild_retains_native_layout() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn additive_catalog_commits_preserve_native_views_and_exact_replay() {
+    use fgdb_delta_types::LimbLimit;
+    use fgdb_delta_types::catalog::{CatalogSymbol, CatalogSymbolKind, SymbolCatalog};
+    use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
+    use fgdb_types::EId;
+
+    let ((), report) = run_async_under_lab(0x6e73_7104, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut catalog = SymbolCatalog::default();
+        catalog
+            .bind_all([
+                ("L", CatalogSymbol::Label(LabelId(1))),
+                ("R", CatalogSymbol::Relation(RelationId(1))),
+                ("p", CatalogSymbol::Property(P)),
+            ])
+            .unwrap();
+        db.register_symbols(&commit, &catalog).await.unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for (id, value) in [(1, 4), (2, 7), (3, 7)] {
+            seed.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(P, CanonicalScalar::Int(value))],
+            );
+        }
+        seed.add_edge(EId(101), VId(1), VId(2), vec![]);
+        seed.add_edge(EId(102), VId(1), VId(2), vec![]);
+        seed.add_edge(EId(103), VId(2), VId(3), vec![]);
+        let baseline_at = db.write(&commit, seed).await.unwrap();
+        let pinned = db.pinned_read_view().unwrap();
+        let text = [
+            "MATCH (n:L) RETURN n.p AS p ORDER BY p",
+            "MATCH (n:L) RETURN DISTINCT n.p AS p ORDER BY p",
+            "MATCH (n:L) RETURN COUNT(*) AS amount, SUM(n.p) AS total, AVG(n.p) AS mean",
+            "MATCH (n:L) RETURN SUM(n.p) AS total, n.p AS key, COUNT(*) AS amount GROUP BY key ORDER BY key",
+            "MATCH (a:L)-[:R]->(b:L) RETURN a.p AS p, b.p AS q ORDER BY p, q",
+            "MATCH (a:L)-[:R]->(b:L) RETURN a AS source, collect(b.p) AS values",
+        ];
+        let params = GqlParameters::new();
+        let mut handles = Vec::new();
+        let mut consumers = Vec::new();
+        let mut bags = Vec::new();
+        let mut before = Vec::new();
+        for query in text {
+            let prepared = PreparedNativeRead::prepare(
+                query,
+                &params,
+                CatalogSymbolResolver::new(db.symbol_catalog().unwrap()),
+            )
+            .unwrap();
+            let handle = prepared
+                .register_standing(&mut db, &cx, &params, policy())
+                .unwrap();
+            let mut consumer = db.open_standing_subscription(&cx, &handle).unwrap();
+            consumer
+                .enable_replay(&mut db, &cx, 8, 10_000, 100_000, policy())
+                .unwrap();
+            let baseline = consumer.poll(&db, &cx, policy()).unwrap().unwrap();
+            assert_eq!(baseline.frontier(), baseline_at);
+            assert!(baseline.is_snapshot());
+            bags.push(
+                baseline
+                    .rows()
+                    .checked_clone(LimbLimit::new(4), &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+            );
+            consumer.acknowledge(baseline.receipt()).unwrap();
+            before.push(db.standing_native_query(&cx, &handle, policy()).unwrap().1);
+            handles.push(handle);
+            consumers.push(consumer);
+        }
+        assert_eq!(before[0], integers(&[4, 7, 7]));
+        assert_eq!(before[1], integers(&[4, 7]));
+
+        let mut names = SymbolCatalog::default();
+        names
+            .bind_all([
+                ("Unused", CatalogSymbol::Label(LabelId(9))),
+                ("UNUSED_R", CatalogSymbol::Relation(RelationId(9))),
+                ("unused", CatalogSymbol::Property(PropertyKeyId(9))),
+            ])
+            .unwrap();
+        let mut floors = SymbolCatalog::default();
+        floors.reserve_through(CatalogSymbol::Property(PropertyKeyId(99)));
+        let mut catalog_ticks = Vec::new();
+        let mut previous = baseline_at;
+        for extension in [&names, &floors] {
+            let at = db.register_symbols(&commit, extension).await.unwrap();
+            catalog_ticks.push(at);
+            for (index, handle) in handles.iter().enumerate() {
+                let (frontier, actual) =
+                    db.standing_native_query(&cx, handle, policy()).unwrap();
+                assert_eq!(frontier, at);
+                assert_eq!(actual, before[index], "{}", text[index]);
+                let delta = consumers[index].poll(&db, &cx, policy()).unwrap().unwrap();
+                assert_eq!(delta.from(), Some(previous));
+                assert_eq!(delta.frontier(), at);
+                assert!(!delta.is_snapshot());
+                assert!(delta.rows().is_empty(), "{}", text[index]);
+                assert_eq!(consumers[index].acknowledge(delta.receipt()).unwrap(), at);
+                assert!(consumers[index].poll(&db, &cx, policy()).unwrap().is_none());
+            }
+            previous = at;
+        }
+        assert_eq!(
+            pinned
+                .symbol_catalog()
+                .resolve(CatalogSymbolKind::Property, "unused"),
+            None
+        );
+
+        // Empty catalog ticks are retained real successors, not silently
+        // skipped positions or replacement baselines during delayed delivery.
+        let (mut historical, baseline) = db
+            .open_standing_replay_subscription_at(
+                &cx,
+                consumers[0].replay_handle().unwrap(),
+                baseline_at,
+                policy(),
+            )
+            .unwrap();
+        assert_eq!(baseline.rows(), &bags[0]);
+        historical.acknowledge(baseline.receipt()).unwrap();
+        let mut previous = baseline_at;
+        for at in catalog_ticks {
+            let delta = historical.poll(&db, &cx, policy()).unwrap().unwrap();
+            assert_eq!(delta.from(), Some(previous));
+            assert_eq!(delta.frontier(), at);
+            assert!(delta.rows().is_empty());
+            historical.acknowledge(delta.receipt()).unwrap();
+            previous = at;
+        }
+
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(3)));
+        change.delete_edge(EId(101));
+        change.add_edge(EId(104), VId(3), VId(1), vec![]);
+        change.create_vertex(
+            VId(4),
+            vec![LabelId(1)],
+            vec![(P, CanonicalScalar::Int(11))],
+        );
+        let at = db.write(&commit, change).await.unwrap();
+        for (index, handle) in handles.iter().enumerate() {
+            let delta = consumers[index].poll(&db, &cx, policy()).unwrap().unwrap();
+            assert_eq!(delta.from(), Some(previous));
+            assert_eq!(delta.frontier(), at);
+            assert!(!delta.is_snapshot());
+            bags[index]
+                .integrate(delta.rows(), LimbLimit::new(4), &mut |_| Ok::<_, ()>(()))
+                .unwrap();
+            assert_eq!(
+                bags[index],
+                db.standing_native_bag(&cx, handle, policy()).unwrap().1
+            );
+            let actual = db.standing_native_query(&cx, handle, policy()).unwrap().1;
+            assert_eq!(
+                actual,
+                db.query(
+                    &cx,
+                    text[index],
+                    &params,
+                    CatalogSymbolResolver::new(db.symbol_catalog().unwrap()),
+                    policy(),
+                )
+                .unwrap(),
+                "{}",
+                text[index]
+            );
+            consumers[index].acknowledge(delta.receipt()).unwrap();
+        }
+        assert_eq!(
+            db.standing_native_query(&cx, &handles[0], policy()).unwrap().1,
+            integers(&[3, 4, 7, 11])
+        );
+        assert_eq!(
+            pinned
+                .query(
+                    &cx,
+                    text[0],
+                    &params,
+                    CatalogSymbolResolver::new(pinned.symbol_catalog()),
+                    policy(),
+                )
+                .unwrap(),
+            before[0]
+        );
+        let delta = historical.poll(&db, &cx, policy()).unwrap().unwrap();
+        assert_eq!(delta.from(), Some(previous));
+        assert_eq!(delta.frontier(), at);
+        assert!(!delta.rows().is_empty());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

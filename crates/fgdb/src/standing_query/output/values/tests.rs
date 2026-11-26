@@ -545,7 +545,7 @@ fn source_to_row_sink_cancellation_preserves_publication_and_retries() {
                 checkpoint: &mut checkpoint,
             };
             success_source
-                .maintain_with_output(&delta, &mut meter, Some(&mut success))
+                .maintain_with_output(&delta, None, &mut meter, Some(&mut success))
                 .unwrap();
         }
         for stop in 1..=calls {
@@ -566,7 +566,7 @@ fn source_to_row_sink_cancellation_preserves_publication_and_retries() {
                     checkpoint: &mut checkpoint,
                 };
                 assert_eq!(
-                    source.maintain_with_output(&delta, &mut meter, Some(&mut output)),
+                    source.maintain_with_output(&delta, None, &mut meter, Some(&mut output)),
                     Err(StandingQueryFailure::Interrupted)
                 );
             }
@@ -581,7 +581,7 @@ fn source_to_row_sink_cancellation_preserves_publication_and_retries() {
                 checkpoint: &mut checkpoint,
             };
             source
-                .maintain_with_output(&delta, &mut meter, Some(&mut output))
+                .maintain_with_output(&delta, None, &mut meter, Some(&mut output))
                 .unwrap();
             assert_eq!(source.rows, success_source.rows);
             same(&output, &success);

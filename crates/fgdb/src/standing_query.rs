@@ -1302,7 +1302,7 @@ pub(crate) fn publish(
                 cx.checkpoint()
                     .map_err(|_| StandingQueryFailure::Interrupted)
             };
-            let result = scope.maintain(batch, &mut checkpoint);
+            let result = scope.maintain(batch, schema, &mut checkpoint);
             let stats = scope.stats;
             let has_delta = result.is_ok() && scope.current_delta.is_some();
             query.record(batch.commit_seq(), result, stats);
@@ -1350,13 +1350,21 @@ pub(crate) fn publish(
                 index += 1;
                 continue;
             }
-            StandingQuery::Aggregate(query) => query.maintain(effective_batch, &mut meter),
-            StandingQuery::ProjectedAggregate { source, output } => {
-                source.maintain_with_output(effective_batch, &mut meter, Some(output.as_mut()))
+            StandingQuery::Aggregate(query) => {
+                query.maintain(effective_batch, Some(schema), &mut meter)
             }
-            StandingQuery::Rows { source, output } => {
-                source.maintain_with_output(effective_batch, &mut meter, Some(output.as_mut()))
-            }
+            StandingQuery::ProjectedAggregate { source, output } => source.maintain_with_output(
+                effective_batch,
+                Some(schema),
+                &mut meter,
+                Some(output.as_mut()),
+            ),
+            StandingQuery::Rows { source, output } => source.maintain_with_output(
+                effective_batch,
+                Some(schema),
+                &mut meter,
+                Some(output.as_mut()),
+            ),
             StandingQuery::Reachability(query) => {
                 query.maintain(cx, effective_batch, topology, &mut meter)
             }

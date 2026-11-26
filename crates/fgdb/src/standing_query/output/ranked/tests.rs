@@ -332,7 +332,7 @@ fn whole_ranked_maintenance_aborts_source_result_and_page_at_every_checkpoint() 
                 checkpoint: &mut checkpoint,
             };
             complete
-                .maintain_with_output(&delta, &mut meter, Some(&mut final_output))
+                .maintain_with_output(&delta, None, &mut meter, Some(&mut final_output))
                 .unwrap();
             meter.stats
         };
@@ -363,7 +363,7 @@ fn whole_ranked_maintenance_aborts_source_result_and_page_at_every_checkpoint() 
                     checkpoint: &mut checkpoint,
                 };
                 assert_eq!(
-                    source.maintain_with_output(&delta, &mut meter, Some(&mut output)),
+                    source.maintain_with_output(&delta, None, &mut meter, Some(&mut output)),
                     Err(StandingQueryFailure::Interrupted)
                 );
             }
@@ -378,7 +378,7 @@ fn whole_ranked_maintenance_aborts_source_result_and_page_at_every_checkpoint() 
                 checkpoint: &mut checkpoint,
             };
             source
-                .maintain_with_output(&delta, &mut meter, Some(&mut output))
+                .maintain_with_output(&delta, None, &mut meter, Some(&mut output))
                 .unwrap();
             assert_eq!(source.rows, complete.rows);
             same(&output, &final_output);
@@ -406,7 +406,7 @@ fn whole_ranked_maintenance_aborts_source_result_and_page_at_every_checkpoint() 
                 checkpoint: &mut checkpoint,
             };
             assert_eq!(
-                source.maintain_with_output(&delta, &mut meter, Some(&mut output)),
+                source.maintain_with_output(&delta, None, &mut meter, Some(&mut output)),
                 Err(reason)
             );
             assert_eq!(source.rows, before.rows);
@@ -417,7 +417,7 @@ fn whole_ranked_maintenance_aborts_source_result_and_page_at_every_checkpoint() 
                 checkpoint: &mut checkpoint,
             };
             source
-                .maintain_with_output(&delta, &mut meter, Some(&mut output))
+                .maintain_with_output(&delta, None, &mut meter, Some(&mut output))
                 .unwrap();
             assert_eq!(source.rows, complete.rows);
             same(&output, &final_output);

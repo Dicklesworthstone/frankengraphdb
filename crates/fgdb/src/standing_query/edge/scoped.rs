@@ -511,7 +511,7 @@ mod tests {
             stats: StandingQueryStats::default(),
             checkpoint: &mut checkpoint,
         };
-        query.maintain(batch, &mut meter).unwrap();
+        query.maintain(batch, None, &mut meter).unwrap();
         query.frontier = batch.commit_seq();
         query
     }
@@ -605,7 +605,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                success.maintain(&delta, &mut meter).unwrap();
+                success.maintain(&delta, None, &mut meter).unwrap();
             }
             assert!(total > 0);
             for stop in 1..=total {
@@ -626,7 +626,7 @@ mod tests {
                         checkpoint: &mut checkpoint,
                     };
                     assert_eq!(
-                        candidate.maintain(&delta, &mut meter),
+                        candidate.maintain(&delta, None, &mut meter),
                         Err(StandingQueryFailure::Interrupted)
                     );
                 }
@@ -638,7 +638,7 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                candidate.maintain(&delta, &mut meter).unwrap();
+                candidate.maintain(&delta, None, &mut meter).unwrap();
                 unchanged(&candidate, &success);
             }
             let mut entries = delta.coordinate_entries().to_vec();
@@ -668,7 +668,7 @@ mod tests {
                 checkpoint: &mut checkpoint,
             };
             assert_eq!(
-                candidate.maintain(&malformed, &mut meter),
+                candidate.maintain(&malformed, None, &mut meter),
                 Err(StandingQueryFailure::InvalidDelta)
             );
             unchanged(&candidate, &before);

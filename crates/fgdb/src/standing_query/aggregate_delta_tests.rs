@@ -211,7 +211,7 @@ fn projected_output_refusal_never_replaces_the_accepted_source_derivative() {
                     checkpoint: &mut checkpoint,
                 };
                 success
-                    .maintain_with_output(&delta, &mut meter, Some(&mut result))
+                    .maintain_with_output(&delta, None, &mut meter, Some(&mut result))
                     .unwrap();
             }
             let mut integrated = clone_bag(&before_output.rows);
@@ -241,7 +241,7 @@ fn projected_output_refusal_never_replaces_the_accepted_source_derivative() {
                         checkpoint: &mut checkpoint,
                     };
                     assert_eq!(
-                        candidate.maintain_with_output(&delta, &mut meter, Some(&mut output)),
+                        candidate.maintain_with_output(&delta, None, &mut meter, Some(&mut output)),
                         Err(StandingQueryFailure::Interrupted)
                     );
                 }
@@ -256,7 +256,7 @@ fn projected_output_refusal_never_replaces_the_accepted_source_derivative() {
                     checkpoint: &mut checkpoint,
                 };
                 candidate
-                    .maintain_with_output(&delta, &mut meter, Some(&mut output))
+                    .maintain_with_output(&delta, None, &mut meter, Some(&mut output))
                     .unwrap();
                 assert_eq!(candidate.last_delta, success.last_delta);
                 assert_eq!(output.rows, result.rows);
@@ -298,6 +298,228 @@ fn aggregate_baseline_empty_ticks_and_failed_views_are_distinct() {
             foreign.standing_query_delta(&cx, &handle),
             Err(StandingQueryError::ForeignHandle)
         ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn catalog_ticks_require_the_exact_admitted_schema_transition() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+
+    let ((), report) = run_async_under_lab(0x006d_de04, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut basis = Database::open_memory(&commit, keys()).await.unwrap();
+        basis.write(&commit, seed()).await.unwrap();
+        let mut driver = Database::open_memory(&commit, keys()).await.unwrap();
+        driver.write(&commit, seed()).await.unwrap();
+        let mut names = SymbolCatalog::default();
+        names
+            .bind("key", CatalogSymbol::Property(PropertyKeyId(1)))
+            .unwrap();
+        let at = driver.register_symbols(&commit, &names).await.unwrap();
+        let delta = driver.delta_index().unwrap().get(at).unwrap().clone();
+        let make = || {
+            basis
+                .prepare_standing_query(&cx, definition(0), policy())
+                .unwrap()
+        };
+        let before = make();
+        for schema in [None, Some(&basis.snapshot.schema)] {
+            let mut candidate = make();
+            let mut checkpoint = || Ok(());
+            let mut meter = Meter {
+                policy: policy(),
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            assert_eq!(
+                candidate.maintain(&delta, schema, &mut meter),
+                Err(StandingQueryFailure::InvalidDelta)
+            );
+            assert_eq!(candidate.vertices, before.vertices);
+            assert_eq!(candidate.rows, before.rows);
+            assert_eq!(candidate.last_delta, before.last_delta);
+        }
+
+        // A valid owner cannot authorize a fabricated transition, an epoch
+        // shortcut, or an extra effect attached to the authentic schema tick.
+        for corruption in 0..5 {
+            let mut coordinates = delta.coordinate_entries().to_vec();
+            let coordinate = &mut coordinates[0];
+            match corruption {
+                0 => coordinate.schema_transition = None,
+                1 => {
+                    let oid = fgdb_types::ObjectId([0xa7; 32]);
+                    coordinate.schema_transition = Some(oid);
+                    let DeltaRow::Schema { transition_oid, .. } = &mut coordinate.rows[0]
+                    else {
+                        unreachable!("the committed catalog tick has one Schema row");
+                    };
+                    *transition_oid = oid;
+                }
+                2 => {
+                    let DeltaRow::Schema { after_epoch, .. } = &mut coordinate.rows[0] else {
+                        unreachable!("the committed catalog tick has one Schema row");
+                    };
+                    after_epoch.0 += 1;
+                }
+                3 => coordinate.rows.push(coordinate.rows[0].clone()),
+                _ => coordinate.rows.clear(),
+            }
+            let forged = LogicalDeltaBatch::from_parts_for_test(
+                coordinates,
+                *delta.source_template_digest(),
+                delta.commit_marker_identity(),
+                at,
+                at,
+            );
+            let mut candidate = make();
+            let mut checkpoint = || Ok(());
+            let mut meter = Meter {
+                policy: policy(),
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            assert_eq!(
+                candidate.maintain(&forged, Some(&driver.snapshot.schema), &mut meter),
+                Err(StandingQueryFailure::InvalidDelta),
+                "corruption {corruption}"
+            );
+            assert_eq!(candidate.vertices, before.vertices);
+            assert_eq!(candidate.rows, before.rows);
+            assert_eq!(candidate.last_delta, before.last_delta);
+        }
+
+        let mut accepted = make();
+        let mut checkpoint = || Ok(());
+        let mut meter = Meter {
+            policy: policy(),
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        accepted
+            .maintain(&delta, Some(&driver.snapshot.schema), &mut meter)
+            .unwrap();
+        assert_eq!(accepted.vertices, before.vertices);
+        assert_eq!(accepted.rows, before.rows);
+        assert!(accepted.last_delta.as_ref().unwrap().is_empty());
+        assert_eq!(meter.stats.delta_rows, 1);
+        assert_eq!(meter.stats.affected_vertices, 0);
+        assert_eq!(meter.stats.affected_edges, 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn admitted_catalog_ticks_keep_atomic_cancellation_and_work_admission() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+
+    let ((), report) = run_async_under_lab(0x006d_de05, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut basis = Database::open_memory(&commit, keys()).await.unwrap();
+        basis.write(&commit, seed()).await.unwrap();
+        let mut driver = Database::open_memory(&commit, keys()).await.unwrap();
+        driver.write(&commit, seed()).await.unwrap();
+        let mut floors = SymbolCatalog::default();
+        floors.reserve_through(CatalogSymbol::Property(PropertyKeyId(99)));
+        let at = driver.register_symbols(&commit, &floors).await.unwrap();
+        let delta = driver.delta_index().unwrap().get(at).unwrap().clone();
+        let make = || {
+            basis
+                .prepare_standing_query(&cx, definition(0), policy())
+                .unwrap()
+        };
+        let before = make();
+        let mut success = make();
+        let mut calls = 0;
+        let stats = {
+            let mut checkpoint = || {
+                calls += 1;
+                Ok(())
+            };
+            let mut meter = Meter {
+                policy: policy(),
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            success
+                .maintain(&delta, Some(&driver.snapshot.schema), &mut meter)
+                .unwrap();
+            meter.stats
+        };
+        assert!(calls > 0 && stats.work_units > 0);
+        assert_eq!(stats.scratch_entries, 0);
+        assert!(success.last_delta.as_ref().unwrap().is_empty());
+        for stop in 1..=calls {
+            let mut candidate = make();
+            let mut seen = 0;
+            {
+                let mut checkpoint = || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(StandingQueryFailure::Interrupted)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let mut meter = Meter {
+                    policy: policy(),
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
+                assert_eq!(
+                    candidate.maintain(&delta, Some(&driver.snapshot.schema), &mut meter),
+                    Err(StandingQueryFailure::Interrupted)
+                );
+            }
+            assert_eq!(seen, stop);
+            assert_eq!(candidate.vertices, before.vertices);
+            assert_eq!(candidate.rows, before.rows);
+            assert_eq!(candidate.last_delta, before.last_delta);
+            let mut checkpoint = || Ok(());
+            let mut meter = Meter {
+                policy: policy(),
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            candidate
+                .maintain(&delta, Some(&driver.snapshot.schema), &mut meter)
+                .unwrap();
+            assert_eq!(candidate.rows, success.rows);
+            assert_eq!(candidate.last_delta, success.last_delta);
+        }
+        let mut candidate = make();
+        let mut bounded = policy();
+        bounded.evaluator.max_work_units = stats.work_units - 1;
+        bounded.evaluator.max_scratch_entries = 0;
+        let mut checkpoint = || Ok(());
+        let mut meter = Meter {
+            policy: bounded,
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        assert_eq!(
+            candidate.maintain(&delta, Some(&driver.snapshot.schema), &mut meter),
+            Err(StandingQueryFailure::WorkBudget)
+        );
+        assert_eq!(candidate.vertices, before.vertices);
+        assert_eq!(candidate.rows, before.rows);
+        assert_eq!(candidate.last_delta, before.last_delta);
+        bounded.evaluator.max_work_units = stats.work_units;
+        let mut meter = Meter {
+            policy: bounded,
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        candidate
+            .maintain(&delta, Some(&driver.snapshot.schema), &mut meter)
+            .unwrap();
+        assert_eq!(candidate.rows, success.rows);
+        assert_eq!(candidate.last_delta, success.last_delta);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

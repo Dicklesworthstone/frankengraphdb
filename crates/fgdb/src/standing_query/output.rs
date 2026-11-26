@@ -620,7 +620,7 @@ mod tests {
                     checkpoint: &mut checkpoint,
                 };
                 successful
-                    .maintain_with_output(&delta, &mut meter, Some(&mut after))
+                    .maintain_with_output(&delta, None, &mut meter, Some(&mut after))
                     .unwrap();
                 meter.stats
             };
@@ -647,7 +647,7 @@ mod tests {
                         checkpoint: &mut checkpoint,
                     };
                     assert_eq!(
-                        candidate.maintain_with_output(&delta, &mut meter, Some(&mut output)),
+                        candidate.maintain_with_output(&delta, None, &mut meter, Some(&mut output)),
                         Err(StandingQueryFailure::Interrupted)
                     );
                 }
@@ -662,7 +662,7 @@ mod tests {
                     checkpoint: &mut checkpoint,
                 };
                 candidate
-                    .maintain_with_output(&delta, &mut meter, Some(&mut output))
+                    .maintain_with_output(&delta, None, &mut meter, Some(&mut output))
                     .unwrap();
                 assert_eq!(candidate.rows, successful.rows);
                 same(&output, &after);
@@ -690,7 +690,7 @@ mod tests {
                     checkpoint: &mut checkpoint,
                 };
                 assert_eq!(
-                    source.maintain_with_output(&delta, &mut meter, Some(&mut output)),
+                    source.maintain_with_output(&delta, None, &mut meter, Some(&mut output)),
                     Err(reason)
                 );
                 assert_eq!(source.rows, original.rows);
@@ -701,7 +701,7 @@ mod tests {
                     checkpoint: &mut checkpoint,
                 };
                 source
-                    .maintain_with_output(&delta, &mut meter, Some(&mut output))
+                    .maintain_with_output(&delta, None, &mut meter, Some(&mut output))
                     .unwrap();
                 assert_eq!(source.rows, successful.rows);
                 same(&output, &after);

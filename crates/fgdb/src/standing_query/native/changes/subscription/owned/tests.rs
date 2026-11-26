@@ -396,3 +396,219 @@ fn failed_sources_can_be_reclaimed_without_rebuild_and_ordinary_close_never_recl
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn authorized_subscriptions_hide_catalog_ticks_and_preserve_pending_deliveries() {
+    use asupersync::security::key::AuthKey;
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, SchemaEpoch};
+    use fgdb_types::EId;
+    use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
+
+    let ((), report) = run_async_under_lab(0x5c14_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let params = GqlParameters::new();
+        let issuer = Authority::new(
+            AuthKey::from_seed(0x5c14_0006),
+            DatabaseSecurityNamespaceId([32; 32]),
+            "graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 100_000,
+                max_work: 10_000_000,
+                max_rows: 100_000,
+            },
+        );
+        grant.labels = Scope::only([LabelId(1)]);
+        grant.relations = Scope::only([RelationId(1)]);
+        grant.properties = Scope::only([PropertyKeyId(1)]);
+        let token = issuer.issue_at(&grant, 0).unwrap();
+        let authority = issuer.verify_at(&token, "main", 1).unwrap();
+
+        for text in [
+            "MATCH (n:L) RETURN n.p AS p",
+            "MATCH (n:L) RETURN COUNT(*) AS amount, SUM(n.p) AS total",
+            "MATCH (a:L)-[:R]->(b:L) RETURN b.p AS p",
+            "MATCH (a:L)-[:R*]->(b:L) RETURN DISTINCT a,b",
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut visible = Database::open_memory(&commit, keys()).await.unwrap();
+            for graph in [&mut db, &mut visible] {
+                let mut seed = WriteBatch::new(RelationId(1));
+                for (id, value) in [(1, 3), (2, 7)] {
+                    seed.create_vertex(
+                        VId(id),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+                    );
+                }
+                seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+                graph.write(&commit, seed).await.unwrap();
+            }
+            // Only one world contains these hidden graph facts or the later
+            // catalog registrations. Their public deliveries must still agree.
+            let mut hidden = WriteBatch::new(RelationId(2));
+            hidden.create_vertex(
+                VId(10),
+                vec![LabelId(2)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(99))],
+            );
+            hidden.add_edge(EId(10), VId(2), VId(1), vec![]);
+            db.write(&commit, hidden).await.unwrap();
+            let resolver = |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                _ => symbols(kind, name),
+            };
+            let prepared = PreparedNativeRead::prepare(text, &params, resolver).unwrap();
+            let (mut sub, initial) = prepared
+                .subscribe_authorized(
+                    &mut db,
+                    &cx,
+                    &params,
+                    authority.predicates(),
+                    setup(),
+                    |_, batch| Ok::<_, SubscriptionError>(Arc::clone(batch)),
+                )
+                .unwrap();
+            let (mut control, expected_initial) = prepared
+                .subscribe_authorized(
+                    &mut visible,
+                    &cx,
+                    &params,
+                    authority.predicates(),
+                    setup(),
+                    |_, batch| Ok::<_, SubscriptionError>(Arc::clone(batch)),
+                )
+                .unwrap();
+            assert_eq!(initial.frontier(), CommitSeq(1), "{text}");
+            assert_eq!(initial.frontier(), expected_initial.frontier());
+            assert_eq!(initial.rows(), expected_initial.rows(), "{text}");
+            let initial_stats = db
+                .standing_query_node_stats(&cx, &sub.handle)
+                .unwrap()
+                .copied()
+                .collect::<Vec<_>>();
+
+            let mut names = SymbolCatalog::default();
+            names
+                .bind_all([
+                    ("Hidden", CatalogSymbol::Label(LabelId(2))),
+                    ("SECRET", CatalogSymbol::Relation(RelationId(2))),
+                    ("secret", CatalogSymbol::Property(PropertyKeyId(2))),
+                ])
+                .unwrap();
+            let mut floors = SymbolCatalog::default();
+            floors.reserve_through(CatalogSymbol::Label(LabelId(99)));
+            floors.reserve_through(CatalogSymbol::Relation(RelationId(99)));
+            floors.reserve_through(CatalogSymbol::Property(PropertyKeyId(99)));
+            for catalog in [&names, &floors] {
+                let before = db.frontier().unwrap();
+                let at = db.register_symbols(&commit, catalog).await.unwrap();
+                assert_eq!(at, before.checked_successor().unwrap());
+                assert!(Arc::ptr_eq(
+                    &initial,
+                    &sub.poll(&db, &cx, policy()).unwrap().unwrap()
+                ));
+                assert_eq!(
+                    db.standing_query_node_stats(&cx, &sub.handle)
+                        .unwrap()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    initial_stats,
+                    "catalog-only work never reaches the masked circuit: {text}"
+                );
+                let first = sub.ownership.as_ref().unwrap().range.start;
+                let StandingQuery::CapabilityScope(scope) = &db.standing_queries[first] else {
+                    panic!("restricted registration owns a projection");
+                };
+                assert_eq!(scope.physical_frontier, at);
+                assert_eq!(scope.visible_frontier, initial.frontier());
+                assert_eq!(scope.stats, StandingQueryStats::default());
+            }
+            sub.acknowledge(initial.receipt()).unwrap();
+            control.acknowledge(expected_initial.receipt()).unwrap();
+            assert!(sub.poll(&db, &cx, policy()).unwrap().is_none());
+            assert!(control.poll(&visible, &cx, policy()).unwrap().is_none());
+
+            let mut hidden_property = WriteBatch::new(RelationId(1));
+            hidden_property.set_vertex_property(
+                VId(1),
+                PropertyKeyId(2),
+                Some(CanonicalScalar::Int(123)),
+            );
+            db.write(&commit, hidden_property).await.unwrap();
+            assert!(sub.poll(&db, &cx, policy()).unwrap().is_none());
+            assert_eq!(sub.acknowledged_frontier(), Some(CommitSeq(1)));
+
+            let mut update = WriteBatch::new(RelationId(1));
+            update.set_vertex_property(VId(2), PropertyKeyId(1), Some(CanonicalScalar::Int(8)));
+            update.create_vertex(
+                VId(3),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(11))],
+            );
+            update.add_edge(EId(2), VId(2), VId(3), vec![]);
+            for graph in [&mut db, &mut visible] {
+                graph.write(&commit, update.clone()).await.unwrap();
+            }
+            let next = sub.poll(&db, &cx, policy()).unwrap().unwrap();
+            let expected = control.poll(&visible, &cx, policy()).unwrap().unwrap();
+            assert!(!next.is_snapshot());
+            assert_eq!((next.from(), next.frontier()), (Some(CommitSeq(1)), CommitSeq(2)));
+            assert_eq!((next.from(), next.frontier()), (expected.from(), expected.frontier()));
+            assert_eq!(next.rows(), expected.rows(), "{text}");
+            assert_eq!(
+                db.standing_native_query(&cx, &sub.handle, policy()).unwrap().1,
+                visible.query(&cx, text, &params, resolver, policy()).unwrap(),
+                "maintained masked output agrees with a fresh visible-only query: {text}"
+            );
+
+            let mut later = SymbolCatalog::default();
+            later.bind("LATER", CatalogSymbol::Relation(RelationId(100))).unwrap();
+            db.register_symbols(&commit, &later).await.unwrap();
+            assert!(Arc::ptr_eq(
+                &next,
+                &sub.poll(&db, &cx, policy()).unwrap().unwrap()
+            ));
+            sub.acknowledge(next.receipt()).unwrap();
+            control.acknowledge(expected.receipt()).unwrap();
+            assert!(sub.poll(&db, &cx, policy()).unwrap().is_none());
+
+            let mut delete = WriteBatch::new(RelationId(1));
+            delete.delete_vertex(VId(2));
+            for graph in [&mut db, &mut visible] {
+                graph.write(&commit, delete.clone()).await.unwrap();
+            }
+            let last = sub.poll(&db, &cx, policy()).unwrap().unwrap();
+            let expected_last = control.poll(&visible, &cx, policy()).unwrap().unwrap();
+            assert_eq!((last.from(), last.frontier()), (Some(CommitSeq(2)), CommitSeq(3)));
+            assert_eq!(
+                (last.from(), last.frontier()),
+                (expected_last.from(), expected_last.frontier())
+            );
+            assert_eq!(last.rows(), expected_last.rows(), "{text}");
+            assert_eq!(
+                db.standing_native_query(&cx, &sub.handle, policy()).unwrap().1,
+                visible.query(&cx, text, &params, resolver, policy()).unwrap(),
+                "{text}"
+            );
+            sub.acknowledge(last.receipt()).unwrap();
+            control.acknowledge(expected_last.receipt()).unwrap();
+            sub.close_and_release(&mut db, &cx, policy()).unwrap();
+            control.close_and_release(&mut visible, &cx, policy()).unwrap();
+            assert!(db.standing_queries.is_empty());
+            assert!(visible.standing_queries.is_empty());
+            assert_eq!(initial.rows(), expected_initial.rows());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
