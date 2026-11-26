@@ -741,7 +741,8 @@ pub fn decode_container(bytes: &[u8]) -> Result<(CapsuleDescriptor, Vec<Vec<u8>>
         repair_symbols: r.u32()?,
     };
     let declared = r.u32()? as usize;
-    if let Some(registered) = CapsuleProfile::registered(descriptor.fec_profile) {
+    let registered = CapsuleProfile::registered(descriptor.fec_profile);
+    if let Some(registered) = registered {
         if descriptor.repair_symbols != registered.repair_symbols {
             return Err(CapsuleError::RepairBudgetMismatch {
                 fec_profile: descriptor.fec_profile,
@@ -769,6 +770,16 @@ pub fn decode_container(bytes: &[u8]) -> Result<(CapsuleDescriptor, Vec<Vec<u8>>
         return Err(CapsuleError::MalformedContainer);
     }
 
+    // A complete registered V1 inventory has independently known slot
+    // boundaries. Trust its profile width for navigation: damage to one
+    // redundant length prefix must not hide every subsequent repair symbol.
+    // For short containers retain the length-framed recovery path, including
+    // earlier records that were themselves shortened before a surviving slot.
+    let record_len = usize::from(HEADER_LEN_V1)
+        + usize::from(descriptor.symbol_size)
+        + usize::from(SYMBOL_MAC_LEN_V1);
+    let fixed_slots = registered.is_some()
+        && declared.checked_mul(4 + record_len) == Some(bytes.len() - CAPSULE_HEADER_BYTES_V1);
     let mut symbols = Vec::new();
     symbols
         .try_reserve_exact(declared)
@@ -776,16 +787,24 @@ pub fn decode_container(bytes: &[u8]) -> Result<(CapsuleDescriptor, Vec<Vec<u8>>
     let mut parsed = 0usize;
     for _ in 0..declared {
         let Ok(len) = r.u32() else { break };
-        let Ok(payload) = r.take(len as usize) else {
+        let slot_len = if fixed_slots {
+            record_len
+        } else {
+            len as usize
+        };
+        let Ok(payload) = r.take(slot_len) else {
             break;
         };
+        parsed += 1;
+        if len as usize != slot_len {
+            continue;
+        }
         let mut symbol = Vec::new();
         symbol
             .try_reserve_exact(payload.len())
             .map_err(|_| CapsuleError::AllocationFailed)?;
         symbol.extend_from_slice(payload);
         symbols.push(symbol);
-        parsed += 1;
     }
     if parsed == declared && !r.is_at_end() {
         return Err(CapsuleError::MalformedContainer);

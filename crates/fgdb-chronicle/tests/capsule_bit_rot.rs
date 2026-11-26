@@ -40,13 +40,14 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::capsule::{
-    CapsuleError, CapsuleKeys, CapsuleProfile, MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container,
+    CapsuleError, CapsuleKeys, CapsuleProfile, MAX_CAPSULE_CONTAINER_BYTES_V1, SealedCapsule,
+    decode_container, encode_container,
 };
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate, MarkerChain};
 use fgdb_crypto::Digest;
 use fgdb_types::context::{CommitCx, PurposeContexts};
-use fgdb_types::{BranchId, GraphId, ObjectId};
+use fgdb_types::{BranchId, CommitSeq, GraphId, ObjectId};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -319,6 +320,71 @@ fn a_single_rotted_symbol_heals_invisibly() {
             plaintext(),
             "one rotted symbol must be invisible, not merely survivable"
         );
+    });
+}
+
+#[test]
+fn damaged_length_prefixes_cost_one_symbol_each_and_scrub_restores_the_inventory() {
+    let dir = scratch_dir("symbol-framing");
+    under_lab(0x534c_4f54, move |cx| async move {
+        let (path, oid) = committed(&dir, &cx).await;
+        let original = std::fs::read(&path).unwrap();
+        let (descriptor, symbols) = decode_container(&original).unwrap();
+        let budget = keys().profile().erasure_budget();
+        assert!(budget > 0 && budget < symbols.len());
+        let coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        // Change the physical order while keeping the first slot in place.
+        // Remaining records must be interpreted by their authenticated
+        // coordinates, never by their physical slot or survivor index.
+        let mut shuffled = symbols.clone();
+        shuffled[1..].reverse();
+        let mut damaged = encode_container(&SealedCapsule {
+            object_id: oid,
+            descriptor,
+            symbols: shuffled,
+        });
+        for (index, symbol) in symbols.iter().take(budget + 1).enumerate() {
+            let start = damaged
+                .windows(symbol.len())
+                .position(|w| w == symbol)
+                .unwrap();
+            let length = &mut damaged[start - 4..start];
+            assert_eq!(length, (symbol.len() as u32).to_be_bytes());
+            // Alternate a one-bit overstatement and a one-bit understatement.
+            let bit = if index % 2 == 0 {
+                31
+            } else {
+                (symbol.len() as u32).trailing_zeros()
+            };
+            length.copy_from_slice(&((symbol.len() as u32) ^ (1 << bit)).to_be_bytes());
+            let count = index + 1;
+            if count != 1 && count != budget && count != budget + 1 {
+                continue;
+            }
+            std::fs::write(&path, &damaged).unwrap();
+            let read = coordinator.read_capsule(&cx, oid, &mut Vec::new()).await;
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                damaged,
+                "a read never rewrites the file"
+            );
+            let scrub = coordinator
+                .scrub_capsules(&cx, CommitSeq::FIRST, None, &mut Vec::new())
+                .await
+                .unwrap();
+            if count <= budget {
+                assert_eq!(read.unwrap(), plaintext());
+                assert_eq!(scrub.repaired, [oid]);
+                assert!(scrub.lost.is_empty());
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+            } else {
+                assert!(read.is_err());
+                assert!(scrub.repaired.is_empty());
+                assert_eq!(scrub.lost.len(), 1);
+                assert_eq!(scrub.lost[0].object_id, oid);
+                assert_eq!(std::fs::read(&path).unwrap(), damaged);
+            }
+        }
     });
 }
 
