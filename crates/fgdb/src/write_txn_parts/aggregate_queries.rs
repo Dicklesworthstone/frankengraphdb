@@ -58,6 +58,7 @@ impl WriteTxn {
                 }
                 return usage.finish(policy, result);
             }
+            let metadata_records = usage.snapshot_records();
             let pattern = aggregate.input_pattern();
             let source = self.query_source_with_witnesses(
                 snapshot,
@@ -84,7 +85,7 @@ impl WriteTxn {
             )?;
             let element_failure = std::cell::RefCell::new(None);
             let result = aggregate.execute_governed_with_element_maps_and_reads(
-                source.snapshot_records as u64,
+                source.snapshot_records as u64 + metadata_records,
                 source.vertex_ids(),
                 source.identified_edges(),
                 |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),

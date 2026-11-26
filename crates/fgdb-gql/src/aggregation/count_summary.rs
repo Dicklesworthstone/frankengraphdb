@@ -2,7 +2,7 @@
 //!
 //! This is a checked physical input to the ordinary aggregate finalizer, not
 //! a cached result. Source admission stays the host's responsibility. Only
-//! plans with filterless input or one metadata-proven vertex label qualify.
+//! filterless inputs or predicates with metadata-proven populations qualify.
 //! Exact metadata also admits COUNT of a proven nonnull vertex or edge identity,
 //! and DISTINCT when that identity occurs exactly once in the admitted source.
 //! Property values, nullable bindings and repeated endpoints need real input.
@@ -34,13 +34,14 @@ pub enum GraphCountSource {
 enum CountInput {
     Single(GraphCountSource),
     Alternatives(EdgeRelationSet),
+    LabelIntersection,
 }
 
 impl CountInput {
     fn single(self) -> Option<GraphCountSource> {
         match self {
             Self::Single(source) => Some(source),
-            Self::Alternatives(_) => None,
+            Self::Alternatives(_) | Self::LabelIntersection => None,
         }
     }
 }
@@ -111,15 +112,23 @@ impl PreparedGraphAggregate {
         for operator in &operators[1..] {
             match operator {
                 GlaOperator::Select { slot, predicates }
-                    if source == CountInput::Single(GraphCountSource::Vertices)
-                        && columns.is_none()
-                        && slot.ordinal() == 0 =>
+                    if slots == 1 && columns.is_none() && slot.ordinal() == 0 =>
                 {
-                    let [crate::algebra::VertexPredicate::HasLabel(label)] = predicates.as_slice()
-                    else {
+                    if predicates.is_empty() {
                         return None;
-                    };
-                    source = CountInput::Single(GraphCountSource::Label(*label));
+                    }
+                    for predicate in predicates {
+                        let crate::algebra::VertexPredicate::HasLabel(label) = predicate else {
+                            return None;
+                        };
+                        source = match source {
+                            CountInput::Single(GraphCountSource::Vertices) => {
+                                CountInput::Single(GraphCountSource::Label(*label))
+                            }
+                            _ if metadata => CountInput::LabelIntersection,
+                            _ => return None,
+                        };
+                    }
                 }
                 GlaOperator::Select { slot, predicates }
                     if endpoint_labels
@@ -275,6 +284,14 @@ impl PreparedGraphAggregate {
         ) && self.count_shape(true).is_some()
     }
 
+    /// Whether exact per-label populations may prove a vertex conjunction.
+    /// The proof checks overlap at execution against the selected generation.
+    #[must_use]
+    pub fn can_count_label_intersection(&self) -> bool {
+        matches!(self.input.plan().operators().first(), Some(GlaOperator::ScanVertices))
+            && self.count_shape(true).is_some_and(|shape| shape.source == CountInput::LabelIntersection)
+    }
+
     /// Bind a trusted source's exact, already admitted counts to this query.
     /// `examined` counts all live rows that the ordinary input iterator would
     /// yield; `matching` counts the named relation's occurrences, or the same
@@ -329,8 +346,8 @@ impl PreparedGraphAggregate {
     }
 
     /// Bind exact current-generation counts, summing disjoint directed relation
-    /// alternatives from a single generation or optionally proving endpoint
-    /// label predicates universal over that same live vertex population.
+    /// alternatives or proving vertex-label intersections and universal endpoint
+    /// labels over that same live vertex population.
     ///
     /// The host supplies trusted, unrestricted counts at one exact cut and
     /// admits every lookup through its ordinary controls. Unknown counts or
@@ -351,6 +368,45 @@ impl PreparedGraphAggregate {
                     return Ok(None);
                 };
                 count
+            }
+            CountInput::LabelIntersection => {
+                let Some(vertices) = lookup(GraphCountSource::Vertices)? else {
+                    return Ok(None);
+                };
+                // Universal labels impose no restriction. A zero population
+                // proves an empty intersection; otherwise two distinct proper
+                // subsets have unknown overlap, even with equal cardinalities.
+                let mut subset = None;
+                let mut ambiguous = false;
+                let mut size = vertices;
+                'labels: for operator in self.input.plan().operators() {
+                    if let GlaOperator::Select { predicates, .. } = operator {
+                        for predicate in predicates {
+                            let crate::algebra::VertexPredicate::HasLabel(label) = predicate else {
+                                unreachable!("the shape checked every label predicate")
+                            };
+                            let Some(count) = lookup(GraphCountSource::Label(*label))? else {
+                                return Ok(None);
+                            };
+                            if count > vertices {
+                                return Ok(None);
+                            }
+                            if count == 0 {
+                                size = 0;
+                                break 'labels;
+                            }
+                            if count < vertices {
+                                ambiguous |= subset.is_some_and(|previous| previous != *label);
+                                subset = Some(*label);
+                                size = count;
+                            }
+                        }
+                    }
+                }
+                if size != 0 && ambiguous {
+                    return Ok(None);
+                }
+                size
             }
             CountInput::Alternatives(set) => {
                 // Every edge has exactly one relation. The selector has

@@ -456,6 +456,57 @@ fn only_one_vertex_label_can_supply_exact_metadata() {
 }
 
 #[test]
+fn conjunctive_label_counts_prove_only_determined_intersections() {
+    let q = query("MATCH (n:L:M:X) RETURN COUNT(DISTINCT n) AS n");
+    assert!(q.can_count_label_intersection());
+    assert!(q.count_metadata_source().is_none());
+    let policy = GqlQueryPolicy::new(10, 1, 100, 100);
+    for l in 0_u8..8 {
+        for m in 0_u8..8 {
+            for x in 0_u8..8 {
+                let sets = [l, m, x];
+                let count = q
+                    .prepare_count_metadata_with_universal_labels(|source| {
+                        Ok::<_, ()>(Some(match source {
+                            GraphCountSource::Vertices => 3,
+                            GraphCountSource::Label(LabelId(id @ 1..=3)) => {
+                                u64::from(sets[id as usize - 1].count_ones())
+                            }
+                            _ => panic!("unexpected population"),
+                        }))
+                    })
+                    .unwrap();
+                let provable = sets.contains(&0) || sets.iter().filter(|s| **s != 7).count() <= 1;
+                assert_eq!(count.is_some(), provable, "{sets:?}");
+                if let Some(count) = count {
+                    let rows = count.execute_governed::<(), ()>(4, policy, || Ok(())).unwrap();
+                    assert_eq!(rows.value[0].values()[0].as_count(), Some(u64::from((l & m & x).count_ones())));
+                }
+            }
+        }
+    }
+    for partial in [None, Some(4)] {
+        let result = q.prepare_count_metadata_with_universal_labels(|source| {
+            Ok::<_, ()>(if source == GraphCountSource::Label(LabelId(2)) { partial } else { Some(3) })
+        }).unwrap();
+        assert!(result.is_none());
+    }
+    for stop in 1..=4 {
+        let mut n = 0;
+        assert!(matches!(q.prepare_count_metadata_with_universal_labels(|_| {
+            n += 1;
+            if n == stop { Err(stop) } else { Ok(Some(3)) }
+        }), Err(e) if e == stop));
+        assert_eq!(n, stop);
+    }
+    let filtered = query("MATCH (n:L:M) WHERE n.p IS NULL RETURN COUNT(*) AS n");
+    assert!(!filtered.can_count_label_intersection());
+    assert!(filtered.prepare_count_metadata_with_universal_labels(|_| -> Result<Option<u64>, ()> {
+        panic!("an unproved filter touched counters")
+    }).unwrap().is_none());
+}
+
+#[test]
 fn universal_endpoint_labels_use_exact_population_proofs_and_the_native_finalizer() {
     let vertices = [VId(0), VId(17), VId(u128::MAX)];
     let edges = [

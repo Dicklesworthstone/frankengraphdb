@@ -977,3 +977,36 @@ fn idempotent_replay_cannot_change_a_counted_local_ensure_outside_the_count_doma
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn label_intersection_reads_track_staged_membership_and_its_absence() {
+    let ((), report) = run_async_under_lab(0xc071_0013, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let commit = c.commit();
+        let txn = c.txn();
+        let cx = c.query();
+        let mut db = fixture(&commit).await;
+        let mut universal = WriteBatch::new(R);
+        universal.set_vertex_label(VId(6), A, true);
+        db.write(&commit, universal).await.unwrap();
+        let q = prepare("MATCH (n:A:B) RETURN count(n) AS n");
+        let mut reader = db.begin(&txn).unwrap();
+        let result = reader.execute_graph_aggregate_governed(
+            &db, &cx, &q, GqlQueryPolicy::new(3, 1, 10_000, 1_000)
+        ).unwrap();
+        assert_eq!(result.rows.snapshot_records, 3);
+        assert_eq!(count(&result.value), 1);
+        reader.savepoint(&db, "original").unwrap();
+        let mut move_label = WriteBatch::new(R);
+        move_label.set_vertex_label(VId(6), B, false);
+        reader.write(&mut db, move_label).unwrap();
+        assert_eq!(count(&reader.execute_graph_aggregate_governed(&db, &cx, &q, policy()).unwrap().value), 0);
+        reader.rollback_to_savepoint(&db, "original").unwrap();
+        assert_eq!(count(&reader.execute_graph_aggregate_governed(&db, &cx, &q, policy()).unwrap().value), 1);
+        let mut concurrent = WriteBatch::new(R);
+        concurrent.set_vertex_label(VId(1), B, true);
+        db.write(&commit, concurrent).await.unwrap();
+        assert_read_conflict(reader.finish(&mut db, &commit).await);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
