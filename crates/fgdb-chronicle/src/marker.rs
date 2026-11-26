@@ -519,6 +519,23 @@ impl MarkerPrefix {
         next_commit_seq(self.frontier)
     }
 
+    pub(crate) fn recover(
+        &mut self,
+        marker: CommitMarker,
+        stored_hash: Digest,
+    ) -> Result<(), ChainVerifyFailure> {
+        let chained = recover_marker(
+            marker,
+            stored_hash,
+            self.frontier,
+            &mut self.heads,
+            &mut self.identity_counters,
+        )?;
+        self.frontier = Some(MarkerFrontier::from(&chained));
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn append(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
         let chain_hash =
             validate_marker(&marker, self.frontier, &self.heads, self.identity_counters)?;
@@ -563,6 +580,16 @@ fn validate_marker(
     heads: &[((GraphId, BranchId), MarkerRef)],
     identity_counters: IdentityCounters,
 ) -> Result<Digest, ChainError> {
+    validate_marker_structure(marker, frontier, heads, identity_counters)?;
+    marker.chain_hash(frontier.map_or(CHAIN_ORIGIN, |last| last.chain_hash))
+}
+
+fn validate_marker_structure(
+    marker: &CommitMarker,
+    frontier: Option<MarkerFrontier>,
+    heads: &[((GraphId, BranchId), MarkerRef)],
+    identity_counters: IdentityCounters,
+) -> Result<(), ChainError> {
     let expected_seq = next_commit_seq(frontier)?;
     if marker.commit_seq != expected_seq.0 {
         return Err(ChainError::NonContiguousCommitSeq {
@@ -627,7 +654,41 @@ fn validate_marker(
         }
     }
 
-    marker.chain_hash(frontier.map_or(CHAIN_ORIGIN, |last| last.chain_hash))
+    Ok(())
+}
+
+/// Authenticate the frame against the current chain before validating its
+/// structure. A complete frame is hashed once, and the decoded head updates
+/// move with the marker. Both scanner postures adopt through the same laws.
+fn recover_marker(
+    marker: CommitMarker,
+    stored_hash: Digest,
+    frontier: Option<MarkerFrontier>,
+    heads: &mut Vec<((GraphId, BranchId), MarkerRef)>,
+    identity_counters: &mut IdentityCounters,
+) -> Result<ChainedMarker, ChainVerifyFailure> {
+    let commit_seq = marker.commit_seq;
+    let structure = |cause| ChainVerifyFailure {
+        commit_seq,
+        cause: ChainVerifyCause::Structure(cause),
+    };
+    let chain_hash = marker
+        .chain_hash(frontier.map_or(CHAIN_ORIGIN, |last| last.chain_hash))
+        .map_err(structure)?;
+    if chain_hash != stored_hash {
+        return Err(ChainVerifyFailure {
+            commit_seq,
+            cause: ChainVerifyCause::DerivedValueMismatch,
+        });
+    }
+    validate_marker_structure(&marker, frontier, heads, *identity_counters).map_err(structure)?;
+    let chained = ChainedMarker {
+        marker,
+        marker_oid: ObjectId(chain_hash.0),
+        chain_hash,
+    };
+    adopt_marker(&chained, frontier, heads, identity_counters).map_err(structure)?;
+    Ok(chained)
 }
 
 /// The head index has exactly one writer in both representations. As on the
@@ -744,6 +805,22 @@ impl MarkerChain {
     /// authoritative heads or a chain value.
     pub fn verify_entries(entries: &[ChainedMarker]) -> Result<(), ChainVerifyFailure> {
         Self::from_entries(entries).map(drop)
+    }
+
+    pub(crate) fn recover(
+        &mut self,
+        marker: CommitMarker,
+        stored_hash: Digest,
+    ) -> Result<(), ChainVerifyFailure> {
+        let chained = recover_marker(
+            marker,
+            stored_hash,
+            self.entries.last().map(MarkerFrontier::from),
+            &mut self.heads,
+            &mut self.identity_counters,
+        )?;
+        self.entries.push(chained);
+        Ok(())
     }
 
     /// A branch's current head, if it has one.
@@ -1078,6 +1155,58 @@ mod commit_seq_exhaustion_tests {
             flags: 0,
             identity_counters: None,
         }
+    }
+
+    #[test]
+    fn recovery_moves_the_decoded_body_and_checks_hash_before_structure() {
+        let mut history = MarkerChain::new();
+        let mut prefix = MarkerPrefix::default();
+        let mut first = marker(1);
+        first.head_updates.push(HeadUpdate {
+            graph: GraphId(4),
+            branch: BranchId(7),
+            expected_previous: None,
+        });
+        let hash = first.chain_hash(CHAIN_ORIGIN).unwrap();
+        prefix.recover(first.clone(), hash).unwrap();
+        let allocation = first.head_updates.as_ptr();
+        history.recover(first, hash).unwrap();
+        assert_eq!(
+            history.entries()[0].marker.head_updates.as_ptr(),
+            allocation
+        );
+        let expected_head = history.head(GraphId(4), BranchId(7)).unwrap();
+
+        let mut bad = marker(2);
+        bad.head_updates.push(HeadUpdate {
+            graph: GraphId(4),
+            branch: BranchId(7),
+            expected_previous: None,
+        });
+        let bad_hash = bad.chain_hash(hash).unwrap();
+        for stored in [Digest([0; 32]), bad_hash] {
+            let error = history.recover(bad.clone(), stored).unwrap_err();
+            assert_eq!(prefix.recover(bad.clone(), stored).unwrap_err(), error);
+            assert_eq!(error.commit_seq, 2);
+            if stored == bad_hash {
+                assert!(matches!(
+                    error.cause,
+                    ChainVerifyCause::Structure(ChainError::HeadCasMismatch(_))
+                ));
+            } else {
+                assert_eq!(error.cause, ChainVerifyCause::DerivedValueMismatch);
+            }
+            assert_eq!(history.entries().len(), 1);
+            assert_eq!(history.head(GraphId(4), BranchId(7)), Some(expected_head));
+            assert_eq!(prefix.frontier(), CommitSeq::FIRST);
+            assert_eq!(prefix.chain_value(), hash);
+        }
+        bad.head_updates[0].expected_previous = Some(expected_head);
+        let next = bad.chain_hash(hash).unwrap();
+        history.recover(bad.clone(), next).unwrap();
+        prefix.recover(bad, next).unwrap();
+        assert_eq!(history.chain_value(), next);
+        assert_eq!(prefix.chain_value(), next);
     }
 
     #[test]

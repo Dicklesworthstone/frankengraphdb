@@ -34,7 +34,8 @@ use crate::capsule::{
 };
 use crate::identity::CryptoVerificationSink;
 use crate::marker::{
-    CHAIN_ORIGIN, ChainError, CommitMarker, EffectSource, MarkerChain, MarkerPrefix,
+    CHAIN_ORIGIN, ChainError, ChainVerifyCause, ChainVerifyFailure, CommitMarker, EffectSource,
+    MarkerChain, MarkerPrefix,
 };
 use crate::scrub::{
     CapsuleScrubSummary, LostCapsule, LostReason, ScrubCrashPoint, ScrubVerdict, scrub_object,
@@ -138,7 +139,11 @@ impl CommitScanSummary {
 trait ScanCollector: Send {
     fn chain_value(&self) -> Digest;
     fn next_commit_seq(&self) -> Result<CommitSeq, ChainError>;
-    fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError>;
+    fn append_marker(
+        &mut self,
+        marker: CommitMarker,
+        stored_hash: Digest,
+    ) -> Result<(), ChainVerifyFailure>;
 }
 
 impl ScanCollector for MarkerChain {
@@ -150,8 +155,12 @@ impl ScanCollector for MarkerChain {
         self.next_commit_seq()
     }
 
-    fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
-        self.append(marker).map(|_| ())
+    fn append_marker(
+        &mut self,
+        marker: CommitMarker,
+        stored_hash: Digest,
+    ) -> Result<(), ChainVerifyFailure> {
+        self.recover(marker, stored_hash)
     }
 }
 
@@ -189,8 +198,12 @@ impl ScanCollector for PrefixScan {
         self.prefix.next_commit_seq()
     }
 
-    fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
-        self.prefix.append(marker)?;
+    fn append_marker(
+        &mut self,
+        marker: CommitMarker,
+        stored_hash: Digest,
+    ) -> Result<(), ChainVerifyFailure> {
+        self.prefix.recover(marker, stored_hash)?;
         if self.prefix.frontier() == self.requested {
             self.commitment = Some(self.prefix.chain_value());
         }
@@ -1373,20 +1386,19 @@ impl<V: Vfs> CommitCoordinator<V> {
                         });
                     }
                 };
-                let expected = marker.chain_hash(chain.chain_value()).map_err(|_| {
-                    CommitError::CorruptLogEntry {
-                        commit_seq: marker.commit_seq,
-                    }
-                })?;
-                if expected != stored_chain_hash {
-                    return Err(CommitError::ChainDiverged {
-                        commit_seq: marker.commit_seq,
-                    });
-                }
-                let seq = marker.commit_seq;
                 chain
-                    .append_marker(marker)
-                    .map_err(|_| CommitError::CorruptLogEntry { commit_seq: seq })?;
+                    .append_marker(marker, stored_chain_hash)
+                    .map_err(|failure| {
+                        let commit_seq = failure.commit_seq;
+                        match failure.cause {
+                            ChainVerifyCause::DerivedValueMismatch => {
+                                CommitError::ChainDiverged { commit_seq }
+                            }
+                            ChainVerifyCause::Structure(_) => {
+                                CommitError::CorruptLogEntry { commit_seq }
+                            }
+                        }
+                    })?;
                 cursor = cursor.checked_add(consumed).ok_or_else(|| {
                     CommitError::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -1701,7 +1713,9 @@ mod tests {
         PrefixScan, ScanCollector, UnixVfs, read_bounded_capsule_container_with_limit,
     };
     use crate::capsule::{CapsuleError, CapsuleKeys, CapsuleProfile};
-    use crate::marker::{CHAIN_ORIGIN, ChainError, CommitMarker, EffectSource, MarkerChain};
+    use crate::marker::{
+        CHAIN_ORIGIN, ChainError, ChainVerifyFailure, CommitMarker, EffectSource, MarkerChain,
+    };
     use asupersync::io::{AsyncRead, ReadBuf};
     use asupersync::lab::run_async_under_lab;
     use fgdb_crypto::Digest;
@@ -1994,8 +2008,12 @@ mod tests {
             self.collector.next_commit_seq()
         }
 
-        fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
-            self.collector.append_marker(marker)?;
+        fn append_marker(
+            &mut self,
+            marker: CommitMarker,
+            stored_hash: Digest,
+        ) -> Result<(), ChainVerifyFailure> {
+            self.collector.append_marker(marker, stored_hash)?;
             if let Some(mutate) = self.after_first.take() {
                 mutate();
             }
@@ -2236,8 +2254,12 @@ mod tests {
                 self.scan.next_commit_seq()
             }
 
-            fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
-                self.scan.append_marker(marker)?;
+            fn append_marker(
+                &mut self,
+                marker: CommitMarker,
+                stored_hash: Digest,
+            ) -> Result<(), ChainVerifyFailure> {
+                self.scan.append_marker(marker, stored_hash)?;
                 self.cancel
                     .set_cancel_reason(asupersync::CancelReason::user(
                         "cancel after checkpoint commitment was found",
