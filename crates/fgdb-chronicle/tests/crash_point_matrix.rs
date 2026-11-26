@@ -1492,6 +1492,79 @@ fn a_bounded_length_increase_on_the_final_durable_entry_fails_closed() {
 }
 
 #[test]
+fn incomplete_framing_must_be_a_possible_prefix_of_the_acknowledged_marker() {
+    let dir = scratch_dir("incomplete-marker-framing");
+    under_lab(0x4652_414d, move |cx| async move {
+        let mut writer = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        commit_ok(&mut writer, &cx, 1).await;
+        let start = log_bytes(&dir).len();
+        commit_ok(&mut writer, &cx, 2).await;
+        let expected_chain = writer.chain().clone();
+        drop(writer);
+        let committed = log_bytes(&dir);
+        let body_len = u32::from_be_bytes(committed[start + 4..start + 8].try_into().unwrap());
+        let body_end = start + 8 + body_len as usize;
+        assert_eq!(body_end + 40, committed.len());
+        assert_eq!(&committed[body_end - 4..body_end], &[0; 4]);
+
+        // Enabling identity counters consumes the first 16 real chain-hash
+        // bytes as two counters. With +1024, the decoded canonical length
+        // contradicts the declaration. With +16, the length agrees but the
+        // remaining 24 bytes contradict the hash at this exact chain cut.
+        let mut cases = Vec::new();
+        for extra in [16, 1024] {
+            let mut damaged = committed.clone();
+            damaged[start + 4..start + 8].copy_from_slice(&(body_len + extra).to_be_bytes());
+            damaged[body_end - 1] |= 1;
+            cases.push(damaged);
+        }
+        // Keep a partial frame, changing only its last present byte. Exercise
+        // partial magic, hash, duplicate length and trailer magic separately.
+        for cut in [start + 1, body_end + 1, body_end + 33, body_end + 39] {
+            let mut damaged = committed[..cut].to_vec();
+            damaged[cut - 1] ^= 1;
+            cases.push(damaged);
+        }
+        for damaged in cases {
+            write_log(&dir, &damaged);
+            let history = CommitCoordinator::scan_committed_chain(&cx, &UnixVfs::new(), &dir).await;
+            assert!(matches!(
+                history,
+                Err(CommitError::CorruptLogEntry { commit_seq: 2 })
+            ));
+            let prefix = CommitCoordinator::scan_committed_prefix(
+                &cx,
+                &UnixVfs::new(),
+                &dir,
+                CommitSeq::FIRST,
+            )
+            .await;
+            assert!(matches!(
+                prefix,
+                Err(CommitError::CorruptLogEntry { commit_seq: 2 })
+            ));
+            let reopened = CommitCoordinator::open(&cx, &dir, keys()).await;
+            assert!(matches!(
+                reopened,
+                Err(CommitError::CorruptLogEntry { commit_seq: 2 })
+            ));
+            assert_eq!(log_bytes(&dir), damaged);
+        }
+        // An interrupted append with the correct hash prefix at the second
+        // cut is still discarded; the scanner must use the first marker's
+        // chain value, not the origin, to distinguish the two cases.
+        write_log(&dir, &committed[..body_end + 17]);
+        let recovered = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(recovered.chain().len(), 1);
+        assert_eq!(log_bytes(&dir), committed[..start]);
+        drop(recovered);
+        write_log(&dir, &committed);
+        let restored = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(restored.chain().entries(), expected_chain.entries());
+    });
+}
+
+#[test]
 fn impossible_head_count_never_turns_an_acknowledged_marker_into_a_torn_tail() {
     let dir = scratch_dir("bounded-length-impossible-head-count");
     under_lab(0x4845_4144, move |cx| async move {
