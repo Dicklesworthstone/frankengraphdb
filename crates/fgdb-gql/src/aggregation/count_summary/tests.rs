@@ -456,6 +456,57 @@ fn only_one_vertex_label_can_supply_exact_metadata() {
 }
 
 #[test]
+fn conjunctive_label_counts_prove_only_determined_intersections() {
+    let q = query("MATCH (n:L:M:X) RETURN COUNT(DISTINCT n) AS n");
+    assert!(q.can_count_label_intersection());
+    assert!(q.count_metadata_source().is_none());
+    let policy = GqlQueryPolicy::new(10, 1, 100, 100);
+    for l in 0_u8..8 {
+        for m in 0_u8..8 {
+            for x in 0_u8..8 {
+                let sets = [l, m, x];
+                let count = q
+                    .prepare_count_metadata_with_universal_labels(|source| {
+                        Ok::<_, ()>(Some(match source {
+                            GraphCountSource::Vertices => 3,
+                            GraphCountSource::Label(LabelId(id @ 1..=3)) => {
+                                u64::from(sets[id as usize - 1].count_ones())
+                            }
+                            _ => panic!("unexpected population"),
+                        }))
+                    })
+                    .unwrap();
+                let provable = sets.contains(&0) || sets.iter().filter(|s| **s != 7).count() <= 1;
+                assert_eq!(count.is_some(), provable, "{sets:?}");
+                if let Some(count) = count {
+                    let rows = count.execute_governed::<(), ()>(4, policy, || Ok(())).unwrap();
+                    assert_eq!(rows.value[0].values()[0].as_count(), Some(u64::from((l & m & x).count_ones())));
+                }
+            }
+        }
+    }
+    for partial in [None, Some(4)] {
+        let result = q.prepare_count_metadata_with_universal_labels(|source| {
+            Ok::<_, ()>(if source == GraphCountSource::Label(LabelId(2)) { partial } else { Some(3) })
+        }).unwrap();
+        assert!(result.is_none());
+    }
+    for stop in 1..=4 {
+        let mut n = 0;
+        assert!(matches!(q.prepare_count_metadata_with_universal_labels(|_| {
+            n += 1;
+            if n == stop { Err(stop) } else { Ok(Some(3)) }
+        }), Err(e) if e == stop));
+        assert_eq!(n, stop);
+    }
+    let filtered = query("MATCH (n:L:M) WHERE n.p IS NULL RETURN COUNT(*) AS n");
+    assert!(!filtered.can_count_label_intersection());
+    assert!(filtered.prepare_count_metadata_with_universal_labels(|_| -> Result<Option<u64>, ()> {
+        panic!("an unproved filter touched counters")
+    }).unwrap().is_none());
+}
+
+#[test]
 fn universal_endpoint_labels_use_exact_population_proofs_and_the_native_finalizer() {
     let vertices = [VId(0), VId(17), VId(u128::MAX)];
     let edges = [
@@ -633,6 +684,81 @@ fn wildcard_directed_counts_admit_only_exact_metadata() {
                 .prepare_count_metadata(GraphCountSource::Edges, 9)
                 .is_none(),
             "{text}"
+        );
+    }
+}
+
+#[test]
+fn relation_alternations_sum_each_disjoint_population_once() {
+    let r = GraphCountSource::Relation(RelationId(1));
+    let s = GraphCountSource::Relation(RelationId(2));
+    for text in [
+        "MATCH (a)-[:S|R|S]->(b) RETURN COUNT(*) AS n, COUNT(b) AS m",
+        "MATCH (a)<-[e:S|R]-(b) RETURN COUNT(DISTINCT e) AS n",
+    ] {
+        let query = query(text);
+        assert!(query.can_count_relation_alternation());
+        assert!(
+            query
+                .prepare_count_metadata(GraphCountSource::Edges, 99)
+                .is_none()
+        );
+        let mut reads = Vec::new();
+        let count = query
+            .prepare_count_metadata_with_universal_labels(|source| {
+                reads.push(source);
+                Ok::<_, ()>(Some(if source == r { 4 } else { 2 }))
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(reads, [r, s]);
+        let actual = count
+            .execute_governed::<(), ()>(2, GqlQueryPolicy::new(2, 1, 100, 100), || Ok(()))
+            .unwrap();
+        for cell in actual.value[0].values() {
+            assert_eq!(cell.as_count(), Some(6));
+        }
+        for missing in [r, s] {
+            let mut lookups = Vec::new();
+            let result = query
+                .prepare_count_metadata_with_universal_labels(|source| {
+                    lookups.push(source);
+                    Ok::<_, ()>((source != missing).then_some(0))
+                })
+                .unwrap();
+            assert!(result.is_none());
+            assert_eq!(lookups.last(), Some(&missing));
+        }
+        assert!(
+            query
+                .prepare_count_metadata_with_universal_labels(|_| Ok::<_, ()>(Some(u64::MAX)))
+                .unwrap()
+                .is_none()
+        );
+        let failure = query.prepare_count_metadata_with_universal_labels(|source| {
+            if source == s {
+                Err("cancelled")
+            } else {
+                Ok(Some(3))
+            }
+        });
+        assert!(matches!(failure, Err("cancelled")));
+    }
+    for text in [
+        "MATCH (a)-[:R|S]-(b) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R|S]->(b) RETURN COUNT(DISTINCT a) AS n",
+        "MATCH (a)-[e:R|S]->(b) RETURN COUNT(e.p) AS n",
+        "MATCH (a)-[:R|S]->(a) RETURN COUNT(*) AS n",
+    ] {
+        let query = query(text);
+        assert!(!query.can_count_relation_alternation(), "{text}");
+        assert!(
+            query
+                .prepare_count_metadata_with_universal_labels(|_| -> Result<Option<u64>, ()> {
+                    panic!("unsupported shape touched metadata: {text}")
+                })
+                .unwrap()
+                .is_none()
         );
     }
 }

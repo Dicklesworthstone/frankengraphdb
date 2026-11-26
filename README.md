@@ -638,6 +638,13 @@ printf 'label Person=1\nrelation KNOWS=1\nproperty name=1\n' > social.bindings
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --bindings-file social.bindings \
   "MATCH (p:Person) RETURN p.name"
 
+# Verify the marker chain and its logical delta capsules through commit 42.
+# This read-only check also works beside a live writer. Keep the reported
+# chain hash independently to check the same cut in a later copy.
+fgdb verify-history --db mydb.fgdbdir --key-file fgdb.keys --through 42
+fgdb verify-history --db backup.fgdbdir --key-file fgdb.keys --through 42 \
+  --expect-chain "$SAVED_CHAIN_HASH"
+
 # Verify every capsule and block; repair damaged redundancy in place
 fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys
 

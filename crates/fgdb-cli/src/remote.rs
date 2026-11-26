@@ -15,7 +15,7 @@ mod prepared_writes;
 mod transaction;
 
 use super::refusal::Code;
-use super::{Failure, emit, float_text, hex, render_row_body, render_rows};
+use super::{Failure, emit, float_text, hex, render_row_body_iter, render_rows_iter};
 use crate::load::{Json, parse_json};
 use asupersync::Budget;
 use asupersync::io::AsyncReadExt;
@@ -57,6 +57,7 @@ struct RemoteOptions {
     transaction: bool,
     /// Pin a native read owner instead of opening a writer for the script.
     read_only_transaction: bool,
+    rollback_transaction: bool,
     /// Admit every parameter set against one pinned read session and share its
     /// execution allowance. The batch has one successful terminal record.
     consistent_batch: bool,
@@ -94,6 +95,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut rows_file = None;
     let mut statements_file = None;
     let mut read_only_transaction = false;
+    let mut rollback_transaction = false;
     let mut consistent_batch = false;
     let mut prepared_batch = false;
     let mut csv_types = None;
@@ -133,6 +135,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
                 statements_file = Some(PathBuf::from(value()?));
             }
             "--read-only" if !read_only_transaction => read_only_transaction = true,
+            "--rollback" if !rollback_transaction => rollback_transaction = true,
             "--consistent-batch" if !consistent_batch => consistent_batch = true,
             "--prepared-batch" if !prepared_batch => prepared_batch = true,
             "--prepared-jsonl" if prepared_jsonl.is_none() => {
@@ -245,6 +248,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     };
     if read_mode.is_some() && verb != "query" {
         return Err(Failure::usage("--read-mode applies only to query"));
+    }
+    if rollback_transaction && verb != "transaction" {
+        return Err(Failure::usage("--rollback applies only to remote transaction"));
     }
     if read_only_transaction && verb != "transaction" {
         return Err(Failure::usage(
@@ -361,6 +367,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         statements_file,
         transaction: verb == "transaction",
         read_only_transaction,
+        rollback_transaction,
         consistent_batch,
         prepared_batch,
         csv_types,
@@ -663,9 +670,10 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
         return runtime.block_on(async {
             // Admit every step before credentials, connection or BEGIN. The
             // shared client driver owns provisional delivery and final commit.
-            let script =
+            let mut script =
                 transaction::TransactionScript::read(&cx, path, options.read_only_transaction)
                     .await?;
+            script.rollback = options.rollback_transaction;
             let mut client = connect(&cx, &options).await?;
             client
                 .select(&cx, &options.database)
@@ -797,59 +805,79 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
         let _ = client.close(&cx).await;
         Ok::<_, Failure>(answer)
     })?;
-    match answer.outcome {
-        Outcome::Rows { seq } => {
-            let rendered = answer
-                .rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|value| if robot { cell(value) } else { human(value) })
-                        .collect()
-                })
-                .collect();
-            render_rows(&answer.columns, rendered, seq, "rows", robot, out)
-        }
-        // A CREATE/INSERT ... RETURN answers its rows with the commit, in the
-        // same frames as the embedded write path.
-        Outcome::WriteCommitted { seq, statements } | Outcome::ReadClosed { seq, statements }
-            if !answer.columns.is_empty() =>
-        {
-            let rendered: Vec<Vec<String>> = answer
-                .rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|value| if robot { cell(value) } else { human(value) })
-                        .collect()
-                })
-                .collect();
-            let count = rendered.len();
-            render_row_body(&answer.columns, &rendered, robot, out)?;
-            if robot {
-                emit(
-                    out,
-                    &format!(
-                        r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"count":{count},"statements":{statements}}}"#
-                    ),
-                )
-            } else {
-                emit(out, &format!("{count} row(s), completed at seq {seq}"))
-            }
-        }
-        Outcome::WriteCommitted { seq, statements } | Outcome::ReadClosed { seq, statements } => {
-            if robot {
-                emit(
-                    out,
-                    &format!(
-                        r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"statements":{statements}}}"#
-                    ),
-                )
-            } else {
-                emit(out, &format!("completed at seq {seq}"))
-            }
-        }
+    render_answer(&answer, robot, out)
+}
+
+fn render_answer(
+    answer: &fgdb_protocol::client::Answer,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let rendered = answer.rows.iter().map(|row| {
+        row.iter()
+            .map(|value| if robot { cell(value) } else { human(value) })
+            .collect::<Vec<_>>()
+    });
+    if let Outcome::Rows { seq } = answer.outcome {
+        return render_rows_iter(&answer.columns, rendered, seq, "rows", robot, out);
     }
+    let count = (!answer.columns.is_empty()).then_some(answer.rows.len());
+    if count.is_some() {
+        render_row_body_iter(&answer.columns, rendered, robot, out)
+            .map_err(|error| undelivered_write(answer.outcome, error))?;
+    }
+    render_write_completion(answer.outcome, count, None, robot, out)
+}
+
+fn undelivered_write(outcome: Outcome, error: Failure) -> Failure {
+    let completion = match outcome {
+        Outcome::WriteCommitted { seq, .. } => format!("write committed at seq {seq}"),
+        Outcome::ReadClosed { seq, .. } => format!("write completed without changes at seq {seq}"),
+        Outcome::Rows { .. } => return error,
+    };
+    Failure::io(format!(
+        "{completion}, but output delivery failed; do not replay: {}",
+        error.message
+    ))
+}
+
+fn render_write_completion(
+    outcome: Outcome,
+    count: Option<usize>,
+    records: Option<usize>,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let (tag, description, seq, statements) = match outcome {
+        Outcome::WriteCommitted { seq, statements } => {
+            ("write_committed", "committed", seq, statements)
+        }
+        Outcome::ReadClosed { seq, statements } => {
+            ("read_closed", "completed without changes", seq, statements)
+        }
+        Outcome::Rows { .. } => {
+            return Err(Failure::io(
+                "unexpected write outcome; do not replay automatically",
+            ));
+        }
+    };
+    let line = if robot {
+        let count = count.map_or_else(String::new, |n| format!(r#","count":{n}"#));
+        let records = records.map_or_else(String::new, |n| format!(r#","records":{n}"#));
+        format!(
+            r#"{{"v":1,"event":"result","kind":"written","outcome":"{tag}","seq":{seq}{count},"statements":{statements}{records}}}"#
+        )
+    } else {
+        let prefix = if let Some(records) = records {
+            format!("{records} argument set(s), {statements} statement(s), ")
+        } else {
+            count.map_or_else(String::new, |n| format!("{n} row(s), "))
+        };
+        format!("{prefix}{description} at seq {seq}")
+    };
+    emit(out, &line)
+        .and_then(|()| out.flush().map_err(Failure::io))
+        .map_err(|error| undelivered_write(outcome, error))
 }
 
 /// Adapt one native remote read to the local incremental output contract.
@@ -1379,6 +1407,11 @@ mod tests {
         let options = script(&[]).unwrap_or_else(|error| panic!("{}", error.message));
         assert!(options.transaction);
         assert!(!options.read_only_transaction);
+        assert!(!options.rollback_transaction);
+        for flags in [vec!["--rollback"], vec!["--read-only", "--rollback"]] {
+            let preview = script(&flags).unwrap_or_else(|error| panic!("{}", error.message));
+            assert!(preview.rollback_transaction);
+        }
         assert_eq!(options.statements_file, Some(PathBuf::from("steps.json")));
         assert_eq!(options.mode, ExecuteMode::Write);
         assert!(options.statement.is_empty());
@@ -1399,6 +1432,13 @@ mod tests {
         );
         for verb in ["query", "write", "subscribe"] {
             assert_eq!(
+                self::options(verb, &["--rollback"])
+                    .err()
+                    .expect("rollback preview requires a transaction")
+                    .code,
+                2
+            );
+            assert_eq!(
                 self::options(verb, &["--read-only"])
                     .err()
                     .expect("read-only transaction flag has one owner")
@@ -1411,6 +1451,7 @@ mod tests {
             vec!["RETURN 1"],
             vec!["--statements-file", "again.json"],
             vec!["--read-only", "--read-only"],
+            vec!["--rollback", "--rollback"],
             vec!["--rows-file", "rows.json"],
             vec!["--csv-types", "id=int64"],
             vec!["--prepared-jsonl", "writes.jsonl"],

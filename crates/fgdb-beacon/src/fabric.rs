@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use fgdb_types::VId;
 
-use crate::bm25::{AnalyzedText, CorpusStats, TextSegment};
+use crate::bm25::{AnalyzedText, CorpusStats, PreparedTextQuery, TextSegment};
 use crate::ranking::{Ranked, retain_best};
 use crate::{
     BeaconError, Bm25Config, Bm25Stats, Hnsw, HnswConfig, Neighbor, TextHit, TextMatch,
@@ -812,13 +812,13 @@ impl IndexSnapshot {
             .ok_or(BeaconError::Disabled("text"))?;
         let terms = config.query_terms(query, work)?;
         let limit = k.min(self.generation.corpus.documents);
+        let query = PreparedTextQuery::new(terms, mode, &self.generation.corpus, limit, work)?;
         let mut best = BinaryHeap::new();
         for segment in &self.generation.segments {
             work.charge(1)?;
             let visible = |id| self.visible_in(id, segment.generation) && eligible(id);
             segment.text.search_into(
-                &terms,
-                mode,
+                &query,
                 config,
                 &self.generation.corpus,
                 limit,

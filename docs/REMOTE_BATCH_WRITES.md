@@ -103,11 +103,13 @@ not publish an earlier successfully processed argument set.
 
 ## Completion and failures
 
-Success emits one ordinary `written` terminal, with `records` for argument sets
-and `statements` from the native completion. It emits no per-record progress:
+Success emits one `written` terminal for the batch. It reports the argument set
+count in `records`, the native statement count in `statements`, and the native
+completion in `outcome`. A batch that finishes without changes reports
+`read_closed` at its existing sequence. A published batch reports `write_committed`.
 
 ```json
-{"v":1,"event":"result","kind":"written","seq":7,"statements":2,"records":2}
+{"v":1,"event":"result","kind":"written","outcome":"write_committed","seq":7,"statements":2,"records":2}
 ```
 
 File/shape/type/wire admission finishes before reading the bearer credential or

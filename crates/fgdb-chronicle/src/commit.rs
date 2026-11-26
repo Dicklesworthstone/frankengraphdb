@@ -28,13 +28,15 @@
 //! is corruption, because entries before it were durable.
 
 pub mod restore;
+pub mod verify;
 
 use crate::capsule::{
     CapsuleError, CapsuleKeys, MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container, encode_container,
 };
 use crate::identity::CryptoVerificationSink;
 use crate::marker::{
-    CHAIN_ORIGIN, ChainError, CommitMarker, EffectSource, MarkerChain, MarkerPrefix,
+    CHAIN_ORIGIN, ChainError, ChainVerifyCause, ChainVerifyFailure, CommitMarker, EffectSource,
+    MarkerChain, MarkerPrefix,
 };
 use crate::scrub::{
     CapsuleScrubSummary, LostCapsule, LostReason, ScrubCrashPoint, ScrubVerdict, scrub_object,
@@ -138,7 +140,11 @@ impl CommitScanSummary {
 trait ScanCollector: Send {
     fn chain_value(&self) -> Digest;
     fn next_commit_seq(&self) -> Result<CommitSeq, ChainError>;
-    fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError>;
+    fn append_marker(
+        &mut self,
+        marker: CommitMarker,
+        stored_hash: Digest,
+    ) -> Result<(), ChainVerifyFailure>;
 }
 
 impl ScanCollector for MarkerChain {
@@ -150,8 +156,12 @@ impl ScanCollector for MarkerChain {
         self.next_commit_seq()
     }
 
-    fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
-        self.append(marker).map(|_| ())
+    fn append_marker(
+        &mut self,
+        marker: CommitMarker,
+        stored_hash: Digest,
+    ) -> Result<(), ChainVerifyFailure> {
+        self.recover(marker, stored_hash)
     }
 }
 
@@ -189,12 +199,24 @@ impl ScanCollector for PrefixScan {
         self.prefix.next_commit_seq()
     }
 
-    fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
-        self.prefix.append(marker)?;
+    fn append_marker(
+        &mut self,
+        marker: CommitMarker,
+        stored_hash: Digest,
+    ) -> Result<(), ChainVerifyFailure> {
+        self.prefix.recover(marker, stored_hash)?;
         if self.prefix.frontier() == self.requested {
             self.commitment = Some(self.prefix.chain_value());
         }
         Ok(())
+    }
+}
+
+fn recovered_marker_error(failure: ChainVerifyFailure) -> CommitError {
+    let commit_seq = failure.commit_seq;
+    match failure.cause {
+        ChainVerifyCause::DerivedValueMismatch => CommitError::ChainDiverged { commit_seq },
+        ChainVerifyCause::Structure(_) => CommitError::CorruptLogEntry { commit_seq },
     }
 }
 
@@ -753,18 +775,27 @@ impl<V: Vfs> CommitCoordinator<V> {
         capsule_oid: ObjectId,
         verification: &mut dyn crate::identity::CryptoVerificationSink,
     ) -> Result<Vec<u8>, CommitError> {
-        cx.with_restriction_async(async {
-            let file = self
-                .vfs
-                .open_read(&Self::capsule_path(&self.dir, capsule_oid))
-                .await?;
-            let container = read_bounded_capsule_container(file).await?;
-            let (descriptor, symbols) = decode_container(&container)?;
-            Ok(self
-                .keys
-                .recover(&descriptor, &symbols, capsule_oid, verification)?)
-        })
+        cx.with_restriction_async(Self::read_capsule_from(
+            &self.vfs,
+            &self.dir,
+            &self.keys,
+            capsule_oid,
+            verification,
+        ))
         .await
+    }
+
+    async fn read_capsule_from(
+        vfs: &V,
+        dir: &Path,
+        keys: &CapsuleKeys,
+        capsule_oid: ObjectId,
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<Vec<u8>, CommitError> {
+        let file = vfs.open_read(&Self::capsule_path(dir, capsule_oid)).await?;
+        let container = read_bounded_capsule_container(file).await?;
+        let (descriptor, symbols) = decode_container(&container)?;
+        Ok(keys.recover(&descriptor, &symbols, capsule_oid, verification)?)
     }
 
     /// Inspect the committed prefix and atomically restore each recoverable
@@ -1357,7 +1388,9 @@ impl<V: Vfs> CommitCoordinator<V> {
             );
             loop {
                 scan_checkpoint(cx)?;
-                let Some(decoded) = Self::read_next_entry(&mut reader, &mut entry).await? else {
+                let Some(decoded) =
+                    Self::read_next_entry(&mut reader, &mut entry, chain.chain_value()).await?
+                else {
                     break;
                 };
                 let (marker, stored_chain_hash, consumed) = match decoded {
@@ -1371,20 +1404,9 @@ impl<V: Vfs> CommitCoordinator<V> {
                         });
                     }
                 };
-                let expected = marker.chain_hash(chain.chain_value()).map_err(|_| {
-                    CommitError::CorruptLogEntry {
-                        commit_seq: marker.commit_seq,
-                    }
-                })?;
-                if expected != stored_chain_hash {
-                    return Err(CommitError::ChainDiverged {
-                        commit_seq: marker.commit_seq,
-                    });
-                }
-                let seq = marker.commit_seq;
                 chain
-                    .append_marker(marker)
-                    .map_err(|_| CommitError::CorruptLogEntry { commit_seq: seq })?;
+                    .append_marker(marker, stored_chain_hash)
+                    .map_err(recovered_marker_error)?;
                 cursor = cursor.checked_add(consumed).ok_or_else(|| {
                     CommitError::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -1464,13 +1486,14 @@ impl<V: Vfs> CommitCoordinator<V> {
     async fn read_next_entry<R: AsyncRead + Unpin>(
         reader: &mut R,
         entry: &mut Vec<u8>,
+        prior_chain: Digest,
     ) -> std::io::Result<EntryRead> {
         entry.clear();
         if !Self::read_until_len(reader, entry, ENTRY_HEADER_BYTES).await? {
             return if entry.is_empty() {
                 Ok(None)
             } else {
-                Ok(Some(Self::decode_entry(entry)))
+                Ok(Some(Self::decode_entry(entry, prior_chain)))
             };
         }
 
@@ -1486,7 +1509,7 @@ impl<V: Vfs> CommitCoordinator<V> {
         }
         let total = ENTRY_HEADER_BYTES + body_len + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES;
         let _complete = Self::read_until_len(reader, entry, total).await?;
-        Ok(Some(Self::decode_entry(entry)))
+        Ok(Some(Self::decode_entry(entry, prior_chain)))
     }
 
     /// Extend `bytes` to `target_len`, returning false only when EOF arrives
@@ -1511,8 +1534,12 @@ impl<V: Vfs> CommitCoordinator<V> {
     }
 
     /// Decode one entry, or say which way it failed.
-    fn decode_entry(bytes: &[u8]) -> Result<(CommitMarker, Digest, usize), EntryDefect> {
-        if bytes.len() >= ENTRY_MAGIC.len() && bytes[..ENTRY_MAGIC.len()] != ENTRY_MAGIC {
+    fn decode_entry(
+        bytes: &[u8],
+        prior_chain: Digest,
+    ) -> Result<(CommitMarker, Digest, usize), EntryDefect> {
+        let magic_len = bytes.len().min(ENTRY_MAGIC.len());
+        if bytes[..magic_len] != ENTRY_MAGIC[..magic_len] {
             return Err(EntryDefect::Corrupt);
         }
         if bytes.len() < ENTRY_HEADER_BYTES {
@@ -1527,7 +1554,11 @@ impl<V: Vfs> CommitCoordinator<V> {
             // A damaged leading length must not hide a present illegal marker
             // tag. Distinguish corrupt bytes from missing fields before any
             // caller can classify this suffix as disposable torn staging.
-            return Err(Self::incomplete_entry_defect(bytes, body_len));
+            return Err(Self::incomplete_entry_defect(
+                &bytes[ENTRY_HEADER_BYTES..],
+                body_len,
+                prior_chain,
+            ));
         }
         let body_end = ENTRY_HEADER_BYTES + body_len;
         let marker = crate::marker::decode_canonical(&bytes[ENTRY_HEADER_BYTES..body_end])
@@ -1547,31 +1578,34 @@ impl<V: Vfs> CommitCoordinator<V> {
         Ok((marker, Digest(chain_hash), total))
     }
 
-    /// Classify a frame whose declared extent runs past the captured EOF.
-    /// Present illegal tags and head counts that cannot fit the declared body
-    /// are corruption even if the canonical body cannot finish decoding.
-    /// A complete body plus the fixed framing suffix also
-    /// proves a damaged leading length. Do not search for trailer bytes inside
-    /// the body: arbitrary digests can contain a convincing trailer by chance.
-    fn incomplete_entry_defect(bytes: &[u8], body_len: usize) -> EntryDefect {
-        let Some(marker_and_suffix) = bytes.get(ENTRY_HEADER_BYTES..) else {
-            return EntryDefect::Truncated;
+    /// A torn append must be a possible prefix of the declared frame. After
+    /// the marker is decoded, both its exact extent and every byte of the
+    /// suffix are known, even if the final trailer never arrived.
+    fn incomplete_entry_defect(bytes: &[u8], body_len: usize, prior_chain: Digest) -> EntryDefect {
+        let body = &bytes[..bytes.len().min(body_len)];
+        let marker = match crate::marker::decode_canonical_prefix(body, body_len) {
+            Ok((marker, consumed)) if consumed == body_len => marker,
+            Err(crate::marker::MarkerDecodeError::Truncated) if body.len() < body_len => {
+                return EntryDefect::Truncated;
+            }
+            _ => return EntryDefect::Corrupt,
         };
-        let intrinsic_body_len =
-            match crate::marker::decode_canonical_prefix(marker_and_suffix, body_len) {
-                Ok((_, len)) => len,
-                Err(crate::marker::MarkerDecodeError::Truncated) => return EntryDefect::Truncated,
-                Err(crate::marker::MarkerDecodeError::Corrupt) => return EntryDefect::Corrupt,
-            };
-        if intrinsic_body_len > MAX_ENTRY_BODY {
-            return EntryDefect::Corrupt;
+        let observed_suffix = &bytes[body_len..];
+        if observed_suffix.is_empty() {
+            return EntryDefect::Truncated;
         }
-        let intrinsic_total =
-            ENTRY_HEADER_BYTES + intrinsic_body_len + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES;
-        if bytes.len() >= intrinsic_total {
-            EntryDefect::Corrupt
-        } else {
+        let Ok(hash) = marker.chain_hash(prior_chain) else {
+            return EntryDefect::Corrupt;
+        };
+        let mut expected_suffix = [0; CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES];
+        expected_suffix[..CHAIN_HASH_BYTES].copy_from_slice(&hash.0);
+        expected_suffix[CHAIN_HASH_BYTES..CHAIN_HASH_BYTES + 4]
+            .copy_from_slice(&(body_len as u32).to_be_bytes());
+        expected_suffix[CHAIN_HASH_BYTES + 4..].copy_from_slice(&ENTRY_TRAILER_MAGIC);
+        if expected_suffix.starts_with(observed_suffix) {
             EntryDefect::Truncated
+        } else {
+            EntryDefect::Corrupt
         }
     }
 
@@ -1687,7 +1721,9 @@ mod tests {
         PrefixScan, ScanCollector, UnixVfs, read_bounded_capsule_container_with_limit,
     };
     use crate::capsule::{CapsuleError, CapsuleKeys, CapsuleProfile};
-    use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
+    use crate::marker::{
+        CHAIN_ORIGIN, ChainError, ChainVerifyFailure, CommitMarker, EffectSource, MarkerChain,
+    };
     use asupersync::io::{AsyncRead, ReadBuf};
     use asupersync::lab::run_async_under_lab;
     use fgdb_crypto::Digest;
@@ -1763,6 +1799,7 @@ mod tests {
         let polled = poll_once(CommitCoordinator::<UnixVfs>::read_next_entry(
             &mut source,
             &mut entry,
+            CHAIN_ORIGIN,
         ));
         assert!(
             matches!(polled, Poll::Ready(_)),
@@ -1848,7 +1885,8 @@ mod tests {
 
         let frames = scan_fixture_frames();
         let (mut marker, _, _) =
-            CommitCoordinator::<UnixVfs>::decode_entry(&frames[1]).expect("complete fixture");
+            CommitCoordinator::<UnixVfs>::decode_entry(&frames[1], CHAIN_ORIGIN)
+                .expect("complete fixture");
         let previous = MarkerRef {
             marker_oid: ObjectId([0x91; 32]),
             commit_seq: CommitSeq::FIRST,
@@ -1891,7 +1929,7 @@ mod tests {
         for length in 0..frame.len() {
             assert!(
                 matches!(
-                    CommitCoordinator::<UnixVfs>::decode_entry(&frame[..length]),
+                    CommitCoordinator::<UnixVfs>::decode_entry(&frame[..length], CHAIN_ORIGIN),
                     Err(EntryDefect::Truncated)
                 ),
                 "honest frame prefix of {length} bytes must remain repairable"
@@ -1901,6 +1939,7 @@ mod tests {
             let Poll::Ready(result) = poll_once(CommitCoordinator::<UnixVfs>::read_next_entry(
                 &mut reader,
                 &mut retained,
+                CHAIN_ORIGIN,
             )) else {
                 panic!("a slice reader cannot suspend");
             };
@@ -1915,7 +1954,8 @@ mod tests {
             }
         }
         let (decoded, actual_hash, consumed) =
-            CommitCoordinator::<UnixVfs>::decode_entry(&frame).expect("complete frame");
+            CommitCoordinator::<UnixVfs>::decode_entry(&frame, CHAIN_ORIGIN)
+                .expect("complete frame");
         assert_eq!(decoded, marker);
         assert_eq!(actual_hash, hash);
         assert_eq!(consumed, frame.len());
@@ -1938,7 +1978,7 @@ mod tests {
             prefix[4..8].copy_from_slice(&body_len.to_be_bytes());
             prefix[count_at..count_at + 4].copy_from_slice(&head_count.to_be_bytes());
             assert_eq!(
-                CommitCoordinator::<UnixVfs>::decode_entry(&prefix),
+                CommitCoordinator::<UnixVfs>::decode_entry(&prefix, CHAIN_ORIGIN),
                 Err(expected),
                 "declared body {body_len}, head count {head_count}"
             );
@@ -1947,6 +1987,7 @@ mod tests {
             let Poll::Ready(result) = poll_once(CommitCoordinator::<UnixVfs>::read_next_entry(
                 &mut reader,
                 &mut retained,
+                CHAIN_ORIGIN,
             )) else {
                 panic!("a slice reader cannot suspend");
             };
@@ -1975,8 +2016,12 @@ mod tests {
             self.collector.next_commit_seq()
         }
 
-        fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
-            self.collector.append_marker(marker)?;
+        fn append_marker(
+            &mut self,
+            marker: CommitMarker,
+            stored_hash: Digest,
+        ) -> Result<(), ChainVerifyFailure> {
+            self.collector.append_marker(marker, stored_hash)?;
             if let Some(mutate) = self.after_first.take() {
                 mutate();
             }
@@ -2217,8 +2262,12 @@ mod tests {
                 self.scan.next_commit_seq()
             }
 
-            fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
-                self.scan.append_marker(marker)?;
+            fn append_marker(
+                &mut self,
+                marker: CommitMarker,
+                stored_hash: Digest,
+            ) -> Result<(), ChainVerifyFailure> {
+                self.scan.append_marker(marker, stored_hash)?;
                 self.cancel
                     .set_cancel_reason(asupersync::CancelReason::user(
                         "cancel after checkpoint commitment was found",

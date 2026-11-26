@@ -462,6 +462,8 @@ impl EncodingDescriptor {
 /// recompute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityMismatch {
+    /// A typed reader was given a descriptor from another logical object domain.
+    ObjectKind { expected: u16, actual: u16 },
     /// The durable cipher descriptor names no registered data-crypto profile.
     UnsupportedDataCryptoProfile { data_crypto_profile: u16 },
     /// The declared object tag length disagrees with the selected profile.
@@ -485,6 +487,9 @@ pub enum IdentityMismatch {
 impl core::fmt::Display for IdentityMismatch {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ObjectKind { expected, actual } => {
+                write!(f, "expected logical object kind {expected}, found {actual}")
+            }
             Self::UnsupportedDataCryptoProfile {
                 data_crypto_profile,
             } => write!(f, "unsupported data-crypto profile {data_crypto_profile}"),

@@ -37,7 +37,7 @@ pub use read_batch::{ReadBatchAnswer, ReadBatchResult};
 mod transaction;
 pub use transaction::{
     MAX_TRANSACTION_BATCH_STATEMENTS, TransactionAnswer, TransactionBatchAnswer,
-    TransactionBatchEnd, TransactionBatchResult,
+    TransactionBatchEnd, TransactionBatchResult, TransactionBatchRollback,
 };
 
 /// What a client can fail with. Server refusals keep their public class.
@@ -809,6 +809,13 @@ impl Client {
         if self.selected.is_none() {
             return Err(ClientError::Protocol("select a database first"));
         }
+        let write = match mode {
+            ExecuteMode::Read | ExecuteMode::ReadStream | ExecuteMode::ReadOrdered => false,
+            ExecuteMode::Write => true,
+            ExecuteMode::Subscribe => {
+                return Err(ClientError::Protocol("use subscribe for a subscription"));
+            }
+        };
         parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let body = Execute {
             mode,
@@ -818,7 +825,18 @@ impl Client {
         let request = self
             .send(cx, FrameKind::Execute, StreamId::CONTROL, &body)
             .await?;
-        self.receive_result(cx, request, on_columns, on_row).await
+        let outcome = self.receive_result(cx, request, on_columns, on_row).await?;
+        // END has released the wire request. Its semantic receipt must still
+        // agree with EXECUTE before a caller can report a successful result.
+        match (write, outcome) {
+            (true, Outcome::Rows { .. }) => {
+                Err(ClientError::Protocol("write returned a read outcome"))
+            }
+            (false, Outcome::WriteCommitted { .. } | Outcome::ReadClosed { .. }) => {
+                Err(ClientError::Protocol("read returned a write outcome"))
+            }
+            _ => Ok(outcome),
+        }
     }
 
     async fn receive_result(
@@ -2554,6 +2572,75 @@ mod tests {
             }
             assert_eq!(written.lock().unwrap().len(), before);
             assert_eq!(client.next_request, u64::MAX);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn text_execution_checks_the_receipt_against_the_requested_operation() {
+        let ((), report) = run_async_under_lab(0x79a0_0481, |root| async move {
+            for mode in [
+                ExecuteMode::Read,
+                ExecuteMode::ReadStream,
+                ExecuteMode::ReadOrdered,
+                ExecuteMode::Write,
+            ] {
+                for outcome in [
+                    Outcome::Rows { seq: 7 },
+                    Outcome::WriteCommitted {
+                        seq: 7,
+                        statements: 1,
+                    },
+                    Outcome::ReadClosed {
+                        seq: 7,
+                        statements: 1,
+                    },
+                ] {
+                    let io = script(vec![
+                        result_chunk(4, &[42]),
+                        conditional_end(4, outcome, 1),
+                        rpc(FrameKind::Pong, 5, StreamId::CONTROL, &Ping { nonce: 7 }),
+                    ]);
+                    let written = std::sync::Arc::clone(&io.written);
+                    let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    assert!(matches!(
+                        client
+                            .execute(&root, ExecuteMode::Subscribe, "RETURN 42", vec![])
+                            .await,
+                        Err(ClientError::Protocol("use subscribe for a subscription"))
+                    ));
+                    let statement = if mode == ExecuteMode::Write {
+                        "CREATE (n) RETURN 42"
+                    } else {
+                        "RETURN 42"
+                    };
+                    let answer = client.execute(&root, mode, statement, vec![]).await;
+                    match (mode == ExecuteMode::Write, outcome) {
+                        (true, Outcome::Rows { .. }) => assert!(matches!(
+                            answer,
+                            Err(ClientError::Protocol("write returned a read outcome"))
+                        )),
+                        (false, Outcome::WriteCommitted { .. } | Outcome::ReadClosed { .. }) => {
+                            assert!(matches!(
+                                answer,
+                                Err(ClientError::Protocol("read returned a write outcome"))
+                            ));
+                        }
+                        _ => {
+                            let answer = answer.unwrap();
+                            assert_eq!(answer.outcome, outcome);
+                            assert_eq!(answer.rows, [vec![WireValue::Int(42)]]);
+                        }
+                    }
+                    // A fully drained END permits the next independent request.
+                    client.ping(&root, 7).await.unwrap();
+                    let frames = sent_frames(&written.lock().unwrap());
+                    assert_eq!(frames.len(), 5);
+                    assert_eq!(frames[3].header().kind(), FrameKind::Execute);
+                    assert_eq!(Execute::decode(frames[3].payload()).unwrap().mode, mode);
+                }
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

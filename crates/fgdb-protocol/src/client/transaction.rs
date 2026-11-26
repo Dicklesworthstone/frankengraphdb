@@ -45,6 +45,15 @@ pub struct TransactionBatchEnd {
     pub outcome: Outcome,
 }
 
+/// A preview whose explicit rollback was acknowledged for its original handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransactionBatchRollback {
+    /// Snapshot observed at BEGIN. Rollback publishes no new sequence.
+    pub basis: u64,
+    pub statements: u32,
+    pub rows: u64,
+}
+
 /// A complete managed transaction. No successful prefix is returned if any
 /// statement or the final commit fails. A lost commit response remains unknown.
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +68,14 @@ pub struct TransactionBatchAnswer {
 /// guard never sends from Drop and never claims that a write was rolled back.
 struct TransactionBatchGuard<'a> {
     client: &'a mut Client,
+}
+
+/// The complete script has run, but its workspace is still private.
+struct ExecutedBatch<'a> {
+    owner: TransactionBatchGuard<'a>,
+    begun: TransactionBegun,
+    statements: u32,
+    rows: u64,
 }
 
 impl TransactionBatchGuard<'_> {
@@ -227,15 +244,60 @@ impl Client {
             .await
     }
 
+    /// Execute a script, stream its provisional rows and discard the complete
+    /// workspace. A matching ROLLBACK acknowledgement is required for success.
+    /// No COMMIT is sent, including after an incomplete response or callback
+    /// failure. With `read_only`, only Read statements are admitted.
+    pub async fn preview_transaction_batch_streaming(
+        &mut self,
+        cx: &Cx,
+        statements: Vec<Execute>,
+        read_only: bool,
+        on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
+        on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
+    ) -> Result<TransactionBatchRollback, ClientError> {
+        let batch = self
+            .run_transaction_batch(cx, statements, read_only, on_columns, on_row, on_result_end)
+            .await?;
+        batch.owner.client.rollback_transaction(cx, batch.begun.handle).await?;
+        Ok(TransactionBatchRollback {
+            basis: batch.begun.basis,
+            statements: batch.statements,
+            rows: batch.rows,
+        })
+    }
+
     async fn execute_transaction_batch_mode(
         &mut self,
+        cx: &Cx,
+        statements: Vec<Execute>,
+        read_only: bool,
+        on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
+        on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
+    ) -> Result<TransactionBatchEnd, ClientError> {
+        let batch = self
+            .run_transaction_batch(cx, statements, read_only, on_columns, on_row, on_result_end)
+            .await?;
+        let outcome = batch.owner.client.commit_transaction(cx, batch.begun.handle).await?;
+        Ok(TransactionBatchEnd {
+            basis: batch.begun.basis,
+            statements: batch.statements,
+            rows: batch.rows,
+            outcome,
+        })
+    }
+
+    async fn run_transaction_batch<'a>(
+        &'a mut self,
         cx: &Cx,
         mut statements: Vec<Execute>,
         read_only: bool,
         mut on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
         mut on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
         mut on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
-    ) -> Result<TransactionBatchEnd, ClientError> {
+    ) -> Result<ExecutedBatch<'a>, ClientError> {
         if statements.is_empty() || statements.len() > MAX_TRANSACTION_BATCH_STATEMENTS {
             return Err(ClientError::Protocol(
                 "a transaction batch needs 1..=32 statements",
@@ -309,12 +371,11 @@ impl Client {
             }
             rows = total;
         }
-        let outcome = owner.client.commit_transaction(cx, begun.handle).await?;
-        Ok(TransactionBatchEnd {
-            basis: begun.basis,
+        Ok(ExecutedBatch {
+            owner,
+            begun,
             statements: count,
             rows,
-            outcome,
         })
     }
 

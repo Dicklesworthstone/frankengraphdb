@@ -4,7 +4,7 @@ use super::super::transaction::TransactionScript;
 use super::*;
 use fgdb_protocol::body::{
     ExecuteTransaction, TransactionBegun, TransactionCompletion, TransactionHandle,
-    TransactionResultEnd,
+    TransactionResultEnd, TransactionSelector,
 };
 
 const HANDLE: TransactionHandle = TransactionHandle([0x71; 16]);
@@ -902,6 +902,80 @@ fn savepoint_files_keep_provisional_observations_and_one_final_completion() {
                 .iter()
                 .any(|frame| frame.header().kind() == FrameKind::RollbackTransaction)
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn preview_requires_a_matching_rollback_ack_and_never_commits() {
+    let ((), report) = run_async_under_lab(0x79a0_0831, |root| async move {
+        for read_only in [false, true] {
+            for acknowledged_handle in [Some(HANDLE), Some(TransactionHandle([0x20; 16])), None] {
+                let mut transaction = TransactionScript::parse(
+                    if read_only {
+                        r#"[{"mode":"read","statement":"RETURN 42"}]"#
+                    } else {
+                        r#"[{"mode":"write","statement":"CREATE (n {p:42})"},{"mode":"read","statement":"MATCH (n) RETURN n.p"}]"#
+                    },
+                    read_only,
+                    || Ok(()),
+                )
+                .unwrap_or_else(|error| panic!("{}", error.message));
+                transaction.rollback = true;
+                let mut replies = vec![(begun(), 0)];
+                let (read_request, read_ordinal, flushed) = if read_only {
+                    (5, 1, 0)
+                } else {
+                    replies.push((provisional_chunk(5, Some(vec![]), vec![]), 0));
+                    replies.push((statement_end(5, 1, 0), 1));
+                    (6, 2, 1)
+                };
+                replies.push((
+                    provisional_chunk(
+                        read_request, Some(vec!["p".into()]), vec![vec![WireValue::Int(42)]],
+                    ),
+                    flushed,
+                ));
+                replies.push((statement_end(read_request, read_ordinal, 1), flushed + 2));
+                if let Some(handle) = acknowledged_handle {
+                    replies.push((
+                        frame(
+                            FrameKind::TransactionRolledBack,
+                            read_request + 1,
+                            StreamId::CONTROL,
+                            Binding::Ready(ready().binding(session())),
+                            &TransactionSelector { handle },
+                        ),
+                        flushed + 2,
+                    ));
+                }
+                let flushes = Arc::new(AtomicUsize::new(0));
+                let io = script(replies, Arc::clone(&flushes));
+                let written = Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "social").await.unwrap();
+                let mut out = Output { bytes: vec![], flushes, fail_on: None };
+                let result = transaction.execute(&root, &mut client, true, &mut out).await;
+                let text = String::from_utf8(out.bytes).unwrap();
+                assert!(text.contains(r#""provisional":true"#));
+                let receipt = text.lines().find(|line| line.contains(r#""event":"result""#));
+                if acknowledged_handle == Some(HANDLE) {
+                    result.unwrap_or_else(|error| panic!("{}", error.message));
+                    assert_eq!(receipt.unwrap(), format!(
+                        r#"{{"v":1,"event":"result","kind":"transaction","outcome":"rolled_back","basis_seq":7,"statements":{read_ordinal},"count":1}}"#
+                    ));
+                } else {
+                    assert!(result.is_err());
+                    assert!(receipt.is_none());
+                }
+                let frames = sent_frames(&written.lock().unwrap());
+                let begin = if read_only { FrameKind::BeginReadTransaction } else { FrameKind::BeginTransaction };
+                assert_submission_mode(&frames, read_ordinal as usize, 0, begin);
+                let rollbacks: Vec<_> = frames.iter().filter(|frame| frame.header().kind() == FrameKind::RollbackTransaction).collect();
+                assert_eq!(rollbacks.len(), 1);
+                assert_eq!(TransactionSelector::decode(rollbacks[0].payload()).unwrap().handle, HANDLE);
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

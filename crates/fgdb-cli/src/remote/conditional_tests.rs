@@ -102,6 +102,31 @@ fn remote_conditional_write_preserves_return_rows_and_full_width_revision() {
                 assert_eq!(answer.columns, ["value"]);
                 assert_eq!(answer.rows, [vec![WireValue::Int(42)]]);
                 assert_eq!(answer.outcome, outcome);
+                for robot in [true, false] {
+                    let mut output = Vec::new();
+                    render_answer(&answer, robot, &mut output)
+                        .unwrap_or_else(|error| panic!("{}", error.message));
+                    let text = String::from_utf8(output).unwrap();
+                    let receipt = text.lines().last().unwrap();
+                    if robot {
+                        let tag = if committed {
+                            "write_committed"
+                        } else {
+                            "read_closed"
+                        };
+                        assert!(receipt.contains(&format!(r#""outcome":"{tag}""#)));
+                        assert!(receipt.contains(r#""kind":"written""#));
+                        assert!(receipt.contains(r#""count":1"#));
+                    } else {
+                        let verb = if committed {
+                            "committed"
+                        } else {
+                            "completed without changes"
+                        };
+                        assert!(receipt.contains(&format!("1 row(s), {verb} at seq ")));
+                    }
+                    assert!(receipt.contains(&(expected + u64::from(committed)).to_string()));
+                }
                 let frames = sent_frames(&written.lock().unwrap());
                 let requests = frames
                     .iter()

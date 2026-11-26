@@ -1043,14 +1043,26 @@ fn remote_batch_submits_one_native_request_and_reports_only_its_terminal() {
                     let text = String::from_utf8(out.bytes).unwrap();
                     assert_eq!(text.lines().count(), 1);
                     if robot {
+                        let expected = match completion {
+                            Outcome::WriteCommitted { .. } => "write_committed",
+                            Outcome::ReadClosed { .. } => "read_closed",
+                            Outcome::Rows { .. } => unreachable!(),
+                        };
                         assert_eq!(
                             text.trim_end(),
-                            r#"{"v":1,"event":"result","kind":"written","seq":7,"statements":2,"records":2}"#
+                            format!(
+                                r#"{{"v":1,"event":"result","kind":"written","outcome":"{expected}","seq":7,"statements":2,"records":2}}"#
+                            )
                         );
                     } else {
+                        let expected = match completion {
+                            Outcome::WriteCommitted { .. } => "committed",
+                            Outcome::ReadClosed { .. } => "completed without changes",
+                            Outcome::Rows { .. } => unreachable!(),
+                        };
                         assert_eq!(
                             text.trim_end(),
-                            "completed 2 argument set(s), 2 statement(s) at seq 7"
+                            format!("2 argument set(s), 2 statement(s), {expected} at seq 7")
                         );
                     }
                     let frames = sent_frames(&written.lock().unwrap());
@@ -1169,7 +1181,7 @@ fn output_failure_keeps_known_batch_completion_and_never_replays() {
                 .await
                 .expect_err("failed stdout flush must fail the command");
             assert_eq!(error.code, 5);
-            assert!(error.message.contains("completed at seq 7"));
+            assert!(error.message.contains("committed at seq 7"));
             assert!(error.message.contains("do not replay"));
             // Bytes may already have reached stdout; only the successful exit
             // and terminal together establish complete delivery, not the line.

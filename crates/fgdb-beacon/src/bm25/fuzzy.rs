@@ -5,8 +5,8 @@
 //! dead prefix ranges using the current dictionary without another stored trie.
 //! It does not implement transpositions, grapheme edits, stemming or fuzzy
 //! phrases. No dictionary, statistics or source outside the pinned corpus is
-//! consulted. Expansion is repeated per segment under the SAME work allowance;
-//! this is not an O(query length) lookup or the complete durable FTS/ART design.
+//! consulted. Each search expands the pinned live vocabulary once and shares
+//! its term groups across all segments under the same work allowance.
 
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
@@ -121,13 +121,13 @@ fn after_prefix(prefix: &str, work: &mut dyn WorkControl) -> Result<Option<Strin
 
 /// Borrow vocabulary keys. A term appears once even if it matches several
 /// input terms, but its ordered input-group list preserves all-term semantics.
-struct Expansion<'a> {
+pub(super) struct Expansion<'a> {
     terms: BTreeMap<&'a str, Vec<usize>>,
     groups: usize,
 }
 
 impl<'a> Expansion<'a> {
-    fn build(
+    pub(super) fn build(
         query: &AnalyzedText,
         corpus: &'a CorpusStats,
         distance: EditDistance,
@@ -227,10 +227,8 @@ impl TextSegment {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn search_fuzzy_into(
         &self,
-        query: &AnalyzedText,
-        distance: EditDistance,
+        expansion: &Expansion<'_>,
         require_all: bool,
-        maximum: usize,
         config: &Bm25Config,
         corpus: &CorpusStats,
         limit: usize,
@@ -239,19 +237,13 @@ impl TextSegment {
         work: &mut dyn WorkControl,
     ) -> Result<(), BeaconError> {
         work.charge(1)?;
-        if limit == 0 || query.frequencies.is_empty() || corpus.total_length == 0 {
-            return Ok(());
-        }
-        // Expand against the LIVE vocabulary, not obsolete per-segment words.
-        // The cap is global to that vocabulary, not a per-segment truncation.
-        let expansion = Expansion::build(query, corpus, distance, maximum, work)?;
         let mut streams = Vec::new();
         work.charge(expansion.terms.len())?;
         streams
             .try_reserve_exact(expansion.terms.len())
             .map_err(|_| BeaconError::ResourceLimit {
                 resource: "fuzzy posting streams",
-                limit: maximum,
+                limit: expansion.terms.len(),
             })?;
         let mut covered = Vec::new();
         work.charge(expansion.groups)?;
@@ -699,6 +691,50 @@ mod tests {
             )
             .unwrap(),
             old_rows
+        );
+    }
+
+    #[test]
+    fn segmented_fuzzy_search_shares_the_compact_vocabulary_budget() {
+        // Every distractor stays close to the pattern until its last two
+        // scalars. Dictionary work dominates the short matching posting lists.
+        use std::fmt::Write;
+
+        let mut words = String::from("abcdefg");
+        for first in 'h'..='z' {
+            for second in 'h'..='z' {
+                write!(words, " abcde{first}{second}").unwrap();
+            }
+        }
+        let mut build = WorkBudget::new(usize::MAX);
+        let mut index = BeaconIndex::build(IndexConfig::default(), [document(1, &words)], &mut build)
+            .unwrap();
+        for id in 2..=8 {
+            index
+                .apply_batch([IndexMutation::Upsert(document(id, "abcdefg"))], &mut build)
+                .unwrap();
+        }
+        let segmented = index.snapshot();
+        assert_eq!(segmented.stats().segments, 8);
+        index.compact(&mut build).unwrap();
+        let compact = index.snapshot();
+        assert_eq!(compact.stats().segments, 1);
+        let query = mode(EditDistance::One, true, 1);
+        let mut meter = WorkBudget::new(usize::MAX);
+        let expected = compact
+            .text_search("abcdefg", 8, query, |_| true, &mut meter)
+            .unwrap();
+        assert_eq!(expected.len(), 8);
+        let compact_work = usize::MAX - meter.remaining();
+        let mut budget = WorkBudget::new(2 * compact_work);
+        let rows = segmented
+            .text_search("abcdefg", 8, query, |_| true, &mut budget)
+            .unwrap();
+        assert_eq!(rows, expected);
+        let used = 2 * compact_work - budget.remaining();
+        assert_eq!(
+            segmented.text_search("abcdefg", 8, query, |_| true, &mut WorkBudget::new(used - 1)),
+            Err(BeaconError::WorkBudgetExceeded)
         );
     }
 

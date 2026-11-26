@@ -66,7 +66,14 @@ pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
     // relational inputs deliberately retain their own completed-row semantics.
     // Identified-edge plans materialize unless the visitor answers them exactly
     // from topology, as the owner path routes them (fgdb-xtsw3).
-    let result = if visits_bindings(query) || query.count_metadata_source().is_some() {
+    let result = if visits_bindings(query)
+        || query.count_metadata_source().is_some()
+        || (at == snapshot.frontier
+            && scope.sees_all_incidence()
+            && scope.sees_all_fields()
+            && snapshot.exact_counts.has_relation_counts()
+            && query.can_count_relation_alternation())
+    {
         visit_at(
             snapshot,
             at,

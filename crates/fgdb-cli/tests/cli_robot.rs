@@ -4310,6 +4310,27 @@ fn seal_publishes_for_cold_reads_without_advancing_or_rewriting_history() {
 }
 
 #[test]
+fn verify_history_proves_exact_cuts_and_checks_a_trusted_chain_commitment() {
+    let db = TestDb::new("verify-history");
+    assert_eq!(db.create(), 0);
+    db.command("verify-history", &["--through", "0"]).failure(2, "usage");
+    db.command("verify-history", &["--through", "1"]).failure(5, "io");
+    db.write(&["INSERT (:Person {name:'Ada'})"]);
+    let first = db.command("verify-history", &["--through", "1"]);
+    assert_eq!(first.sequence("verified_history"), 1);
+    let anchor = first.terminal().get("chain_hash").string();
+    assert_eq!(anchor.len(), 64);
+    assert!(anchor.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+
+    db.write(&["INSERT (:Person {name:'Grace'})"]);
+    let checked = db.command("verify-history", &["--through", "1", "--expect-chain", &anchor.to_ascii_uppercase()]);
+    assert_eq!(checked.sequence("verified_history"), 1);
+    assert_eq!(checked.terminal().get("chain_hash").string(), anchor);
+    db.command("verify-history", &["--through", "2", "--expect-chain", anchor]).failure(5, "io");
+    db.command("verify-history", &["--through", "3"]).failure(5, "io");
+}
+
+#[test]
 fn scrub_verifies_repairs_in_place_and_never_overwrites_damage_beyond_repair() {
     let db = TestDb::new("scrub");
     db.create();

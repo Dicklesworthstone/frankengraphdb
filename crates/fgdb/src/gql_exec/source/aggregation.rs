@@ -57,11 +57,11 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(|error| {
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
-        if let Some(plan) = fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(aggregate) {
+        if let Some(plan) = aggregate_scan(&self.snapshot, as_of, aggregate) {
             let view = self.read_session().map_err(|error| {
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
-            return execute_scan(&view, cx, &plan, as_of, policy);
+            return scan_or_count_labels(&view, cx, aggregate, &plan, as_of, policy);
         }
         cx.with_restriction(|| execute_at(self, aggregate, as_of, policy, || cx.checkpoint()))
     }
@@ -96,8 +96,8 @@ impl EmbeddedReadView {
         self.snapshot.check_frontier(as_of).map_err(|error| {
             GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
         })?;
-        if let Some(plan) = fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(aggregate) {
-            return execute_scan(self, cx, &plan, as_of, policy);
+        if let Some(plan) = aggregate_scan(&self.snapshot, as_of, aggregate) {
+            return scan_or_count_labels(self, cx, aggregate, &plan, as_of, policy);
         }
         cx.with_restriction(|| execute_at(self, aggregate, as_of, policy, || cx.checkpoint()))
     }
@@ -110,6 +110,76 @@ impl EmbeddedReadView {
     ) -> AggregateResult<GqlError> {
         self.execute_graph_aggregate_governed_at(cx, query.aggregate(), query.as_of(), policy)
     }
+}
+
+// A complete relation histogram is immutable at its own frontier. Preserve
+// the streaming evaluator for an alternation at any earlier or unindexed cut.
+fn aggregate_scan(
+    snapshot: &Snapshot,
+    as_of: CommitSeq,
+    aggregate: &PreparedGraphAggregate,
+) -> Option<fgdb_gql::scan_stream::AggregateScanPlan> {
+    if as_of == snapshot.frontier
+        && snapshot.exact_counts.has_relation_counts()
+        && aggregate.can_count_relation_alternation()
+    {
+        return None;
+    }
+    fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(aggregate)
+}
+
+// An unproved intersection retains its compiled streaming input. Charge the
+// metadata probe and that cursor to the same statement, including records
+// read before a lookup refused to establish an exact population.
+fn scan_or_count_labels(
+    view: &EmbeddedReadView,
+    cx: &QueryCx,
+    aggregate: &PreparedGraphAggregate,
+    plan: &fgdb_gql::scan_stream::AggregateScanPlan,
+    as_of: CommitSeq,
+    policy: GqlQueryPolicy,
+) -> AggregateResult<GqlError> {
+    if as_of != view.frontier() || !aggregate.can_count_label_intersection() {
+        return execute_scan(view, cx, plan, as_of, policy);
+    }
+    let mut usage = AdmissionUsage::default();
+    let count = cx.with_restriction(|| {
+        aggregate.prepare_count_metadata_with_universal_labels(|source| {
+            view.snapshot.exact_counts.lookup(source, &mut |event| {
+                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                usage.observe::<GraphAggregateError<GqlError>, _>(policy, event)
+            })
+        })
+    })?;
+    let records = usage.snapshot_records();
+    let mut remaining = usage.remaining(policy);
+    if let Some(count) = count {
+        // The stream compiler already proved every output scan-local.
+        let result = cx.with_restriction(|| {
+            count.execute_governed(records, remaining, || cx.checkpoint())
+        });
+        return usage.finish(policy, result);
+    }
+    if let Some(limit) = policy.rows.max_snapshot_records() {
+        let left = limit - records;
+        remaining.rows = match policy.rows.max_result_rows() {
+            Some(rows) => fgdb_gql::GqlExecutionBudget::new(left, rows),
+            None => fgdb_gql::GqlExecutionBudget::snapshot_records(left),
+        };
+    }
+    let result = match execute_scan(view, cx, plan, as_of, remaining) {
+        Ok(mut execution) => {
+            execution.rows.snapshot_records += records;
+            Ok(execution)
+        }
+        Err(GqlQueryError::Rows(mut error)) if error.dimension == GqlBudgetDimension::SnapshotRecords => {
+            error.limit += records;
+            error.observed += records;
+            Err(GqlQueryError::Rows(error))
+        }
+        Err(error) => Err(error),
+    };
+    usage.finish(policy, result)
 }
 
 // The ordinary read surface can consume a pull aggregate without materializing

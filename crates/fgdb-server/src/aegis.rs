@@ -1,17 +1,16 @@
-//! Server-hosted Aegis single-voter / replica coordinator (plan §14).
+//! Server-hosted Aegis replica coordinator (plan §14).
 //!
 //! Binds [`fgdb_order`] consensus state transitions and [`fgdb_repl`]'s
-//! durability-gated [`Replica`] driver into `fgdb-server` without claiming
-//! unimplemented multi-node network transport. Single-member quorum bootstrap,
-//! proposal sequencing through [`RaftPublisher`], and clock-free `read_index`
-//! barriers run through the real Aegis kernels.
+//! durability-gated [`Replica`] driver into `fgdb-server`. A host supplies
+//! authenticated peer delivery, election and heartbeat timers, an exclusive
+//! member fence, and the publisher that owns the persistent state.
 
 use fgdb_order::{
-    Committed, Configuration, Domain, Error as OrderError, Event, Limits, MemberId,
-    PersistentState, Role,
+    Committed, Configuration, Domain, Envelope, Error as OrderError, Event, Limits, MemberId,
+    PersistentState, ReadIndexAck, ReadIndexError, ReadIndexProbe, Role,
 };
 use fgdb_repl::driver::RaftPublisher;
-use fgdb_repl::replica::{ReadIndexId, ReadResolution, Replica, ReplicaError, ReplicaOutput};
+use fgdb_repl::replica::{ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput};
 
 /// In-process durability publisher retaining the latest published [`PersistentState`]
 /// for hosts that sequence single-member or embedded replica transitions.
@@ -94,6 +93,61 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
         })
     }
 
+    /// Resume the exclusively fenced member from its authenticated publication.
+    /// The host binds the publication to this member and its currently authorized
+    /// configuration. Terms, votes and committed entries survive recovery.
+    /// Outstanding reads and authority to lead are reacquired in this incarnation.
+    pub fn recover(
+        member: MemberId,
+        expected: &Configuration,
+        state: PersistentState<C>,
+        limits: Limits,
+        maximum_reads: usize,
+    ) -> Result<Self, OrderError> {
+        if state.configuration().domain() != expected.domain() {
+            return Err(OrderError::WrongDomain);
+        }
+        if state.configuration() != expected {
+            return Err(OrderError::WrongConfiguration);
+        }
+        Ok(Self {
+            replica: Replica::recover(member, state, limits, maximum_reads)?,
+        })
+    }
+
+    /// Deliver an envelope received on a channel authenticated as `peer`.
+    /// The transport supplies that identity independently of the envelope.
+    /// The replica checks the domain, configuration, recipient and membership.
+    /// Outbound replies are released only after required publication succeeds.
+    pub async fn receive<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        peer: MemberId,
+        envelope: Envelope<C>,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        if envelope.from != peer {
+            return Err(ReplicaError::Raft(OrderError::InvalidMessage));
+        }
+        self.replica.step(publisher, Event::Receive(envelope)).await
+    }
+
+    /// Drive the host's election interval on voters, including the current leader.
+    /// Followers pre-vote, while leaders check whether a quorum is still reachable.
+    pub async fn liveness_timeout<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica.step(publisher, Event::LivenessTimeout).await
+    }
+
+    /// Drive a leader heartbeat, including retries for lagging followers.
+    pub async fn heartbeat<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica.step(publisher, Event::Heartbeat).await
+    }
+
     #[must_use]
     pub fn member_id(&self) -> MemberId {
         self.replica.id()
@@ -130,6 +184,46 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
         publisher: &mut P,
     ) -> Result<(ReadIndexId, ReplicaOutput<C>), ReplicaError<P::Error>> {
         self.replica.read_index(publisher).await
+    }
+
+    /// Release a pending request on disconnect or deadline, freeing its read slot.
+    /// IDs are scoped to the originating coordinator incarnation.
+    #[must_use]
+    pub fn cancel_read(&mut self, id: &ReadIndexId) -> bool {
+        self.replica.cancel_read(id)
+    }
+
+    /// Obtain dedicated quorum probes for an admitted read whose append replies
+    /// are delayed. Retries cover the same round and only its unconfirmed voters.
+    pub fn read_index_probes(&self, id: &ReadIndexId) -> Result<Vec<ReadIndexProbe>, ReadIndexError> {
+        self.replica.read_index_probes(id)
+    }
+
+    /// Answer from published voter state on a channel authenticated as `peer`.
+    pub fn acknowledge_read_index(
+        &self,
+        peer: MemberId,
+        probe: ReadIndexProbe,
+    ) -> Result<ReadIndexAck, ReadIndexError> {
+        if probe.from != peer {
+            return Err(OrderError::InvalidMessage.into());
+        }
+        self.replica.acknowledge_read_index(probe)
+    }
+
+    /// Credit a peer's authenticated response to the original local request.
+    /// A ready floor still requires application and audit visibility through
+    /// that index before the host can serve an authorized snapshot.
+    pub fn confirm_read_index(
+        &mut self,
+        id: &ReadIndexId,
+        peer: MemberId,
+        ack: ReadIndexAck,
+    ) -> Result<Option<ReadIndexReady>, ReadIndexError> {
+        if ack.from != peer {
+            return Err(OrderError::InvalidMessage.into());
+        }
+        self.replica.confirm_read_index(id, ack)
     }
 
     /// Extract ready read floors from a [`ReplicaOutput`].
@@ -229,3 +323,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "aegis_peer_tests.rs"]
+mod peer_tests;

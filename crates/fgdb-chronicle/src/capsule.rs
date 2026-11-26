@@ -505,7 +505,7 @@ impl CapsuleKeys {
     }
 
     /// Recover `plaintext` from a container's descriptor and symbols, proving
-    /// it is `expected_object_id`.
+    /// it is `expected_object_id` in this authority's logical object domain.
     pub fn recover(
         &self,
         descriptor: &CapsuleDescriptor,
@@ -513,6 +513,12 @@ impl CapsuleKeys {
         expected_object_id: ObjectId,
         verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Vec<u8>, CapsuleError> {
+        if descriptor.object_kind != self.object_kind {
+            return Err(CapsuleError::DescriptorMismatch(IdentityMismatch::ObjectKind {
+                expected: self.object_kind,
+                actual: descriptor.object_kind,
+            }));
+        }
         recover(
             descriptor,
             symbols,
@@ -741,7 +747,8 @@ pub fn decode_container(bytes: &[u8]) -> Result<(CapsuleDescriptor, Vec<Vec<u8>>
         repair_symbols: r.u32()?,
     };
     let declared = r.u32()? as usize;
-    if let Some(registered) = CapsuleProfile::registered(descriptor.fec_profile) {
+    let registered = CapsuleProfile::registered(descriptor.fec_profile);
+    if let Some(registered) = registered {
         if descriptor.repair_symbols != registered.repair_symbols {
             return Err(CapsuleError::RepairBudgetMismatch {
                 fec_profile: descriptor.fec_profile,
@@ -769,23 +776,45 @@ pub fn decode_container(bytes: &[u8]) -> Result<(CapsuleDescriptor, Vec<Vec<u8>>
         return Err(CapsuleError::MalformedContainer);
     }
 
+    // A nominal-size inventory can still contain a shortened record and a
+    // lengthened record. Preserve coherent length framing in that case.
+    // Otherwise the registered width locates later slots past a damaged
+    // prefix. Healthy containers require only the ordinary forward walk.
+    let record_len = usize::from(HEADER_LEN_V1)
+        + usize::from(descriptor.symbol_size)
+        + usize::from(SYMBOL_MAC_LEN_V1);
+    let nominal_extent = registered.is_some()
+        && declared.checked_mul(4 + record_len) == Some(bytes.len() - CAPSULE_HEADER_BYTES_V1);
+    let mut use_fixed_width = None;
     let mut symbols = Vec::new();
     symbols
         .try_reserve_exact(declared)
         .map_err(|_| CapsuleError::AllocationFailed)?;
     let mut parsed = 0usize;
-    for _ in 0..declared {
+    for index in 0..declared {
         let Ok(len) = r.u32() else { break };
-        let Ok(payload) = r.take(len as usize) else {
+        let slot_len = if nominal_extent
+            && len as usize != record_len
+            && *use_fixed_width
+                .get_or_insert_with(|| !r.lengths_reach_end(len as usize, declared - index - 1))
+        {
+            record_len
+        } else {
+            len as usize
+        };
+        let Ok(payload) = r.take(slot_len) else {
             break;
         };
+        parsed += 1;
+        if len as usize != slot_len {
+            continue;
+        }
         let mut symbol = Vec::new();
         symbol
             .try_reserve_exact(payload.len())
             .map_err(|_| CapsuleError::AllocationFailed)?;
         symbol.extend_from_slice(payload);
         symbols.push(symbol);
-        parsed += 1;
     }
     if parsed == declared && !r.is_at_end() {
         return Err(CapsuleError::MalformedContainer);
@@ -910,6 +939,22 @@ impl<'a> Reader<'a> {
 
     fn is_at_end(&self) -> bool {
         self.position == self.bytes.len()
+    }
+
+    /// Probe the remaining declared frames once, without copying any records.
+    /// A coherent walk consumes the complete inventory and ends exactly at EOF.
+    fn lengths_reach_end(&self, current_len: usize, remaining: usize) -> bool {
+        let mut probe = Self::new(&self.bytes[self.position..]);
+        if probe.take(current_len).is_err() {
+            return false;
+        }
+        for _ in 0..remaining {
+            let Ok(len) = probe.u32() else { return false };
+            if probe.take(len as usize).is_err() {
+                return false;
+            }
+        }
+        probe.is_at_end()
     }
 
     fn u16(&mut self) -> Result<u16, CapsuleError> {

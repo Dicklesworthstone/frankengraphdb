@@ -1492,6 +1492,79 @@ fn a_bounded_length_increase_on_the_final_durable_entry_fails_closed() {
 }
 
 #[test]
+fn incomplete_framing_must_be_a_possible_prefix_of_the_acknowledged_marker() {
+    let dir = scratch_dir("incomplete-marker-framing");
+    under_lab(0x4652_414d, move |cx| async move {
+        let mut writer = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        commit_ok(&mut writer, &cx, 1).await;
+        let start = log_bytes(&dir).len();
+        commit_ok(&mut writer, &cx, 2).await;
+        let expected_chain = writer.chain().clone();
+        drop(writer);
+        let committed = log_bytes(&dir);
+        let body_len = u32::from_be_bytes(committed[start + 4..start + 8].try_into().unwrap());
+        let body_end = start + 8 + body_len as usize;
+        assert_eq!(body_end + 40, committed.len());
+        assert_eq!(&committed[body_end - 4..body_end], &[0; 4]);
+
+        // Enabling identity counters consumes the first 16 real chain-hash
+        // bytes as two counters. With +1024, the decoded canonical length
+        // contradicts the declaration. With +16, the length agrees but the
+        // remaining 24 bytes contradict the hash at this exact chain cut.
+        let mut cases = Vec::new();
+        for extra in [16, 1024] {
+            let mut damaged = committed.clone();
+            damaged[start + 4..start + 8].copy_from_slice(&(body_len + extra).to_be_bytes());
+            damaged[body_end - 1] |= 1;
+            cases.push(damaged);
+        }
+        // Keep a partial frame, changing only its last present byte. Exercise
+        // partial magic, hash, duplicate length and trailer magic separately.
+        for cut in [start + 1, body_end + 1, body_end + 33, body_end + 39] {
+            let mut damaged = committed[..cut].to_vec();
+            damaged[cut - 1] ^= 1;
+            cases.push(damaged);
+        }
+        for damaged in cases {
+            write_log(&dir, &damaged);
+            let history = CommitCoordinator::scan_committed_chain(&cx, &UnixVfs::new(), &dir).await;
+            assert!(matches!(
+                history,
+                Err(CommitError::CorruptLogEntry { commit_seq: 2 })
+            ));
+            let prefix = CommitCoordinator::scan_committed_prefix(
+                &cx,
+                &UnixVfs::new(),
+                &dir,
+                CommitSeq::FIRST,
+            )
+            .await;
+            assert!(matches!(
+                prefix,
+                Err(CommitError::CorruptLogEntry { commit_seq: 2 })
+            ));
+            let reopened = CommitCoordinator::open(&cx, &dir, keys()).await;
+            assert!(matches!(
+                reopened,
+                Err(CommitError::CorruptLogEntry { commit_seq: 2 })
+            ));
+            assert_eq!(log_bytes(&dir), damaged);
+        }
+        // An interrupted append with the correct hash prefix at the second
+        // cut is still discarded; the scanner must use the first marker's
+        // chain value, not the origin, to distinguish the two cases.
+        write_log(&dir, &committed[..body_end + 17]);
+        let recovered = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(recovered.chain().len(), 1);
+        assert_eq!(log_bytes(&dir), committed[..start]);
+        drop(recovered);
+        write_log(&dir, &committed);
+        let restored = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(restored.chain().entries(), expected_chain.entries());
+    });
+}
+
+#[test]
 fn impossible_head_count_never_turns_an_acknowledged_marker_into_a_torn_tail() {
     let dir = scratch_dir("bounded-length-impossible-head-count");
     under_lab(0x4845_4144, move |cx| async move {
@@ -2529,6 +2602,97 @@ mod incomplete_capsule_tests {
 /// over a torn tail that is an append still in flight, it returns exactly the
 /// complete entries and leaves every log byte in place. Only the next lease
 /// holder repairs the tail, exactly as before.
+#[test]
+fn verify_history_authenticates_capsules_through_the_exact_cut_beside_a_writer() {
+    use fgdb_chronicle::commit::verify::HistoryVerificationError as Failure;
+    use std::num::NonZeroU64;
+
+    fn template(bytes: &[u8]) -> Digest {
+        let mut digest = fgdb_crypto::Hasher::new();
+        digest.update(bytes);
+        digest.finalize()
+    }
+
+    let dir = scratch_dir("verify-history-cut");
+    under_lab(0x78_51, move |cx| async move {
+        let cx = &cx;
+        let vfs = UnixVfs::new();
+        let keys = keys();
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys.clone()).await.expect("open");
+        let mut first_capsule = None;
+        for seq in 1..=2 {
+            let payload = capsule_bytes(seq);
+            let value = template(&payload);
+            let chain = coordinator.chain().clone();
+            coordinator.commit(cx, &payload, |allocated, oid| {
+                let mut marker = marker_for(allocated, oid, &chain);
+                marker.effect_source = EffectSource::Local {
+                    capsule_ref: oid,
+                    logical_delta_template_digest: value,
+                };
+                marker
+            }).await.expect("commit");
+            if seq == 1 {
+                first_capsule = Some(only_capsule_path(&dir));
+            }
+        }
+        let verify = |cut| CommitCoordinator::verify_history_through(
+            cx, &vfs, &dir, &keys, NonZeroU64::new(cut).unwrap(), template,
+        );
+        assert_eq!(verify(2).await.unwrap(), coordinator.chain().chain_value());
+        assert!(matches!(verify(3).await, Err(Failure::Unreached {
+            requested: CommitSeq(3), verified: CommitSeq(2),
+        })));
+
+        let wrong_kind = CapsuleKeys::new(
+            *keys.k_oid(), keys.namespace(), *keys.dek(), 0x0275, CapsuleProfile::balanced(),
+        );
+        let rejected = CommitCoordinator::verify_history_through(
+            cx, &vfs, &dir, &wrong_kind, NonZeroU64::MIN, template,
+        ).await;
+        assert!(matches!(rejected, Err(Failure::Capsule {
+            commit_seq: CommitSeq(1),
+            source: CommitError::Capsule(fgdb_chronicle::capsule::CapsuleError::DescriptorMismatch(
+                fgdb_chronicle::identity::IdentityMismatch::ObjectKind { expected: 0x0275, actual: 0x0274 },
+            )),
+            ..
+        })));
+
+        // Recovery of one damaged symbol suffices for verification. The
+        // inspector leaves the damaged encoding exactly as it found it.
+        let path = first_capsule.as_ref().unwrap();
+        let mut damaged = std::fs::read(path).unwrap();
+        // The V1 container ends with the last symbol record’s MAC, with no trailer.
+        *damaged.last_mut().unwrap() ^= 1;
+        std::fs::write(path, &damaged).unwrap();
+        assert_eq!(verify(2).await.unwrap(), coordinator.chain().chain_value());
+        assert_eq!(std::fs::read(path).unwrap(), damaged);
+
+        // A valid capsule identity cannot satisfy a false template commitment.
+        commit_ok(&mut coordinator, cx, 3).await;
+        assert!(matches!(verify(3).await, Err(Failure::TemplateDigestMismatch {
+            commit_seq: CommitSeq(3), ..
+        })));
+
+        // Damage the third frame, then verify that the first two alone can
+        // still be proved without truncating the source or opening a writer.
+        let mut log = log_bytes(&dir);
+        *log.last_mut().unwrap() ^= 0x80;
+        write_log(&dir, &log);
+        assert_eq!(verify(2).await.unwrap(), coordinator.chain().entries()[1].chain_hash);
+        assert!(matches!(verify(3).await, Err(Failure::Marker(CommitError::CorruptLogEntry {
+            commit_seq: 3,
+        }))));
+        let path = first_capsule.unwrap();
+        std::fs::write(&path, b"lost").unwrap();
+        assert!(matches!(verify(2).await, Err(Failure::Capsule {
+            commit_seq: CommitSeq(1), ..
+        })));
+        assert_eq!(std::fs::read(path).unwrap(), b"lost");
+        assert_eq!(log_bytes(&dir), log);
+    });
+}
+
 #[test]
 fn a_lease_free_scan_reads_committed_entries_and_never_repairs_a_torn_tail() {
     let dir = scratch_dir("lease-free-scan");
