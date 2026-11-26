@@ -928,6 +928,11 @@ Output remains the ordinary versioned write contract; a conflict is a query
 refusal with robot code `conflict` and exit status 3. The caller can read the new
 state and decide whether to issue a new conditional request.
 
+For both conditional and unconditional text writes, the remote CLI reports
+`kind: "written"` and the terminal's `outcome`. A published write reports
+`write_committed`. A write that finishes without advancing the frontier
+reports `read_closed`. Both may return rows and report their selected sequence.
+
 HTTP exposes the same operation as
 `POST /v1/databases/<name>/write-if-current`, using the usual bearer token:
 

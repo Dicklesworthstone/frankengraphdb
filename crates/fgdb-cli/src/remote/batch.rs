@@ -13,8 +13,8 @@ use fgdb_gql::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParamet
 use fgdb_protocol::MAX_HEADER_LEN;
 use fgdb_protocol::body::{
     Body, Execute, ExecuteBatch, ExecuteMode, ExecutePreparedReadBatch, ExecuteReadStatements,
-    MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS, MAX_READ_BATCH_STATEMENTS, Outcome,
-    Prepare, PrepareMode, PreparedHandle, PreparedReadMode, WireValue,
+    MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS, MAX_READ_BATCH_STATEMENTS, Prepare,
+    PrepareMode, PreparedHandle, PreparedReadMode, WireValue,
 };
 use fgdb_protocol::client::{CLIENT_MAX_FRAME, Client, ClientError};
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
@@ -381,39 +381,7 @@ impl PreparedBatch {
             .execute_batch(cx, &self.body.statement, self.body.argument_sets)
             .await
             .map_err(batch_failure)?;
-        let (seq, statements) = match outcome {
-            Outcome::WriteCommitted { seq, statements }
-            | Outcome::ReadClosed { seq, statements } => (seq, statements),
-            // Never turn a post-submission protocol fault into a retry hint.
-            Outcome::Rows { .. } => {
-                return Err(Failure::io(
-                    "unexpected batch outcome; do not replay automatically",
-                ));
-            }
-        };
-        let delivered = if robot {
-            emit(
-                out,
-                &format!(
-                    r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"statements":{statements},"records":{records}}}"#
-                ),
-            )
-        } else {
-            emit(
-                out,
-                &format!(
-                    "completed {records} argument set(s), {statements} statement(s) at seq {seq}"
-                ),
-            )
-        };
-        delivered
-            .and_then(|()| out.flush().map_err(Failure::io))
-            .map_err(|error| {
-                Failure::io(format!(
-                    "batch completed at seq {seq}, but output delivery failed; do not replay: {}",
-                    error.message
-                ))
-            })
+        super::render_write_completion(outcome, None, Some(records), robot, out)
     }
 
     /// Prepare once, then stream each independently completed read without

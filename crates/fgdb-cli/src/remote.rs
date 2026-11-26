@@ -15,7 +15,7 @@ mod prepared_writes;
 mod transaction;
 
 use super::refusal::Code;
-use super::{Failure, emit, float_text, hex, render_row_body, render_rows};
+use super::{Failure, emit, float_text, hex, render_row_body_iter, render_rows_iter};
 use crate::load::{Json, parse_json};
 use asupersync::Budget;
 use asupersync::io::AsyncReadExt;
@@ -797,59 +797,79 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
         let _ = client.close(&cx).await;
         Ok::<_, Failure>(answer)
     })?;
-    match answer.outcome {
-        Outcome::Rows { seq } => {
-            let rendered = answer
-                .rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|value| if robot { cell(value) } else { human(value) })
-                        .collect()
-                })
-                .collect();
-            render_rows(&answer.columns, rendered, seq, "rows", robot, out)
-        }
-        // A CREATE/INSERT ... RETURN answers its rows with the commit, in the
-        // same frames as the embedded write path.
-        Outcome::WriteCommitted { seq, statements } | Outcome::ReadClosed { seq, statements }
-            if !answer.columns.is_empty() =>
-        {
-            let rendered: Vec<Vec<String>> = answer
-                .rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|value| if robot { cell(value) } else { human(value) })
-                        .collect()
-                })
-                .collect();
-            let count = rendered.len();
-            render_row_body(&answer.columns, &rendered, robot, out)?;
-            if robot {
-                emit(
-                    out,
-                    &format!(
-                        r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"count":{count},"statements":{statements}}}"#
-                    ),
-                )
-            } else {
-                emit(out, &format!("{count} row(s), completed at seq {seq}"))
-            }
-        }
-        Outcome::WriteCommitted { seq, statements } | Outcome::ReadClosed { seq, statements } => {
-            if robot {
-                emit(
-                    out,
-                    &format!(
-                        r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"statements":{statements}}}"#
-                    ),
-                )
-            } else {
-                emit(out, &format!("completed at seq {seq}"))
-            }
-        }
+    render_answer(&answer, robot, out)
+}
+
+fn render_answer(
+    answer: &fgdb_protocol::client::Answer,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let rendered = answer.rows.iter().map(|row| {
+        row.iter()
+            .map(|value| if robot { cell(value) } else { human(value) })
+            .collect::<Vec<_>>()
+    });
+    if let Outcome::Rows { seq } = answer.outcome {
+        return render_rows_iter(&answer.columns, rendered, seq, "rows", robot, out);
     }
+    let count = (!answer.columns.is_empty()).then_some(answer.rows.len());
+    if count.is_some() {
+        render_row_body_iter(&answer.columns, rendered, robot, out)
+            .map_err(|error| undelivered_write(answer.outcome, error))?;
+    }
+    render_write_completion(answer.outcome, count, None, robot, out)
+}
+
+fn undelivered_write(outcome: Outcome, error: Failure) -> Failure {
+    let completion = match outcome {
+        Outcome::WriteCommitted { seq, .. } => format!("write committed at seq {seq}"),
+        Outcome::ReadClosed { seq, .. } => format!("write completed without changes at seq {seq}"),
+        Outcome::Rows { .. } => return error,
+    };
+    Failure::io(format!(
+        "{completion}, but output delivery failed; do not replay: {}",
+        error.message
+    ))
+}
+
+fn render_write_completion(
+    outcome: Outcome,
+    count: Option<usize>,
+    records: Option<usize>,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let (tag, description, seq, statements) = match outcome {
+        Outcome::WriteCommitted { seq, statements } => {
+            ("write_committed", "committed", seq, statements)
+        }
+        Outcome::ReadClosed { seq, statements } => {
+            ("read_closed", "completed without changes", seq, statements)
+        }
+        Outcome::Rows { .. } => {
+            return Err(Failure::io(
+                "unexpected write outcome; do not replay automatically",
+            ));
+        }
+    };
+    let line = if robot {
+        let count = count.map_or_else(String::new, |n| format!(r#","count":{n}"#));
+        let records = records.map_or_else(String::new, |n| format!(r#","records":{n}"#));
+        format!(
+            r#"{{"v":1,"event":"result","kind":"written","outcome":"{tag}","seq":{seq}{count},"statements":{statements}{records}}}"#
+        )
+    } else {
+        let prefix = if let Some(records) = records {
+            format!("{records} argument set(s), {statements} statement(s), ")
+        } else {
+            count.map_or_else(String::new, |n| format!("{n} row(s), "))
+        };
+        format!("{prefix}{description} at seq {seq}")
+    };
+    emit(out, &line)
+        .and_then(|()| out.flush().map_err(Failure::io))
+        .map_err(|error| undelivered_write(outcome, error))
 }
 
 /// Adapt one native remote read to the local incremental output contract.
