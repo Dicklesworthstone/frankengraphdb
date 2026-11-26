@@ -1,13 +1,12 @@
-//! Server-hosted Aegis single-voter / replica coordinator (plan §14).
+//! Server-hosted Aegis replica coordinator (plan §14).
 //!
 //! Binds [`fgdb_order`] consensus state transitions and [`fgdb_repl`]'s
-//! durability-gated [`Replica`] driver into `fgdb-server` without claiming
-//! unimplemented multi-node network transport. Single-member quorum bootstrap,
-//! proposal sequencing through [`RaftPublisher`], and clock-free `read_index`
-//! barriers run through the real Aegis kernels.
+//! durability-gated [`Replica`] driver into `fgdb-server`. A host supplies
+//! authenticated peer delivery, election and heartbeat timers, an exclusive
+//! member fence, and the publisher that owns the persistent state.
 
 use fgdb_order::{
-    Committed, Configuration, Domain, Error as OrderError, Event, Limits, MemberId,
+    Committed, Configuration, Domain, Envelope, Error as OrderError, Event, Limits, MemberId,
     PersistentState, Role,
 };
 use fgdb_repl::driver::RaftPublisher;
@@ -92,6 +91,61 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
         Ok(Self {
             replica: Replica::new(member, configuration, limits, maximum_reads)?,
         })
+    }
+
+    /// Resume the exclusively fenced member from its authenticated publication.
+    /// The host binds the publication to this member and its currently authorized
+    /// configuration. Terms, votes and committed entries survive recovery.
+    /// Outstanding reads and authority to lead are reacquired in this incarnation.
+    pub fn recover(
+        member: MemberId,
+        expected: &Configuration,
+        state: PersistentState<C>,
+        limits: Limits,
+        maximum_reads: usize,
+    ) -> Result<Self, OrderError> {
+        if state.configuration().domain() != expected.domain() {
+            return Err(OrderError::WrongDomain);
+        }
+        if state.configuration() != expected {
+            return Err(OrderError::WrongConfiguration);
+        }
+        Ok(Self {
+            replica: Replica::recover(member, state, limits, maximum_reads)?,
+        })
+    }
+
+    /// Deliver an envelope received on a channel authenticated as `peer`.
+    /// The transport supplies that identity independently of the envelope.
+    /// The replica checks the domain, configuration, recipient and membership.
+    /// Outbound replies are released only after required publication succeeds.
+    pub async fn receive<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        peer: MemberId,
+        envelope: Envelope<C>,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        if envelope.from != peer {
+            return Err(ReplicaError::Raft(OrderError::InvalidMessage));
+        }
+        self.replica.step(publisher, Event::Receive(envelope)).await
+    }
+
+    /// Drive the host's election interval on voters, including the current leader.
+    /// Followers pre-vote, while leaders check whether a quorum is still reachable.
+    pub async fn liveness_timeout<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica.step(publisher, Event::LivenessTimeout).await
+    }
+
+    /// Drive a leader heartbeat, including retries for lagging followers.
+    pub async fn heartbeat<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica.step(publisher, Event::Heartbeat).await
     }
 
     #[must_use]
@@ -229,3 +283,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "aegis_peer_tests.rs"]
+mod peer_tests;
