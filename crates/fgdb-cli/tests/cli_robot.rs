@@ -653,6 +653,17 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                         assert_eq!(index, 1);
                         event.get("seq").unsigned();
                     }
+                    "verified_history" => {
+                        exact_fields(event, &["v", "event", "kind", "seq", "chain_hash"]);
+                        assert_eq!(index, 1);
+                        assert!(event.get("seq").unsigned() > 0);
+                        let hash = event.get("chain_hash").string();
+                        assert_eq!(hash.len(), 64);
+                        assert!(
+                            hash.bytes()
+                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                        );
+                    }
                     "sealed" => {
                         exact_fields(
                             event,
@@ -4327,6 +4338,17 @@ fn verify_history_proves_exact_cuts_and_checks_a_trusted_chain_commitment() {
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     );
+    for invalid in [
+        first.stdout.replace("\"seq\":1", "\"seq\":0"),
+        first.stdout.replace(anchor, &anchor[..63]),
+        first.stdout.replace(anchor, &"A".repeat(64)),
+        first
+            .stdout
+            .replace("\"chain_hash\":", "\"count\":0,\"chain_hash\":"),
+    ] {
+        assert_ne!(invalid, first.stdout);
+        assert!(std::panic::catch_unwind(|| check_events(&invalid, first.code)).is_err());
+    }
 
     db.write(&["INSERT (:Person {name:'Grace'})"]);
     let checked = db.command(

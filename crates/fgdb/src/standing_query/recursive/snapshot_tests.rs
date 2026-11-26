@@ -359,8 +359,15 @@ fn named_schema_snapshot_epochs_support_views_and_preserve_schema_refusal() {
             );
         }
 
-        // A later catalog transition still requires an explicit view rebuild.
-        // Admitting the initial nonzero epoch does not authorize schema replay.
+        let expected = oracle(&db, R);
+        let mut detached = db
+            .prepare_standing_reachability(&query, R, policy())
+            .unwrap();
+        let mut export = |_| Ok::<(), ()>(());
+        let detached_input = detached.input.encode_checkpoint(&mut export).unwrap();
+
+        // Only the authenticated live publication can advance this name-only
+        // catalog transition. Detached application sees the same durable batch.
         let mut more_names = SymbolCatalog::default();
         more_names
             .bind(
@@ -370,14 +377,32 @@ fn named_schema_snapshot_epochs_support_views_and_preserve_schema_refusal() {
             .unwrap();
         let schema_at = db.register_symbols(&commit, &more_names).await.unwrap();
         assert!(schema_at > graph_at);
+        {
+            let batch = db.delta_index().unwrap().get(schema_at).unwrap();
+            assert!(matches!(batch.coordinate_entries(), [entry]
+                if matches!(entry.rows.as_slice(), [fgdb_delta_types::DeltaRow::Schema { .. }])));
+            let mut checkpoint = || Ok(());
+            let mut meter = Meter {
+                policy: policy(),
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            assert_eq!(
+                detached.maintain(&commit, batch, None, &mut meter),
+                Err(StandingQueryFailure::InvalidDelta)
+            );
+        }
+        assert_eq!(detached.frontier, graph_at);
+        assert_eq!(
+            detached.input.encode_checkpoint(&mut export).unwrap(),
+            detached_input
+        );
+        assert_eq!(plain(&detached.rows), expected);
         for handle in [&empty, &populated] {
-            assert!(matches!(
-                db.standing_reachability(&query, handle),
-                Err(StandingQueryError::Unavailable {
-                    frontier,
-                    reason: StandingQueryFailure::InvalidDelta,
-                }) if frontier == graph_at
-            ));
+            let view = db.standing_reachability(&query, handle).unwrap();
+            assert_eq!(view.frontier(), schema_at);
+            assert_eq!(plain(view.rows()), expected);
+            assert_eq!(view.last_maintenance().delta_rows, 1);
             assert_eq!(
                 db.rebuild_standing_query(&query, handle, policy()).unwrap(),
                 schema_at
@@ -389,6 +414,7 @@ fn named_schema_snapshot_epochs_support_views_and_preserve_schema_refusal() {
         db.write(&commit, last).await.unwrap();
         check(&db, &query, &empty, R);
         check(&db, &query, &populated, R);
+        assert_eq!(oracle(&db, R).len(), 2);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -7117,12 +7117,25 @@ fn checkpoint_from_manifest_commitment(
     resolved: &[(ManifestRecord, fgdb_strata::root::PartitionRoot)],
     path: &Path,
 ) -> Result<SelectedCheckpoint, OpenError> {
+    let [(record, root)] = resolved else {
+        return Err(OpenError::SlotDisagreesWithStream {
+            path: path.to_path_buf(),
+            slot_manifest: claimed.0,
+        });
+    };
+    checkpoint_from_manifest_record(commitment_at, claimed, record, root, path)
+}
+
+fn checkpoint_from_manifest_record(
+    commitment_at: impl FnOnce(CommitSeq) -> Option<Digest>,
+    claimed: ManifestVersion,
+    record: &ManifestRecord,
+    root: &fgdb_strata::root::PartitionRoot,
+    path: &Path,
+) -> Result<SelectedCheckpoint, OpenError> {
     let disagrees = || OpenError::SlotDisagreesWithStream {
         path: path.to_path_buf(),
         slot_manifest: claimed.0,
-    };
-    let [(record, root)] = resolved else {
-        return Err(disagrees());
     };
     let describes_spine = record.graph == GRAPH
         && record.branch == BRANCH

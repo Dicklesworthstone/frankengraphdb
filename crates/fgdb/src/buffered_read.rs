@@ -4,8 +4,8 @@
 
 use super::*;
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_strata::store::BufferedPartition;
 pub use fgdb_strata::store::{BufferedEdge, BufferedReadError, BufferedReadLimits, BufferedValue};
+use fgdb_strata::store::{BufferedPartition, BufferedRootSelection};
 pub use fgdb_strata::tiered::buffer::{BufferLimits, BufferStats};
 use fgdb_strata::tiered::edge_scan::{BufferedEdgeDirection, BufferedEdgeIncidenceScan};
 pub use fgdb_strata::tiered::memory::{MemoryError, MemoryPool};
@@ -117,8 +117,15 @@ impl<V: Vfs> core::fmt::Debug for BufferedReadView<V> {
 pub struct BufferedReadPublication<V: Vfs = UnixVfs> {
     namespace: DatabaseSecurityNamespaceId,
     published: PublishedRead<V>,
-    pool: MemoryPool,
-    limits: BufferedReadLimits,
+    source: BufferedReadSource<V>,
+}
+
+enum BufferedReadSource<V: Vfs> {
+    Selected(Box<BufferedRootSelection<V>>),
+    Deferred {
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+    },
 }
 
 impl<V: Vfs + Clone> BufferedReadPublication<V> {
@@ -142,12 +149,14 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
         cx: &CommitCx,
     ) -> Result<BufferedReadView<V>, BufferedOpenError> {
         let published = self.published;
-        let admission: crate::SendFuture<'_, _> = Box::pin(published.store.open_buffered_root(
-            cx,
-            published.root_id,
-            self.pool,
-            self.limits,
-        ));
+        let admission: crate::SendFuture<'_, _> = match self.source {
+            BufferedReadSource::Selected(selection) => Box::pin(selection.into_partition(cx)),
+            BufferedReadSource::Deferred { pool, limits } => Box::pin(
+                published
+                    .store
+                    .open_buffered_root(cx, published.root_id, pool, limits),
+            ),
+        };
         Ok(BufferedReadView {
             partition: admission.await?,
             manifest: published.manifest,
@@ -526,8 +535,7 @@ impl<V: Vfs + Clone> Database<V> {
                 published_at: self.snapshot.frontier,
                 schema: self.snapshot.schema.reference,
             },
-            pool,
-            limits,
+            source: BufferedReadSource::Deferred { pool, limits },
         })
     }
 
@@ -595,10 +603,14 @@ impl<V: Vfs + Clone> Database<V> {
         pool: &MemoryPool,
         limits: BufferedReadLimits,
     ) -> Result<SymbolCatalogReadView, BufferedOpenError> {
-        let publication =
-            Self::open_buffered_publication_with_vfs(cx, vfs, path, keys, pool.clone(), limits)
-                .await?;
-        Ok(publication.symbol_catalog(cx).await?)
+        let BufferedReadPublication {
+            published, source, ..
+        } = Self::open_buffered_publication_with_vfs(cx, vfs, path, keys, pool.clone(), limits)
+            .await?;
+        // A caller requesting only names does not need to retain the graph's
+        // decoded root while it reads the independently owned catalog.
+        drop(source);
+        Ok(SymbolCatalogReadView::from_published(cx, &published).await?)
     }
 
     /// Authenticate the current checkpoint once for catalog binding and subsequent graph reads.
@@ -635,28 +647,41 @@ impl<V: Vfs + Clone> Database<V> {
         };
         let store = store.with_buffered_reads(pool.clone());
         let resolved = store
-            .resolve_manifest_bounded(cx, manifest, &limits)
+            .resolve_manifest_bounded(cx, manifest, limits, selection_charge)
             .await?;
         // Scanned after the slot was read: a writer appends a marker before
         // it publishes the root that names it, so this chain reaches the
         // slot's frontier.
         let requested = resolved
-            .first()
-            .map_or(CommitSeq::ORIGIN, |(_, root)| root.published_at);
+            .as_ref()
+            .map_or(CommitSeq::ORIGIN, |(_, selection)| {
+                selection.root().published_at
+            });
         let scan = CommitCoordinator::scan_committed_prefix(cx, &vfs, path, requested)
             .await
             .map_err(OpenError::Commit)?;
-        let checkpoint = checkpoint_from_manifest_commitment(
+        let (record, selection) = resolved.ok_or_else(|| OpenError::SlotDisagreesWithStream {
+            path: path.to_path_buf(),
+            slot_manifest: manifest.0,
+        })?;
+        let checkpoint = checkpoint_from_manifest_record(
             |at| scan.checkpoint_commitment(at),
             manifest,
-            &resolved,
+            &record,
+            selection.root(),
             path,
         )?;
         if checkpoint.published_at != scan.frontier() {
             return Err(BufferedOpenError::RecoveryRequired);
         }
-        drop(resolved);
-        drop(selection_charge);
+        let source = if keys.strata_ecs.is_some() && checkpoint.schema.is_some() {
+            // Protected catalog decoding uses this same pool. Preserve its
+            // independent admission window before reopening the pinned graph.
+            drop(selection);
+            BufferedReadSource::Deferred { pool, limits }
+        } else {
+            BufferedReadSource::Selected(Box::new(selection))
+        };
         Ok(BufferedReadPublication {
             namespace: keys.namespace,
             published: PublishedRead {
@@ -666,8 +691,7 @@ impl<V: Vfs + Clone> Database<V> {
                 published_at: checkpoint.published_at,
                 schema: checkpoint.schema,
             },
-            pool,
-            limits,
+            source,
         })
     }
 }

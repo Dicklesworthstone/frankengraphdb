@@ -3232,6 +3232,68 @@ fn catalog_generation_change_refuses_a_prebound_import_before_effects_or_result(
 }
 
 #[test]
+fn buffered_catalog_damage_survives_name_binding() {
+    use std::fmt::Write as _;
+
+    let fixture = Fixture::new("bounded-symbol-root-damage");
+    assert_eq!(
+        succeeded(&fixture.robot("create", &["--persist-bindings"]), "created"),
+        1
+    );
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &["CREATE (:Person {id:7})"]),
+            "written",
+        ),
+        2
+    );
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let cx = PurposeContexts::narrow_runtime_root(&root).commit();
+    let selected = runtime.block_on(async {
+        Database::open(&cx, fixture.db(), keys())
+            .await
+            .unwrap()
+            .partition_root()
+            .unwrap()
+    });
+
+    let statement = "MATCH (n:Person) RETURN n,n.id AS id";
+    let query = |text| fixture.discovered("query", &["--buffered", text]);
+    let healthy = query(statement);
+    assert_eq!(succeeded(&healthy, "rows"), 2);
+    assert_eq!(rows(&healthy).len(), 1);
+    let unknown = query("MATCH (n:Absent) RETURN n");
+    refused(&unknown, 3, "query");
+    assert!(terminal(&unknown).contains("\"code\":\"not_found\""));
+
+    let mut root_name = String::new();
+    for byte in selected.0.as_bytes() {
+        write!(root_name, "{byte:02x}").unwrap();
+    }
+    let mut expected = directory_bytes(&fixture.db());
+    let root_file = fixture
+        .db()
+        .join("strata-blocks")
+        .join(format!("{root_name}.block"));
+    let bytes = expected.get_mut(&root_file).unwrap();
+    assert!(bytes.starts_with(b"FGSR"));
+    *bytes.last_mut().unwrap() ^= 0x40;
+    std::fs::write(&root_file, bytes).unwrap();
+
+    let damaged = query(statement);
+    refused(&damaged, 4, "open");
+    assert!(terminal(&damaged).contains(&format!("not ObjectId({root_name})")));
+    let declared = fixture.robot("query", &["--buffered", statement]);
+    assert_eq!(damaged.stdout, declared.stdout);
+    assert!(rows(&damaged).is_empty());
+    let malformed = query("MATCH (");
+    refused(&malformed, 3, "query");
+    assert!(terminal(&malformed).contains("\"code\":\"syntax\""));
+    assert_eq!(directory_bytes(&fixture.db()), expected);
+}
+
+#[test]
 fn bounded_catalog_discovery_refuses_lagging_publication_without_resident_recovery() {
     use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
 

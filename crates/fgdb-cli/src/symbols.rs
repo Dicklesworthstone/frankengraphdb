@@ -217,18 +217,18 @@ pub(super) enum CatalogDiscovery {
     Buffered(Box<fgdb::BufferedReadPublication>),
     Unavailable {
         failure: Failure,
-        admission_refused: bool,
+        catalog_unreadable: bool,
     },
 }
 
 impl CatalogDiscovery {
     /// Syntax errors survive a failed open. A name lookup cannot establish
-    /// absence when the memory or root-size limit prevented the catalog read.
+    /// absence if the bounded catalog could not be read or authenticated.
     pub(super) fn preflight_error(&self, error: Failure) -> Failure {
         match self {
             Self::Unavailable {
                 failure,
-                admission_refused: true,
+                catalog_unreadable: true,
             } if error.refusal == refusal::Code::NotFound => failure.clone(),
             _ => error,
         }
@@ -253,7 +253,7 @@ pub(super) async fn discover(
     // Bounded graph hosts must never recover through a resident graph while
     // discovering names. They retain the same current-checkpoint requirement
     // as their eventual buffered/sealed source open.
-    let mut admission_refused = false;
+    let mut catalog_unreadable = false;
     let opened = if options.buffered.enabled() {
         async {
             let (pool, limits) = options.buffered.admission(options.budget.policy())?;
@@ -267,26 +267,16 @@ pub(super) async fn discover(
             )
             .await
             .map_err(|error| {
-                admission_refused = match &error {
-                    fgdb::BufferedOpenError::Memory(_)
-                    | fgdb::BufferedOpenError::Read(
-                        fgdb::BufferedReadError::Memory(_) | fgdb::BufferedReadError::Limit { .. },
-                    ) => true,
-                    fgdb::BufferedOpenError::Read(fgdb::BufferedReadError::Store(source)) => {
-                        matches!(
-                            source.as_ref(),
-                            fgdb_strata::store::StoreError::ObjectTooLarge { .. }
-                                | fgdb_strata::store::StoreError::RootReferenceLimit { .. }
-                        )
-                    }
-                    _ => false,
-                };
+                catalog_unreadable = matches!(
+                    error,
+                    fgdb::BufferedOpenError::Memory(_) | fgdb::BufferedOpenError::Read(_)
+                );
                 super::buffered::open_failure(error)
             })?;
-            let view = publication
-                .symbol_catalog(open_cx)
-                .await
-                .map_err(open_failure)?;
+            let view = publication.symbol_catalog(open_cx).await.map_err(|error| {
+                catalog_unreadable = true;
+                open_failure(error)
+            })?;
             Ok((view, CatalogDiscovery::Buffered(Box::new(publication))))
         }
         .await
@@ -309,7 +299,7 @@ pub(super) async fn discover(
         Err(failure) => {
             return Ok(CatalogDiscovery::Unavailable {
                 failure,
-                admission_refused,
+                catalog_unreadable,
             });
         }
     };

@@ -311,6 +311,10 @@ impl MemoryCharge {
         self.bytes
     }
 
+    pub(crate) fn pool(&self) -> &MemoryPool {
+        &self.pool
+    }
+
     /// Transfer already-admitted bytes into an independent affine charge.
     /// This neither acquires nor refunds bytes in this pool or any ancestor,
     /// and requires no allocation. An oversized request leaves this charge

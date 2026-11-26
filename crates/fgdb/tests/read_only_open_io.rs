@@ -395,6 +395,96 @@ fn read_only_prefix_selection_checks_complete_entries_after_a_lagging_root() {
 }
 
 #[test]
+fn buffered_admission_reuses_the_catalog_roots_authenticated_metadata() {
+    let ((), report) = run_async_under_lab(0x7669_6631, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = RecordingVfs::new();
+        let path = vfs.memory.database_dir();
+        let mut writer = spokes(&commit, &vfs, 258).await;
+        let root_id = writer.read_session().unwrap().partition_root();
+        let store = fgdb_strata::store::BlockStore::open_existing_for_read_with_vfs(
+            &commit,
+            vfs.clone(),
+            &path,
+            [0xc1; 32],
+            keys().namespace,
+        )
+        .await
+        .unwrap();
+        let membership = store.get_root(&commit, root_id).await.unwrap();
+        assert_eq!(
+            (membership.blocks.len(), membership.vertex_patches.len()),
+            (257, 258)
+        );
+        let payloads: Vec<_> = membership
+            .blocks
+            .iter()
+            .map(|block| store.path(block.block_id))
+            .chain(
+                membership
+                    .vertex_patches
+                    .iter()
+                    .map(|patch| store.path(patch.patch_id)),
+            )
+            .collect();
+        vfs.take_object_paths();
+        vfs.take_writes();
+
+        let pool = MemoryPool::new(64 * 1024 * 1024, 0).unwrap();
+        let mut limits = buffered_limits();
+        limits.max_root_bytes = 2 * 1024 * 1024;
+        let publication = Database::open_buffered_publication_with_vfs(
+            &commit,
+            vfs.clone(),
+            &path,
+            keys(),
+            pool.clone(),
+            limits,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            publication
+                .symbol_catalog(&commit)
+                .await
+                .unwrap()
+                .frontier(),
+            CommitSeq(258)
+        );
+        let metadata = vfs.take_object_paths();
+        let root_path = store.path(root_id.0);
+        assert_eq!(
+            metadata.iter().filter(|entry| **entry == root_path).count(),
+            1
+        );
+        assert!(
+            metadata.len() >= 4,
+            "root, manifest and at least two segments"
+        );
+        assert!(!metadata.iter().any(|file| payloads.contains(file)));
+        assert!(pool.used() > 0);
+        assert!(vfs.take_writes().is_empty());
+
+        writer.write(&commit, spoke(259)).await.unwrap();
+        vfs.take_object_paths();
+        vfs.take_writes();
+        let mut view = publication.into_read_view(&commit).await.unwrap();
+        assert_eq!(view.frontier(), CommitSeq(258));
+        let admission = vfs.take_object_paths();
+        assert!(!admission.iter().any(|file| metadata.contains(file)));
+        assert!(payloads.iter().all(|file| admission.contains(file)));
+        assert!(view.vertex(&query, VId(258)).await.unwrap().is_some());
+        assert!(view.vertex(&query, VId(259)).await.unwrap().is_none());
+        assert!(vfs.take_writes().is_empty());
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn live_admission_buffered_open_reads_descriptors_and_faults_only_selected_payloads() {
     let ((), report) = run_async_under_lab(0x7669_6620, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

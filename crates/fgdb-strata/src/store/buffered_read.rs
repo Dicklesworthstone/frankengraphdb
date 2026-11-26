@@ -21,7 +21,7 @@ pub(crate) use scan_access::native_runs::{NativeRunRow, NativeRunSuffix};
 use super::{BlockStore, ExtentError, RootReadEvent, RootWalk, StoreError};
 use crate::edge_props::{BlockProps, EdgePropertyRow};
 use crate::root::PartitionRoot;
-use crate::root::descriptor::{BlockDescriptor, BlockSummary, PatchDescriptor};
+use crate::root::descriptor::{BlockDescriptor, BlockSummary, PatchDescriptor, RootDescriptors};
 use crate::tiered::buffer::{
     Admission, BufferError, BufferHandle, BufferLimits, BufferStats, ExtentBuffer, ExtentKey,
     PreparedExtent, extent_checksum,
@@ -149,6 +149,31 @@ impl BufferedReadLimits {
                 .ok_or(BufferedReadError::SizeOverflow)?;
         }
         Ok(bytes)
+    }
+
+    fn retain_root_charge(
+        self,
+        metadata: &mut MemoryCharge,
+        root: &PartitionRoot,
+        block_capacity: usize,
+        patch_capacity: usize,
+    ) -> Result<(), BufferedReadError> {
+        let retained = self.retained_metadata_bytes(root, block_capacity, patch_capacity)?;
+        let excess =
+            metadata
+                .bytes()
+                .checked_sub(retained)
+                .ok_or(MemoryError::ResourceExhausted {
+                    requested: retained,
+                    available: metadata.bytes(),
+                    limit: metadata.bytes(),
+                })?;
+        drop(
+            metadata
+                .split_off(excess)
+                .ok_or(BufferedReadError::SizeOverflow)?,
+        );
+        Ok(())
     }
 }
 
@@ -611,16 +636,63 @@ fn descriptor(id: fgdb_types::ids::ObjectId, bytes: &[u8]) -> Result<ExtentKey, 
     Ok(ExtentKey::new(id, 0, bytes.len(), extent_checksum(bytes))?)
 }
 
+struct DecodedBufferedRoot {
+    root: PartitionRoot,
+    published: Option<RootDescriptors>,
+    metadata: MemoryCharge,
+}
+
+/// Authenticated metadata for one bounded read. The original store, limits and
+/// memory reservation travel with the selected root. Graph admission still
+/// reads and verifies every payload in this publication.
+pub struct BufferedRootSelection<V: Vfs> {
+    store: BlockStore<V>,
+    id: PartitionRootVersion,
+    limits: BufferedReadLimits,
+    decoded: DecodedBufferedRoot,
+}
+
+impl<V: Vfs + Clone> BufferedRootSelection<V> {
+    pub fn root(&self) -> &PartitionRoot {
+        &self.decoded.root
+    }
+
+    pub async fn into_partition(
+        self,
+        cx: &impl BufferedReadCx,
+    ) -> Result<BufferedPartition<V>, BufferedReadError> {
+        let pool = self.decoded.metadata.pool().clone();
+        self.store
+            .open_buffered_root_inner(cx, self.id, pool, self.limits, None, Some(self.decoded))
+            .await
+    }
+}
+
 impl<V: Vfs + Clone> BlockStore<V> {
     /// Bounded counterpart of resolve_manifest for the native one-partition
-    /// database. The caller owns the pre-admitted metadata reservation.
+    /// database. The caller reserves metadata before opening the store. The
+    /// selected root retains the charge for its decoded metadata.
     pub async fn resolve_manifest_bounded(
         &self,
         cx: &impl StorageReadCx,
         id: crate::manifest::ManifestVersion,
-        limits: &BufferedReadLimits,
-    ) -> Result<Vec<(crate::manifest::ManifestRecord, PartitionRoot)>, BufferedReadError> {
-        let records = self
+        limits: BufferedReadLimits,
+        metadata: MemoryCharge,
+    ) -> Result<
+        Option<(crate::manifest::ManifestRecord, BufferedRootSelection<V>)>,
+        BufferedReadError,
+    > {
+        let requested = limits.metadata_bytes()?;
+        if metadata.bytes() < requested {
+            return Err(MemoryError::ResourceExhausted {
+                requested,
+                available: metadata.bytes(),
+                limit: metadata.bytes(),
+            }
+            .into());
+        }
+        let store = self.clone().with_buffered_reads(metadata.pool().clone());
+        let records = store
             .read_object_proven(
                 cx,
                 super::StoredObjectKind::Manifest,
@@ -633,20 +705,30 @@ impl<V: Vfs + Clone> BlockStore<V> {
             )
             .await?;
         limit("native manifest roots", records.len(), 1)?;
-        let mut resolved = Vec::with_capacity(records.len());
-        for record in records {
-            let (root, _) = self
-                .get_root_and_segments_limited(
-                    cx,
-                    record.root,
-                    limits.max_root_bytes,
-                    limits.max_blocks,
-                    limits.max_vertex_patches,
-                )
-                .await?;
-            resolved.push((record, root));
-        }
-        Ok(resolved)
+        let Some(record) = records.into_iter().next() else {
+            return Ok(None);
+        };
+        let id = record.root;
+        let mut decoded = store.decode_buffered_root(cx, id, limits, metadata).await?;
+        let (block_capacity, patch_capacity) =
+            decoded.published.as_ref().map_or((0, 0), |published| {
+                (published.blocks.capacity(), published.patches.capacity())
+            });
+        limits.retain_root_charge(
+            &mut decoded.metadata,
+            &decoded.root,
+            block_capacity,
+            patch_capacity,
+        )?;
+        Ok(Some((
+            record,
+            BufferedRootSelection {
+                store,
+                id,
+                limits,
+                decoded,
+            },
+        )))
     }
 
     /// An arbitrary keyed root ID is not published-source authority. This
@@ -662,7 +744,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
         self.clone()
             .with_buffered_reads(pool.clone())
-            .open_buffered_root_inner(cx, id, pool, limits, None)
+            .open_buffered_root_inner(cx, id, pool, limits, None, None)
             .await
     }
 
@@ -685,22 +767,17 @@ impl<V: Vfs + Clone> BlockStore<V> {
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
         self.clone()
             .with_buffered_reads(pool.clone())
-            .open_buffered_root_inner(cx, id, pool, limits, Some(receipts))
+            .open_buffered_root_inner(cx, id, pool, limits, Some(receipts), None)
             .await
     }
 
-    async fn open_buffered_root_inner(
+    async fn decode_buffered_root(
         &self,
-        cx: &impl BufferedReadCx,
+        cx: &impl StorageReadCx,
         id: PartitionRootVersion,
-        pool: MemoryPool,
         limits: BufferedReadLimits,
-        receipts: Option<&super::PublishReceipts>,
-    ) -> Result<BufferedPartition<V>, BufferedReadError> {
-        cx.buffered_checkpoint()
-            .map_err(BufferedReadError::Interrupted)?;
-        let buffer = ExtentBuffer::new(pool.clone(), limits.buffer)?;
-        let mut metadata = pool.reserve(cx, limits.metadata_bytes()?)?;
+        metadata: MemoryCharge,
+    ) -> Result<DecodedBufferedRoot, BufferedReadError> {
         let (root, mut segments) = self
             .get_root_and_segments_limited(
                 cx,
@@ -710,8 +787,52 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 limits.max_vertex_patches,
             )
             .await?;
-        let published = segments.descriptors.take();
-        drop(segments);
+        Ok(DecodedBufferedRoot {
+            root,
+            published: segments.descriptors.take(),
+            metadata,
+        })
+    }
+
+    async fn open_buffered_root_inner(
+        &self,
+        cx: &impl BufferedReadCx,
+        id: PartitionRootVersion,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+        receipts: Option<&super::PublishReceipts>,
+        selected: Option<DecodedBufferedRoot>,
+    ) -> Result<BufferedPartition<V>, BufferedReadError> {
+        cx.buffered_checkpoint()
+            .map_err(BufferedReadError::Interrupted)?;
+        let buffer = ExtentBuffer::new(pool.clone(), limits.buffer)?;
+        // Bind the reservation first so it drops after the decoded metadata.
+        let DecodedBufferedRoot {
+            mut metadata,
+            root,
+            published,
+        } = match selected {
+            Some(mut decoded) => {
+                // Legacy roots synthesize descriptors during admission. Restore
+                // the opening allowance before allocating those vectors.
+                if decoded.published.is_none() {
+                    let additional = limits
+                        .metadata_bytes()?
+                        .saturating_sub(decoded.metadata.bytes());
+                    decoded.metadata.grow(cx, additional)?;
+                }
+                decoded
+            }
+            None => {
+                self.decode_buffered_root(
+                    cx,
+                    id,
+                    limits,
+                    pool.reserve(cx, limits.metadata_bytes()?)?,
+                )
+                .await?
+            }
+        };
         let identity = self.root_identity_domain();
         let trusted = receipts
             .and_then(|receipts| receipts.root_memo.as_ref())
@@ -749,20 +870,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
         // Retain one charged descriptor per reference. A cold V6 open compares
         // each entry with its payload. A legacy open fills the reserved slots.
         // Incoming and refaulted objects keep their independent reservations.
-        let admission_metadata =
-            limits.retained_metadata_bytes(&root, blocks.capacity(), patches.capacity())?;
-        let excess = metadata.bytes().checked_sub(admission_metadata).ok_or(
-            MemoryError::ResourceExhausted {
-                requested: admission_metadata,
-                available: metadata.bytes(),
-                limit: metadata.bytes(),
-            },
-        )?;
-        drop(
-            metadata
-                .split_off(excess)
-                .ok_or(BufferedReadError::SizeOverflow)?,
-        );
+        limits.retain_root_charge(&mut metadata, &root, blocks.capacity(), patches.capacity())?;
         let mut work = 0;
         if !certified {
             let mut descriptors_match = !verify_published
