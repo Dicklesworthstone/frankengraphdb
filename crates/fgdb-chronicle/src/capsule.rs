@@ -770,24 +770,28 @@ pub fn decode_container(bytes: &[u8]) -> Result<(CapsuleDescriptor, Vec<Vec<u8>>
         return Err(CapsuleError::MalformedContainer);
     }
 
-    // A complete registered V1 inventory has independently known slot
-    // boundaries. Trust its profile width for navigation: damage to one
-    // redundant length prefix must not hide every subsequent repair symbol.
-    // For short containers retain the length-framed recovery path, including
-    // earlier records that were themselves shortened before a surviving slot.
+    // A nominal-size inventory can still contain a shortened record and a
+    // lengthened record. Preserve coherent length framing in that case.
+    // Otherwise the registered width locates later slots past a damaged
+    // prefix. Healthy containers require only the ordinary forward walk.
     let record_len = usize::from(HEADER_LEN_V1)
         + usize::from(descriptor.symbol_size)
         + usize::from(SYMBOL_MAC_LEN_V1);
-    let fixed_slots = registered.is_some()
+    let nominal_extent = registered.is_some()
         && declared.checked_mul(4 + record_len) == Some(bytes.len() - CAPSULE_HEADER_BYTES_V1);
+    let mut use_fixed_width = None;
     let mut symbols = Vec::new();
     symbols
         .try_reserve_exact(declared)
         .map_err(|_| CapsuleError::AllocationFailed)?;
     let mut parsed = 0usize;
-    for _ in 0..declared {
+    for index in 0..declared {
         let Ok(len) = r.u32() else { break };
-        let slot_len = if fixed_slots {
+        let slot_len = if nominal_extent
+            && len as usize != record_len
+            && *use_fixed_width
+                .get_or_insert_with(|| !r.lengths_reach_end(len as usize, declared - index - 1))
+        {
             record_len
         } else {
             len as usize
@@ -929,6 +933,22 @@ impl<'a> Reader<'a> {
 
     fn is_at_end(&self) -> bool {
         self.position == self.bytes.len()
+    }
+
+    /// Probe the remaining declared frames once, without copying any records.
+    /// A coherent walk consumes the complete inventory and ends exactly at EOF.
+    fn lengths_reach_end(&self, current_len: usize, remaining: usize) -> bool {
+        let mut probe = Self::new(&self.bytes[self.position..]);
+        if probe.take(current_len).is_err() {
+            return false;
+        }
+        for _ in 0..remaining {
+            let Ok(len) = probe.u32() else { return false };
+            if probe.take(len as usize).is_err() {
+                return false;
+            }
+        }
+        probe.is_at_end()
     }
 
     fn u16(&mut self) -> Result<u16, CapsuleError> {

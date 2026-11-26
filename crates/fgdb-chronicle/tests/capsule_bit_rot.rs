@@ -413,6 +413,42 @@ fn rot_within_the_repair_budget_heals() {
     });
 }
 
+#[test]
+fn compensating_record_sizes_preserve_undamaged_symbols_and_scrub_repair() {
+    let dir = scratch_dir("compensating-record-sizes");
+    under_lab(0x5348_4946, move |cx| async move {
+        let (path, oid) = committed(&dir, &cx).await;
+        let original = std::fs::read(&path).unwrap();
+        let (descriptor, mut symbols) = decode_container(&original).unwrap();
+        assert!(symbols.len() > 2);
+        symbols[0].pop().unwrap();
+        symbols.last_mut().unwrap().push(0);
+        let altered = SealedCapsule {
+            object_id: oid,
+            descriptor,
+            symbols,
+        };
+        let damaged = encode_container(&altered);
+        assert_eq!(damaged.len(), original.len());
+        assert_eq!(decode_container(&damaged).unwrap().1, altered.symbols);
+        std::fs::write(&path, &damaged).unwrap();
+        let coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        let recovered = coordinator
+            .read_capsule(&cx, oid, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(recovered, plaintext());
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+        let summary = coordinator
+            .scrub_capsules(&cx, CommitSeq::FIRST, None, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(summary.repaired, [oid]);
+        assert!(summary.lost.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    });
+}
+
 /// ONE PAST THE BUDGET FAILS CLOSED. Never partial bytes, never wrong bytes.
 ///
 /// This is the law the whole erasure design exists to make true, and the one whose
