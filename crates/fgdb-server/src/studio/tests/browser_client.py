@@ -49,6 +49,11 @@ def mount(page):
         if (fixture.mode === '403') return new Response('<html>Forbidden</html>', {status:403});
         if (fixture.mode === '401-oversize') return new Response('denied', {status:401,headers:{'content-length':'9000000'}});
         if (fixture.mode === 'network') throw new TypeError('Fixture connection lost');
+        if (fixture.mode === 'components') {
+          const vertex = id => ({type:'vertex',value:id});
+          return new Response(JSON.stringify({v:1,seq:'18446744073709551615',columns:['vertex','component'],
+            rows:[[vertex('340282366920938463463374607431768211455'),vertex('22')],[vertex('123'),vertex('22')]]}));
+        }
         if (fixture.mode === 'scores') return new Response(JSON.stringify({v:1,seq:'18446744073709551615',columns:['vertex','score'],rows:[[{type:'vertex',value:'340282366920938463463374607431768211455'},{type:'float',value:'0.125'}]]}));
         if (fixture.mode === 'empty') return new Response(JSON.stringify({v:1,columns:['x'],rows:[],seq:13}));
         if (fixture.mode === 'width') return new Response(JSON.stringify({v:1,columns:['x'],rows:[[]],seq:13}));
@@ -304,6 +309,26 @@ class ClientState(unittest.TestCase):
         self.assertEqual(self.page.locator('#result-table th').count(),2)
         self.page.click('#clear-baseline')
         self.assertTrue(self.page.locator('#analysis-toggle').is_disabled())
+
+    def test_component_overlay_focus_uses_exact_ids_without_scanning(self):
+        self.connect()
+        self.page.click('#pin-baseline')
+        self.execute('components')
+        requests = self.page.evaluate('fixture.requests.length')
+        self.page.click('#analysis-toggle')
+        self.assertIn('Mapped components: 1', self.page.locator('#comparison-banner').inner_text())
+        self.assertIn('Assigned vertices outside the pinned topology: 1', self.page.locator('#graph-notice').inner_text())
+        self.page.get_by_label('Focus component').select_option('22')
+        self.assertEqual(self.page.locator('#metric-nodes').inner_text(), '1')
+        self.page.locator('.node-option').click()
+        self.assertIn('Component representative', self.page.locator('#inspector').inner_text())
+        self.assertIn('22', self.page.locator('#inspector').inner_text())
+        self.page.click('#tab-table')
+        self.assertEqual(self.page.locator('#result-table tbody tr').count(), 2)
+        self.assertEqual(self.page.evaluate('fixture.requests.length'), requests)
+        self.page.click('#clear-baseline')
+        self.assertTrue(self.page.locator('#analysis-toggle').is_disabled())
+        self.assertTrue(self.page.get_by_label('Focus component').is_hidden())
 
     def test_canvas_drag_pins_selected_node_and_keyboard_unpins(self):
         self.page.wait_for_function("fixture.physics.some(p=>p.engine==='wasm'&&p.done)",timeout=30000)

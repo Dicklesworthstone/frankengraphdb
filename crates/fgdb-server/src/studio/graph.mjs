@@ -5,6 +5,11 @@ const clip = (text, n = 26) => String(text).length > n ? String(text).slice(0, n
 const pointOn = (g, t) => ({ x:(1-t)**2*g.a.x+2*(1-t)*t*g.c.x+t*t*g.b.x, y:(1-t)**2*g.a.y+2*(1-t)*t*g.c.y+t*t*g.b.y });
 const segmentDistance = (p,a,b) => { const dx=b.x-a.x,dy=b.y-a.y,t=Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1))); return Math.hypot(p.x-a.x-t*dx,p.y-a.y-t*dy); };
 
+function nodeColor(node) {
+  if (node.component !== undefined) return node.component?.color ?? '#9298a5';
+  return PALETTE[colorIndex(node.group)];
+}
+
 export class GraphCanvas {
   constructor(canvas, minimap, { onSelect = () => {}, onBusy = () => {}, onError = () => {}, onTick = () => {} } = {}) {
     Object.assign(this, { canvas, minimap, onSelect, onBusy, onError, onTick });
@@ -141,7 +146,7 @@ export class GraphCanvas {
       const p=this.points.get(n.id);if(!p)continue;const selected=this.selection?.kind==='node'&&this.selection.id===n.id,hover=this.hover?.kind==='node'&&this.hover.id===n.id;
       const match=!this.matches||this.matches.has(n.id),connected=neighbors.has(n.id),onPath=highlighted.has(n.id);
       c.globalAlpha=!match||this.focus&&focusId&&!connected?0.16:1;
-      const color=n.change==='added'?'#68e6af':n.change==='removed'?'#fb8499':n.change==='changed'?'#f5c679':PALETTE[colorIndex(n.group)],r=this.radius(n);
+      const color=n.change==='added'?'#68e6af':n.change==='removed'?'#fb8499':n.change==='changed'?'#f5c679':nodeColor(n),r=this.radius(n);
       if(selected||hover||connected||onPath){c.fillStyle=color+'12';c.beginPath();c.arc(p.x,p.y,r+11,0,TAU);c.fill();c.strokeStyle=color+(selected?'bb':'44');c.lineWidth=1/this.view.k;c.beginPath();c.arc(p.x,p.y,r+6,0,TAU);c.stroke();}
       if(n.degree>4||selected){const glow=c.createRadialGradient(p.x,p.y,0,p.x,p.y,r*2.7);glow.addColorStop(0,color+'28');glow.addColorStop(1,color+'00');c.fillStyle=glow;c.fillRect(p.x-r*3,p.y-r*3,r*6,r*6);}
       c.fillStyle=light?'#ffffff':'#10172a';c.strokeStyle=color;c.lineWidth=selected?2.5:1.5;c.setLineDash(n.change==='removed'?[3,2]:[]);c.beginPath();c.arc(p.x,p.y,r,0,TAU);c.fill();c.stroke();c.setLineDash([]);
@@ -170,7 +175,7 @@ export class GraphCanvas {
   caption(c,text,x,y,light,emphasis,color){const k=1/this.view.k;c.font=`${emphasis?600:450} ${(emphasis?12:11)*k}px system-ui`;c.textAlign='center';const w=c.measureText(text).width;c.fillStyle=light?'#f7f9ffed':'#0b1120ed';c.beginPath();c.roundRect(x-w/2-5*k,y-12*k,w+10*k,18*k,4*k);c.fill();if(emphasis){c.strokeStyle=color+'66';c.lineWidth=k;c.stroke();}c.fillStyle=emphasis?(light?'#233048':'#f0f4ff'):(light?'#47556d':'#9aa9c3');c.fillText(text,x,y);}
   drawMinimap(light){if(!this.minimap)return;const c=this.minimap.getContext('2d');this.minimap.width=320;this.minimap.height=192;c.scale(2,2);c.fillStyle=light?'#edf1f9':'#0d1422';c.fillRect(0,0,160,96);const p=this.graph.nodes.map(n=>this.points.get(n.id)).filter(Boolean);if(!p.length)return;
     const l=Math.min(...p.map(p=>p.x))-35,r=Math.max(...p.map(p=>p.x))+35,t=Math.min(...p.map(p=>p.y))-35,b=Math.max(...p.map(p=>p.y))+35,k=Math.min(140/(r-l),75/(b-t)),x=80-(l+r)*k/2,y=48-(t+b)*k/2;this.miniTransform={k,x,y};
-    for(const n of this.graph.nodes){const p=this.points.get(n.id);if(!p)continue;c.fillStyle=PALETTE[colorIndex(n.group)];c.globalAlpha=.7;c.beginPath();c.arc(x+p.x*k,y+p.y*k,1.6,0,TAU);c.fill();}c.globalAlpha=1;c.strokeStyle=light?'#7893c8':'#708ad299';c.fillStyle='#8ba8f40a';const vx=x-this.view.x/this.view.k*k,vy=y-this.view.y/this.view.k*k,w=this.width/this.view.k*k,h=this.height/this.view.k*k;c.fillRect(vx,vy,w,h);c.strokeRect(vx,vy,w,h);
+    for(const n of this.graph.nodes){const p=this.points.get(n.id);if(!p)continue;c.fillStyle=nodeColor(n);c.globalAlpha=.7;c.beginPath();c.arc(x+p.x*k,y+p.y*k,1.6,0,TAU);c.fill();}c.globalAlpha=1;c.strokeStyle=light?'#7893c8':'#708ad299';c.fillStyle='#8ba8f40a';const vx=x-this.view.x/this.view.k*k,vy=y-this.view.y/this.view.k*k,w=this.width/this.view.k*k,h=this.height/this.view.k*k;c.fillRect(vx,vy,w,h);c.strokeRect(vx,vy,w,h);
   }
   image(){return new Promise(resolve=>this.canvas.toBlob(resolve,'image/png'));}
   destroy(){this.stop();this.worker?.terminate();this.observer.disconnect();if(this.frame!==null)cancelAnimationFrame(this.frame);}

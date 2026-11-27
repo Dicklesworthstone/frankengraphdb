@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sequence,temporalQuery,compareResults,tracePath,scoreOverlay,RECIPES,capabilityOrigin } from '../experience.mjs';
+import { sequence,temporalQuery,compareResults,tracePath,scoreOverlay,analyticsOverlay,componentOverlay,focusComponent,RECIPES,capabilityOrigin } from '../experience.mjs';
 import { atlasResult } from '../demo.mjs';
 import { extractGraph,LIMITS } from '../model.mjs';
 const c=(type,value)=>({type,value});
@@ -61,6 +61,42 @@ test('query lenses are explicit read templates and sample generation is bounded'
 test('capabilities are admitted only to HTTPS or explicit HTTP loopback origins',()=>{
  for(const origin of ['https://graph.example','http://127.0.0.1:8080','http://localhost:8000','http://[::1]:8080'])assert.equal(capabilityOrigin(origin),true);
  for(const origin of ['http://graph.example','http://127.0.0.1.evil.example','ftp://localhost','file:///studio/','null',''])assert.equal(capabilityOrigin(origin),false);
+});
+
+test('component overlays preserve native representatives, pinned topology and exact ids', () => {
+  const a = '340282366920938463463374607431768211454', b = '340282366920938463463374607431768211455';
+  const edge = (src, id, dst) => [c('vertex', src), c('edge', id), c('vertex', dst)];
+  const topology = { v:1, seq:7, columns:['source','relationship','target'], rows:[edge(a,'100','9'), edge('9','101',b), edge(b,'102','33')] };
+  const assign = (vertex, component) => [c('vertex', vertex), c('vertex', component)];
+  const result = { v:1, seq:'7', columns:['vertex','component'], rows:[assign(a,a), assign('9',a), assign(b,b), assign('77',b), assign(b,b)] };
+  const original = JSON.stringify([topology,result]);
+  const graph = componentOverlay(topology, result);
+  assert.equal(graph.nodes.length, 4);
+  assert.equal(graph.edges.length, 3);
+  assert.equal(graph.analytics.matched, 3);
+  assert.equal(graph.analytics.unmatched, 1);
+  assert.deepEqual(graph.analytics.groups.map(g => [g.id, g.count]), [[a,2], [b,1]]);
+  assert.notEqual(graph.analytics.groups[0].color, graph.analytics.groups[1].color);
+  assert.equal(graph.nodes.find(n => n.id === '33').component, null);
+  assert.deepEqual(focusComponent(graph, a).edges.map(e => e.id), ['100']);
+  assert.deepEqual(focusComponent(graph, b).nodes.map(n => n.id), [b]);
+  assert.equal(focusComponent(graph, ''), graph);
+  assert.equal(JSON.stringify([topology,result]), original);
+  assert.throws(() => componentOverlay(topology, {...result, seq:8}), /same exact snapshot/);
+  assert.throws(() => componentOverlay(topology, {...result, rows:[...result.rows, assign(a,b)]}), /conflicting/);
+  assert.throws(() => componentOverlay(topology, {...result, rows:[[c('vertex',a),c('int',b)]]}), /typed vertices/);
+  assert.throws(() => componentOverlay(topology, {...result, rows:[assign(a,'340282366920938463463374607431768211456')]}), /identity/);
+});
+
+test('additional result columns preserve compatible score and component overlays', () => {
+  const topology = node('1');
+  const result = { v:1, seq:topology.seq, columns:['vertex','score','component'],
+    rows:[[c('vertex','1'),c('float','0.125'),c('text','unrelated')]] };
+  assert.equal(analyticsOverlay(topology, result).analytics.field, 'score');
+  result.rows[0][2] = c('vertex','2');
+  assert.equal(analyticsOverlay(topology, result).analytics.field, 'score');
+  result.rows[0][1] = c('int','12');
+  assert.equal(analyticsOverlay(topology, result).analytics.field, 'component');
 });
 
 test('reordering rows across the canvas boundary cannot create snapshot changes', () => {

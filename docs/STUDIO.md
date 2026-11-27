@@ -272,12 +272,20 @@ will be admitted for every database or capability.
 
 For a PageRank overlay, first pin an exploration result containing topology.
 Run native PageRank and return a `vertex`, `id`, or `node` identity column plus a
-finite float `score` or `rank` column. When the reported sequences match, Score
+finite float `score` or `rank` column. When the reported sequences match, Analytics
 overlay sizes those already-observed vertices by their returned score. Exact
 score text remains in the inspector and raw result; normalization is visual only.
 Unmatched scored vertices are counted, not invented as new topology. Matching
 sequences and connection ownership are prerequisites, not a signed source or
 plan-certificate check. Re-pin topology when the database has advanced.
+
+For a component overlay, pin a topology result, then run **Find connected
+components**. Turn on **Analytics overlay** to color pinned vertices by their
+returned component representative. Use **Focus component** to isolate the pinned
+members and edges of one component. The inspector shows the full representative
+vertex ID even when it lies outside the pinned sample. Gray vertices have no
+returned assignment. Colors repeat after eight components, so the selector uses
+exact IDs and mapped counts. Table, JSON and CSV keep the original procedure rows.
 
 The inspector's Start trace / Trace here action follows only the returned
 subgraph. It honors known stored direction and treats direction-unknown path

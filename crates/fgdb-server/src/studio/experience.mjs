@@ -1,5 +1,5 @@
 // Result exploration only. Native parsing, snapshots and authorization stay on the server.
-import { graphQuery, extractGraph, LIMITS } from './model.mjs';
+import { graphQuery, extractGraph, LIMITS, PALETTE } from './model.mjs';
 export function capabilityOrigin(origin){
   try{const url=new URL(origin);return url.protocol==='https:'||(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname));}catch{return false;}
 }
@@ -18,7 +18,7 @@ export const RECIPES=Object.freeze([
   {id:'nodes',title:'Inspect vertices',family:'GQL',description:'Include isolated vertices; inspect exact identities.',query:()=>graphQuery({kind:'nodes'})},
   {id:'temporal',title:'Travel to a snapshot',family:'Chronicle',description:'Generate a native FOR SYSTEM_TIME query at an exact sequence.',query:()=>temporalQuery('1')},
   {id:'rank',title:'Find influential vertices',family:'Prism',description:'Run the native PageRank procedure. Server policy and projection admission apply.',query:()=> 'CALL fnx.pagerank(0.85,1000,1e-12,true)\nYIELD score AS rank,vertex AS id'},
-  {id:'components',title:'Find connected components',family:'Prism',description:'Native graph analysis, not a layout-derived cluster guess.',query:()=> 'CALL fnx.connected_components()\nYIELD vertex,component'},
+  {id:'components',title:'Find connected components',family:'Prism',description:'Native graph analysis, not a layout-derived cluster guess.',query:()=> 'CALL fnx.connected_components(direction => \'undirected\')\nYIELD vertex, component\nRETURN vertex, component'},
   {id:'retrieve',title:'Retrieve a graph neighborhood',family:'Beacon',description:'Demand-driven graph retrieval with native candidate and work admission. Replace $source with a known ID.',query:()=> "CALL hybrid.search(seeds => [$source], max_hops => 2,\n     graph_access => 'demand', candidates => 50, k => 20)\nYIELD node, graph_hops, graph_rank\nRETURN node, graph_hops, graph_rank",parameters:'{"source":1}'}
 ]);
 function canonical(value){if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+canonical(value[key])).join(',')+'}';return JSON.stringify(value);}
@@ -88,10 +88,16 @@ export function tracePath(graph,start,end,{directed=true}={}){
   return {nodes:nodes.reverse(),edges:edges.reverse()};
 }
 
-// Overlay native PageRank/score rows on a separately retained topology result.
 // Sequence equality is necessary, not a signed certificate or proof of completeness.
+function requireSameSnapshot(topology, result) {
+  if (topology.seq === undefined || result.seq === undefined || sequence(topology.seq) !== sequence(result.seq)) {
+    throw new Error('An analytics overlay requires the same exact snapshot as the pinned topology.');
+  }
+}
+
+// Overlay native PageRank/score rows on a separately retained topology result.
 export function scoreOverlay(topology,result){
-  if(topology.seq===undefined||result.seq===undefined||sequence(topology.seq)!==sequence(result.seq))throw new Error('An analytics overlay requires the same exact snapshot as the pinned topology.');
+  requireSameSnapshot(topology, result);
   const identity=result.columns.findIndex(name=>['vertex','id','node'].includes(name));
   const score=result.columns.findIndex(name=>['score','rank'].includes(name));
   if(identity<0||score<0)throw new Error('Return a vertex/id/node column and a float score/rank column.');
@@ -102,4 +108,58 @@ export function scoreOverlay(topology,result){
   const scores=[...values.values()].map(v=>v.number),min=Math.min(...scores),max=Math.max(...scores);let matched=0;
   const nodes=graph.nodes.map(n=>{const value=values.get(n.id);if(!value)return{...n,analysis:null};matched++;const normalized=max===min?.5:(value.number/Math.max(1,Math.abs(min),Math.abs(max))-min/Math.max(1,Math.abs(min),Math.abs(max)))/(max/Math.max(1,Math.abs(min),Math.abs(max))-min/Math.max(1,Math.abs(min),Math.abs(max)));return{...n,analysis:{...value,normalized}};});
   return {...graph,nodes,analytics:{field:result.columns[score],matched,unmatched:values.size-matched},warnings:[...graph.warnings,`${matched} returned scores mapped to pinned topology; ${values.size-matched} scored vertices are outside that topology sample.`]};
+}
+
+/** Map the native representative vertex for each member onto an observed topology. */
+export function componentOverlay(topology, result) {
+  requireSameSnapshot(topology, result);
+  const member = result.columns.findIndex(name => ['vertex', 'id', 'node'].includes(name));
+  const representative = result.columns.indexOf('component');
+  if (member < 0 || representative < 0) throw new Error('Return a vertex and component column.');
+  const graph = extractGraph(topology);
+  extractGraph(result); // Checks result bounds and the entire u128 identity domain.
+  const memberships = new Map();
+  for (const row of result.rows) {
+    const vertex = row[member], component = row[representative];
+    if (vertex.type !== 'vertex' || component.type !== 'vertex') {
+      throw new Error('Both the member and the component representative must be typed vertices.');
+    }
+    if (memberships.has(vertex.value) && memberships.get(vertex.value) !== component.value) {
+      throw new Error('A vertex has conflicting component assignments.');
+    }
+    memberships.set(vertex.value, component.value);
+  }
+
+  const counts = new Map();
+  let matched = 0;
+  for (const node of graph.nodes) {
+    const id = memberships.get(node.id);
+    if (id !== undefined) {
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+      matched++;
+    }
+  }
+  // Numeric ordering of canonical unsigned decimal strings, without Number coercion.
+  const ids = [...counts.keys()].sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
+  const groups = ids.map((id, index) => ({ id, count: counts.get(id), color: PALETTE[index % PALETTE.length] }));
+  const byId = new Map(groups.map(group => [group.id, group]));
+  const nodes = graph.nodes.map(node => ({ ...node, component: byId.get(memberships.get(node.id)) ?? null }));
+  const unmatched = memberships.size - matched;
+  const warnings = [...graph.warnings, `Assigned vertices outside the pinned topology: ${unmatched}. Pinned vertices without a returned assignment: ${nodes.length - matched}.`];
+  return { ...graph, nodes, warnings, analytics: { field: 'component', matched, unmatched, groups } };
+}
+
+export function focusComponent(graph, component) {
+  if (!component) return graph;
+  const nodes = graph.nodes.filter(node => node.component?.id === component);
+  const ids = new Set(nodes.map(node => node.id));
+  const edges = graph.edges.filter(edge => ids.has(edge.source) && ids.has(edge.target));
+  return { ...graph, nodes, edges };
+}
+
+export function analyticsOverlay(topology, result) {
+  const score = result.columns.findIndex(name => ['score', 'rank'].includes(name));
+  const hasScores = score >= 0 && result.rows.every(row => row[score]?.type === 'float');
+  if (hasScores || !result.columns.includes('component')) return scoreOverlay(topology, result);
+  return componentOverlay(topology, result);
 }
