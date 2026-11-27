@@ -166,6 +166,10 @@ CORE_GATE_ROSTER=(
 )
 
 STUDIO_NODE_TESTS=(
+  crates/fgdb-server/src/studio/tests/compact-topology.test.mjs
+  crates/fgdb-server/src/studio/tests/difference.test.mjs
+  crates/fgdb-server/src/studio/tests/projection-records.test.mjs
+  crates/fgdb-server/src/studio/tests/viewport.test.mjs
   crates/fgdb-server/src/studio/tests/experience.test.mjs
   crates/fgdb-server/src/studio/tests/flow.test.mjs
   crates/fgdb-server/src/studio/tests/force.test.mjs
@@ -444,6 +448,10 @@ coverage_of() {
     *.sh|*.bash)                         echo "bash -n + shellcheck (next step)" ;;
     crates/fgdb-bench/examples/real_graph_gauntlet.py)
       echo "real_graph_gauntlet --self-test (dataset normalization, scalar oracle and wrong-answer controls)" ;;
+    crates/fgdb-server/src/studio/tests/compact-topology.test.mjs|\
+    crates/fgdb-server/src/studio/tests/difference.test.mjs|\
+    crates/fgdb-server/src/studio/tests/projection-records.test.mjs|\
+    crates/fgdb-server/src/studio/tests/viewport.test.mjs|\
     crates/fgdb-server/src/studio/tests/experience.test.mjs|\
     crates/fgdb-server/src/studio/tests/flow.test.mjs|\
     crates/fgdb-server/src/studio/tests/force.test.mjs|\
