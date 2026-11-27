@@ -1,26 +1,44 @@
 //! Exact vertex-history admission without retaining the property history.
 //!
-//! The ordinary validator still owns every publication-order lifecycle law.
-//! Its rows omit only labels and properties, whose exact equality is checked
-//! against the first authenticated statement instead. The birth locator is
-//! never a digest-only substitute for those values: a restatement refaults
-//! and decodes the original patch through the same keyed root-reference check.
+//! One ordered entry per version binds the first authenticated patch row to
+//! the latest admitted retirement. Ordinary lifecycle checks use its scalars.
+//! A restatement refaults the original row to compare labels and properties.
 
 use super::*;
 
 // The initial tree nodes and their unused slots must fit even for one entry;
 // amortized per-version accounting alone would miss that minimum allocation.
 const INITIAL_TREE_BYTES: usize = 4096;
+// One (VId, CommitSeq) key and a fixed-size locator per version. The
+// allowance also covers internal nodes and spare slots after a tree split.
+const VERTEX_HISTORY_ENTRY_BYTES: usize = 256;
+
+struct VertexStatement {
+    patch: usize,
+    row: usize,
+    birth_ordinal: u64,
+    retired_at: Option<CommitSeq>,
+}
+
+impl VertexStatement {
+    fn lifecycle(&self, (vid, created_at): (VId, CommitSeq)) -> VertexRow {
+        VertexRow {
+            vid,
+            birth_ordinal: self.birth_ordinal,
+            created_at,
+            retired_at: self.retired_at,
+            labels: Vec::new(),
+            props: Vec::new(),
+        }
+    }
+}
 
 pub(super) struct VertexAdmission<'a, V: Vfs> {
-    births: BTreeMap<(VId, CommitSeq), (usize, usize)>,
-    lifecycle: crate::root::VertexHistoryValidator,
+    statements: BTreeMap<(VId, CommitSeq), VertexStatement>,
     store: &'a BlockStore<V>,
     root: &'a PartitionRoot,
     pool: MemoryPool,
-    // Both maps drop before their reservation. The initial node allowance
-    // plus 512 bytes per version covers their fixed-size entries, tree nodes
-    // and spare slots; neither map owns a label vector or property payload.
+    // The statement map drops before its reservation.
     _metadata: MemoryCharge,
 }
 
@@ -40,8 +58,7 @@ impl<'a, V: Vfs + Clone> VertexAdmission<'a, V> {
             },
         )?;
         Ok(Self {
-            births: BTreeMap::new(),
-            lifecycle: crate::root::VertexHistoryValidator::default(),
+            statements: BTreeMap::new(),
             store,
             root,
             pool,
@@ -64,8 +81,20 @@ impl<'a, V: Vfs + Clone> VertexAdmission<'a, V> {
             cx.buffered_checkpoint()
                 .map_err(BufferedReadError::Interrupted)?;
             let key = (row.vid, row.created_at);
-            let birth = self.births.get(&key).copied();
-            if let Some((birth_at, birth_row)) = birth {
+            let incoming = VertexStatement {
+                patch: patch_at,
+                row: row_at,
+                birth_ordinal: row.birth_ordinal,
+                retired_at: row.retired_at,
+            };
+            let lifecycle_error = |error| match error {
+                crate::root::RootError::VertexIdentityMismatch { vid, .. } => {
+                    BufferedReadError::VertexHistoryConflict { vid }
+                }
+                error => StoreError::MalformedRoot(error).into(),
+            };
+            if let Some(existing) = self.statements.get_mut(&key) {
+                let birth_at = existing.patch;
                 if birth_patch
                     .as_ref()
                     .is_none_or(|(cached_at, _)| *cached_at != birth_at)
@@ -88,37 +117,27 @@ impl<'a, V: Vfs + Clone> VertexAdmission<'a, V> {
                 }
                 let original = birth_patch
                     .as_ref()
-                    .and_then(|(_, image)| image.get(birth_row))
+                    .and_then(|(_, image)| image.get(existing.row))
                     .filter(|original| (original.vid, original.created_at) == key)
                     .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
                 if original.labels != row.labels || original.props != row.props {
                     return Err(BufferedReadError::VertexHistoryConflict { vid: row.vid });
                 }
+                crate::root::validate_vertex_restatement(
+                    &existing.lifecycle(key),
+                    &incoming.lifecycle(key),
+                )
+                .map_err(lifecycle_error)?;
+                existing.retired_at = row.retired_at;
             } else {
-                // A restatement adds no map entry. Unique versions reserve
-                // both maps before either BTreeMap can allocate a node.
-                self._metadata.grow(cx, HISTORY_ENTRY_BYTES)?;
-            }
-
-            let statement = VertexRow {
-                vid: row.vid,
-                birth_ordinal: row.birth_ordinal,
-                created_at: row.created_at,
-                retired_at: row.retired_at,
-                labels: Vec::new(),
-                props: Vec::new(),
-            };
-            self.lifecycle
-                .observe_patch(patch_at, core::slice::from_ref(&statement))
-                .map_err(|error| match error {
-                    crate::root::RootError::VertexIdentityMismatch { vid, conflict } => {
-                        drop(conflict);
-                        BufferedReadError::VertexHistoryConflict { vid }
-                    }
-                    error => StoreError::MalformedRoot(error).into(),
-                })?;
-            if birth.is_none() {
-                self.births.insert(key, (patch_at, row_at));
+                self._metadata.grow(cx, VERTEX_HISTORY_ENTRY_BYTES)?;
+                crate::root::validate_vertex_neighbors(
+                    &self.statements,
+                    &incoming.lifecycle(key),
+                    |key, statement| statement.lifecycle(key),
+                )
+                .map_err(lifecycle_error)?;
+                self.statements.insert(key, incoming);
             }
         }
         Ok(())
@@ -216,7 +235,7 @@ mod tests {
                         .await
                         .unwrap();
                 }
-                assert_eq!(pool.used(), INITIAL_TREE_BYTES + HISTORY_ENTRY_BYTES);
+                assert_eq!(pool.used(), INITIAL_TREE_BYTES + VERTEX_HISTORY_ENTRY_BYTES);
                 {
                     let _incoming = pool.reserve(&query, OBJECT_WORKSPACE_BYTES).unwrap();
                     let rows = store.get_patch(&query, later_id).await.unwrap();
@@ -243,7 +262,7 @@ mod tests {
                     assert_eq!(events, fail_at + 1);
                     assert_eq!(
                         pool.used(),
-                        OBJECT_WORKSPACE_BYTES + INITIAL_TREE_BYTES + HISTORY_ENTRY_BYTES
+                        OBJECT_WORKSPACE_BYTES + INITIAL_TREE_BYTES + VERTEX_HISTORY_ENTRY_BYTES
                     );
                 }
                 drop(history);
@@ -253,7 +272,7 @@ mod tests {
             // An incoming image may fit while the exact-comparison image does
             // not. Refuse before issuing its first object-read event.
             let pool = MemoryPool::new(
-                2 * OBJECT_WORKSPACE_BYTES + INITIAL_TREE_BYTES + HISTORY_ENTRY_BYTES - 1,
+                2 * OBJECT_WORKSPACE_BYTES + INITIAL_TREE_BYTES + VERTEX_HISTORY_ENTRY_BYTES - 1,
                 0,
             )
             .unwrap();
@@ -312,7 +331,7 @@ mod tests {
                 ));
                 assert_eq!(
                     pool.used(),
-                    OBJECT_WORKSPACE_BYTES + INITIAL_TREE_BYTES + HISTORY_ENTRY_BYTES
+                    OBJECT_WORKSPACE_BYTES + INITIAL_TREE_BYTES + VERTEX_HISTORY_ENTRY_BYTES
                 );
             }
             drop(history);

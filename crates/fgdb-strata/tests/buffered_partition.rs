@@ -2540,6 +2540,29 @@ fn cold_edge_and_vertex_history_reuse_the_same_admission_budget() {
             ))
         ));
         assert_eq!(small.used(), 0);
+
+        // With only vertex patches, a single locator/lifecycle entry per
+        // version fits between the old two-map bound and the object workspace.
+        root.blocks.clear();
+        let vertices = store.put_root(&commit, &root).await.unwrap();
+        let pool = MemoryPool::new(1_270_000, 0).unwrap();
+        let view = store
+            .open_buffered_root(&query, vertices, pool.clone(), read)
+            .await
+            .unwrap();
+        assert_eq!(view.root(), &root);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        let small = MemoryPool::new(1_190_000, 0).unwrap();
+        assert!(matches!(
+            store
+                .open_buffered_root(&query, vertices, small.clone(), read)
+                .await,
+            Err(BufferedReadError::Memory(
+                MemoryError::ResourceExhausted { .. }
+            ))
+        ));
+        assert_eq!(small.used(), 0);
     });
 }
 

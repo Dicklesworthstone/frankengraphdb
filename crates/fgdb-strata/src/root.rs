@@ -2829,23 +2829,23 @@ pub(crate) fn validate_vertex_successor(
 }
 
 /// A new statement must join both adjacent versions of the same identity.
-fn validate_vertex_neighbors<'a, T>(
+pub(crate) fn validate_vertex_neighbors<'a, T, R: Borrow<crate::vertex::VertexRow>>(
     history: &'a std::collections::BTreeMap<(VId, CommitSeq), T>,
     row: &crate::vertex::VertexRow,
-    resolve: impl Fn(&'a T) -> &'a crate::vertex::VertexRow,
+    resolve: impl Fn((VId, CommitSeq), &'a T) -> R,
 ) -> Result<(), RootError> {
     let key = (row.vid, row.created_at);
-    if let Some(((vid, _), previous)) = history.range(..key).next_back()
-        && *vid == row.vid
+    if let Some((&previous_key, previous)) = history.range(..key).next_back()
+        && previous_key.0 == row.vid
     {
-        validate_vertex_successor(resolve(previous), row)?;
+        validate_vertex_successor(resolve(previous_key, previous).borrow(), row)?;
     }
-    if let Some(((vid, _), next)) = history
+    if let Some((&next_key, next)) = history
         .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
         .next()
-        && *vid == row.vid
+        && next_key.0 == row.vid
     {
-        validate_vertex_successor(row, resolve(next))?;
+        validate_vertex_successor(row, resolve(next_key, next).borrow())?;
     }
     Ok(())
 }
@@ -2862,7 +2862,7 @@ pub(crate) fn admit_retained_vertex_statement<'a, T>(
     if let Some(existing) = history.get(&key) {
         validate_vertex_restatement(resolve(existing), row)?;
     } else {
-        validate_vertex_neighbors(history, row, |entry| resolve(entry))?;
+        validate_vertex_neighbors(history, row, |_, entry| resolve(entry))?;
     }
     history.insert(key, source);
     Ok(())
@@ -2943,7 +2943,7 @@ impl VertexHistoryValidator {
                 }
             }
         } else {
-            validate_vertex_neighbors(&self.rows, row, AdmittedVertexRow::row)?;
+            validate_vertex_neighbors(&self.rows, row, |_, source| source.row())?;
             self.rows.insert(key, retain());
         }
         Ok(())
