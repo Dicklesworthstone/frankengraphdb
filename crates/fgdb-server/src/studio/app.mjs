@@ -1,7 +1,7 @@
 import { colorIndex, graphQuery, queryBody, parseResponse, boundedText, extractGraph, filterGraph, cellText, csv } from './model.mjs';
 import { demoResult, atlasResult } from './demo.mjs';
 import { GraphCanvas } from './graph.mjs';
-import { RECIPES, temporalQuery, compareResults, compareProperties, tracePath, analyticsOverlay, focusComponent, capabilityOrigin } from './experience.mjs';
+import { RECIPES, temporalQuery, compareResults, compareProperties, differenceBody, inspectDifference, tracePath, analyticsOverlay, focusComponent, capabilityOrigin } from './experience.mjs';
 
 const $=id=>document.getElementById(id);
 const paths={graph:'M5 5l14 7L5 19V5Zm-2 0a2 2 0 1 0 4 0 2 2 0 1 0-4 0m14 7a2 2 0 1 0 4 0 2 2 0 1 0-4 0M3 19a2 2 0 1 0 4 0 2 2 0 1 0-4 0',layers:'m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5',clock:'M3 12a9 9 0 1 0 18 0 9 9 0 1 0-18 0m9-5v5l3 2',code:'m8 6-6 6 6 6m8-12 6 6-6 6m-3-14-2 16',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z',shield:'m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6',sun:'M8 12a4 4 0 1 0 8 0 4 4 0 1 0-8 0M12 1v2m0 18v2M1 12h2m18 0h2M4 4l2 2m12 12 2 2M4 20l2-2M18 6l2-2',moon:'M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10Z',help:'M3 12a9 9 0 1 0 18 0 9 9 0 1 0-18 0m6-3a3 3 0 0 1 6 0c0 2-3 2-3 4m0 3h.01',search:'M3 10a7 7 0 1 0 14 0 7 7 0 1 0-14 0m12 5 6 6',chevron:'m7 10 5 5 5-5',download:'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',table:'M3 4h18v16H3V4Zm0 5h18M3 14h18M9 4v16',type:'M4 5h16M12 5v15m-4 0h8M4 5v3m16-3v3',panel:'M3 4h18v16H3V4Zm12 0v16',plus:'M12 5v14M5 12h14',minus:'M5 12h14',fit:'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 8h8v8H8V8Z',play:'m8 4 12 8-12 8V4Z',close:'m6 6 12 12M6 18 18 6',terminal:'m5 6 6 6-6 6m9 0h5',database:'M3 6c0-4 18-4 18 0s-18 4-18 0Zm0 0v12c0 4 18 4 18 0V6M3 12c0 4 18 4 18 0',pin:'m8 3 8 0-1 6 4 5H5l4-5-1-6Zm4 11v8',menu:'M4 6h16M4 12h16M4 18h16',link:'m9 15 6-6M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 10a4 4 0 0 0 6 0l4-4a4 4 0 0 0-6-6l-1 1',sliders:'M5 3v18M12 3v18M19 3v18M2 8h6m1 8h6m1-10h6',arrow:'M4 12h16m-6-6 6 6-6 6',node:'M8 12a4 4 0 1 0 8 0 4 4 0 1 0-8 0M12 2v3m0 14v3M2 12h3m14 0h3'};
@@ -14,6 +14,7 @@ let toastTimer;function toast(text){$('toast').textContent=text;$('toast').hidde
 let session=null,connecting=false,sample=true,sampleKind='atlas',sampleCut=104,current=null,baseline=null,comparison=false,analysis=false;
 let graph={nodes:[],edges:[],warnings:[]},shown=graph,selection=null,traceStart=null;
 let hiddenLabels=new Set(),schema={labels:[],relations:[],properties:[]},history=[],page='explore',view='graph',tablePage=0,tableSort=null,sortAscending=true;
+let difference = null, differencePage = 0, differenceTicket = null;
 let comparisonResult=null,analysisResult=null,componentFocus='';
 function analyticsView() {
   if (analysisResult === null) {
@@ -49,12 +50,12 @@ $('parameters-toggle').onclick=()=>{const open=$('parameters-panel').hidden;$('p
 function loadRecipe(recipe){activeRecipe=recipe.id;$('query-editor').value=recipe.query();$('query-parameters').value=recipe.parameters||'{}';highlight();showPage('explore');renderRecipes();toast(recipe.description);}
 function renderRecipes(){$('recipe-list').replaceChildren(...RECIPES.map(recipe=>{const glyph={GQL:'graph',Chronicle:'clock',Prism:'spark',Beacon:'search'}[recipe.family],b=button(recipe.title,()=>loadRecipe(recipe),'recipe'+(activeRecipe===recipe.id?' active':''),glyph);b.title=recipe.description;b.append(el('small',recipe.family,'family'));return b;}));}
 function status(message,error=false){$('query-status').textContent=message;$('query-status').className=error?'error':'';}
-function busy(value){$('run-query').disabled=value;$('cancel-query').hidden=!value;$('run-label').textContent=value?'Running…':session?'Run query':'Connect to run';}
-function cancel(notify=true){requestId++;controller?.abort();controller=null;clearTimeout(timeout);timeout=null;connecting=false;$('connect-submit').disabled=false;busy(false);if(notify){status('Browser request cancelled. Server-side cancellation is not guaranteed.');toast('Cancelled in this browser.');}}
+function busy(value){$('difference-open').disabled=value||!session;$('run-query').disabled=value;$('cancel-query').hidden=!value;$('run-label').textContent=value?'Running…':session?'Run query':'Connect to run';}
+function cancel(notify=true){if(differenceTicket!==null){differenceTicket=null;$('difference-run').disabled=false;$('difference-status').textContent='Historical comparison interrupted.';}requestId++;controller?.abort();controller=null;clearTimeout(timeout);timeout=null;connecting=false;$('connect-submit').disabled=false;busy(false);if(notify){status('Browser request cancelled. Server-side cancellation is not guaranteed.');toast('Cancelled in this browser.');}}
 function finish(ticket){if(ticket!==requestId)return;clearTimeout(timeout);timeout=null;controller=null;busy(false);}
-function begin(){cancel(false);const ticket=requestId;controller=new AbortController();const signal=controller.signal;timeout=setTimeout(()=>{if(ticket===requestId){cancel(false);status('Browser request timed out after 30 seconds.',true);if($('connect-dialog').open){$('connection-error').hidden=false;$('connection-error').textContent='Connection timed out.';}}},30000);return{ticket,signal};}
+function begin(){cancel(false);const ticket=requestId;controller=new AbortController();const signal=controller.signal;timeout=setTimeout(()=>{if(ticket===requestId){cancel(false);status('Browser request timed out after 30 seconds.',true);if($('difference-dialog').open)$('difference-status').textContent='Comparison timed out after 30 seconds.';if($('connect-dialog').open){$('connection-error').hidden=false;$('connection-error').textContent='Connection timed out.';}}},30000);return{ticket,signal};}
 function clearCurrent(keepPositions=false){comparisonResult=null;analysisResult=null;componentFocus='';current=null;graph={nodes:[],edges:[],warnings:[]};selection=null;traceStart=null;hiddenLabels=new Set();tableSort=null;tablePage=0;renderer.pathNodes=null;renderer.pathEdges=null;renderer.focus=false;if(keepPositions){renderer.stop();renderer.setVisible(graph);}else renderer.setData(graph,{preserve:false});renderResult();}
-function clearSession(keepDraft=false){cancel(false);session=null;sample=false;baseline=null;comparison=false;analysis=false;history=[];schema={labels:[],relations:[],properties:[]};$('capability-token').value='';if(!keepDraft)$('query-parameters').value='{}';clearCurrent();renderHistory();renderSchema();updateConnection();}
+function clearSession(keepDraft=false){cancel(false);clearDifferenceDialog();if($('difference-dialog').open)$('difference-dialog').close();session=null;sample=false;baseline=null;comparison=false;analysis=false;history=[];schema={labels:[],relations:[],properties:[]};$('capability-token').value='';if(!keepDraft)$('query-parameters').value='{}';clearCurrent();renderHistory();renderSchema();updateConnection();}
 function updateConnection(){const name=sample?(sampleKind==='atlas'?'Research atlas':'Classic sample'):session?.name||'Local workspace';$('workspace-name').textContent=name;$('collection-name').textContent=name;$('canvas-name').textContent=name;$('source-name').textContent=name.toUpperCase();$('collection-note').textContent=sample?'Illustrative knowledge graph':session?'Capability-scoped connection':'Connect a local database';$('connection-label').textContent=session?.name||'Connect database';$('connection-dot').classList.toggle('live',Boolean(session));$('dataset-badge').textContent=sample?'SAMPLE DATA':session?'QUERY RESULT':'NOT CONNECTED';$('footer-status').textContent=sample?'Sample workspace · not connected':session?'Connected · same-origin API':'Not connected';$('disconnect-button').hidden=!session;busy(false);renderChronicle();}
 async function api(path,token,body,signal){const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:{Accept:'application/json',Authorization:`Bearer ${token}`,...(body===undefined?{}:{'Content-Type':'application/json'})},body,signal,credentials: 'omit',redirect: 'error',cache:'no-store',referrerPolicy:'no-referrer'});try{const raw=await boundedText(response);let data;try{data=parseResponse(raw);}catch(error){throw new Error(`Cannot read the server response: ${error.message}`);}if(!response.ok||data?.error)throw new Error(`${data?.error?.code||response.status}: ${data?.error?.message||'Request refused'}`);return{data,raw};}catch(error){error.status=response.status;throw error;}}
 function showConnection(){$('connection-origin').textContent=location.origin;$('connection-error').hidden=true;if(session)$('database-name').value=session.name;openDialog('connect-dialog');}
@@ -140,6 +141,111 @@ function renderInspector(){const root=$('inspector');root.replaceChildren();cons
   if(Object.keys(properties).length>60)root.append(el('p','60 properties shown. The JSON retains the complete result.','muted'));
   if(kind==='node'){const edges=shown.edges.filter(e=>e.source===item.id||e.target===item.id);root.append(el('div',`${edges.length} RETURNED CONNECTIONS`,'section-heading'));for(const edge of edges.slice(0,12)){const other=shown.nodes.find(n=>n.id===(edge.source===item.id?edge.target:edge.source));const b=button(`${edge.label||'Relationship'} · ${other?.title||''}`,()=>renderer.select({kind:'edge',id:edge.id}),'relation-option','arrow');root.append(b);}}else{root.append(el('p',`${item.source} → ${item.target}`,'identity'));}
 }
+
+function clearDifferenceOutput() {
+  difference = null;
+  differencePage = 0;
+  $('difference-status').textContent = '';
+  $('difference-page').textContent = '';
+  $('difference-table').replaceChildren();
+  $('difference-navigation').hidden = true;
+  $('difference-download').hidden = true;
+}
+
+function clearDifferenceDialog() {
+  clearDifferenceOutput();
+  $('difference-statement').textContent = '';
+  $('difference-before').value = '';
+  $('difference-after').value = '';
+}
+
+function renderDifferencePage() {
+  const { columns, changes } = difference.data;
+  const size = 25, pages = Math.ceil(changes.length / size);
+  const table = $('difference-table');
+  table.replaceChildren();
+  if (pages === 0) return;
+  const header = table.createTHead().insertRow();
+  for (const label of ['Net occurrences', ...columns]) {
+    const th = el('th', label);
+    th.scope = 'col';
+    header.append(th);
+  }
+  const body = table.createTBody();
+  for (const { weight, row } of changes.slice(differencePage * size, (differencePage + 1) * size)) {
+    const tr = body.insertRow(), removed = weight.startsWith('-');
+    const count = tr.insertCell();
+    count.className = removed ? 'diff-removed' : 'diff-added';
+    count.textContent = removed ? weight : '+' + weight;
+    for (const value of row) {
+      const td = tr.insertCell();
+      td.textContent = cellText(value);
+      td.title = value.type + ' · ' + td.textContent;
+    }
+  }
+  $('difference-navigation').hidden = pages < 2;
+  $('difference-prev').disabled = differencePage === 0;
+  $('difference-next').disabled = differencePage + 1 >= pages;
+  $('difference-page').textContent = `Page ${differencePage + 1} of ${pages}`;
+}
+
+$('difference-open').onclick = () => {
+  if (!session || controller) return;
+  clearDifferenceDialog();
+  $('difference-before').value = baseline?.data.seq ?? '';
+  $('difference-after').value = current?.data.seq ?? '';
+  $('difference-statement').textContent = $('query-editor').value;
+  openDialog('difference-dialog');
+};
+$('difference-dialog').addEventListener('close', () => {
+  if ($('difference-dialog').open) return;
+  if (differenceTicket !== null && differenceTicket === requestId) cancel(false);
+  clearDifferenceDialog();
+});
+$('difference-prev').onclick = () => { differencePage--; renderDifferencePage(); };
+$('difference-next').onclick = () => { differencePage++; renderDifferencePage(); };
+$('difference-download').onclick = () => {
+  if (difference) download(new Blob([difference.raw], { type: 'application/json' }), 'frankengraph-difference.json');
+};
+$('difference-form').onsubmit = async event => {
+  event.preventDefault();
+  if (!session || differenceTicket !== null) return;
+  const before = $('difference-before').value.trim(), after = $('difference-after').value.trim();
+  clearDifferenceOutput();
+  let body;
+  try { body = differenceBody($('difference-statement').textContent, $('query-parameters').value, before, after); }
+  catch (error) { $('difference-status').textContent = error.message; return; }
+  const active = session, { ticket, signal } = begin();
+  differenceTicket = ticket;
+  busy(true);
+  $('difference-run').disabled = true;
+  $('difference-status').textContent = 'Comparing query rows at both revisions…';
+  try {
+    const response = await api(`/v1/databases/${encodeURIComponent(active.name)}/query-diff`, active.token, body, signal);
+    if (ticket !== requestId || session !== active || !$('difference-dialog').open) return;
+    const { added, removed } = inspectDifference(response.data, before, after);
+    difference = response;
+    renderDifferencePage();
+    $('difference-status').textContent = `Seq ${before} → ${after} · ${response.data.changed_rows} changed tuples · ${added} added occurrences · ${removed} removed occurrences`;
+    $('difference-download').hidden = false;
+  } catch (error) {
+    if (ticket !== requestId) return;
+    if ([401, 403, 404].includes(error.status)) {
+      clearSession();
+      status(error.message, true);
+    } else {
+      clearDifferenceOutput();
+      $('difference-status').textContent = error.message;
+    }
+  } finally {
+    if (ticket === requestId) {
+      differenceTicket = null;
+      $('difference-run').disabled = false;
+      finish(ticket);
+    }
+  }
+};
+
 function renderChronicle(){const illustrative=sample&&sampleKind==='atlas';$('sample-timeline').hidden=!sample;$('live-timeline').hidden=sample;$('timeline-note').textContent=sample?'Illustrative sample snapshots':'Native exact-sequence lens';$('sample-timeline').replaceChildren(...(illustrative?[101,102,103,104]:[0]).map(seq=>{const b=button(String(seq),()=>{if(illustrative)loadSample('atlas',seq,true);},seq===(illustrative?sampleCut:0)?'active':'');b.setAttribute('aria-label',`Sample snapshot ${seq}`);b.setAttribute('aria-pressed',String(seq===sampleCut));return b;}));$('compare-toggle').disabled=!baseline||!current;$('compare-toggle').classList.toggle('active',comparison);$('compare-toggle').setAttribute('aria-pressed',String(comparison));$('clear-baseline').hidden=!baseline;$('baseline-status').textContent=baseline?`Baseline A · seq ${baseline.data.seq}`:'No baseline retained';$('pin-baseline').disabled=!current;const eligible=Boolean(baseline&&current&&baseline!==current&&analyticsView());$('analysis-toggle').disabled=!eligible;$('analysis-toggle').classList.toggle('active',analysis);$('analysis-toggle').setAttribute('aria-pressed',String(analysis));}
 $('snapshot-load').onclick=()=>{try{$('query-editor').value=temporalQuery($('snapshot-input').value);$('query-parameters').value='{}';highlight();toast('Temporal lens loaded. Run query to execute the native snapshot read.');}catch(error){toast(error.message);}};
 $('pin-baseline').onclick=()=>{if(!current)return;baseline=current;comparisonResult=null;analysisResult=null;componentFocus='';comparison=false;analysis=false;renderChronicle();refreshGraph(true);toast(`Baseline pinned at sequence ${current.data.seq}. Only this tab retains it.`);};

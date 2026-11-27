@@ -263,6 +263,25 @@ The agent-atlas sample has four explicitly illustrative cuts (101–104). They l
 you exercise additions, omitted edges and property changes without claiming to
 read a database. The classic 32-node sample remains available separately.
 
+### Compare query rows at two committed revisions
+
+In a connected workspace, put a read and its JSON parameters in the editor.
+Choose **Compare revisions** in the Chronicle strip. Enter the before and after
+sequences and select **Run historical comparison**. A pinned baseline and the
+current result prefill the fields when available. Both cuts are editable, and
+sequence zero, equal cuts and reverse order are supported. The statement should
+leave its time selector implicit because the request supplies both revisions.
+
+The native `query-diff` read evaluates the query at each cut under the connected
+capability. A net weight of `+3` means three additional occurrences of that
+tuple in the after result. A negative weight means fewer occurrences. The
+summary counts both distinct changed tuples and total occurrences. Each
+endpoint applies the query’s own filtering, ordering and pagination. An empty
+successful response means their result bags agreed. Read a page of changed
+tuples or export the complete admitted JSON, including the original type tags
+and exact signed weights. Closing the dialog discards the comparison. The graph
+workspace keeps the result and baseline you were exploring.
+
 ### Prism and Beacon: use native capabilities
 
 Query lenses include native PageRank and connected-components calls through
