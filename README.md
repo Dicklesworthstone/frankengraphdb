@@ -796,6 +796,10 @@ fgdb schema --db mydb.fgdbdir --key-file fgdb.keys
 fgdb schema --db mydb.fgdbdir --key-file fgdb.keys --if-current 2 \
   --property score --label Team=100
 
+# Fence registration against the exact branch marker obtained from verify-history.
+fgdb schema --db mydb.fgdbdir --key-file fgdb.keys --if-head "3@$SAVED_CHAIN_HASH" \
+  --property rank
+
 # Inspect exactly the names visible at an earlier committed revision.
 fgdb schema --db mydb.fgdbdir --key-file fgdb.keys --as-of 1
 ```

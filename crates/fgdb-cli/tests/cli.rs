@@ -2361,15 +2361,9 @@ fn embedded_write_and_transaction_if_current_guard_durable_frontier() {
     assert!(!stdout.contains("\"value\":\"88\""), "{stdout}");
 }
 
-#[test]
-fn local_writes_and_transactions_check_the_exact_verified_marker() {
-    let fixture = Fixture::new("branch-head");
-    assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
-    let statement = "CREATE (:Person {id: 10})";
-    let write = |guard: &str| fixture.robot("write", &["--if-head", guard, statement]);
-    assert_eq!(succeeded(&write("empty"), "written"), 1);
-    let history = fixture.discovered("verify-history", &["--through", "1"]);
-    assert_eq!(succeeded(&history, "verified_history"), 1);
+fn verified_head(fixture: &Fixture, seq: u64) -> String {
+    let history = fixture.discovered("verify-history", &["--through", &seq.to_string()]);
+    assert_eq!(succeeded(&history, "verified_history"), seq);
     let result = terminal(&history);
     let hash = result
         .split("\"chain_hash\":\"")
@@ -2378,7 +2372,18 @@ fn local_writes_and_transactions_check_the_exact_verified_marker() {
         .split('"')
         .next()
         .unwrap();
-    let head = format!("1@{hash}");
+    format!("{seq}@{hash}")
+}
+
+#[test]
+fn local_writes_and_transactions_check_the_exact_verified_marker() {
+    let fixture = Fixture::new("branch-head");
+    assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
+    let statement = "CREATE (:Person {id: 10})";
+    let write = |guard: &str| fixture.robot("write", &["--if-head", guard, statement]);
+    assert_eq!(succeeded(&write("empty"), "written"), 1);
+    let head = verified_head(&fixture, 1);
+    let (_, hash) = head.split_once('@').unwrap();
     let padding = "00".repeat(32);
     for invalid in ["1@123", &format!("0@{padding}"), &format!("+1@{padding}")] {
         refused(&write(invalid), 2, "usage");
@@ -2399,6 +2404,30 @@ fn local_writes_and_transactions_check_the_exact_verified_marker() {
         String::from_utf8(read.stdout).unwrap().matches("\"event\":\"row\"").count(),
         2
     );
+}
+
+#[test]
+fn schema_registration_checks_the_branch_marker_before_allocating_names() {
+    let fixture = Fixture::new("schema-branch-head");
+    assert_eq!(succeeded(&fixture.discovered("create", &[]), "created"), 0);
+    let schema = |args: &[&str]| fixture.discovered("schema", args);
+    assert_eq!(succeeded(&schema(&["--if-head", "empty", "--label", "Person"]), "rows"), 1);
+    let head = verified_head(&fixture, 1);
+    let forged = format!("1@{}", "00".repeat(32));
+    let before = directory_bytes(&fixture.db());
+    for guard in ["empty", forged.as_str()] {
+        let stale = schema(&["--if-head", guard, "--property", "never"]);
+        refused(&stale, 3, "query");
+        assert!(terminal(&stale).contains("\"code\":\"conflict\""));
+        assert_eq!(directory_bytes(&fixture.db()), before);
+    }
+    let registered = schema(&["--if-head", &head, "--property", "score"]);
+    assert_eq!(succeeded(&registered, "rows"), 2);
+    let output = String::from_utf8(registered.stdout).unwrap();
+    assert!(output.contains("\"value\":\"score\""));
+    assert!(!output.contains("\"value\":\"never\""));
+    refused(&schema(&["--if-head", &head]), 2, "usage");
+    refused(&schema(&["--if-head", &head, "--as-of", "1"]), 2, "usage");
 }
 
 #[test]
