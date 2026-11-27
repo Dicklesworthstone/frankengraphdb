@@ -435,7 +435,10 @@ fn cancellation_after_pending_write_fences_unacknowledged_transport_progress() {
                 writer.poll_send(cx, &mut task, |_| Ok(())),
                 Poll::Ready(Err(TransportError::Closed))
             );
-            assert_eq!(*output.borrow(), if emit_header { vec![0x82] } else { vec![] });
+            assert_eq!(
+                *output.borrow(),
+                if emit_header { vec![0x82] } else { vec![] }
+            );
         });
     }
 }

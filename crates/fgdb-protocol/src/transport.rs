@@ -373,9 +373,7 @@ pub enum AbandonedSend {
     ///
     /// `accepted_bytes` may be zero: a framed or buffered transport can emit
     /// its own prefix or retain ciphertext before acknowledging plaintext.
-    FailedAfterWrite {
-        accepted_bytes: usize,
-    },
+    FailedAfterWrite { accepted_bytes: usize },
 }
 
 /// One serialized writer. No API exposes its underlying stream while a frame

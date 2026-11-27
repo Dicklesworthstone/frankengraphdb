@@ -27,6 +27,10 @@ mod read_batch;
 #[cfg(feature = "transport")]
 pub mod transport;
 
+/// Bounded binary WebSocket byte transport over the foundation frame codec.
+#[cfg(feature = "transport")]
+pub mod websocket;
+
 /// A TCP client for the operations `fgdbd` serves.
 #[cfg(feature = "transport")]
 pub mod client;
