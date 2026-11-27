@@ -425,6 +425,14 @@ impl<C: Clone + Eq, A: ReadApplication<C> + RaftPublisher<C>> AppliedReplica<C, 
         {
             return Err(ApplicationStateError::LeadershipLost.into());
         }
+        // Quorum confirmation can precede a handoff while this read waits
+        // for application or audit visibility. Recheck before acquiring a pin.
+        if self.leadership_transfer()?.is_some() {
+            return Err(ApplicationStateError::Raft(
+                fgdb_order::Error::LeadershipTransferInProgress,
+            )
+            .into());
+        }
         let basis = self.application.progress;
         let required = ready.index();
         if basis.applied.index < required {

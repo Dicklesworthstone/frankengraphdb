@@ -355,7 +355,10 @@ impl<C: Clone + Eq> Replica<C> {
             for (_, read) in std::mem::take(&mut self.reads) {
                 resolutions.push(ReadResolution::LeadershipLost(read.id));
             }
-        } else {
+        } else if self.raft.leadership_transfer()?.is_none() {
+            // Apply the same handoff fence as the dedicated ReadIndex probe.
+            // Keep pending rounds for a possible abort. An actual stepdown
+            // resolves them as LeadershipLost above.
             if let Some((member, term, request, true)) = reply
                 && term == state.term()
                 && configuration.voters().contains(&member)
