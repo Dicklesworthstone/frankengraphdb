@@ -15,44 +15,45 @@ use crate::tiered::edge_scan::BufferedEdgeDirection;
 use fgdb_delta_types::RelationId;
 use fgdb_types::{EId, VId};
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Outgoing {
-    source: VId,
-    relation: RelationId,
+// Subtree maxima name the descriptor owning the inclusive upper bound.
+// All full-width endpoints and relations remain in the admitted descriptors.
+#[derive(Clone, Copy)]
+struct Interval {
     block: usize,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Incoming {
-    first: VId,
-    last: VId,
-    source: VId,
-    relation: RelationId,
-    block: usize,
-    maximum: VId,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct EdgeRange {
-    first: EId,
-    last: EId,
-    block: usize,
-    maximum: EId,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct RelationBlock {
-    relation: RelationId,
-    block: usize,
+    maximum: usize,
 }
 
 pub(super) struct BlockDirectory {
-    outgoing: Vec<Outgoing>,
-    incoming: Vec<Incoming>,
-    edges: Vec<EdgeRange>,
-    relations: Vec<RelationBlock>,
-    // All descriptor vectors drop before their shared reservation.
+    routes: Routes,
     _charge: MemoryCharge,
+}
+
+struct Routes {
+    outgoing: Vec<usize>,
+    incoming: Vec<Interval>,
+    edges: Vec<Interval>,
+    relations: Vec<usize>,
+}
+
+fn summary(blocks: &[BlockDescriptor], index: usize) -> &super::BlockSummary {
+    blocks[index]
+        .summary
+        .as_ref()
+        .expect("only nonempty admitted descriptors are indexed")
+}
+
+fn slots<T>(count: usize) -> Result<Vec<T>, BufferedReadError> {
+    let bytes = count
+        .checked_mul(size_of::<T>())
+        .ok_or(BufferedReadError::SizeOverflow)?;
+    let mut slots = Vec::new();
+    slots
+        .try_reserve_exact(count)
+        .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
+    if slots.capacity() > count {
+        return Err(BufferedReadError::SizeOverflow);
+    }
+    Ok(slots)
 }
 
 impl BlockDirectory {
@@ -64,94 +65,11 @@ impl BlockDirectory {
     ) -> Result<Self, BufferedReadError> {
         let bytes = blocks
             .len()
-            .checked_mul(
-                size_of::<Outgoing>()
-                    + size_of::<Incoming>()
-                    + size_of::<EdgeRange>()
-                    + size_of::<RelationBlock>(),
-            )
+            .checked_mul(2 * size_of::<usize>() + 2 * size_of::<Interval>())
             .ok_or(BufferedReadError::SizeOverflow)?;
         let charge = pool.reserve(cx, bytes)?;
-        let mut outgoing = Vec::new();
-        let mut incoming = Vec::new();
-        let mut edges = Vec::new();
-        let mut relations = Vec::new();
-        outgoing
-            .try_reserve_exact(blocks.len())
-            .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
-        incoming
-            .try_reserve_exact(blocks.len())
-            .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
-        edges
-            .try_reserve_exact(blocks.len())
-            .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
-        relations
-            .try_reserve_exact(blocks.len())
-            .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
-        if outgoing
-            .capacity()
-            .checked_mul(size_of::<Outgoing>())
-            .and_then(|outgoing| {
-                incoming
-                    .capacity()
-                    .checked_mul(size_of::<Incoming>())
-                    .and_then(|incoming| outgoing.checked_add(incoming))
-            })
-            .and_then(|allocated| {
-                edges
-                    .capacity()
-                    .checked_mul(size_of::<EdgeRange>())
-                    .and_then(|edges| allocated.checked_add(edges))
-            })
-            .and_then(|allocated| {
-                relations
-                    .capacity()
-                    .checked_mul(size_of::<RelationBlock>())
-                    .and_then(|relations| allocated.checked_add(relations))
-            })
-            .is_none_or(|allocated| allocated > bytes)
-        {
-            return Err(BufferedReadError::SizeOverflow);
-        }
-        for (block, descriptor) in blocks.iter().enumerate() {
-            control()?;
-            if let Some(summary) = descriptor.summary {
-                outgoing.push(Outgoing {
-                    source: summary.source,
-                    relation: summary.relation,
-                    block,
-                });
-                incoming.push(Incoming {
-                    first: summary.first_destination,
-                    last: summary.last_destination,
-                    source: summary.source,
-                    relation: summary.relation,
-                    block,
-                    maximum: summary.last_destination,
-                });
-                edges.push(EdgeRange {
-                    first: summary.first_edge.0,
-                    last: summary.last_edge,
-                    block,
-                    maximum: summary.last_edge,
-                });
-                relations.push(RelationBlock {
-                    relation: summary.relation,
-                    block,
-                });
-            }
-        }
-        crate::tiered::edge_scan::sort(&mut outgoing, control)?;
-        crate::tiered::edge_scan::sort(&mut incoming, control)?;
-        crate::tiered::edge_scan::sort(&mut edges, control)?;
-        crate::tiered::edge_scan::sort(&mut relations, control)?;
-        augment(&mut incoming, control)?;
-        augment_edges(&mut edges, control)?;
         Ok(Self {
-            outgoing,
-            incoming,
-            edges,
-            relations,
+            routes: Routes::build(blocks, control)?,
             _charge: charge,
         })
     }
@@ -162,15 +80,21 @@ impl BlockDirectory {
         relation: Option<RelationId>,
         direction: BufferedEdgeDirection,
     ) -> Candidates {
-        Candidates::new(self.incoming.len(), endpoint, relation, direction)
+        Candidates::new(self.routes.incoming.len(), endpoint, relation, direction)
     }
 
     pub(super) fn next<E>(
         &self,
+        descriptors: &[BlockDescriptor],
         candidates: &mut Candidates,
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
-        candidates.next(&self.outgoing, &self.incoming, control)
+        candidates.next(
+            descriptors,
+            &self.routes.outgoing,
+            &self.routes.incoming,
+            control,
+        )
     }
 
     pub(super) fn root_candidates<'a>(
@@ -179,35 +103,43 @@ impl BlockDirectory {
         relation: Option<RelationId>,
         direction: BufferedEdgeDirection,
     ) -> RootCandidates<'a> {
-        RootCandidates::new(self.incoming.len(), vertices, relation, direction)
+        RootCandidates::new(self.routes.incoming.len(), vertices, relation, direction)
     }
 
     pub(super) fn next_root<E>(
         &self,
+        descriptors: &[BlockDescriptor],
         candidates: &mut RootCandidates<'_>,
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
-        candidates.next(&self.outgoing, &self.incoming, control)
+        candidates.next(
+            descriptors,
+            &self.routes.outgoing,
+            &self.routes.incoming,
+            control,
+        )
     }
 
     pub(super) fn edge_candidates(&self, eid: EId) -> EdgeCandidates {
-        EdgeCandidates::new(self.edges.len(), eid)
+        EdgeCandidates::new(self.routes.edges.len(), eid)
     }
 
     pub(super) fn next_edge<E>(
         &self,
+        descriptors: &[BlockDescriptor],
         candidates: &mut EdgeCandidates,
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
-        candidates.next(&self.edges, control)
+        candidates.next(descriptors, &self.routes.edges, control)
     }
 
     pub(super) fn relation_blocks<E>(
         &self,
+        descriptors: &[BlockDescriptor],
         relation: RelationId,
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<RelationBlocks, E> {
-        RelationBlocks::new(&self.relations, relation, control)
+        RelationBlocks::new(descriptors, &self.routes.relations, relation, control)
     }
 
     pub(super) fn next_relation<E>(
@@ -215,7 +147,88 @@ impl BlockDirectory {
         blocks: &mut RelationBlocks,
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
-        blocks.next(&self.relations, control)
+        blocks.next(&self.routes.relations, control)
+    }
+}
+
+// Bulk imports often arrive in one relation or in source order. Confirm that
+// an index is already ordered with one metered comparison per adjacent pair.
+// Stop probing at the first inversion and use the ordinary controlled sort.
+fn sort_ordinals<T, K: Ord, E>(
+    values: &mut [T],
+    key: impl Fn(&T) -> K,
+    control: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    for pair in values.windows(2) {
+        control()?;
+        if key(&pair[0]) > key(&pair[1]) {
+            return crate::tiered::edge_scan::sort_by(values, |a, b| key(a).cmp(&key(b)), control);
+        }
+    }
+    Ok(())
+}
+
+impl Routes {
+    fn build(
+        blocks: &[BlockDescriptor],
+        control: &mut impl FnMut() -> Result<(), BufferedReadError>,
+    ) -> Result<Self, BufferedReadError> {
+        let mut outgoing = slots(blocks.len())?;
+        let mut incoming = slots(blocks.len())?;
+        let mut edges = slots(blocks.len())?;
+        let mut relations = slots(blocks.len())?;
+        for (block, descriptor) in blocks.iter().enumerate() {
+            control()?;
+            if descriptor.summary.is_some() {
+                let range = Interval {
+                    block,
+                    maximum: block,
+                };
+                outgoing.push(block);
+                incoming.push(range);
+                edges.push(range);
+                relations.push(block);
+            }
+        }
+        let outgoing_key = |block| {
+            let fields = summary(blocks, block);
+            (fields.source, fields.relation, block)
+        };
+        let incoming_key = |block| {
+            let fields = summary(blocks, block);
+            (
+                fields.first_destination,
+                fields.last_destination,
+                fields.source,
+                fields.relation,
+                block,
+            )
+        };
+        let edge_key = |block| {
+            let fields = summary(blocks, block);
+            (fields.first_edge.0, fields.last_edge, block)
+        };
+        let relation_key = |block| (summary(blocks, block).relation, block);
+        sort_ordinals(&mut outgoing, |block| outgoing_key(*block), control)?;
+        sort_ordinals(&mut incoming, |range| incoming_key(range.block), control)?;
+        sort_ordinals(&mut edges, |range| edge_key(range.block), control)?;
+        sort_ordinals(&mut relations, |block| relation_key(*block), control)?;
+        augment(
+            &mut incoming,
+            &|block| summary(blocks, block).last_destination,
+            control,
+        )?;
+        augment(
+            &mut edges,
+            &|block| summary(blocks, block).last_edge,
+            control,
+        )?;
+        Ok(Self {
+            outgoing,
+            incoming,
+            edges,
+            relations,
+        })
     }
 }
 
@@ -229,7 +242,8 @@ pub(crate) struct RelationBlocks {
 
 impl RelationBlocks {
     fn new<E>(
-        blocks: &[RelationBlock],
+        descriptors: &[BlockDescriptor],
+        blocks: &[usize],
         relation: RelationId,
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Self, E> {
@@ -237,7 +251,7 @@ impl RelationBlocks {
         while first < end {
             control()?;
             let middle = first + (end - first) / 2;
-            if blocks[middle].relation < relation {
+            if summary(descriptors, blocks[middle]).relation < relation {
                 first = middle + 1;
             } else {
                 end = middle;
@@ -248,7 +262,7 @@ impl RelationBlocks {
         while first < end {
             control()?;
             let middle = first + (end - first) / 2;
-            if blocks[middle].relation <= relation {
+            if summary(descriptors, blocks[middle]).relation <= relation {
                 first = middle + 1;
             } else {
                 end = middle;
@@ -263,39 +277,17 @@ impl RelationBlocks {
 
     fn next<E>(
         &mut self,
-        blocks: &[RelationBlock],
+        blocks: &[usize],
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
         if self.next == self.end {
             return Ok(None);
         }
         control()?;
-        let block = blocks[self.next].block;
+        let block = blocks[self.next];
         self.next += 1;
         Ok(Some(block))
     }
-}
-
-fn augment_edges<E>(
-    ranges: &mut [EdgeRange],
-    control: &mut impl FnMut() -> Result<(), E>,
-) -> Result<Option<EId>, E> {
-    if ranges.is_empty() {
-        return Ok(None);
-    }
-    control()?;
-    let middle = ranges.len() / 2;
-    let (left, rest) = ranges.split_at_mut(middle);
-    let (root, right) = rest.split_first_mut().expect("nonempty midpoint");
-    let mut maximum = root.last;
-    if let Some(last) = augment_edges(left, control)? {
-        maximum = maximum.max(last);
-    }
-    if let Some(last) = augment_edges(right, control)? {
-        maximum = maximum.max(last);
-    }
-    root.maximum = maximum;
-    Ok(Some(maximum))
 }
 
 /// A bounded position over all possible histories of one full-width EId.
@@ -325,7 +317,8 @@ impl EdgeCandidates {
 
     fn next<E>(
         &mut self,
-        ranges: &[EdgeRange],
+        descriptors: &[BlockDescriptor],
+        ranges: &[Interval],
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
         while self.depth != 0 {
@@ -333,26 +326,30 @@ impl EdgeCandidates {
             self.depth -= 1;
             let (first, end) = self.pending[self.depth];
             let middle = first + (end - first) / 2;
-            let entry = ranges[middle];
-            if ranges[first].first > self.eid || entry.maximum < self.eid {
+            let range = ranges[middle];
+            let entry = summary(descriptors, range.block);
+            let lower = summary(descriptors, ranges[first].block).first_edge.0;
+            let upper = summary(descriptors, range.maximum).last_edge;
+            if lower > self.eid || upper < self.eid {
                 continue;
             }
-            if entry.first <= self.eid {
+            if entry.first_edge.0 <= self.eid {
                 self.push(middle + 1, end);
             }
             self.push(first, middle);
-            if entry.first <= self.eid && self.eid <= entry.last {
-                return Ok(Some(entry.block));
+            if entry.first_edge.0 <= self.eid && self.eid <= entry.last_edge {
+                return Ok(Some(range.block));
             }
         }
         Ok(None)
     }
 }
 
-fn augment<E>(
-    ranges: &mut [Incoming],
+fn augment<K: Ord, E>(
+    ranges: &mut [Interval],
+    upper: &impl Fn(usize) -> K,
     control: &mut impl FnMut() -> Result<(), E>,
-) -> Result<Option<VId>, E> {
+) -> Result<Option<usize>, E> {
     if ranges.is_empty() {
         return Ok(None);
     }
@@ -360,12 +357,13 @@ fn augment<E>(
     let middle = ranges.len() / 2;
     let (left, rest) = ranges.split_at_mut(middle);
     let (root, right) = rest.split_first_mut().expect("nonempty midpoint");
-    let mut maximum = root.last;
-    if let Some(last) = augment(left, control)? {
-        maximum = maximum.max(last);
-    }
-    if let Some(last) = augment(right, control)? {
-        maximum = maximum.max(last);
+    let mut maximum = root.block;
+    for child in [left, right] {
+        if let Some(last) = augment(child, upper, control)?
+            && upper(last) > upper(maximum)
+        {
+            maximum = last;
+        }
     }
     root.maximum = maximum;
     Ok(Some(maximum))
@@ -414,8 +412,9 @@ impl Candidates {
 
     fn next<E>(
         &mut self,
-        outgoing: &[Outgoing],
-        incoming: &[Incoming],
+        descriptors: &[BlockDescriptor],
+        outgoing: &[usize],
+        incoming: &[Interval],
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
         if !self.outgoing_done {
@@ -427,7 +426,7 @@ impl Candidates {
                     while first < end {
                         control()?;
                         let middle = first + (end - first) / 2;
-                        let entry = outgoing[middle];
+                        let entry = summary(descriptors, outgoing[middle]);
                         if (entry.source, entry.relation) < key {
                             first = middle + 1;
                         } else {
@@ -437,15 +436,16 @@ impl Candidates {
                     first
                 }
             };
-            if let Some(entry) = outgoing.get(at) {
+            if let Some(&block) = outgoing.get(at) {
                 control()?;
+                let entry = summary(descriptors, block);
                 if entry.source == self.endpoint
                     && self
                         .relation
                         .is_none_or(|relation| relation == entry.relation)
                 {
                     self.outgoing_at = Some(at + 1);
-                    return Ok(Some(entry.block));
+                    return Ok(Some(block));
                 }
             }
             self.outgoing_done = true;
@@ -455,23 +455,26 @@ impl Candidates {
             self.depth -= 1;
             let (first, end) = self.pending[self.depth];
             let middle = first + (end - first) / 2;
-            let entry = incoming[middle];
-            if incoming[first].first > self.endpoint || entry.maximum < self.endpoint {
+            let range = incoming[middle];
+            let entry = summary(descriptors, range.block);
+            let lower = summary(descriptors, incoming[first].block).first_destination;
+            let upper = summary(descriptors, range.maximum).last_destination;
+            if lower > self.endpoint || upper < self.endpoint {
                 continue;
             }
-            if entry.first <= self.endpoint {
+            if entry.first_destination <= self.endpoint {
                 self.push(middle + 1, end);
             }
             self.push(first, middle);
-            if entry.first <= self.endpoint
-                && self.endpoint <= entry.last
+            if entry.first_destination <= self.endpoint
+                && self.endpoint <= entry.last_destination
                 && self.relation.is_none_or(|relation| relation == entry.relation)
                 // Undirected outgoing already selected this entire block,
                 // including its loops and every matching historical version.
                 && !(self.direction == BufferedEdgeDirection::Undirected
                     && entry.source == self.endpoint)
             {
-                return Ok(Some(entry.block));
+                return Ok(Some(range.block));
             }
         }
         Ok(None)
@@ -549,8 +552,9 @@ impl<'a> RootCandidates<'a> {
 
     fn next<E>(
         &mut self,
-        outgoing: &[Outgoing],
-        incoming: &[Incoming],
+        descriptors: &[BlockDescriptor],
+        outgoing: &[usize],
+        incoming: &[Interval],
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
         while let Some(&vertex) = self.vertices.get(self.outgoing_seed) {
@@ -563,7 +567,7 @@ impl<'a> RootCandidates<'a> {
                     while first < end {
                         control()?;
                         let middle = first + (end - first) / 2;
-                        let entry = outgoing[middle];
+                        let entry = summary(descriptors, outgoing[middle]);
                         if (entry.source, entry.relation) < key {
                             first = middle + 1;
                         } else {
@@ -573,18 +577,19 @@ impl<'a> RootCandidates<'a> {
                     first
                 }
             };
-            let Some(entry) = outgoing.get(at) else {
+            let Some(&block) = outgoing.get(at) else {
                 self.outgoing_seed = self.vertices.len();
                 break;
             };
             control()?;
+            let entry = summary(descriptors, block);
             if entry.source == vertex
                 && self
                     .relation
                     .is_none_or(|relation| relation == entry.relation)
             {
                 self.outgoing_at = Some(at + 1);
-                return Ok(Some(entry.block));
+                return Ok(Some(block));
             }
             self.outgoing_at = None;
             self.outgoing_first = at;
@@ -595,8 +600,11 @@ impl<'a> RootCandidates<'a> {
             self.depth -= 1;
             let (first, end) = self.pending[self.depth];
             let middle = first + (end - first) / 2;
-            let entry = incoming[middle];
-            if !self.intersects(incoming[first].first, entry.maximum, control)? {
+            let range = incoming[middle];
+            let entry = summary(descriptors, range.block);
+            let lower = summary(descriptors, incoming[first].block).first_destination;
+            let upper = summary(descriptors, range.maximum).last_destination;
+            if !self.intersects(lower, upper, control)? {
                 continue;
             }
             // The last seed can exclude the right subtree without a search;
@@ -604,7 +612,7 @@ impl<'a> RootCandidates<'a> {
             if self
                 .vertices
                 .last()
-                .is_some_and(|&last| entry.first <= last)
+                .is_some_and(|&last| entry.first_destination <= last)
             {
                 self.push(middle + 1, end);
             }
@@ -614,9 +622,9 @@ impl<'a> RootCandidates<'a> {
                 .is_none_or(|relation| relation == entry.relation)
                 && !(self.direction == BufferedEdgeDirection::Undirected
                     && self.intersects(entry.source, entry.source, control)?)
-                && self.intersects(entry.first, entry.last, control)?
+                && self.intersects(entry.first_destination, entry.last_destination, control)?
             {
-                return Ok(Some(entry.block));
+                return Ok(Some(range.block));
             }
         }
         Ok(None)

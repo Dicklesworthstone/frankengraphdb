@@ -1687,10 +1687,11 @@ impl<V: Vfs> BufferedPartition<V> {
     ) -> Result<Option<EdgePointWinner>, C> {
         let mut result: Option<EdgePointWinner> = None;
         let mut candidates = self.block_directory.edge_candidates(eid);
-        while let Some(at) = self
-            .block_directory
-            .next_edge(&mut candidates, &mut || control(PointReadEvent::Directory))?
-        {
+        while let Some(at) = self.block_directory.next_edge(
+            &self.blocks,
+            &mut candidates,
+            &mut || control(PointReadEvent::Directory),
+        )? {
             let descriptor = self.blocks[at];
             if self.root.blocks[at].first_seq.0 > as_of.0
                 || descriptor
@@ -1855,7 +1856,7 @@ impl<V: Vfs> BufferedPartition<V> {
             crate::tiered::edge_scan::BufferedEdgeDirection::Outgoing
         };
         let mut blocks = self.block_directory.candidates(vertex, relation, direction);
-        while let Some(at) = self.block_directory.next(&mut blocks, &mut || {
+        while let Some(at) = self.block_directory.next(&self.blocks, &mut blocks, &mut || {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
             advance(&mut work, 1, self.limits.max_work)
         })? {

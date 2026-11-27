@@ -1500,22 +1500,23 @@ fn invalid_load() -> BufferedReadError {
 // One controlled binary-heap kernel serves both the global merge and the
 // format-bounded local permutation sort. Every comparison precedes a control;
 // interruption discards the private state rather than exposing a partial sort.
-fn sift<T: Ord, E>(
+fn sift<T, E>(
     values: &mut [T],
     mut root: usize,
     end: usize,
+    order: &impl Fn(&T, &T) -> core::cmp::Ordering,
     control: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
     while root < end / 2 {
         let mut child = root * 2 + 1;
         if child + 1 < end {
             control()?;
-            if values[child] < values[child + 1] {
+            if order(&values[child], &values[child + 1]).is_lt() {
                 child += 1;
             }
         }
         control()?;
-        if values[root] >= values[child] {
+        if !order(&values[root], &values[child]).is_lt() {
             break;
         }
         values.swap(root, child);
@@ -1549,21 +1550,29 @@ fn heap_pop<T: Ord, E>(
     control()?;
     let first = values.swap_remove(0);
     let len = values.len();
-    sift(values, 0, len, control)?;
+    sift(values, 0, len, &Ord::cmp, control)?;
     Ok(first)
 }
 pub(crate) fn sort<T: Ord, E>(
     values: &mut [T],
     control: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
+    sort_by(values, Ord::cmp, control)
+}
+
+pub(crate) fn sort_by<T, E>(
+    values: &mut [T],
+    order: impl Fn(&T, &T) -> core::cmp::Ordering,
+    control: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let len = values.len();
     for start in (0..len / 2).rev() {
-        sift(values, start, len, control)?;
+        sift(values, start, len, &order, control)?;
     }
     for end in (1..len).rev() {
         control()?;
         values.swap(0, end);
-        sift(values, 0, end, control)?;
+        sift(values, 0, end, &order, control)?;
     }
     Ok(())
 }

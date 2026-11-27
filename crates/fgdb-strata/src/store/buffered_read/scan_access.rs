@@ -76,7 +76,7 @@ impl<V: Vfs> BufferedPartition<V> {
         observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
     ) -> Result<RelationBlocks, BufferedScanError<C>> {
         self.block_directory
-            .relation_blocks(relation, &mut || work.step(cx, observe))
+            .relation_blocks(&self.blocks, relation, &mut || work.step(cx, observe))
     }
 
     pub(crate) fn edge_scan_next_relation_block<C>(
@@ -108,7 +108,7 @@ impl<V: Vfs> BufferedPartition<V> {
         observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
     ) -> Result<Option<usize>, BufferedScanError<C>> {
         self.block_directory
-            .next(candidates, &mut || work.step(cx, observe))
+            .next(&self.blocks, candidates, &mut || work.step(cx, observe))
     }
 
     pub(crate) fn edge_scan_root_blocks<'a>(
@@ -129,7 +129,7 @@ impl<V: Vfs> BufferedPartition<V> {
         observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
     ) -> Result<Option<usize>, BufferedScanError<C>> {
         self.block_directory
-            .next_root(candidates, &mut || work.step(cx, observe))
+            .next_root(&self.blocks, candidates, &mut || work.step(cx, observe))
     }
 
     pub(crate) fn reserve_scan_bytes(
