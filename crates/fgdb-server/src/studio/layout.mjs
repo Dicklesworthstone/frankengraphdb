@@ -3,7 +3,71 @@
 import { hash, LIMITS } from './model.mjs';
 
 export const DEFAULT_PHYSICS = Object.freeze({ charge: 65, distance: 115, gravity: 0.005, collision: 1, grouping: 0 });
-export function createLayout(nodes, edges, mode = 'force', previous = []) {
+// Build undirected hop rings over the returned topology. The selected vertex
+// roots its component; elsewhere the most distinct neighbors wins, then ID.
+// Sort ties by exact ID so reordering rows or parallel edges cannot rotate a ring.
+function radialTargets(points, links, focusId) {
+  const neighbors = points.map(() => new Set());
+  for (const [a, b] of links) {
+    if (a !== b) { neighbors[a].add(b); neighbors[b].add(a); }
+  }
+  const compareId = (a, b) => points[a].id < points[b].id ? -1 : points[a].id > points[b].id ? 1 : 0;
+  const candidates = points.map((_, i) => i).sort((a, b) =>
+    Number(points[b].id === focusId) - Number(points[a].id === focusId)
+    || neighbors[b].size - neighbors[a].size || compareId(a, b));
+  const seen = new Set(), components = [];
+  let area = 0, widest = 0;
+  for (const root of candidates) {
+    if (seen.has(root)) continue;
+    let ring = [root], radius = 0;
+    const members = [];
+    seen.add(root);
+    while (ring.length) {
+      const next = [];
+      for (let j = 0; j < ring.length; j++) {
+        const index = ring[j], angle = j * 2 * Math.PI / ring.length - Math.PI / 2;
+        points[index].tx = Math.cos(angle) * radius;
+        points[index].ty = Math.sin(angle) * radius;
+        members.push(index);
+        for (const neighbor of neighbors[index]) {
+          if (!seen.has(neighbor)) { seen.add(neighbor); next.push(neighbor); }
+        }
+      }
+      if (next.length) radius = Math.max(radius + 100, next.length * 48 / (2 * Math.PI));
+      ring = next.sort(compareId);
+    }
+    const size = 2 * radius + 120;
+    components.push({ members, size });
+    area += size * size;
+    widest = Math.max(widest, size);
+  }
+
+  // Shelf-pack disconnected components with space around their outer ring.
+  // Work in display coordinates; the database contributes no stored positions.
+  const width = Math.max(widest, Math.sqrt(area));
+  let x = 0, y = 0, rowHeight = 0, maxAbs = 0;
+  const origin = (components[0]?.size ?? 0) / 2;
+  for (const { members, size } of components) {
+    if (x && x + size > width) { x = 0; y += rowHeight; rowHeight = 0; }
+    for (const i of members) {
+      const p = points[i];
+      p.tx += x + size / 2 - origin;
+      p.ty += y + size / 2 - origin;
+      maxAbs = Math.max(maxAbs, Math.abs(p.tx), Math.abs(p.ty));
+    }
+    x += size;
+    rowHeight = Math.max(rowHeight, size);
+  }
+  // Long chains can exceed the Wasm coordinate domain. One uniform scale
+  // retains hop order and component separation without clipping outer rings.
+  const scale = Math.min(1, 90000 / Math.max(1, maxAbs));
+  for (const p of points) {
+    p.tx *= scale; p.ty *= scale;
+    if (!p.pinned) { p.x = p.tx; p.y = p.ty; }
+  }
+}
+
+export function createLayout(nodes, edges, mode = 'force', previous = [], focusId = null) {
   if (nodes.length > LIMITS.nodes || edges.length > LIMITS.edges) throw new Error('Layout bounds exceeded.');
   if (!['force', 'clusters', 'radial', 'flow'].includes(mode)) throw new Error('Unknown layout mode.');
   const groups = [...new Set(nodes.map(node => node.group || 'Unlabeled'))].sort();
@@ -29,15 +93,15 @@ export function createLayout(nodes, edges, mode = 'force', previous = []) {
       group, tx: Math.cos(angle) * 230, ty: Math.sin(angle) * 230,
       mass: 1 + Math.sqrt(node.degree || 0) * 0.25, radius: 12 + Math.min(10, Math.sqrt(node.degree || 0) * 2), pinned: old?.pinned || false };
   });
-  if (mode === 'radial') points.forEach((point, i) => { const a = i * 2 * Math.PI / Math.max(1, points.length); point.tx = Math.cos(a) * Math.max(130, points.length * 4); point.ty = Math.sin(a) * Math.max(130, points.length * 4); });
   const byId = new Map(points.map((point, index) => [point.id, index]));
   const links = edges.map(edge => [byId.get(edge.source), byId.get(edge.target)]);
   if (byId.size !== nodes.length || links.some(pair => pair.includes(undefined))) throw new Error('Layout needs unique nodes and complete endpoints.');
+  if (mode === 'radial') radialTargets(points, links, focusId);
   return { points, links, groups, mode };
 }
 
 export function createSimulation(engine, nodes, edges, mode = 'force', previous = [], settings = DEFAULT_PHYSICS) {
-  const state = createLayout(nodes, edges, mode, previous);
+  const state = createLayout(nodes, edges, mode, previous, settings.focusId);
   if (!engine.init(nodes.length, edges.length)) throw new Error('Wasm capacity admission failed.');
   for (let i = 0; i < state.points.length; i++) {
     const p = state.points[i];

@@ -90,7 +90,8 @@ export class GraphCanvas {
     this.simulationNodes=this.graph.nodes.map(({id,group,degree})=>({id,group,degree}));
     const previous=[...this.points.values()].map(p=>({...p,pinned:this.pinned.has(p.id)}));
     if(!keep)this.interacted=false;this.running=true;this.paused=false;this.onBusy(true);
-    const revision=++this.revision;this.worker.postMessage({id:this.id,revision,nodes:this.simulationNodes,edges:this.graph.edges.map(({source,target,directed})=>({source,target,directed})),mode,previous,settings:this.settings});
+    const focusId = mode === 'radial' && this.selection?.kind === 'node' ? this.selection.id : null;
+    const revision=++this.revision;this.worker.postMessage({id:this.id,revision,nodes:this.simulationNodes,edges:this.graph.edges.map(({source,target,directed})=>({source,target,directed})),mode,previous,settings:{...this.settings,focusId}});
   }
   fit(interacted=true){
     if(!this.width||!this.height)return;const p=this.graph.nodes.map(n=>this.points.get(n.id)).filter(Boolean);

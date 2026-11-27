@@ -202,7 +202,7 @@ Neither Playwright nor Python is needed to run Studio itself.
 Studio now runs genuine force integration in a WebAssembly worker: Barnes–Hut
 repulsion, spring attraction, collision separation, damping and cooling. Force,
 label-constellation and radial modes use the same physical kernel; the latter
-modes add target forces rather than substituting a static diagram. The simulation
+modes add target forces rather than substituting a static diagram. In **Radial hop rings**, vertices one, two, or more relationships away are drawn toward successively larger rings. Choose **Center hop rings** on a vertex to root its component there. Other components use their most connected vertex as the center. Distances follow the returned topology in either direction. Springs and pins can shift the final positions. The simulation
 settles and stops. Pause, reheat, repulsion, link-length and gravity controls work
 without a database request. Shift-drag, double-click, or P on a selected node pins
 it; neighboring nodes continue responding. Coordinate continuity is preserved

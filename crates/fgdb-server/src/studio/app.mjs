@@ -115,6 +115,10 @@ function renderInspector(){const root=$('inspector');root.replaceChildren();cons
   const identity=el('div','','identity');identity.append(el('small',kind==='node'?'VERTEX / U128':'RELATIONSHIP / U128'),el('code',item.id));root.append(identity);
   if(item.change)root.append(el('p',{added:'Only in current result',removed:'Only in baseline result',changed:'Returned values changed'}[item.change],'diff-'+item.change));
   if(kind==='node'){const actions=el('div','','inspector-actions');actions.append(button(renderer.pinned.has(item.id)?'Unpin':'Pin node',()=>renderer.togglePin(item.id),'secondary','pin'),button('Spotlight',()=>{renderer.focus=!renderer.focus;renderer.drawSoon();},'secondary','node'));
+    actions.append(button('Center hop rings', () => {
+      $('layout-mode').value = 'radial';
+      renderer.arrange('radial');
+    }, 'secondary', 'graph'));
     actions.append(button(traceStart&&traceStart!==item.id?'Trace here':'Start trace',()=>{if(traceStart&&traceStart!==item.id){const path=tracePath(shown,traceStart,item.id);renderer.pathNodes=new Set(path?.nodes||[]);renderer.pathEdges=new Set(path?.edges||[]);renderer.focus=false;renderer.drawSoon();toast(path?`${path.edges.length} hops in the returned subgraph only.`:'No directed path in the returned subgraph.');}else{traceStart=item.id;toast('Select another node, then choose Trace here.');}renderInspector();},'secondary','link'));root.append(actions);if(traceStart)root.append(el('p','Trace uses returned edges only, not a new database query.','trace-note'));}
   if (item.component !== undefined) {
     const membership = el('div', '', 'property');
