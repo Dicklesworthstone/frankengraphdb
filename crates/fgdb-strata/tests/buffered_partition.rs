@@ -176,6 +176,17 @@ fn cold_admission_refunds_repeated_edge_statements_without_hiding_retirement() {
                     .unwrap()
                     .unwrap();
                 assert_eq!(live.entry, edge(128, 7, 11, 1, None));
+                drop(live);
+                drop(view);
+                // Replacing one family's predecessor across 48 blocks
+                // retains just one head alongside the 128 distinct rows.
+                let tight = MemoryPool::new(1_282_000, 0).unwrap();
+                let view = store
+                    .open_buffered_root(&query, root, tight.clone(), limits)
+                    .await
+                    .expect("repeated publications share their family-head slot");
+                drop(view);
+                assert_eq!(tight.used(), 0);
             } else {
                 assert!(matches!(
                     opened,

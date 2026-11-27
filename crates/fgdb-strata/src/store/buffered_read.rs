@@ -942,17 +942,18 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     )
                     .await?;
                 let (entries, _, predecessor) = &read.resolved;
+                let family = entries.first().map(|first| (first.src, first.relation));
+                let expected = family.and_then(|key| walk.chain_heads.get(&key).copied());
+                let new_head = usize::from(family.is_some() && expected.is_none());
                 edge_history_charge.grow(
                     cx,
                     entries
                         .len()
-                        .checked_add(1)
+                        .checked_add(new_head)
                         .and_then(|rows| rows.checked_mul(HISTORY_ENTRY_BYTES))
                         .ok_or(BufferedReadError::SizeOverflow)?,
                 )?;
-                if let Some(first) = entries.first() {
-                    let family = (first.src, first.relation);
-                    let expected = walk.chain_heads.get(&family).copied();
+                if let Some(family) = family {
                     if predecessor.map(|link| link.0) != expected {
                         return Err(StoreError::MalformedRoot(
                             crate::root::RootError::BlockChainMismatch {
@@ -970,9 +971,8 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     .observe_block(at, entries)
                     .map_err(StoreError::MalformedRoot)?;
                 let retained = walk.history.statement_count() - retained_before;
-                // A verified restatement overwrites a slot without retaining
-                // another row. Keep the per-block head allowance and refund
-                // only the rows that the canonical walk proved redundant.
+                // Retain one head per distinct family and one statement per
+                // version. A verified restatement only overwrites its slot.
                 let redundant = (entries.len() - retained) * HISTORY_ENTRY_BYTES;
                 if redundant != 0 {
                     drop(
