@@ -222,7 +222,10 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     // Validate the whole physical definition before opening storage. Source
     // errors after this point are terminal, including for anti-joins.
     let plan = pattern.plan();
-    let source = if matches!(plan.operators().first(), Some(GlaOperator::ScanEdges { .. })) {
+    let source = if matches!(
+        plan.operators().first(),
+        Some(GlaOperator::ScanEdges { .. })
+    ) {
         if plan.operators().iter().any(|op| {
             matches!(
                 op,

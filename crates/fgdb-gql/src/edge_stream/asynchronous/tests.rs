@@ -822,10 +822,12 @@ fn async_single_edge_source_refuses_variable_length_collections() {
             .iter()
             .any(|op| matches!(op, GlaOperator::Collect { .. }))
     );
-    assert!(!plan.operators().iter().any(|op| matches!(
-        op,
-        GlaOperator::Expand { .. } | GlaOperator::Probe { .. }
-    )));
+    assert!(
+        !plan
+            .operators()
+            .iter()
+            .any(|op| matches!(op, GlaOperator::Expand { .. } | GlaOperator::Probe { .. }))
+    );
     assert!(EdgeScanPlan::compile(plan).is_ok());
     assert!(AsyncEdgeScanPlan::compile(plan).is_err());
 }
