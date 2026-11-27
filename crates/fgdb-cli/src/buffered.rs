@@ -10,9 +10,14 @@ use fgdb::{
 };
 use fgdb_gql::algebra::{GlaOperator, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{
-    AsyncEdgeScanCursor, AsyncEdgeScanOutput, AsyncEdgeScanPlan, AsyncEdgeScanSource, EdgeScanError,
+    AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
+    AsyncEdgeScanCursor, AsyncEdgeScanOutput, AsyncEdgeScanPlan, AsyncEdgeScanSource,
+    AsyncGraphWalkSource, EdgeScanError,
 };
-use fgdb_gql::stream::AsyncVertexScanPlan;
+use fgdb_gql::stream::{
+    AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexScanOutput, AsyncVertexScanPlan,
+    VertexScanError,
+};
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_types::{CommitSeq, QueryCx};
@@ -165,7 +170,14 @@ impl BufferedOptions {
 pub(super) struct Prepared {
     pattern: PreparedGraphPattern<GraphValueRow>,
     as_of: Option<CommitSeq>,
-    edge: bool,
+    source: StreamSource,
+}
+
+enum StreamSource {
+    Vertex,
+    VertexProbe,
+    Edge,
+    EdgeJoin,
 }
 
 pub(super) enum PreparedQuery {
@@ -203,25 +215,43 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         }
         _ => {
             return Err(Failure::query(
-                "--buffered supports native single-vertex and single-edge scans, not aggregate or set queries",
+                "this buffered stream requires a native graph pattern; use --spill-dir for supported aggregate and set queries",
             ));
         }
     };
-    let edge = matches!(
-        pattern.plan().operators().first(),
-        Some(GlaOperator::ScanEdges { .. })
-    );
-    // Validate the whole physical definition before graph recovery/open. LIMIT
-    // 0 cannot hide an unsupported probe, join, projection or ordering.
-    if edge {
-        AsyncEdgeScanPlan::compile(pattern.plan()).map_err(execution_failure)?;
+    // Validate the whole physical definition before opening storage. Source
+    // errors after this point are terminal, including for anti-joins.
+    let plan = pattern.plan();
+    let source = if matches!(plan.operators().first(), Some(GlaOperator::ScanEdges { .. })) {
+        if plan.operators().iter().any(|op| {
+            matches!(
+                op,
+                GlaOperator::Expand { .. }
+                    | GlaOperator::Probe { .. }
+                    | GlaOperator::Collect { .. }
+            )
+        }) {
+            AsyncEdgeJoinPlan::compile(plan).map_err(execution_failure)?;
+            StreamSource::EdgeJoin
+        } else {
+            AsyncEdgeScanPlan::compile(plan).map_err(execution_failure)?;
+            StreamSource::Edge
+        }
+    } else if plan
+        .operators()
+        .iter()
+        .any(|op| matches!(op, GlaOperator::Probe { .. }))
+    {
+        AsyncVertexProbePlan::compile(plan).map_err(execution_failure)?;
+        StreamSource::VertexProbe
     } else {
-        AsyncVertexScanPlan::compile(pattern.plan()).map_err(execution_failure)?;
-    }
+        AsyncVertexScanPlan::compile(plan).map_err(execution_failure)?;
+        StreamSource::Vertex
+    };
     Ok(Prepared {
         pattern,
         as_of,
-        edge,
+        source,
     })
 }
 
@@ -242,26 +272,34 @@ pub(super) async fn run<V: Vfs + Clone>(
 ) -> Result<(), Failure> {
     let seq = prepared.as_of.unwrap_or(view.frontier());
     let columns = prepared.pattern.columns();
-    if prepared.edge {
-        let mut cursor = view
-            .stream_graph_edges_governed_at(cx, &prepared.pattern, seq, options.budget.policy())
-            .map_err(execution_failure)?;
-        let result = deliver(columns, seq.0, &mut cursor, robot, out, || {
-            cx.checkpoint().map_err(Failure::query)
-        })
-        .await;
-        cursor.close();
-        result
-    } else {
-        let mut cursor = view
-            .stream_graph_values_governed_at(cx, &prepared.pattern, seq, options.budget.policy())
-            .map_err(execution_failure)?;
-        let result = deliver(columns, seq.0, &mut cursor, robot, out, || {
-            cx.checkpoint().map_err(Failure::query)
-        })
-        .await;
-        cursor.close();
-        result
+    let policy = options.budget.policy();
+    let pattern = &prepared.pattern;
+    let checkpoint = || cx.checkpoint().map_err(Failure::query);
+    match prepared.source {
+        StreamSource::Vertex => {
+            let mut cursor = view
+                .stream_graph_values_governed_at(cx, pattern, seq, policy)
+                .map_err(execution_failure)?;
+            deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
+        }
+        StreamSource::VertexProbe => {
+            let mut cursor = view
+                .stream_graph_probes_governed_at(cx, pattern, seq, policy)
+                .map_err(execution_failure)?;
+            deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
+        }
+        StreamSource::Edge => {
+            let mut cursor = view
+                .stream_graph_edges_governed_at(cx, pattern, seq, policy)
+                .map_err(execution_failure)?;
+            deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
+        }
+        StreamSource::EdgeJoin => {
+            let mut cursor = view
+                .stream_graph_edge_joins_governed_at(cx, pattern, seq, policy)
+                .map_err(execution_failure)?;
+            deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
+        }
     }
 }
 
@@ -310,6 +348,32 @@ where
     F: FnMut() -> Result<(), Cancel> + Send,
 {
     type Row = AsyncEdgeScanOutput<S::OutputGuard>;
+    type Error = GqlQueryError<EdgeScanError<S::Error>, Cancel>;
+    fn pull(&mut self) -> Pulled<'_, Self::Row, Self::Error> {
+        Box::pin(self.next())
+    }
+}
+
+impl<S, F> NativeRows for AsyncVertexProbeCursor<S, F, GraphValueRow>
+where
+    S: AsyncGraphWalkSource,
+    S::Error: std::error::Error + 'static,
+    F: FnMut() -> Result<(), Cancel> + Send,
+{
+    type Row = AsyncVertexScanOutput<GraphValueRow, S::OutputGuard>;
+    type Error = GqlQueryError<VertexScanError<S::Error>, Cancel>;
+    fn pull(&mut self) -> Pulled<'_, Self::Row, Self::Error> {
+        Box::pin(self.next())
+    }
+}
+
+impl<S, F> NativeRows for AsyncEdgeJoinCursor<S, F>
+where
+    S: AsyncEdgeJoinSource,
+    S::Error: std::error::Error + 'static,
+    F: FnMut() -> Result<(), Cancel> + Send,
+{
+    type Row = AsyncEdgeJoinOutput<S::OutputGuard>;
     type Error = GqlQueryError<EdgeScanError<S::Error>, Cancel>;
     fn pull(&mut self) -> Pulled<'_, Self::Row, Self::Error> {
         Box::pin(self.next())

@@ -138,9 +138,35 @@ fn buffered_vertex_edge_and_temporal_cli_delivery_matches_native_rows() {
                 1,
                 3,
             ),
+            (
+                "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) } RETURN a,a.p",
+                2,
+                2,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b) WHERE b.p>=2 } RETURN r",
+                2,
+                3,
+            ),
+            (
+                "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->(b) } RETURN a,a.p",
+                2,
+                1,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) FOR SYSTEM_TIME AS OF SEQ 1 RETURN r,a,s,r.p",
+                1,
+                2,
+            ),
         ] {
-            let options = options(&[text]);
+            let mut options = options(&[text]);
             let prepared = okay(prepare(&options));
+            if matches!(
+                prepared.source,
+                StreamSource::VertexProbe | StreamSource::EdgeJoin
+            ) {
+                options.buffered.memory = Some(32 * 1024 * 1024);
+            }
             let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
             let mut view = Database::open_buffered_read_view_with_vfs(
                 &commit,
@@ -214,7 +240,8 @@ fn unsupported_definitions_and_open_budgets_refuse_before_delivery_while_late_er
         for text in [
             "MATCH (n) RETURN n.p LIMIT 0",
             "MATCH (n) RETURN n ORDER BY n DESC LIMIT 0",
-            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n LIMIT 0",
+            "MATCH (a)-[r:R]->(b) RETURN r ORDER BY r DESC LIMIT 0",
+            "MATCH (n) WHERE NOT EXISTS { MATCH (m) } RETURN n LIMIT 0",
             "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN r,a,c LIMIT 0",
             "MATCH (n) RETURN count(*) LIMIT 0",
         ] {
@@ -246,15 +273,24 @@ fn unsupported_definitions_and_open_budgets_refuse_before_delivery_while_late_er
             assert_eq!(error.class, "open");
             assert_eq!(pool.used(), 0);
         }
-        for text in [
-            "MATCH (n) RETURN n,n.p",
-            "MATCH (n) WHERE 10/(n.p-2)>0 RETURN n,n.p",
+        for (text, row_limit) in [
+            ("MATCH (n) RETURN n,n.p", Some(1)),
+            (
+                "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) } RETURN a",
+                Some(1),
+            ),
+            ("MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r,a,s", Some(1)),
+            ("MATCH (n) WHERE 10/(n.p-2)>0 RETURN n,n.p", None),
         ] {
             let mut options = options(&[text]);
-            if text == "MATCH (n) RETURN n,n.p" {
-                options.budget.rows = Some(1);
-            }
             let prepared = okay(prepare(&options));
+            if matches!(
+                prepared.source,
+                StreamSource::VertexProbe | StreamSource::EdgeJoin
+            ) {
+                options.buffered.memory = Some(32 * 1024 * 1024);
+            }
+            options.budget.rows = row_limit;
             let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
             let mut view = Database::open_buffered_read_view_with_vfs(
                 &commit,
