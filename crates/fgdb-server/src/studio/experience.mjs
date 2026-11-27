@@ -1,5 +1,5 @@
 // Result exploration only. Native parsing, snapshots and authorization stay on the server.
-import { graphQuery, extractGraph, LIMITS, PALETTE } from './model.mjs';
+import { graphQuery, extractGraph, queryBody, validateResult, LIMITS, PALETTE } from './model.mjs';
 export function capabilityOrigin(origin){
   try{const url=new URL(origin);return url.protocol==='https:'||(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname));}catch{return false;}
 }
@@ -8,6 +8,39 @@ export function sequence(value) {
   if(!/^(0|[1-9]\d{0,19})$/.test(text)||BigInt(text)>(1n<<64n)-1n)throw new Error('Snapshot must be an exact unsigned 64-bit sequence.');
   return text;
 }
+
+/** Parameter literals and cut numbers must survive transport without Number coercion. */
+export function differenceBody(statement, parameters, before, after) {
+  const query = queryBody(statement, parameters);
+  return `{"before":${JSON.stringify(sequence(before))},"after":${JSON.stringify(sequence(after))},${query.slice(1)}`;
+}
+
+/** Verify the terminal envelope before presenting any changed tuples. */
+export function inspectDifference(data, before, after) {
+  if (data?.v !== 1 || data.before !== sequence(before) || data.after !== sequence(after)) {
+    throw new Error('The response does not match the requested revisions.');
+  }
+  if (!Array.isArray(data.changes) || data.changes.length > LIMITS.rows ||
+      data.changed_rows !== String(data.changes.length)) {
+    throw new Error('Incomplete or oversized historical difference.');
+  }
+  let added = 0n, removed = 0n;
+  const maxWeight = (1n << 127n) - 1n;
+  const rows = data.changes.map(change => {
+    const weight = change?.weight;
+    if (typeof weight !== 'string' || !/^-?[1-9]\d{0,38}$/.test(weight)) {
+      throw new Error('Invalid signed occurrence count.');
+    }
+    const count = BigInt(weight);
+    if (count < -maxWeight - 1n || count > maxWeight) throw new Error('Occurrence count exceeds signed 128-bit range.');
+    if (count > 0n) added += count;
+    else removed -= count;
+    return change.row;
+  });
+  validateResult({ v: 1, columns: data.columns, rows });
+  return { added, removed };
+}
+
 export function temporalQuery(value, options={}) {
   const seq=sequence(value), text=graphQuery(options), split=text.indexOf('\nRETURN');
   // This is our own generated template, never a rewrite of an arbitrary query.
