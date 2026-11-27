@@ -354,6 +354,7 @@ struct PendingFrame {
     header: Header,
     bytes: Vec<u8>,
     written: usize,
+    write_attempted: bool,
 }
 
 /// Physical completion only. It is intentionally not convertible into any
@@ -365,9 +366,13 @@ pub struct SendCompletion {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AbandonedSend {
+    /// No write was attempted and no transport prefix can have escaped.
     CancelledBeforeWrite,
     /// The old stream is permanently unusable. Flow credit must not be
     /// refunded and an uncertain result must not be acknowledged.
+    ///
+    /// `accepted_bytes` may be zero: a framed or buffered transport can emit
+    /// its own prefix or retain ciphertext before acknowledging plaintext.
     FailedAfterWrite {
         accepted_bytes: usize,
     },
@@ -408,6 +413,7 @@ impl<W> FrameWriter<W> {
             header: *frame.header(),
             bytes,
             written: 0,
+            write_attempted: false,
         });
         Ok(())
     }
@@ -417,10 +423,12 @@ impl<W> FrameWriter<W> {
     }
 
     /// Explicit local transport cancellation, never durable result release.
-    /// A frame whose prefix was accepted cannot be replaced on this stream.
+    /// After a write attempt, the stream cannot be reused even if the I/O
+    /// returned Pending without acknowledging any plaintext. Transport framing
+    /// or ciphertext may already have progressed.
     pub fn abandon(&mut self, _cx: &Cx) -> Result<AbandonedSend, TransportError> {
         let pending = self.pending.take().ok_or(TransportError::NoPendingSend)?;
-        if pending.written == 0 && !self.failed {
+        if !pending.write_attempted && !self.failed {
             Ok(AbandonedSend::CancelledBeforeWrite)
         } else {
             self.failed = true;
@@ -477,6 +485,9 @@ impl<W: AsyncWrite + Unpin> FrameWriter<W> {
                 }
             }
             let remaining = &pending.bytes[pending.written..];
+            // Pending is not evidence that a framing or TLS layer performed
+            // no I/O. Fence abandonment before entering the transport.
+            pending.write_attempted = true;
             match Pin::new(&mut self.io).poll_write(task, remaining) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) if error.kind() == ErrorKind::Interrupted => continue,

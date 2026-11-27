@@ -383,6 +383,64 @@ fn partial_cancellation_permanently_fences_old_stream() {
 }
 
 #[test]
+fn cancellation_after_pending_write_fences_unacknowledged_transport_progress() {
+    struct PendingPrefixWriter {
+        output: Rc<RefCell<Vec<u8>>>,
+        emit_header: bool,
+    }
+
+    impl AsyncWrite for PendingPrefixWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.emit_header {
+                // Model a WebSocket header reaching the peer before any FGP
+                // plaintext can be acknowledged by the adapter.
+                self.output.borrow_mut().push(0x82);
+            }
+            task.waker().wake_by_ref();
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            panic!("an abandoned pending write must never be flushed");
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            panic!("abandonment must not drive transport shutdown");
+        }
+    }
+
+    for emit_header in [false, true] {
+        with_cx(|cx| {
+            let expected = frame(FrameKind::HelloAck, vec![]);
+            let output = Rc::new(RefCell::new(Vec::new()));
+            let io = PendingPrefixWriter {
+                output: Rc::clone(&output),
+                emit_header,
+            };
+            let mut writer = FrameWriter::new(io, limits());
+            writer.queue(cx, &expected).unwrap();
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(writer.poll_send(cx, &mut task, |_| Ok(())).is_pending());
+            assert_eq!(writer.accepted_bytes(), Some(0));
+            assert_eq!(
+                writer.abandon(cx),
+                Ok(AbandonedSend::FailedAfterWrite { accepted_bytes: 0 })
+            );
+            assert_eq!(writer.queue(cx, &expected), Err(TransportError::Closed));
+            assert_eq!(
+                writer.poll_send(cx, &mut task, |_| Ok(())),
+                Poll::Ready(Err(TransportError::Closed))
+            );
+            assert_eq!(*output.borrow(), if emit_header { vec![0x82] } else { vec![] });
+        });
+    }
+}
+
+#[test]
 fn unsent_cancellation_allows_next_frame_without_bytes() {
     with_cx(|cx| {
         let expected = frame(FrameKind::HelloAck, vec![]);
