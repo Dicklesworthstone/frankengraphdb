@@ -17,6 +17,7 @@ asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "3
 fgdb = { path = "../fgdb" }
 fgdb-beacon = { path = "../fgdb-beacon" }
 fgdb-bolt = { path = "../fgdb-bolt" }
+fgdb-chronicle = { path = "../fgdb-chronicle" }
 fgdb-crypto = { path = "../fgdb-crypto" }
 fgdb-delta-types = { path = "../fgdb-delta-types" }
 fgdb-gql = { path = "../fgdb-gql" }

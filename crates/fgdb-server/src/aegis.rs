@@ -5,14 +5,19 @@
 //! authenticated peer delivery, election and heartbeat timers, an exclusive
 //! member fence, and the publisher that owns the persistent state.
 
+use fgdb_chronicle::seed::SeedPlan;
 use fgdb_order::{
     Committed, Configuration, Domain, Envelope, Error as OrderError, Event, Limits, MemberId,
-    PersistentState, ReadIndexAck, ReadIndexError, ReadIndexProbe, Role,
+    PersistentState, ReadIndexAck, ReadIndexError, ReadIndexProbe, Role, SnapshotCut,
+    SnapshotTransfer,
 };
-use fgdb_repl::driver::RaftPublisher;
+use fgdb_repl::CatchupError;
+use fgdb_repl::download::SnapshotDownload;
+use fgdb_repl::driver::{RaftPublisher, SeedDriveError, SeedPublisher};
 use fgdb_repl::replica::{
     ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput,
 };
+use fgdb_types::DatabaseSecurityNamespaceId;
 
 /// In-process durability publisher retaining the latest published [`PersistentState`]
 /// for hosts that sequence single-member or embedded replica transitions.
@@ -131,6 +136,41 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
             return Err(ReplicaError::Raft(OrderError::InvalidMessage));
         }
         self.replica.step(publisher, Event::Receive(envelope)).await
+    }
+
+    /// Retire the committed log prefix covered by a locally applied, visible
+    /// and authenticated snapshot. The host pins its closure for peer transfer.
+    pub async fn compact<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        snapshot: SnapshotCut,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica.step(publisher, Event::Compact(snapshot)).await
+    }
+
+    /// Bind a persisted peer offer to the verifier's complete seed inventory.
+    /// The owned download allows normal peer traffic while objects are staged.
+    /// The host keeps source retention pins alive and cancels transfers named
+    /// by subsequent consensus output.
+    pub fn begin_snapshot_download(
+        &self,
+        namespace: DatabaseSecurityNamespaceId,
+        transfer: SnapshotTransfer,
+        plan: SeedPlan,
+    ) -> Result<SnapshotDownload, CatchupError> {
+        self.replica
+            .begin_snapshot_download(namespace, transfer, plan)
+    }
+
+    /// Revalidate the offer and publish the seed and consensus cut atomically.
+    /// The host owns the exclusive destination fence. Installation releases
+    /// the peer acknowledgement only after the publisher returns root evidence.
+    pub async fn install_download<P: SeedPublisher<C>>(
+        &mut self,
+        download: SnapshotDownload,
+        publisher: &mut P,
+    ) -> Result<ReplicaOutput<C>, SeedDriveError<core::convert::Infallible, P::Error>> {
+        self.replica.install_download(download, publisher).await
     }
 
     /// Drive the host's election interval on voters, including the current leader.
