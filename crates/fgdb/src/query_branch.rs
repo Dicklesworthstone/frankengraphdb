@@ -53,9 +53,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// A fresh database, or one containing exclusively older commits without
     /// explicit head updates, returns `None`. As with snapshot acquisition,
     /// an uncertain commit or incomplete publication requires recovery first.
-    pub fn branch_head(&self) -> Result<Option<fgdb_types::MarkerRef>, super::ReadError> {
+    pub fn branch_head(&self) -> Result<Option<fgdb_types::MarkerRef>, crate::ReadError> {
         self.frontier()?;
-        Ok(self.coordinator.chain().head(super::GRAPH, super::BRANCH))
+        Ok(self.coordinator.chain().head(crate::GRAPH, crate::BRANCH))
     }
 
     /// Execute a native read using an explicit host branch resolver.
