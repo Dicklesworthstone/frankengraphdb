@@ -97,6 +97,98 @@ fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> 
     }
 }
 
+#[test]
+fn cold_admission_refunds_repeated_edge_statements_without_hiding_retirement() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let limits = BufferedReadLimits {
+            max_blocks: 48,
+            max_source_bytes: 2 * 1024 * 1024,
+            max_work: 50_000,
+            ..limits()
+        };
+        let pool = MemoryPool::new(3 * 1024 * 1024, 0).unwrap();
+
+        for repeated in [true, false] {
+            let mut blocks = Vec::new();
+            let mut previous = None;
+            for block in 0..48 {
+                let last = block == 47;
+                let offset = if repeated { 0 } else { block * 128 };
+                let entries: Vec<_> = (1..=128)
+                    .map(|row| {
+                        edge(
+                            offset + row,
+                            7,
+                            11,
+                            1,
+                            (repeated && last && row == 1).then_some(2),
+                        )
+                    })
+                    .collect();
+                let bytes = encode_block(0, previous, &entries).unwrap();
+                let version = store.put(&commit, &bytes).await.unwrap();
+                blocks.push(BlockRef {
+                    block_id: version.0,
+                    first_seq: CommitSeq(1),
+                    last_seq: CommitSeq(if repeated && last { 2 } else { 1 }),
+                });
+                previous = Some(version);
+            }
+            let root = store
+                .put_root(
+                    &commit,
+                    &PartitionRoot {
+                        graph: GraphId(1),
+                        branch: BranchId(2),
+                        partition: 0,
+                        published_at: CommitSeq(2),
+                        blocks,
+                        vertex_patches: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            let opened = store
+                .open_buffered_root(&query, root, pool.clone(), limits)
+                .await;
+            if repeated {
+                let mut view = opened.expect("128 retained statements fit the cold pool");
+                let former = view
+                    .edge_at(&query, EId(1), CommitSeq(1))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(former.entry, edge(1, 7, 11, 1, Some(2)));
+                drop(former);
+                assert!(
+                    view.edge_at(&query, EId(1), CommitSeq(2))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                let live = view
+                    .edge_at(&query, EId(128), CommitSeq(2))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(live.entry, edge(128, 7, 11, 1, None));
+            } else {
+                assert!(matches!(
+                    opened,
+                    Err(BufferedReadError::Memory(
+                        MemoryError::ResourceExhausted { .. }
+                    ))
+                ));
+            }
+            assert_eq!(pool.used(), 0);
+        }
+    });
+}
+
 fn vertex(created: u64, retired: Option<u64>, value: i64) -> VertexRow {
     VertexRow {
         vid: VId(1),

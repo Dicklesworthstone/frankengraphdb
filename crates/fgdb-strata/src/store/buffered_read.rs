@@ -44,6 +44,9 @@ use std::sync::Arc;
 // read reserve it BEFORE any payload allocation or I/O.
 const OBJECT_WORKSPACE_BYTES: usize = super::MAX_STORED_OBJECT_BYTES as usize * 64 + 65_536;
 const HISTORY_ENTRY_BYTES: usize = 512;
+// Initial edge chain/index capacity and tree nodes must fit even when a
+// root has only one statement.
+const INITIAL_EDGE_HISTORY_BYTES: usize = 4096;
 
 /// Storage contexts with a cancellation checkpoint; no new effect is granted.
 pub trait BufferedReadCx: StorageReadCx {
@@ -876,8 +879,16 @@ impl<V: Vfs + Clone> BlockStore<V> {
             let mut descriptors_match = !verify_published
                 || (blocks.len() == root.blocks.len()
                     && patches.len() == root.vertex_patches.len());
-            // One growing charge outlives all edge-history allocations.
-            let mut edge_history_charge = pool.reserve(cx, 0)?;
+            // This charge outlives the validator. A block is charged at its
+            // worst case before the walk updates any chain or allocates.
+            let mut edge_history_charge = pool.reserve(
+                cx,
+                if root.blocks.is_empty() {
+                    0
+                } else {
+                    INITIAL_EDGE_HISTORY_BYTES
+                },
+            )?;
             let mut walk = RootWalk::default();
             let mut vertex_history =
                 admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
@@ -954,9 +965,22 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     }
                     walk.chain_heads.insert(family, reference.block_id);
                 }
+                let retained_before = walk.history.statement_count();
                 walk.history
                     .observe_block(at, entries)
                     .map_err(StoreError::MalformedRoot)?;
+                let retained = walk.history.statement_count() - retained_before;
+                // A verified restatement overwrites a slot without retaining
+                // another row. Keep the per-block head allowance and refund
+                // only the rows that the canonical walk proved redundant.
+                let redundant = (entries.len() - retained) * HISTORY_ENTRY_BYTES;
+                if redundant != 0 {
+                    drop(
+                        edge_history_charge
+                            .split_off(redundant)
+                            .expect("the incoming block already reserved every row"),
+                    );
+                }
                 let actual = BlockDescriptor {
                     block: descriptor(reference.block_id, &read.bytes)?,
                     properties: read

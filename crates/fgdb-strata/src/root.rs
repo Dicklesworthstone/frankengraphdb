@@ -2335,6 +2335,12 @@ impl EdgeChain {
 }
 
 impl EdgeHistoryValidator {
+    /// Number of retained (EId, creation sequence) statements. An accepted
+    /// restatement replaces a slot and leaves this count unchanged.
+    pub(crate) const fn statement_count(&self) -> usize {
+        self.statements
+    }
+
     /// Every admitted identity once, in its first-admission order. Retired
     /// identities remain spent; content versions and restatements add no IDs.
     pub(crate) fn identities(&self) -> impl ExactSizeIterator<Item = EId> + '_ {
