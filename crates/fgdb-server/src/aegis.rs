@@ -7,9 +7,9 @@
 
 use fgdb_chronicle::seed::SeedPlan;
 use fgdb_order::{
-    Committed, Configuration, Domain, Envelope, Error as OrderError, Event, Limits, MemberId,
-    PersistentState, ReadIndexAck, ReadIndexError, ReadIndexProbe, Role, SnapshotCut,
-    SnapshotTransfer,
+    Committed, Configuration, Domain, Envelope, Error as OrderError, Event, LeadershipTransfer,
+    LeadershipTransferId, Limits, MemberId, PersistentState, ReadIndexAck, ReadIndexError,
+    ReadIndexProbe, Role, SnapshotCut, SnapshotTransfer,
 };
 use fgdb_repl::CatchupError;
 use fgdb_repl::download::SnapshotDownload;
@@ -171,6 +171,39 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
         publisher: &mut P,
     ) -> Result<ReplicaOutput<C>, SeedDriveError<core::convert::Infallible, P::Error>> {
         self.replica.install_download(download, publisher).await
+    }
+
+    /// Drain the current leader and ask one voter to campaign once it has
+    /// acknowledged the frozen log endpoint. Route the resulting messages and
+    /// continue heartbeats and liveness checks while the target catches up.
+    /// Retrying the same target continues the current attempt.
+    pub async fn transfer_leadership<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        target: MemberId,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica
+            .step(publisher, Event::TransferLeadership(target))
+            .await
+    }
+
+    /// Inspect this leader's active drain, including its cancellation ID.
+    /// Confirm the successor by observing its fresh election and committed term.
+    pub fn leadership_transfer(&self) -> Result<Option<&LeadershipTransfer>, OrderError> {
+        self.replica.leadership_transfer()
+    }
+
+    /// End the specific drain captured by the host's deadline. A stale deadline
+    /// cannot end a later attempt. An election request already delivered to a
+    /// voter can still cause a term change after this call.
+    pub async fn abort_leadership_transfer<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        id: LeadershipTransferId,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica
+            .step(publisher, Event::AbortLeadershipTransfer(id))
+            .await
     }
 
     /// Drive the host's election interval on voters, including the current leader.

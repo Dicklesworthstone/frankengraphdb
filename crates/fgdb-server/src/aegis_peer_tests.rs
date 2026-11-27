@@ -474,3 +474,164 @@ fn cancelled_and_delayed_read_rounds_release_one_slot_and_one_floor() {
         assert!(!leader.coordinator.cancel_read(&current));
     });
 }
+
+#[test]
+fn planned_handoff_catches_up_a_voter_and_reopens_service_in_its_new_term() {
+    use fgdb_order::LeadershipTransferPhase;
+    use fgdb_repl::driver::SequenceError;
+
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    runtime.block_on(async {
+        let voters = [MemberId(1), MemberId(2), MemberId(3)];
+        let config = Configuration::stable(Domain([1; 32]), [2; 32], voters, []).unwrap();
+        let mut nodes = voters.map(|id| Member {
+            coordinator: AegisReplicaCoordinator::from_configuration(
+                id,
+                config.clone(),
+                Limits::default(),
+                8,
+            )
+            .unwrap(),
+            publisher: SingleMemberPublisher::new(),
+        });
+        let leader = &mut nodes[0];
+        let election = leader
+            .coordinator
+            .campaign(&mut leader.publisher)
+            .await
+            .unwrap();
+        deliver(&mut nodes, voters[0], election, &voters).await;
+
+        // Only the old leader and the third voter receive the last command.
+        let leader = &mut nodes[0];
+        let old_term = leader.publisher.latest().unwrap().term();
+        let proposal = leader
+            .coordinator
+            .propose(&mut leader.publisher, 42)
+            .await
+            .unwrap();
+        deliver(&mut nodes, voters[0], proposal, &[voters[0], voters[2]]).await;
+        assert_eq!(nodes[0].committed_commands(), [42]);
+        assert!(nodes[1].committed_commands().is_empty());
+
+        let leader = &mut nodes[0];
+        let (pending, _) = leader
+            .coordinator
+            .read_index(&mut leader.publisher)
+            .await
+            .unwrap();
+        let probe = leader.coordinator.read_index_probes(&pending).unwrap()[0];
+        let ack = nodes[1]
+            .coordinator
+            .acknowledge_read_index(voters[0], probe)
+            .unwrap();
+        let leader = &mut nodes[0];
+        leader
+            .coordinator
+            .transfer_leadership(&mut leader.publisher, voters[1])
+            .await
+            .unwrap();
+        let old = leader
+            .coordinator
+            .leadership_transfer()
+            .unwrap()
+            .unwrap()
+            .id();
+        leader
+            .coordinator
+            .abort_leadership_transfer(&mut leader.publisher, old.clone())
+            .await
+            .unwrap();
+        assert!(leader.coordinator.leadership_transfer().unwrap().is_none());
+
+        let transfer = leader
+            .coordinator
+            .transfer_leadership(&mut leader.publisher, voters[1])
+            .await
+            .unwrap();
+        let attempt = leader.coordinator.leadership_transfer().unwrap().unwrap();
+        assert_eq!(attempt.target(), voters[1]);
+        assert_eq!(attempt.phase(), LeadershipTransferPhase::CatchingUp);
+        assert_ne!(attempt.id(), old);
+        assert!(matches!(
+            leader
+                .coordinator
+                .abort_leadership_transfer(&mut leader.publisher, old)
+                .await,
+            Err(ReplicaError::Sequence(SequenceError::Raft(
+                OrderError::StaleLeadershipTransfer
+            )))
+        ));
+        assert!(matches!(
+            leader.coordinator.propose(&mut leader.publisher, 99).await,
+            Err(ReplicaError::Sequence(SequenceError::Raft(
+                OrderError::LeadershipTransferInProgress
+            )))
+        ));
+        assert!(matches!(
+            leader.coordinator.read_index(&mut leader.publisher).await,
+            Err(ReplicaError::Raft(OrderError::LeadershipTransferInProgress))
+        ));
+        assert!(matches!(
+            leader
+                .coordinator
+                .confirm_read_index(&pending, voters[1], ack),
+            Err(ReadIndexError::Raft(
+                OrderError::LeadershipTransferInProgress
+            ))
+        ));
+
+        // Heal the target. The ordinary append/retry path carries the
+        // missing command before the target can campaign and win a quorum.
+        assert!(
+            deliver(&mut nodes, voters[0], transfer, &voters)
+                .await
+                .is_empty()
+        );
+        for _ in 0..4 {
+            if nodes[1].coordinator.role() == Ok(Role::Leader) {
+                break;
+            }
+            let leader = &mut nodes[0];
+            let pulse = leader
+                .coordinator
+                .heartbeat(&mut leader.publisher)
+                .await
+                .unwrap();
+            assert!(
+                deliver(&mut nodes, voters[0], pulse, &voters)
+                    .await
+                    .is_empty()
+            );
+        }
+        assert_eq!(nodes[0].coordinator.role(), Ok(Role::Follower));
+        assert!(
+            nodes[0]
+                .coordinator
+                .leadership_transfer()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(nodes[1].coordinator.role(), Ok(Role::Leader));
+        let successor = &mut nodes[1];
+        assert!(successor.publisher.latest().unwrap().term() > old_term);
+        let proposal = successor
+            .coordinator
+            .propose(&mut successor.publisher, 84)
+            .await
+            .unwrap();
+        deliver(&mut nodes, voters[1], proposal, &voters).await;
+        let successor = &mut nodes[1];
+        let (read, probes) = successor
+            .coordinator
+            .read_index(&mut successor.publisher)
+            .await
+            .unwrap();
+        let floor = successor.publisher.latest().unwrap().commit_index();
+        assert_eq!(
+            deliver(&mut nodes, voters[1], probes, &voters).await,
+            [(read, floor)]
+        );
+        assert!(nodes.iter().all(|n| n.committed_commands() == [42, 84]));
+    });
+}
