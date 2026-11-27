@@ -15,7 +15,7 @@ mod read_probe;
 pub mod write;
 
 use fgdb_chronicle::seed::SeedPlan;
-use fgdb_order::{Event, MemberId, Output, PersistentState, Role, SnapshotTransfer};
+use fgdb_order::{Envelope, Event, MemberId, Output, PersistentState, Role, SnapshotTransfer};
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 
 use super::{
@@ -223,6 +223,21 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
         self.replica
             .durable_state()
             .map_err(ApplicationStateError::Raft)
+    }
+
+    /// Deliver traffic on a channel authenticated as `peer`. The claimed sender
+    /// is checked before any Raft transition or application observation.
+    pub async fn receive(
+        &mut self,
+        peer: MemberId,
+        envelope: Envelope<C>,
+    ) -> Result<AppliedReplicaOutput<C>, MemberError<<A as RaftPublisher<C>>::Error>> {
+        if envelope.from != peer {
+            return Err(MemberError::Replica(ReplicaError::Raft(
+                fgdb_order::Error::InvalidMessage,
+            )));
+        }
+        self.step(Event::Receive(envelope)).await
     }
 
     pub async fn step(

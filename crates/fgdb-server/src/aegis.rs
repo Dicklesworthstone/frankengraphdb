@@ -5,6 +5,8 @@
 //! authenticated peer delivery, election and heartbeat timers, an exclusive
 //! member fence, and the publisher that owns the persistent state.
 
+mod recovery;
+
 use fgdb_chronicle::seed::SeedPlan;
 use fgdb_order::{
     Committed, Configuration, Domain, Envelope, Error as OrderError, Event, LeadershipTransfer,
