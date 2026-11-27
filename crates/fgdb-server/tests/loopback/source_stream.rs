@@ -1,6 +1,9 @@
 //! Native source streaming over actual flow-controlled loopback connections.
 use super::*;
 
+#[path = "source_projection.rs"]
+mod source_projection;
+
 async fn seed(cx: &Cx, owner: &mut Client) {
     owner
         .execute_batch(
