@@ -1,6 +1,9 @@
 //! Sorted-set gallop/seek and intersection kernels for Loom's `FreeJoin`
 //! leapfrog triejoin (`fgdb-rc1111-loom-conformal-freejoin-txo5d`; plan §8.2, §8.7).
 //!
+//! On Stable Rust the scalar backend is selected by default; enable the
+//! `nightly-simd` feature to compile and exercise the 4-lane vector backend.
+//!
 //! Every kernel has a portable scalar specification (`*_scalar`) and a 4-wide
 //! `core::simd::Simd<u64, 4>` vector path (`PortableSimd4`) built entirely in
 //! safe Rust (`0` `unsafe` blocks). Every path in [`SORTED_SET_COMPILED_PATHS`]
@@ -8,7 +11,9 @@
 //! slices, duplicates, skewed degree ratios, and boundary values (`0`, `u64::MAX`,
 //! `u128::MAX`).
 
+#[cfg(feature = "nightly-simd")]
 use core::simd::Simd;
+#[cfg(feature = "nightly-simd")]
 use core::simd::cmp::{SimdPartialEq, SimdPartialOrd};
 
 /// Width of one `u64` SIMD lane group.
@@ -24,15 +29,23 @@ pub enum SortedSetDispatch {
 }
 
 /// All sorted-set backends compiled into this build.
+#[cfg(feature = "nightly-simd")]
 pub const SORTED_SET_COMPILED_PATHS: &[SortedSetDispatch] = &[
     SortedSetDispatch::PortableScalar,
     SortedSetDispatch::PortableSimd4,
 ];
 
+/// Stable builds contain only the portable scalar kernel.
+#[cfg(not(feature = "nightly-simd"))]
+pub const SORTED_SET_COMPILED_PATHS: &[SortedSetDispatch] = &[SortedSetDispatch::PortableScalar];
+
 /// Returns the default active sorted-set backend.
 #[must_use]
 pub const fn active_sorted_set_path() -> SortedSetDispatch {
-    SortedSetDispatch::PortableSimd4
+    #[cfg(feature = "nightly-simd")]
+    { SortedSetDispatch::PortableSimd4 }
+    #[cfg(not(feature = "nightly-simd"))]
+    { SortedSetDispatch::PortableScalar }
 }
 
 /// Portable scalar specification: returns `(first_index_ge_target, comparisons)`
@@ -90,6 +103,7 @@ pub fn seek_ge_u64_scalar(sorted: &[u64], start: usize, target: u64) -> (usize, 
 /// Four-lane `Simd<u64, 4>` gallop + vectorized window refinement.
 /// Bit-identical index result to [`seek_ge_u64_scalar`].
 #[must_use]
+#[cfg(feature = "nightly-simd")]
 fn seek_ge_u64_simd4(sorted: &[u64], start: usize, target: u64) -> (usize, u64) {
     let len = sorted.len();
     if start >= len {
@@ -178,7 +192,12 @@ pub fn seek_ge_u64_via(
 ) -> (usize, u64) {
     match path {
         SortedSetDispatch::PortableScalar => seek_ge_u64_scalar(sorted, start, target),
-        SortedSetDispatch::PortableSimd4 => seek_ge_u64_simd4(sorted, start, target),
+        SortedSetDispatch::PortableSimd4 => {
+            #[cfg(feature = "nightly-simd")]
+            { seek_ge_u64_simd4(sorted, start, target) }
+            #[cfg(not(feature = "nightly-simd"))]
+            { seek_ge_u64_scalar(sorted, start, target) }
+        },
     }
 }
 
@@ -241,6 +260,7 @@ pub fn seek_ge_u128_scalar(sorted: &[u128], start: usize, target: u128) -> (usiz
 /// for sorted `u128` (`VId`) slices. Bit-identical index result to
 /// [`seek_ge_u128_scalar`].
 #[must_use]
+#[cfg(feature = "nightly-simd")]
 fn seek_ge_u128_simd4(sorted: &[u128], start: usize, target: u128) -> (usize, u64) {
     let len = sorted.len();
     if start >= len {
@@ -341,7 +361,12 @@ pub fn seek_ge_u128_via(
 ) -> (usize, u64) {
     match path {
         SortedSetDispatch::PortableScalar => seek_ge_u128_scalar(sorted, start, target),
-        SortedSetDispatch::PortableSimd4 => seek_ge_u128_simd4(sorted, start, target),
+        SortedSetDispatch::PortableSimd4 => {
+            #[cfg(feature = "nightly-simd")]
+            { seek_ge_u128_simd4(sorted, start, target) }
+            #[cfg(not(feature = "nightly-simd"))]
+            { seek_ge_u128_scalar(sorted, start, target) }
+        },
     }
 }
 
@@ -460,6 +485,25 @@ pub fn intersect_sorted_u128(left: &[u128], right: &[u128], out: &mut Vec<u128>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_backend_is_actually_compiled() {
+        assert!(SORTED_SET_COMPILED_PATHS.contains(&active_sorted_set_path()));
+        assert_eq!(SORTED_SET_COMPILED_PATHS[0], SortedSetDispatch::PortableScalar);
+        #[cfg(not(feature = "nightly-simd"))]
+        {
+            assert_eq!(SORTED_SET_COMPILED_PATHS.len(), 1);
+            assert_eq!(active_sorted_set_path(), SortedSetDispatch::PortableScalar);
+            for target in [0, 3, u64::MAX] {
+                assert_eq!(
+                    seek_ge_u64(&[1, 2, 4, u64::MAX], 0, target),
+                    seek_ge_u64_scalar(&[1, 2, 4, u64::MAX], 0, target),
+                );
+            }
+        }
+        #[cfg(feature = "nightly-simd")]
+        assert!(SORTED_SET_COMPILED_PATHS.contains(&SortedSetDispatch::PortableSimd4));
+    }
 
     #[test]
     fn simd4_and_scalar_seek_and_intersect_are_bit_identical_across_boundary_and_skewed_sets() {
