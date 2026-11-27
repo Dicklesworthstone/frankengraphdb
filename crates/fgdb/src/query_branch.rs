@@ -49,13 +49,44 @@ impl EmbeddedReadView {
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// The most recent durably recorded head of this embedded graph and branch.
-    /// A fresh database, or one containing exclusively older commits without
-    /// explicit head updates, returns `None`. As with snapshot acquisition,
-    /// an uncertain commit or incomplete publication requires recovery first.
+    /// The explicit branch head of the published embedded graph. A fresh
+    /// database or a frontier written without a head update returns `None`.
+    /// This also covers an older writer appending after a tracked generation.
+    /// An uncertain commit or incomplete publication requires recovery first.
     pub fn branch_head(&self) -> Result<Option<fgdb_types::MarkerRef>, crate::ReadError> {
-        self.frontier()?;
-        Ok(self.coordinator.chain().head(crate::GRAPH, crate::BRANCH))
+        self.ensure_readable()?;
+        Ok(self.published_branch_head())
+    }
+
+    fn published_branch_head(&self) -> Option<fgdb_types::MarkerRef> {
+        self.coordinator
+            .chain()
+            .head(crate::GRAPH, crate::BRANCH)
+            .filter(|marker| marker.commit_seq == self.snapshot.frontier)
+    }
+
+    /// Check a write precondition on the current embedded branch.
+    /// A caller composing this check with a separate write must retain
+    /// exclusive access to the same writer until that write completes.
+    pub fn check_branch_head(
+        &self,
+        expected: Option<fgdb_types::MarkerRef>,
+    ) -> Result<(), crate::WriteError> {
+        self.ensure_writable()?;
+        let actual = self.published_branch_head();
+        if actual.is_none() && self.snapshot.frontier != fgdb_types::CommitSeq::ORIGIN {
+            return Err(crate::WriteError::BranchHeadUnrecorded {
+                frontier: self.snapshot.frontier,
+            });
+        }
+        fgdb_chronicle::HeadUpdate {
+            graph: crate::GRAPH,
+            branch: crate::BRANCH,
+            expected_previous: expected,
+        }
+        .check_previous(actual)
+        .map_err(fgdb_chronicle::CommitError::from)?;
+        Ok(())
     }
 
     /// Commit only if the embedded branch is still at the supplied revision.
@@ -75,21 +106,7 @@ impl<V: Vfs + Clone> Database<V> {
         expected: Option<fgdb_types::MarkerRef>,
         batch: crate::WriteBatch,
     ) -> Result<fgdb_types::CommitSeq, crate::WriteError> {
-        self.ensure_writable()?;
-        let chain = self.coordinator.chain();
-        let actual = chain.head(crate::GRAPH, crate::BRANCH);
-        if actual.is_none() && !chain.is_empty() {
-            return Err(crate::WriteError::BranchHeadUnrecorded {
-                frontier: self.snapshot.frontier,
-            });
-        }
-        fgdb_chronicle::HeadUpdate {
-            graph: crate::GRAPH,
-            branch: crate::BRANCH,
-            expected_previous: expected,
-        }
-        .check_previous(actual)
-        .map_err(fgdb_chronicle::CommitError::from)?;
+        self.check_branch_head(expected)?;
         self.write(cx, batch).await
     }
 
@@ -228,51 +245,61 @@ mod head_tests {
     }
 
     #[test]
-    fn markerless_history_cannot_satisfy_a_conditional_creation() {
+    fn a_markerless_tail_cannot_satisfy_any_head_condition() {
         let ((), report) = run_async_under_lab(0xb4a1_0002, |runtime| async move {
             let cx = PurposeContexts::narrow_runtime_root(&runtime).commit();
-            let vfs = MemVfs::new().unwrap();
-            let dir = vfs.database_dir();
-            let keys = || DatabaseKeys::new([3; 32], DatabaseSecurityNamespaceId([4; 32]), [5; 32]);
-            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, keys())
-                .await
-                .unwrap();
-            let mut legacy = WriteBatch::new(RelationId(1));
-            legacy.create_vertex(VId(1), vec![], vec![]);
-            let template = db.build_write_template(legacy).unwrap();
-            let capsule =
-                crate::prepare_capsule(db.keys.k_oid(), db.keys.namespace, &template).unwrap();
-            let old = db
-                .coordinator
-                .commit(&cx, &capsule.bytes, |seq, oid| {
-                    crate::marker_for_capsule(seq, oid, &capsule, vec![])
-                })
-                .await
-                .unwrap();
-            drop(db);
-            let mut reopened = Database::open_with_vfs(&cx, vfs, &dir, keys())
-                .await
-                .unwrap();
-            assert_eq!(reopened.branch_head().unwrap(), None);
-            assert!(
-                reopened
-                    .vertex_at(VId(1), old.commit_seq)
-                    .unwrap()
-                    .is_some()
-            );
-            for expected in [None, Some(old)] {
-                assert!(matches!(
-                    reopened.write_if_branch_head(&cx, expected, WriteBatch::new(RelationId(1))).await,
-                    Err(crate::WriteError::BranchHeadUnrecorded { frontier }) if frontier == old.commit_seq
-                ));
+            for tracked_prefix in [false, true] {
+                let vfs = MemVfs::new().unwrap();
+                let dir = vfs.database_dir();
+                let keys = || DatabaseKeys::new([3; 32], DatabaseSecurityNamespaceId([4; 32]), [5; 32]);
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, keys())
+                    .await
+                    .unwrap();
+                let previous = if tracked_prefix {
+                    let mut tracked = WriteBatch::new(RelationId(1));
+                    tracked.create_vertex(VId(10), vec![], vec![]);
+                    db.write(&cx, tracked).await.unwrap();
+                    db.branch_head().unwrap()
+                } else {
+                    None
+                };
+                let mut legacy = WriteBatch::new(RelationId(1));
+                legacy.create_vertex(VId(1), vec![], vec![]);
+                let template = db.build_write_template(legacy).unwrap();
+                let capsule =
+                    crate::prepare_capsule(db.keys.k_oid(), db.keys.namespace, &template).unwrap();
+                let old = db
+                    .coordinator
+                    .commit(&cx, &capsule.bytes, |seq, oid| {
+                        crate::marker_for_capsule(seq, oid, &capsule, vec![])
+                    })
+                    .await
+                    .unwrap();
+                drop(db);
+                let mut reopened = Database::open_with_vfs(&cx, vfs, &dir, keys())
+                    .await
+                    .unwrap();
+                assert_eq!(reopened.branch_head().unwrap(), None);
+                assert!(
+                    reopened
+                        .vertex_at(VId(1), old.commit_seq)
+                        .unwrap()
+                        .is_some()
+                );
+                for expected in [None, Some(old), previous] {
+                    assert!(matches!(
+                        reopened.write_if_branch_head(&cx, expected, WriteBatch::new(RelationId(1))).await,
+                        Err(crate::WriteError::BranchHeadUnrecorded { frontier }) if frontier == old.commit_seq
+                    ));
+                }
+                let mut first_tracked = WriteBatch::new(RelationId(1));
+                first_tracked.create_vertex(VId(2), vec![], vec![]);
+                reopened.write(&cx, first_tracked).await.unwrap();
+                assert_eq!(
+                    reopened.branch_head().unwrap().unwrap().commit_seq,
+                    old.commit_seq.checked_successor().unwrap()
+                );
             }
-            let mut first_tracked = WriteBatch::new(RelationId(1));
-            first_tracked.create_vertex(VId(2), vec![], vec![]);
-            reopened.write(&cx, first_tracked).await.unwrap();
-            assert_eq!(
-                reopened.branch_head().unwrap().unwrap().commit_seq,
-                CommitSeq(2)
-            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

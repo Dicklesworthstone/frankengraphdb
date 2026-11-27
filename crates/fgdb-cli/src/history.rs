@@ -9,6 +9,68 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::Path;
 
+/// A local write precondition checked under the database's exclusive writer lease.
+pub(super) enum BranchGuard {
+    Empty,
+    At(fgdb_types::MarkerRef),
+}
+
+impl BranchGuard {
+    pub(super) fn parse(raw: &str) -> Result<Self, Failure> {
+        if raw == "empty" {
+            return Ok(Self::Empty);
+        }
+        let invalid = || {
+            Failure::usage("--if-head requires empty or <positive seq>@<64 hexadecimal digits>")
+        };
+        let (seq, hash) = raw.split_once('@').ok_or_else(invalid)?;
+        let seq = super::symbol_ordinal(seq)
+            .filter(|&seq| seq != 0)
+            .ok_or_else(invalid)?;
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid());
+        }
+        let mut oid = [0; 32];
+        for (at, byte) in oid.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hash[2 * at..2 * at + 2], 16).map_err(|_| invalid())?;
+        }
+        Ok(Self::At(fgdb_types::MarkerRef {
+            commit_seq: fgdb_types::CommitSeq(seq),
+            marker_oid: fgdb_types::ObjectId(oid),
+        }))
+    }
+
+    pub(super) fn check<V: asupersync::fs::Vfs + Clone>(
+        &self,
+        db: &fgdb::Database<V>,
+    ) -> Result<(), Failure> {
+        let expected = match self {
+            Self::Empty => None,
+            Self::At(marker) => Some(*marker),
+        };
+        db.check_branch_head(expected).map_err(|error| {
+            let conflict = match &error {
+                fgdb::WriteError::BranchHeadUnrecorded { .. } => true,
+                fgdb::WriteError::Commit(error) => matches!(
+                    error.as_ref(),
+                    fgdb_chronicle::CommitError::Chain(
+                        fgdb_chronicle::ChainError::HeadCasMismatch(_)
+                    )
+                ),
+                _ => false,
+            };
+            if conflict {
+                Failure::coded(
+                    super::refusal::Code::Conflict,
+                    "the expected branch head is not current",
+                )
+            } else {
+                super::execution_failure(error)
+            }
+        })
+    }
+}
+
 struct Options<'a> {
     db: &'a Path,
     key: &'a Path,

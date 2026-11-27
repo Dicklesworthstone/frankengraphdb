@@ -2362,6 +2362,46 @@ fn embedded_write_and_transaction_if_current_guard_durable_frontier() {
 }
 
 #[test]
+fn local_writes_and_transactions_check_the_exact_verified_marker() {
+    let fixture = Fixture::new("branch-head");
+    assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
+    let statement = "CREATE (:Person {id: 10})";
+    let write = |guard: &str| fixture.robot("write", &["--if-head", guard, statement]);
+    assert_eq!(succeeded(&write("empty"), "written"), 1);
+    let history = fixture.discovered("verify-history", &["--through", "1"]);
+    assert_eq!(succeeded(&history, "verified_history"), 1);
+    let result = terminal(&history);
+    let hash = result
+        .split("\"chain_hash\":\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let head = format!("1@{hash}");
+    let padding = "00".repeat(32);
+    for invalid in ["1@123", &format!("0@{padding}"), &format!("+1@{padding}")] {
+        refused(&write(invalid), 2, "usage");
+    }
+    for stale in ["empty", &format!("1@{padding}"), &format!("2@{hash}")] {
+        let refused_write = write(stale);
+        refused(&refused_write, 3, "query");
+        assert!(terminal(&refused_write).contains("\"code\":\"conflict\""));
+    }
+    let txn = || fixture.robot("transaction", &["--if-head", &head, "--write", statement]);
+    assert_eq!(succeeded(&txn(), "committed"), 2);
+    let stale = txn();
+    refused(&stale, 3, "query");
+    assert!(terminal(&stale).contains("\"code\":\"conflict\""));
+    let read = fixture.robot("query", &["MATCH (n:Person) RETURN n.id"]);
+    assert_eq!(succeeded(&read, "rows"), 2);
+    assert_eq!(
+        String::from_utf8(read.stdout).unwrap().matches("\"event\":\"row\"").count(),
+        2
+    );
+}
+
+#[test]
 fn schema_allocates_names_without_reinterpreting_legacy_numeric_data() {
     let fixture = Fixture::new("schema-auto-names");
     assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);

@@ -645,6 +645,11 @@ fgdb verify-history --db mydb.fgdbdir --key-file fgdb.keys --through 42
 fgdb verify-history --db backup.fgdbdir --key-file fgdb.keys --through 42 \
   --expect-chain "$SAVED_CHAIN_HASH"
 
+# Publish only if commit 42 is still the recorded head of the embedded branch.
+fgdb write --db mydb.fgdbdir --key-file fgdb.keys --if-head "42@$SAVED_CHAIN_HASH" \
+  "CREATE (:Person {name: 'Ada'})"
+# --if-head empty admits the first write to a database with no commits.
+
 # Verify every capsule and block; repair damaged redundancy in place
 fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys
 
