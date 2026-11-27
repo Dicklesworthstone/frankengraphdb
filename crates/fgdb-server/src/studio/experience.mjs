@@ -1,5 +1,5 @@
 // Result exploration only. Native parsing, snapshots and authorization stay on the server.
-import { graphQuery, extractGraph, queryBody, validateResult, LIMITS, PALETTE } from './model.mjs';
+import { graphQuery, extractGraph, projectionRecords, queryBody, validateResult, LIMITS, PALETTE } from './model.mjs';
 export function capabilityOrigin(origin){
   try{const url=new URL(origin);return url.protocol==='https:'||(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname));}catch{return false;}
 }
@@ -56,9 +56,9 @@ export const RECIPES=Object.freeze([
 ]);
 function canonical(value){if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+canonical(value[key])).join(',')+'}';return JSON.stringify(value);}
 function signatures(result){
-  const index=new Map(result.columns.map((name,i)=>[name,i])), seen=new Map();
+  const seen=new Map();
   const add=(key,value)=>{if(!seen.has(key))seen.set(key,new Set());seen.get(key).add(canonical(value));};
-  for(const row of result.rows){const get=name=>row[index.get(name)];
+  for(const get of projectionRecords(result)){
     for(const prefix of ['node','source','target'])if(get(prefix)?.type==='vertex')add('n:'+get(prefix).value,[get(prefix+'_labels')??null,get(prefix+'_properties')??null]);
     if(get('relationship')?.type==='edge')add('e:'+get('relationship').value,[get('source')??null,get('target')??null,get('relationship_type')??null,get('relationship_properties')??null]);
   }
@@ -67,15 +67,14 @@ function signatures(result){
 // Track every distinct typed observation for the selected element. Joining rows
 // can return the same identity several times or with different projections.
 function propertyEvidence(result, kind, id) {
-  const columns = new Map(result.columns.map((name, i) => [name, i]));
   const aliases = kind === 'edge' ? ['relationship'] : ['node', 'source', 'target'];
   const fields = new Map();
   let maps = 0;
-  for (const row of result.rows) {
+  for (const get of projectionRecords(result)) {
     for (const alias of aliases) {
-      const entity = row[columns.get(alias)];
+      const entity = get(alias);
       if (entity?.type !== (kind === 'edge' ? 'edge' : 'vertex') || entity.value !== id) continue;
-      const properties = row[columns.get(alias + '_properties')];
+      const properties = get(alias + '_properties');
       if (properties?.type !== 'map') continue;
       maps++;
       for (const [name, cell] of Object.entries(properties.value)) {

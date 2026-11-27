@@ -110,7 +110,7 @@ metadata is associated with these named columns. The node template returns
 identities. Arbitrary vertex/edge co-occurrence is **not** evidence of adjacency.
 A native path supplies traversal adjacency but not stored direction, so its edges
 have no invented arrows unless explicit endpoint columns also supply orientation.
-Graph elements nested in lists and maps are discovered too.
+A map nested in a list or another map can also carry this projection. For example, grouped rows can return a list of maps with `source`, `relationship`, and `target` fields. Studio draws each map’s relationships and resolves its metadata from fields in that same map. Independent maps can be inspected together without combining their endpoints.
 
 Identities remain decimal strings, including full-width u128 values. Typed integer,
 count, wide integer, decimal and exact-average cells are not converted through

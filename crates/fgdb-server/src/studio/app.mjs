@@ -1,4 +1,4 @@
-import { colorIndex, graphQuery, queryBody, parseResponse, boundedText, extractGraph, filterGraph, cellText, csv } from './model.mjs';
+import { colorIndex, graphQuery, queryBody, parseResponse, boundedText, extractGraph, filterGraph, cellText, csv, typedProperties } from './model.mjs';
 import { demoResult, atlasResult } from './demo.mjs';
 import { GraphCanvas } from './graph.mjs';
 import { RECIPES, temporalQuery, compareResults, compareProperties, differenceBody, inspectDifference, tracePath, analyticsOverlay, focusComponent, capabilityOrigin } from './experience.mjs';
@@ -89,18 +89,6 @@ function renderResult(){$('export-button').disabled=!current;$('pin-baseline').d
 function renderLabels(){const counts=new Map();for(const n of shown.nodes)counts.set(n.group,(counts.get(n.group)||0)+1);$('label-count').textContent=String(counts.size);$('label-filters').replaceChildren(...[...counts].sort((a,b)=>b[1]-a[1]).map(([label,count])=>{const b=button('',()=>{hiddenLabels.has(label)?hiddenLabels.delete(label):hiddenLabels.add(label);refreshGraph();},'label-button'+(hiddenLabels.has(label)?' off':''));b.setAttribute('aria-pressed',String(!hiddenLabels.has(label)));b.replaceChildren();const name=el('span');name.append(swatch(label),document.createTextNode(label));b.append(name,el('code',String(count)));return b;}));}
 function renderNodes(){const visible=filterGraph(shown,hiddenLabels,$('node-search').value),nodes=visible.nodes.filter(n=>visible.matches.has(n.id)).sort((a,b)=>b.degree-a.degree||a.title.localeCompare(b.title));$('node-list-count').textContent=String(nodes.length);$('node-list').replaceChildren(...nodes.slice(0,150).map(n=>{const b=button('',()=>renderer.select({kind:'node',id:n.id},true),'node-option'+(selection?.kind==='node'&&selection.id===n.id?' selected':''));b.replaceChildren(swatch(n.group),el('span',n.title),el('small',String(n.degree)));b.title=`${n.title} · ${n.id}`;return b;}));if(nodes.length>150)$('node-list').append(el('p','Showing the first 150 matches. Refine your search.','muted'));}
 $('node-search').oninput=()=>refreshGraph();
-function typedProperties(result, id, kind) {
-  if (!result) return {};
-  const columns = new Map(result.columns.map((name, i) => [name, i]));
-  const aliases = kind === 'node' ? ['node', 'source', 'target'] : ['relationship'];
-  for (const row of result.rows) for (const alias of aliases) {
-    const entity = row[columns.get(alias)], properties = row[columns.get(alias + '_properties')];
-    if (entity?.type === (kind === 'node' ? 'vertex' : 'edge') && entity.value === id && properties?.type === 'map') {
-      return properties.value;
-    }
-  }
-  return {};
-}
 function renderPropertyComparison(root, kind, id) {
   const changes = compareProperties(baseline.data, current.data, kind, id);
   if (!changes.length) return;
