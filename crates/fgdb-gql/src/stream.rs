@@ -37,7 +37,8 @@ use std::sync::Arc;
 pub mod aggregate;
 mod asynchronous;
 pub use asynchronous::{
-    AsyncVertexCandidate, AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexScanCursor,
+    AsyncVertexCandidate, AsyncVertexProbeCursor, AsyncVertexProbePlan,
+    AsyncVertexProjectionCursor, AsyncVertexProjectionPlan, AsyncVertexScanCursor,
     AsyncVertexScanEvent, AsyncVertexScanOutput, AsyncVertexScanPlan, AsyncVertexScanRecord,
     AsyncVertexScanSource, AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan,
 };

@@ -1042,6 +1042,33 @@ pub(super) fn vertex_error(
     scan_error(error).into()
 }
 
+pub(super) fn projection_error(
+    error: GqlQueryError<fgdb_gql::scan_stream::ScanError<AuthorizedBufferedError>, QueryError>,
+) -> AuthorizedBufferedError {
+    use fgdb_gql::scan_stream::ScanError;
+    match error {
+        GqlQueryError::Source(ScanError::Vertex(error)) => {
+            vertex_error(GqlQueryError::Source(error))
+        }
+        GqlQueryError::Source(ScanError::Edge(error)) => edge_error(GqlQueryError::Source(error)),
+        GqlQueryError::Source(ScanError::Projection { row, column, error }) => {
+            QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                row: usize::try_from(row).unwrap_or(usize::MAX),
+                column,
+                error,
+            }))
+            .into()
+        }
+        GqlQueryError::Interrupted(error) => error.into(),
+        GqlQueryError::Rows(error) => vertex_error(GqlQueryError::Rows(error)),
+        GqlQueryError::Evaluator(error) => vertex_error(GqlQueryError::Evaluator(error)),
+        GqlQueryError::IdentifiedEdgesRequired => {
+            vertex_error(GqlQueryError::IdentifiedEdgesRequired)
+        }
+        GqlQueryError::Data(error) => vertex_error(GqlQueryError::Data(error)),
+    }
+}
+
 pub(super) fn edge_error(
     error: GqlQueryError<EdgeScanError<AuthorizedBufferedError>, QueryError>,
 ) -> AuthorizedBufferedError {

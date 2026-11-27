@@ -549,6 +549,12 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> SpoolInput for Input<'_, V, C> {
                 cursor.row_stats(),
                 cursor.evaluator_stats(),
             ),
+            Native::ProjectedVertex(cursor) => (
+                cursor.snapshot_seq(),
+                ScanKind::Vertex,
+                cursor.row_stats(),
+                cursor.evaluator_stats(),
+            ),
             Native::VertexProbe(cursor) => (
                 cursor.snapshot_seq(),
                 ScanKind::Vertex,

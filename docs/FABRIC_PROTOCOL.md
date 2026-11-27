@@ -1263,16 +1263,30 @@ application output is admitted.
   connected fixed joins. An undirected root also requires its root-source
   vertex immediately after the root edge to distinguish orientations. Admitted masked scalar columns and
   native existence probes, DISTINCT and SKIP/LIMIT retain their normal cursor
-  semantics. Resident computed projections can instead explicitly order by the
-  complete ascending source identity prefix. The bound projection may move
+  semantics. Computed projections can instead explicitly order by the
+  complete ascending source identity prefix, provided the native input also
+  proves that identity order. The bound projection may move
   these keys or keep compiler-private keys outside visible output; it evaluates
   every original expression under the same meter and admitted property readers
-  before trimming private cells. This admits vertex, directed/undirected edge
+  before trimming private cells. Resident sources admit vertex, directed/undirected edge
   and fixed-join computations without a sort or collected answer. The final
   page does not suppress skipped or suffix expression failures. Descending or
   incomplete identity orders, DISTINCT for this computed profile, arbitrary
-  relational barriers, metadata reads and random draws still refuse. Configured
-  cold/buffered Set streams retain their separate narrower admission.
+  relational barriers, metadata reads and random draws still refuse.
+
+  Configured cold/buffered sources also admit the computed vertex profile,
+  including prepared historical reads and private identity keys. Every element
+  property read must target a direct column for the current root vertex. The
+  complete bounded field demand includes native predicates, the source
+  projection and every outer expression, before capability masking and source
+  construction. The existing asynchronous vertex compiler still admits the
+  entire physical source. Evaluation borrows the admitted record, charges
+  copied payloads before allocation, and retains the output's memory guard
+  independently of the cursor. One cumulative native/signed allowance covers
+  source and VM work; only selected delivered rows spend result-row credit.
+  SKIP/LIMIT does not hide projection failures in the skipped or suffix rows.
+  Computed cold edges/joins, indirect element reads, probes and collections
+  outside that asynchronous source profile refuse before source construction.
 
   Vertex and fixed-edge aggregates also use the native cursor:
   the first credited demand consumes the complete authorized input and later

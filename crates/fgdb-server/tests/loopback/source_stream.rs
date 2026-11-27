@@ -4,6 +4,9 @@ use super::*;
 #[path = "source_projection.rs"]
 mod source_projection;
 
+#[path = "source_buffered_projection.rs"]
+mod source_buffered_projection;
+
 async fn seed(cx: &Cx, owner: &mut Client) {
     owner
         .execute_batch(

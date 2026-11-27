@@ -1076,18 +1076,22 @@ FGP also supports reusable native read templates through `Client::prepare_read`,
 
 Remote queries select their execution path with `--read-mode buffered|source|ordered`. The default `buffered` mode collects the ordinary eager answer. `source` uses the authorized native row or aggregate cursor with transport credit driving source demand. Its row profile is identity-leading: a vertex scan's rows begin with the scanned vertex and a fixed-edge scan's with the captured edge, so `MATCH (p:Person) RETURN p.name` refuses in `source` mode (re-measured 2026-11-24) while `buffered` answers it; [Native source streams](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) gives the exact profile. `ordered` uses the server's private external sorter for property-only vertex and fixed-edge/join projections, hidden sort keys, DISTINCT and SKIP/LIMIT. It also accepts terminal `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` and `COLLECT` over admitted graph and complete relational inputs, including prepared historical reads. Groups spill through the existing bounded reducer; exact counts, wide sums and rational averages retain their native wire types, and collections retain native occurrence order. Both native modes flush the schema and each row without collecting the complete result in the CLI. Unsupported source profiles and terminal aggregate expressions that require an additional graph-element lookup refuse before execution. New external aggregate regressions have source and formatting review; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
 
-Resident source streams additionally admit computed projections with an explicit
-ascending order by the complete source identity, for example
+Source streams additionally admit computed projections when the native input
+and final output both have proved identity order, for example
 `MATCH (n) RETURN n AS id, n.age + 1 AS next_age ORDER BY id`. The identity may
 be a private ranking key, as in
 `MATCH (n) RETURN {node:n, next_age:n.age+1} AS doc ORDER BY n SKIP 1 LIMIT 10`.
-Directed edges use the edge identity; undirected roots also require the source
-vertex, and fixed joins retain every traversal identity. Expressions use the
+Resident directed edges use the edge identity; undirected roots also require
+the source vertex, and fixed joins retain every traversal identity. Expressions use the
 same scoped readers and cumulative allowance as the source. Every reached
 expression, including the unselected suffix, is checked before successful
 exhaustion. Bare property-only queries still require canonical value ordering,
-and configured cold/buffered source streams retain their existing narrower
-profile. These new source projections have qualification pending.
+and configured cold/buffered source streams admit the vertex form when property
+reads target the current scanned vertex. The cold source admits the complete
+predicate and projection field demand before opening, and retains each scoped
+record through evaluation under its existing memory guards. Computed cold edge
+and join projections, indirect element lookups and other unsupported source
+shapes still refuse. These new source projections have qualification pending.
 
 Enable external ordered reads by adding `--query-scratch-dir /existing/private/scratch` to the database's `fgdbd serve` options, after its `--database` argument. This is an operator path; clients cannot choose files or physical limits. Defaults bound the database's shared tracked spill buffers to 64 MiB and concurrent ordered sessions to four, with three private files of at most 512 MiB each per session and at most 100,000 input rows. The complete sort-work ceiling is reserved from the same signed allowance that pays for source work and final delivery. The server announces the stream before sorting, handles controls while setup or sort I/O is pending, and streams only the completed final rows under credit. Aggregate inputs and completed-group expressions finish even when `LIMIT 0` suppresses output; only delivered groups spend the signed result-row allowance. Each collection must fit the per-value memory and encoded-row limits. On Unix, scratch files are exclusive and unlinked before query data is written. The source graph remains resident. [Ordered stream details and limits](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) describe the supported profile and ownership boundaries.
 

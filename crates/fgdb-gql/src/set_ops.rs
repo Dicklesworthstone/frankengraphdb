@@ -2179,6 +2179,131 @@ impl core::fmt::Debug for GraphSetRowPull {
 }
 
 impl GraphSetRowPull {
+    /// Collect every possible VM field lookup before opening the source.
+    /// Only direct columns containing this pattern's root vertex may read
+    /// graph properties; lazy operands and private ranking cells participate.
+    pub(crate) fn vertex_projection_properties(
+        &self,
+    ) -> Option<fgdb_delta_types::PropertySelection> {
+        fn include(
+            value: &GraphSetValue,
+            columns: &[ValueProjection],
+            keys: &mut fgdb_delta_types::PropertySelection,
+        ) -> Option<()> {
+            use GraphSetValue as V;
+            match value {
+                V::Column(_)
+                | V::Literal(_)
+                | V::TypedNull(_)
+                | V::Integer(_)
+                | V::Value(_)
+                | V::Local(_) => {}
+                V::ElementMetadata { .. } | V::Random { .. } => return None,
+                V::MapGet { map, property, .. } => {
+                    if let crate::GraphElementKey::Property(key) = property {
+                        let V::Column(column) = map.as_ref() else {
+                            return None;
+                        };
+                        if !matches!(columns.get(*column),
+                            Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
+                        {
+                            return None;
+                        }
+                        keys.insert(*key).ok()?;
+                    }
+                    include(map, columns, keys)?;
+                }
+                V::List(values) => {
+                    for value in values {
+                        include(value, columns, keys)?;
+                    }
+                }
+                V::Size(value)
+                | V::Keys(value)
+                | V::Temporal {
+                    argument: value, ..
+                }
+                | V::Function {
+                    argument: value, ..
+                } => include(value, columns, keys)?,
+                V::Index { list, index } => {
+                    include(list, columns, keys)?;
+                    include(index, columns, keys)?;
+                }
+                V::In { value, list } => {
+                    include(value, columns, keys)?;
+                    include(list, columns, keys)?;
+                }
+                V::Equal { left, right } | V::Ordered { left, right, .. } => {
+                    include(left, columns, keys)?;
+                    include(right, columns, keys)?;
+                }
+                V::Comprehension { list, filter, map } => {
+                    include(list, columns, keys)?;
+                    for value in [filter.as_deref(), map.as_deref()].into_iter().flatten() {
+                        include(value, columns, keys)?;
+                    }
+                }
+                V::Quantifier {
+                    list, predicate, ..
+                } => {
+                    include(list, columns, keys)?;
+                    include(predicate, columns, keys)?;
+                }
+                V::Slice { list, from, to } => {
+                    include(list, columns, keys)?;
+                    for value in [from.as_deref(), to.as_deref()].into_iter().flatten() {
+                        include(value, columns, keys)?;
+                    }
+                }
+                V::Range { start, end, step } => {
+                    include(start, columns, keys)?;
+                    include(end, columns, keys)?;
+                    if let Some(step) = step {
+                        include(step, columns, keys)?;
+                    }
+                }
+                V::Reduce { init, list, expr } => {
+                    include(init, columns, keys)?;
+                    include(list, columns, keys)?;
+                    include(expr, columns, keys)?;
+                }
+                V::MapLiteral { values, guard, .. } => {
+                    for value in values {
+                        include(value, columns, keys)?;
+                    }
+                    if let Some(guard) = guard {
+                        include(guard, columns, keys)?;
+                    }
+                }
+                V::MapOverlay { base, values, .. } | V::Let { body: base, values } => {
+                    include(base, columns, keys)?;
+                    for value in values {
+                        include(value, columns, keys)?;
+                    }
+                }
+                V::Case { arms, otherwise } => {
+                    for (condition, value) in arms {
+                        include(condition, columns, keys)?;
+                        include(value, columns, keys)?;
+                    }
+                    if let Some(value) = otherwise {
+                        include(value, columns, keys)?;
+                    }
+                }
+            }
+            Some(())
+        }
+        let mut keys = fgdb_delta_types::PropertySelection::EMPTY;
+        for cell in &self.projection {
+            if !cell.value().is_element_scan_local() {
+                return None;
+            }
+            include(cell.value(), self.pattern.value_columns(), &mut keys)?;
+        }
+        Some(keys)
+    }
+
     /// The source pattern whose native cursor supplies the input rows.
     #[must_use]
     pub fn pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {

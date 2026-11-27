@@ -43,6 +43,8 @@ const S: RelationId = RelationId(8);
 const T: RelationId = RelationId(9);
 const U: RelationId = RelationId(10);
 
+#[path = "authorized_buffered_read/computed_projection.rs"]
+mod computed_projection;
 #[path = "authorized_buffered_read/vertex_probes.rs"]
 mod vertex_probes;
 

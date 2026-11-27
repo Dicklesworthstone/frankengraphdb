@@ -24,14 +24,42 @@ expression validation, including the unselected suffix before successful EOF.
 
 Resident local, Send, cooperative and ordinary FGP/prepared paths share this
 proof. Bare property-only canonical value order, descending/incomplete identity
-keys, DISTINCT in this computed profile, arbitrary relational barriers and
-configured cold/buffered Set streams retain their refusals. Regression sources
+keys, DISTINCT in this computed profile and arbitrary relational barriers
+retain their refusals. Regression sources
 cover private keys, occurrence counts, every projection checkpoint, scope,
 prepared historical rebinding, flow credit, cancellation and suffix failures.
 Independent source/API reviews, scoped pinned formatting and whitespace checks
 completed. Native build/runtime, Clippy, UBS and exact-tree qualification remain
 pending after executor loss.
 Keep `fgdb-w5-executor-olp` and `fgdb-qualify-integrated-nov22-maz0p` open.
+
+### Computed cold vertex source projections — qualification pending
+
+The authorized buffered source path now binds the proved vertex subset of
+Set/TemporalSet reads. It reuses the native projection VM and asynchronous
+vertex kernel, including exact historical cuts and compiler-private ordering
+keys. A bounded effect walk admits only property reads from direct root-vertex
+columns and combines every outer expression's field demand with the source's
+predicates and projection before capability masking and physical admission.
+
+Each scoped record stays alive through evaluation. Property copies and VM
+allocations use the original meter and retained memory reservation; delivered
+rows keep their guards after cursor destruction. Only final selected rows
+spend result-row allowance. Skipped and suffix rows still evaluate before
+successful EOF, including LIMIT 0. Cancellation and projection failures fuse
+the source and release the existing session/source owner. Computed cold edges,
+joins, indirect element lookups and unsupported physical sources still refuse.
+
+Regression sources cover public direct/prepared FGP, duplicate occurrences,
+private map projections, masked properties, temporal rebinding, full suffix
+validation, cumulative budgets and cancellation/reuse with one admitted source.
+Additional native and host regressions cover lazy property-demand bounds,
+matched-row failure ordinals, pending-future cancellation, retained output
+reservations and refusal before a projected payload exceeds the real host pool.
+Independent source/API review, scoped pinned formatting and whitespace checks
+completed. Native build/runtime and exact-tree qualification remain pending;
+no passing runtime result is claimed. Keep `fgdb-w5-executor-olp` and
+`fgdb-qualify-integrated-nov22-maz0p` open.
 
 ### Native FGP over WebSocket — qualification pending
 
