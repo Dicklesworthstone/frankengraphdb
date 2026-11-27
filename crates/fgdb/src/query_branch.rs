@@ -49,6 +49,15 @@ impl EmbeddedReadView {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// The most recent durably recorded head of this embedded graph and branch.
+    /// A fresh database, or one containing exclusively older commits without
+    /// explicit head updates, returns `None`. As with snapshot acquisition,
+    /// an uncertain commit or incomplete publication requires recovery first.
+    pub fn branch_head(&self) -> Result<Option<fgdb_types::MarkerRef>, super::ReadError> {
+        self.frontier()?;
+        Ok(self.coordinator.chain().head(super::GRAPH, super::BRANCH))
+    }
+
     /// Execute a native read using an explicit host branch resolver.
     ///
     /// Unqualified statements acquire a healthy read session from this
@@ -100,4 +109,52 @@ fn query_selected_view(
         None => default_view()?,
     };
     view.query(cx, bound.statement(), bound.parameters(), resolver, policy)
+}
+
+#[cfg(test)]
+mod head_tests {
+    use super::*;
+    use crate::{DatabaseKeys, MemVfs, WriteBatch};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::{CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+
+    #[test]
+    fn embedded_writes_link_the_recovered_head() {
+        let ((), report) = run_async_under_lab(0xb4a1_0001, |runtime| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&runtime).commit();
+            let vfs = MemVfs::new().unwrap();
+            let dir = vfs.database_dir();
+            let keys = || DatabaseKeys::new([3; 32], DatabaseSecurityNamespaceId([4; 32]), [5; 32]);
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, keys())
+                .await
+                .unwrap();
+            assert_eq!(db.branch_head().unwrap(), None);
+            let batch = |id| {
+                let mut batch = WriteBatch::new(RelationId(1));
+                batch.create_vertex(VId(id), vec![], vec![]);
+                batch
+            };
+            db.write(&cx, batch(1)).await.unwrap();
+            let first = db.branch_head().unwrap().unwrap();
+            assert_eq!(first.commit_seq, CommitSeq(1));
+            drop(db);
+            let mut reopened = Database::open_with_vfs(&cx, vfs, &dir, keys())
+                .await
+                .unwrap();
+            assert_eq!(reopened.branch_head().unwrap(), Some(first));
+            reopened.write(&cx, batch(2)).await.unwrap();
+            let second = reopened.branch_head().unwrap().unwrap();
+            assert_eq!(second.commit_seq, CommitSeq(2));
+            let actual: Vec<_> = reopened
+                .coordinator
+                .chain()
+                .branch_history_from(crate::GRAPH, crate::BRANCH, second)
+                .unwrap()
+                .map(|entry| entry.marker_oid)
+                .collect();
+            assert_eq!(actual, vec![second.marker_oid, first.marker_oid]);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 }

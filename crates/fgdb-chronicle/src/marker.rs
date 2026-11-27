@@ -838,6 +838,40 @@ impl MarkerChain {
         self.heads.get(&(graph, branch)).copied()
     }
 
+    /// Walk the recorded ancestry of an exact branch head, newest first.
+    ///
+    /// `at` may be a prior head on this coordinate. Admission checks both
+    /// parts of its marker identity and the coordinate's head update. Every
+    /// such update in a verified chain passed its predecessor CAS, so a past
+    /// update is on that coordinate's single line of history. A marker shared
+    /// by several branches follows only the selected branch's predecessor.
+    /// Global-only markers and history before the first explicit update are
+    /// never attributed to a branch.
+    pub fn branch_history_from(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+        at: MarkerRef,
+    ) -> Option<impl Iterator<Item = &ChainedMarker>> {
+        let locate = move |reference: MarkerRef| {
+            let index = usize::try_from(reference.commit_seq.0.checked_sub(1)?).ok()?;
+            let entry = self.entries.get(index)?;
+            if entry.marker_oid != reference.marker_oid {
+                return None;
+            }
+            let updates = &entry.marker.head_updates;
+            let index = updates
+                .binary_search_by_key(&(graph, branch), |update| (update.graph, update.branch))
+                .ok()?;
+            Some((entry, updates[index].expected_previous))
+        };
+        let start = locate(at)?;
+        Some(
+            std::iter::successors(Some(start), move |(_, previous)| previous.and_then(locate))
+                .map(|(entry, _)| entry),
+        )
+    }
+
     /// Append one marker, enforcing every structural law before anything is
     /// mutated — so a refused append leaves the chain and every head exactly
     /// as they were.
@@ -1318,6 +1352,70 @@ mod commit_seq_exhaustion_tests {
         }
         assert_eq!(chain.entries.len(), 4096);
         assert_eq!(prefix.heads.len(), 3);
+    }
+
+    #[test]
+    fn historical_heads_walk_only_their_verified_coordinate_after_recovery() {
+        let graph = GraphId(1 << 110);
+        let left = BranchId(3);
+        let right = BranchId((1 << 100) + 3);
+        let mut chain = MarkerChain::new();
+        for (seq, branches) in [
+            (1, vec![]), // older global-only marker
+            (2, vec![left]),
+            (3, vec![right]),
+            (4, vec![left, right]), // same head, different predecessors
+            (5, vec![left]),
+            (6, vec![]),
+        ] {
+            let mut next = marker(seq);
+            next.head_updates = branches
+                .into_iter()
+                .map(|branch| HeadUpdate {
+                    graph,
+                    branch,
+                    expected_previous: chain.head(graph, branch),
+                })
+                .collect();
+            chain.append(next).unwrap();
+        }
+        let recovered = MarkerChain::from_entries(chain.entries()).unwrap();
+        for chain in [&chain, &recovered] {
+            let identity = |seq: usize| MarkerRef {
+                marker_oid: chain.entries()[seq - 1].marker_oid,
+                commit_seq: CommitSeq(seq as u64),
+            };
+            let history = |branch, at| {
+                chain.branch_history_from(graph, branch, at).map(|entries| {
+                    entries
+                        .map(|entry| entry.marker.commit_seq)
+                        .collect::<Vec<_>>()
+                })
+            };
+            assert_eq!(history(left, identity(5)), Some(vec![5, 4, 2]));
+            assert_eq!(history(left, identity(4)), Some(vec![4, 2]));
+            assert_eq!(history(right, identity(4)), Some(vec![4, 3]));
+            assert_eq!(history(left, identity(3)), None);
+            assert_eq!(history(left, identity(1)), None);
+            assert_eq!(history(left, identity(6)), None);
+            for seq in [0, 4, 7, u64::MAX] {
+                assert_eq!(
+                    history(
+                        left,
+                        MarkerRef {
+                            commit_seq: CommitSeq(seq),
+                            ..identity(2)
+                        }
+                    ),
+                    None
+                );
+            }
+            assert!(
+                chain
+                    .branch_history_from(GraphId(0), left, identity(4))
+                    .is_none()
+            );
+        }
     }
 
     #[test]

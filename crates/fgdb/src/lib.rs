@@ -4907,6 +4907,15 @@ impl<V: Vfs + Clone> Database<V> {
             .counters();
         self.retain_preparation_anchor();
         let published_frontier = self.snapshot.frontier;
+        // The embedded writer serves one coordinate. Record its exact durable
+        // predecessor, including on the first write after reopening. Older
+        // embedded markers did not advance a head; the first explicit update
+        // starts its own chain without claiming any unrecorded predecessor.
+        let branch_update = HeadUpdate {
+            graph: GRAPH,
+            branch: BRANCH,
+            expected_previous: self.coordinator.chain().head(GRAPH, BRANCH),
+        };
         // `commit_with_crash` is cancellable at every VFS await. Chronicle
         // poisons its own coordinator immediately before marker append, but a
         // dropped OUTER future never executes the error arm below that copies
@@ -4920,7 +4929,7 @@ impl<V: Vfs + Clone> Database<V> {
                 cx,
                 &capsule.bytes,
                 |seq, oid| {
-                    let mut marker = marker_for_capsule(seq, oid, &capsule, Vec::new())
+                    let mut marker = marker_for_capsule(seq, oid, &capsule, vec![branch_update])
                         .with_identity_counters(identity_counters);
                     marker.authorization_decision_digest = authorization_decision_digest;
                     marker
