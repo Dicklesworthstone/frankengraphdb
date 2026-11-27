@@ -131,15 +131,9 @@ impl AsyncEdgeScanPlan {
     }
 
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
-        if let Some(operator) = plan.operators().iter().position(|operator| {
-            matches!(
-                operator,
-                GlaOperator::Expand { .. } | GlaOperator::Probe { .. }
-            )
-        }) {
-            return Err(EdgeScanBuildError { operator });
-        }
-        let inner = EdgeScanPlan::compile(plan)?;
+        // This source can resolve one edge and its endpoints. Nested access
+        // belongs to a join cursor, even for a collection with no fixed hops.
+        let inner = EdgeScanPlan::compile_local(plan, LocalOutput::OrderedRows)?;
         Ok(Self::from_inner(inner))
     }
 

@@ -806,6 +806,30 @@ fn asynchronous_compilation_refuses_nested_reads_and_non_streamable_output() {
     }
 }
 
+#[test]
+fn async_single_edge_source_refuses_variable_length_collections() {
+    let prepared = crate::PreparedGraphSetText::prepare(
+        "MATCH (a)-[r:R]->(b) RETURN r,a,b,\
+         [(b)-[:R*0..3]->(x) WHERE x.p > 5 | x] AS endpoints",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let plan = prepared.single_pattern_input().unwrap().plan();
+    assert!(
+        plan.operators()
+            .iter()
+            .any(|op| matches!(op, GlaOperator::Collect { .. }))
+    );
+    assert!(!plan.operators().iter().any(|op| matches!(
+        op,
+        GlaOperator::Expand { .. } | GlaOperator::Probe { .. }
+    )));
+    assert!(EdgeScanPlan::compile(plan).is_ok());
+    assert!(AsyncEdgeScanPlan::compile(plan).is_err());
+}
+
 // A synchronous reader of the same immutable fixtures. It is an independent
 // source implementation, not an async cursor polled inside synchronous code.
 struct SyncSource {
