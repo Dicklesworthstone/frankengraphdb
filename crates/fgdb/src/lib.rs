@@ -2427,6 +2427,17 @@ pub struct EmbeddedReadView {
     statement_clock: Option<query::StatementClock>,
 }
 
+/// Owner-side historical graph reads at one explicitly recorded branch marker.
+/// The retained view owns the graph data, while the selected revision fixes
+/// both the execution sequence and the catalog used for name resolution.
+/// The marker can be passed to `Database::write_if_branch_head` even after
+/// the read handle's originating writer has advanced or reopened.
+pub struct BranchRevision {
+    marker: fgdb_types::MarkerRef,
+    view: EmbeddedReadView,
+    catalog: fgdb_delta_types::catalog::SymbolCatalog,
+}
+
 /// A non-owning reference to one authenticated embedded generation.
 ///
 /// Upgrading pins that exact generation, including its namespace and search

@@ -65,6 +65,42 @@ impl<V: Vfs + Clone> Database<V> {
             .filter(|marker| marker.commit_seq == self.snapshot.frontier)
     }
 
+    /// Pin the current recorded head and its graph state under one read of
+    /// this healthy handle. No marker is returned for an untracked history.
+    pub fn current_branch_revision(
+        &self,
+    ) -> Result<Option<crate::BranchRevision>, crate::SymbolCatalogError> {
+        match self.branch_head()? {
+            Some(marker) => self.read_branch_revision(marker),
+            None => Ok(None),
+        }
+    }
+
+    /// Pin a historical revision of the embedded branch by its full marker
+    /// identity. A marker outside this coordinate's verified history yields
+    /// `None`. A fenced database or unavailable historical schema is an error.
+    pub fn read_branch_revision(
+        &self,
+        marker: fgdb_types::MarkerRef,
+    ) -> Result<Option<crate::BranchRevision>, crate::SymbolCatalogError> {
+        self.ensure_readable()?;
+        if self
+            .coordinator
+            .chain()
+            .branch_history_from(crate::GRAPH, crate::BRANCH, marker)
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let view = self.read_session()?;
+        let catalog = view.symbol_catalog_at(marker.commit_seq)?;
+        Ok(Some(crate::BranchRevision {
+            marker,
+            view,
+            catalog,
+        }))
+    }
+
     /// Check a write precondition on the current embedded branch.
     /// A caller composing this check with a separate write must retain
     /// exclusive access to the same writer until that write completes.
@@ -136,6 +172,59 @@ impl<V: Vfs + Clone> Database<V> {
             resolve_branch,
             policy,
         )
+    }
+}
+
+impl crate::BranchRevision {
+    /// The exact revision used for reads and conditional writes.
+    pub fn marker(&self) -> fgdb_types::MarkerRef {
+        self.marker
+    }
+
+    /// Immutable name bindings visible at this revision.
+    pub fn symbol_catalog(&self) -> &fgdb_delta_types::catalog::SymbolCatalog {
+        &self.catalog
+    }
+
+    /// Evaluate a native graph read with this marker as its single data and
+    /// catalog cut. The host supplies the ordinary query budget and context.
+    /// Explicit temporal selectors and procedure calls require separate cut
+    /// semantics and refuse before execution. This API carries the embedded
+    /// owner's read authority and does not issue a capability or durable lease.
+    pub fn query(
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+    ) -> Result<QueryResult, QueryError> {
+        use crate::PreparedNativeRead;
+        use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
+
+        let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
+        let (text, params) = lowered
+            .as_ref()
+            .map_or((text, params), |(text, params)| (text.text(), params));
+        let prepared = PreparedNativeRead::prepare(text, params, CatalogSymbolResolver::new(&self.catalog))
+            .map_err(|error| error.original_text(0, lowered.as_ref().map(|(text, _)| text)))?;
+        if prepared.has_procedure_call() {
+            return Err(QueryError::Unsupported {
+                diagnostics: vec!["procedure sources are unavailable on recorded branch revisions".into()],
+            });
+        }
+        match prepared {
+            PreparedNativeRead::TemporalPattern(_)
+            | PreparedNativeRead::TemporalSet(_)
+            | PreparedNativeRead::TemporalAggregate(_) => Err(QueryError::Unsupported {
+                diagnostics: vec!["the recorded branch revision already selects an exact snapshot".into()],
+            }),
+            PreparedNativeRead::Pattern(_)
+            | PreparedNativeRead::Aggregate(_)
+            | PreparedNativeRead::PipelineAggregate(_)
+            | PreparedNativeRead::Set(_) => {
+                prepared.execute_in_view_at_seq(&self.view, cx, params, policy, self.marker.commit_seq)
+            }
+        }
     }
 }
 
@@ -300,6 +389,76 @@ mod head_tests {
                     old.commit_seq.checked_successor().unwrap()
                 );
             }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn revision_queries_pin_rows_catalog_and_write_basis_at_one_marker() {
+        use fgdb_delta_types::LabelId;
+        use fgdb_delta_types::catalog::{CatalogSymbol, CatalogSymbolKind, SymbolCatalog};
+
+        let ((), report) = run_async_under_lab(0xb4a1_0003, |runtime| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+            let cx = contexts.commit();
+            let query = contexts.query();
+            let vfs = MemVfs::new().unwrap();
+            let dir = vfs.database_dir();
+            let keys = || DatabaseKeys::new([3; 32], DatabaseSecurityNamespaceId([4; 32]), [5; 32]);
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()).await.unwrap();
+            let mut names = SymbolCatalog::default();
+            names.bind("Early", CatalogSymbol::Label(LabelId(1))).unwrap();
+            db.register_symbols(&cx, &names).await.unwrap();
+            let mut one = WriteBatch::new(RelationId(1));
+            one.create_vertex(VId(1), vec![LabelId(1)], vec![]);
+            db.write(&cx, one).await.unwrap();
+            let original = db.current_branch_revision().unwrap().unwrap();
+            let mut later_names = SymbolCatalog::default();
+            later_names.bind("Later", CatalogSymbol::Label(LabelId(2))).unwrap();
+            db.register_symbols(&cx, &later_names).await.unwrap();
+            let mut two = WriteBatch::new(RelationId(1));
+            two.create_vertex(VId(2), vec![LabelId(1)], vec![]);
+            db.write(&cx, two).await.unwrap();
+            let newest = db.current_branch_revision().unwrap().unwrap();
+            drop(db);
+            let reopened = Database::open_with_vfs(&cx, vfs, &dir, keys()).await.unwrap();
+            let historical = reopened.read_branch_revision(original.marker()).unwrap().unwrap();
+            assert!(reopened.read_branch_revision(fgdb_types::MarkerRef {
+                marker_oid: newest.marker().marker_oid, ..original.marker()
+            }).unwrap().is_none());
+            drop(reopened);
+            let params = GqlParameters::new();
+            let policy = GqlQueryPolicy::new(100, 100, 10000, 10000);
+            for (revision, count) in [(&original, 1), (&historical, 1), (&newest, 2)] {
+                let result = revision.query(&query, "MATCH (v:Early) RETURN v", &params, policy).unwrap();
+                assert!(matches!(result, QueryResult::Rows { rows, .. } if rows.len() == count));
+            }
+            assert!(historical.symbol_catalog().resolve(CatalogSymbolKind::Label, "Later").is_none());
+            assert!(historical.query(&query, "MATCH (v:Later) RETURN v", &params, policy).is_err());
+            assert!(newest.query(&query, "MATCH (v:Later) RETURN v", &params, policy).is_ok());
+            let compound = "MATCH (v:Early) RETURN v AS x UNION ALL MATCH (w:Early) RETURN w AS x";
+            assert!(matches!(
+                historical.query(&query, compound, &params, policy).unwrap(),
+                QueryResult::Rows { rows, .. } if rows.len() == 2
+            ));
+            for temporal in [
+                "MATCH (v) FOR SYSTEM_TIME AS OF SEQ 4 RETURN v",
+                "MATCH (v) FOR SYSTEM_TIME AS OF SEQ 4 RETURN v AS x UNION ALL MATCH (w) RETURN w AS x",
+                "MATCH (v) RETURN v AS x UNION ALL MATCH (w) FOR SYSTEM_TIME AS OF SEQ 4 RETURN w AS x",
+                "CALL { MATCH (v) FOR SYSTEM_TIME AS OF SEQ 4 RETURN v AS x } RETURN x",
+            ] {
+                assert!(historical.query(&query, temporal, &params, policy).is_err(), "{temporal}");
+            }
+            for value in [17, 23] {
+                let map = GqlParameters::new()
+                    .with_map("m", vec![("value".into(), fgdb_gql::algebra::GraphValue::Scalar(fgdb_types::CanonicalScalar::Int(value)))])
+                    .unwrap();
+                assert_eq!(
+                    historical.query(&query, "MATCH (v:Early) RETURN $m.value AS result", &map, policy).unwrap(),
+                    historical.query(&query, &format!("MATCH (v:Early) RETURN {value} AS result"), &params, policy).unwrap(),
+                );
+            }
+            assert!(historical.query(&query, "MATCH (v) RETURN v", &params, GqlQueryPolicy::new(0, 0, 0, 0)).is_err());
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
