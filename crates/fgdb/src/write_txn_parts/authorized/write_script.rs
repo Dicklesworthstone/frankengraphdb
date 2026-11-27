@@ -436,34 +436,34 @@ impl<V: Vfs + Clone> Database<V> {
             permit,
             clock,
         };
-        commit_cx
-            .with_restriction_async(async {
-                input.preflight(query_cx, verified.predicates(), &mut execution)?;
-                match &input {
-                    Input::Script(_, arguments) => execution
-                        .admit_input(query_cx, "", std::slice::from_ref(*arguments))
-                        .map_err(admission)?,
-                    Input::Batch(_, arguments, _) => execution
-                        .admit_input(query_cx, "", arguments)
-                        .map_err(admission)?,
-                    Input::Bound(_) => {}
-                }
-                let bound = input.bind_admitted(query_cx, &mut execution)?;
-                self.complete_authorized_program(
-                    txn_cx,
-                    query_cx,
-                    commit_cx,
-                    bound.program(),
-                    policy,
-                    verified.predicates(),
-                    &mut execution,
-                    returning,
-                    receipt,
-                )
-                .await
-                .map_err(|error| bound.error(error))
-            })
-            .await
+        let bound = commit_cx.with_restriction(|| {
+            input.preflight(query_cx, verified.predicates(), &mut execution)?;
+            match &input {
+                Input::Script(_, arguments) => execution
+                    .admit_input(query_cx, "", std::slice::from_ref(*arguments))
+                    .map_err(admission)?,
+                Input::Batch(_, arguments, _) => execution
+                    .admit_input(query_cx, "", arguments)
+                    .map_err(admission)?,
+                Input::Bound(_) => {}
+            }
+            input.bind_admitted(query_cx, &mut execution)
+        })?;
+        // Admission is synchronous. Execution applies the commit restriction
+        // itself for every poll and can carry the caller's original clock.
+        self.complete_authorized_program(
+            txn_cx,
+            query_cx,
+            commit_cx,
+            bound.program(),
+            policy,
+            verified.predicates(),
+            &mut execution,
+            returning,
+            receipt,
+        )
+        .await
+        .map_err(|error| bound.error(error))
     }
 }
 

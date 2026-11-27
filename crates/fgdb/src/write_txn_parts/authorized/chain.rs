@@ -1095,17 +1095,20 @@ impl<V: Vfs + Clone> Database<V> {
             &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<Receipt, Fault> {
-        *active_record = None;
-        if chains.is_empty()
-            || (chains.len() != 1
-                && (continuation.is_some() || chains.iter().any(|chain| chain.returns_rows())))
-        {
-            return Err(source(WriteTxnError::AuthorizedMutationRefused));
-        }
-        for (argument_set, chain) in chains.iter().enumerate() {
-            *active_record = Some(argument_set);
-            admit_definition(chain, continuation, query_cx, scope, &mut execution)?;
-        }
+        commit_cx.with_restriction(|| {
+            *active_record = None;
+            if chains.is_empty()
+                || (chains.len() != 1
+                    && (continuation.is_some() || chains.iter().any(|chain| chain.returns_rows())))
+            {
+                return Err(source(WriteTxnError::AuthorizedMutationRefused));
+            }
+            for (argument_set, chain) in chains.iter().enumerate() {
+                *active_record = Some(argument_set);
+                admit_definition(chain, continuation, query_cx, scope, &mut execution)?;
+            }
+            Ok(())
+        })?;
         // Opening the workspace is a whole-batch boundary, not part of the
         // last definition's admission. The same reset precedes completion.
         *active_record = None;

@@ -842,92 +842,97 @@ impl<V: Vfs + Clone> Database<V> {
             permit,
             clock,
         };
-        commit_cx
-            .with_restriction_async(async {
+        let (is_chain, captured) = commit_cx.with_restriction(|| {
+            checkpoint(query_cx, &mut execution).map_err(admission)?;
+            reserve_input(query_cx, &mut execution, text, std::slice::from_ref(params))?;
+            let captured = statement_parameters(
+                self.statement_clock.as_ref(),
+                query_cx,
+                fgdb_gql::statement_time_required(text),
+                params,
+            )?;
+            let is_chain = query_cx.with_restriction(|| {
+                let classified = fgdb_gql::PreparedGraphWriteChainText::is_chain(text);
                 checkpoint(query_cx, &mut execution).map_err(admission)?;
-                reserve_input(query_cx, &mut execution, text, std::slice::from_ref(params))?;
-                let captured = statement_parameters(
-                    self.statement_clock.as_ref(),
-                    query_cx,
-                    fgdb_gql::statement_time_required(text),
-                    params,
-                )?;
-                let params = captured.as_ref();
-                let chain = query_cx.with_restriction(|| {
-                    let classified = fgdb_gql::PreparedGraphWriteChainText::is_chain(text);
-                    checkpoint(query_cx, &mut execution).map_err(admission)?;
-                    classified.map_err(|error| {
-                        Fault::ChainBinding(fgdb_gql::GraphWriteChainTextError::Insert(error))
-                    })
-                })?;
-                if chain {
-                    let chain = bind_chain_admitted(
-                        query_cx,
-                        &mut execution,
-                        text,
-                        params,
-                        relation,
-                        resolver,
-                    )?;
-                    let mut result = None;
-                    let (_, _, completion) = self
-                        .complete_authorized_chain(
-                            txn_cx,
-                            query_cx,
-                            commit_cx,
-                            &chain,
-                            None,
-                            policy.insertion_policy(),
-                            verified.predicates(),
-                            execution,
-                            |stats, rows, work, _| {
-                                result = Some(chain_result(&chain, stats, rows, work)?);
-                                Ok(())
-                            },
-                        )
-                        .await
-                        .map_err(Fault::Chain)?;
-                    let mut result =
-                        result.expect("chain representation was admitted before completion");
-                    if let QueryResult::Write {
-                        completion: written,
-                        ..
-                    } = &mut result
-                    {
-                        *written = Some(completion);
-                    }
-                    return Ok(result);
-                }
-                let bound = bind_native_admitted(
+                classified.map_err(|error| {
+                    Fault::ChainBinding(fgdb_gql::GraphWriteChainTextError::Insert(error))
+                })
+            })?;
+            Ok::<_, Fault>((is_chain, captured))
+        })?;
+        // The chain and program each bind synchronously and restrict their own
+        // completion polls. Keep ingress out of those futures' nested Send proof.
+        if is_chain {
+            let chain = commit_cx.with_restriction(|| {
+                bind_chain_admitted(
                     query_cx,
                     &mut execution,
                     text,
-                    params,
+                    captured.as_ref(),
                     relation,
-                    verified.predicates(),
-                    fgdb_gql::MAX_GRAPH_MUTATION_STATEMENTS,
                     resolver,
-                )?;
-                let (receipt, completion) = self
-                    .complete_authorized_program(
-                        txn_cx,
-                        query_cx,
-                        commit_cx,
-                        bound.program(),
-                        policy,
-                        verified.predicates(),
-                        &mut execution,
-                        true,
-                        GraphWriteProgramReceipt::new,
-                    )
-                    .await
-                    .map_err(|error| bound.error(error))?;
-                Ok(QueryResult::Write {
-                    receipt,
-                    completion: Some(completion),
-                })
-            })
+                )
+            })?;
+            drop(captured);
+            let mut result = None;
+            let (_, _, completion) = self
+                .complete_authorized_chain(
+                    txn_cx,
+                    query_cx,
+                    commit_cx,
+                    &chain,
+                    None,
+                    policy.insertion_policy(),
+                    verified.predicates(),
+                    execution,
+                    |stats, rows, work, _| {
+                        result = Some(chain_result(&chain, stats, rows, work)?);
+                        Ok(())
+                    },
+                )
+                .await
+                .map_err(Fault::Chain)?;
+            let mut result = result.expect("chain representation was admitted before completion");
+            if let QueryResult::Write {
+                completion: written,
+                ..
+            } = &mut result
+            {
+                *written = Some(completion);
+            }
+            return Ok(result);
+        }
+        let bound = commit_cx.with_restriction(|| {
+            bind_native_admitted(
+                query_cx,
+                &mut execution,
+                text,
+                captured.as_ref(),
+                relation,
+                verified.predicates(),
+                fgdb_gql::MAX_GRAPH_MUTATION_STATEMENTS,
+                resolver,
+            )
+        })?;
+        drop(captured);
+        let (receipt, completion) = self
+            .complete_authorized_program(
+                txn_cx,
+                query_cx,
+                commit_cx,
+                bound.program(),
+                policy,
+                verified.predicates(),
+                &mut execution,
+                true,
+                GraphWriteProgramReceipt::new,
+            )
             .await
+            .map_err(|error| bound.error(error))?;
+        Ok(QueryResult::Write {
+            receipt,
+            completion: Some(completion),
+        })
     }
 }
 
