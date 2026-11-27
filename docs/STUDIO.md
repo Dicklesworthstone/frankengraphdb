@@ -244,7 +244,10 @@ The canvas distinguishes elements only in A, only in B, and changed returned
 metadata. Comparison includes original type tags: an integer `1` is not silently
 made equal to text `"1"` or decimal `1.0`. Node positions are retained by exact
 identity, and baseline-only edges are drawn as ghosts. The original table, JSON
-and CSV remain the current result, without comparison ghosts.
+and CSV remain the current result, without comparison ghosts. Select a changed vertex or
+relationship to inspect its returned property values at A and B. The inspector retains
+type tags, distinguishes absent keys from unprojected maps, and shows distinct values
+when the same identity appears in several rows.
 
 These are comparisons of **returned samples**, not complete commit-stream diffs.
 A LIMIT, different query or changed projection can explain an omitted element;

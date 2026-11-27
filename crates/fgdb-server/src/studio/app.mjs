@@ -1,7 +1,7 @@
 import { colorIndex, graphQuery, queryBody, parseResponse, boundedText, extractGraph, filterGraph, cellText, csv } from './model.mjs';
 import { demoResult, atlasResult } from './demo.mjs';
 import { GraphCanvas } from './graph.mjs';
-import { RECIPES, temporalQuery, compareResults, tracePath, analyticsOverlay, focusComponent, capabilityOrigin } from './experience.mjs';
+import { RECIPES, temporalQuery, compareResults, compareProperties, tracePath, analyticsOverlay, focusComponent, capabilityOrigin } from './experience.mjs';
 
 const $=id=>document.getElementById(id);
 const paths={graph:'M5 5l14 7L5 19V5Zm-2 0a2 2 0 1 0 4 0 2 2 0 1 0-4 0m14 7a2 2 0 1 0 4 0 2 2 0 1 0-4 0M3 19a2 2 0 1 0 4 0 2 2 0 1 0-4 0',layers:'m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5',clock:'M3 12a9 9 0 1 0 18 0 9 9 0 1 0-18 0m9-5v5l3 2',code:'m8 6-6 6 6 6m8-12 6 6-6 6m-3-14-2 16',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z',shield:'m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6',sun:'M8 12a4 4 0 1 0 8 0 4 4 0 1 0-8 0M12 1v2m0 18v2M1 12h2m18 0h2M4 4l2 2m12 12 2 2M4 20l2-2M18 6l2-2',moon:'M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10Z',help:'M3 12a9 9 0 1 0 18 0 9 9 0 1 0-18 0m6-3a3 3 0 0 1 6 0c0 2-3 2-3 4m0 3h.01',search:'M3 10a7 7 0 1 0 14 0 7 7 0 1 0-14 0m12 5 6 6',chevron:'m7 10 5 5 5-5',download:'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',table:'M3 4h18v16H3V4Zm0 5h18M3 14h18M9 4v16',type:'M4 5h16M12 5v15m-4 0h8M4 5v3m16-3v3',panel:'M3 4h18v16H3V4Zm12 0v16',plus:'M12 5v14M5 12h14',minus:'M5 12h14',fit:'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 8h8v8H8V8Z',play:'m8 4 12 8-12 8V4Z',close:'m6 6 12 12M6 18 18 6',terminal:'m5 6 6 6-6 6m9 0h5',database:'M3 6c0-4 18-4 18 0s-18 4-18 0Zm0 0v12c0 4 18 4 18 0V6M3 12c0 4 18 4 18 0',pin:'m8 3 8 0-1 6 4 5H5l4-5-1-6Zm4 11v8',menu:'M4 6h16M4 12h16M4 18h16',link:'m9 15 6-6M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 10a4 4 0 0 0 6 0l4-4a4 4 0 0 0-6-6l-1 1',sliders:'M5 3v18M12 3v18M19 3v18M2 8h6m1 8h6m1-10h6',arrow:'M4 12h16m-6-6 6 6-6 6',node:'M8 12a4 4 0 1 0 8 0 4 4 0 1 0-8 0M12 2v3m0 14v3M2 12h3m14 0h3'};
@@ -88,7 +88,38 @@ function renderResult(){$('export-button').disabled=!current;$('pin-baseline').d
 function renderLabels(){const counts=new Map();for(const n of shown.nodes)counts.set(n.group,(counts.get(n.group)||0)+1);$('label-count').textContent=String(counts.size);$('label-filters').replaceChildren(...[...counts].sort((a,b)=>b[1]-a[1]).map(([label,count])=>{const b=button('',()=>{hiddenLabels.has(label)?hiddenLabels.delete(label):hiddenLabels.add(label);refreshGraph();},'label-button'+(hiddenLabels.has(label)?' off':''));b.setAttribute('aria-pressed',String(!hiddenLabels.has(label)));b.replaceChildren();const name=el('span');name.append(swatch(label),document.createTextNode(label));b.append(name,el('code',String(count)));return b;}));}
 function renderNodes(){const visible=filterGraph(shown,hiddenLabels,$('node-search').value),nodes=visible.nodes.filter(n=>visible.matches.has(n.id)).sort((a,b)=>b.degree-a.degree||a.title.localeCompare(b.title));$('node-list-count').textContent=String(nodes.length);$('node-list').replaceChildren(...nodes.slice(0,150).map(n=>{const b=button('',()=>renderer.select({kind:'node',id:n.id},true),'node-option'+(selection?.kind==='node'&&selection.id===n.id?' selected':''));b.replaceChildren(swatch(n.group),el('span',n.title),el('small',String(n.degree)));b.title=`${n.title} · ${n.id}`;return b;}));if(nodes.length>150)$('node-list').append(el('p','Showing the first 150 matches. Refine your search.','muted'));}
 $('node-search').oninput=()=>refreshGraph();
-function typedProperties(result,id,kind){if(!result)return{};const index=new Map(result.columns.map((name,i)=>[name,i]));for(const row of result.rows)for(const prefix of kind==='node'?['node','source','target']:['relationship'])if(row[index.get(prefix)]?.value===id)return row[index.get(prefix+'_properties')]?.value||{};return{};}
+function typedProperties(result, id, kind) {
+  if (!result) return {};
+  const columns = new Map(result.columns.map((name, i) => [name, i]));
+  const aliases = kind === 'node' ? ['node', 'source', 'target'] : ['relationship'];
+  for (const row of result.rows) for (const alias of aliases) {
+    const entity = row[columns.get(alias)], properties = row[columns.get(alias + '_properties')];
+    if (entity?.type === (kind === 'node' ? 'vertex' : 'edge') && entity.value === id && properties?.type === 'map') {
+      return properties.value;
+    }
+  }
+  return {};
+}
+function renderPropertyComparison(root, kind, id) {
+  const changes = compareProperties(baseline.data, current.data, kind, id);
+  if (!changes.length) return;
+  root.append(el('div', 'CHANGED RETURNED PROPERTIES', 'section-heading'));
+  for (const change of changes.slice(0, 60)) {
+    const row = el('div', '', 'property');
+    row.append(el('strong', change.name));
+    for (const [label, evidence] of [['A', change.before], ['B', change.after]]) {
+      if (evidence.unprojected) row.append(el('code', label + ' · No map returned'));
+      if (evidence.absent) row.append(el('code', label + ' · Key absent'));
+      for (const cell of evidence.values.slice(0, 4)) {
+        const text = cell.type === 'list' || cell.type === 'map' ? JSON.stringify(cell.value) : cellText(cell);
+        row.append(el('code', label + ' · ' + cell.type + ' · ' + (text.length > 1200 ? text.slice(0, 1200) + '…' : text)));
+      }
+      if (evidence.values.length > 4) row.append(el('small', label + ' · ' + evidence.values.length + ' distinct values'));
+    }
+    root.append(row);
+  }
+  if (changes.length > 60) root.append(el('p', 'Showing 60 of ' + changes.length + ' changed properties.', 'muted'));
+}
 function renderInspector(){const root=$('inspector');root.replaceChildren();const item=selection&&(selection.kind==='node'?shown.nodes:shown.edges).find(v=>v.id===selection.id);
   if(!item){const wrap=el('div','','inspector-placeholder'),orb=el('div','','orb');orb.append(icon('graph'));wrap.append(orb,el('h2','Follow your curiosity.'),el('p','Select a node to inspect its identity, trace connections, and discover the evidence behind it.'));const hint=el('div','','inspector-hint');hint.append(el('strong','A graph, not a screenshot.'),el('p','Drag a node and watch its neighbors respond. Pin a baseline to see how returned snapshots differ.'));wrap.append(hint);root.append(wrap);return;}
   const kind=selection.kind;const kicker=el('div','','element-kicker');kicker.append(swatch(kind==='node'?item.group:item.label),document.createTextNode(kind==='node'?item.group:item.label||'Relationship'));root.append(kicker,el('h2',kind==='node'?item.title:item.label||'Relationship','element-title'));
@@ -102,6 +133,7 @@ function renderInspector(){const root=$('inspector');root.replaceChildren();cons
     root.append(membership);
   }
   if(item.analysis){const value=el('div','','property'),heading=el('div');heading.append(el('span',item.analysis.field),el('span','float · native result','badge'));value.append(heading,el('code',item.analysis.text));root.append(value);}
+  if (comparison && item.change === 'changed') renderPropertyComparison(root, kind, item.id);
   const data=item.change==='removed'||analysis?baseline?.data:current?.data,properties=typedProperties(data,item.id,kind);root.append(el('div','RETURNED PROPERTIES','section-heading'));
   if(!Object.keys(properties).length)root.append(el('p','No property map was returned. Use an exploration lens to include properties.','muted'));
   for(const[key,value]of Object.entries(properties).slice(0,60)){const row=el('div','','property'),heading=el('div');heading.append(el('span',key),el('span',value.type,'badge'));const text=cellText(value);row.append(heading,el('code',text.length>1200?text.slice(0,1200)+'…':text));root.append(row);}

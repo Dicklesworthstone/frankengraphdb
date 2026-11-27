@@ -116,8 +116,12 @@ export function extractGraph(result, comparisonIndex) {
       nodes.set(id, node);
     }
     if (Array.isArray(labels)) node.labels = [...new Set(labels.filter(x => typeof x === 'string'))];
-    if (properties && typeof properties === 'object' && !Array.isArray(properties)) node.properties = properties;
-    node.title = String(node.properties.name ?? node.properties.title ?? node.properties.label ?? `Vertex ${id}`);
+    if (properties && typeof properties === 'object' && !Array.isArray(properties)) {
+      node.properties = properties;
+      const title = [properties.name, properties.title, properties.label]
+        .find(value => value != null && typeof value !== 'object');
+      node.title = title == null ? `Vertex ${id}` : String(title);
+    }
     node.group = node.labels[0] || 'Unlabeled';
     return node;
   };

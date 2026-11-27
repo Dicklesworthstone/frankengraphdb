@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sequence,temporalQuery,compareResults,tracePath,scoreOverlay,analyticsOverlay,componentOverlay,focusComponent,RECIPES,capabilityOrigin } from '../experience.mjs';
+import { sequence,temporalQuery,compareResults,compareProperties,tracePath,scoreOverlay,analyticsOverlay,componentOverlay,focusComponent,RECIPES,capabilityOrigin } from '../experience.mjs';
 import { atlasResult } from '../demo.mjs';
 import { extractGraph,LIMITS } from '../model.mjs';
 const c=(type,value)=>({type,value});
@@ -121,4 +121,35 @@ test('parallel edges across the draw limit compare using their returned endpoint
   b.rows[0] = path(LIMITS.edges, ['2', '3']);
   b.rows.push(path(LIMITS.edges + 1, ['3', '3']));
   assert.deepEqual(compareResults(a, b).counts.edges, { added: 1, removed: 1, changed: 1 });
+});
+
+test('inspected property differences use all returned maps and preserve typed evidence', () => {
+  const id = '340282366920938463463374607431768211455';
+  const result = (...maps) => ({ v:1, seq:1, columns:['source','source_properties'],
+    rows: maps.map(map => [c('vertex',id),c('map',map)]) });
+  const a = result({ v:c('int','9007199254740993'), removed:c('null') }, { v:c('int','9007199254740993') });
+  const b = result({ v:c('text','9007199254740993'), added:c('list',[c('int','1')]) });
+  const changes = compareProperties(a,b,'node',id);
+  assert.deepEqual(changes.map(d => d.name), ['added','removed','v']);
+  assert.deepEqual(changes[0].before,{unprojected:false,absent:true,values:[]});
+  assert.deepEqual(changes[1].before,{unprojected:false,absent:true,values:[c('null')]});
+  assert.deepEqual(changes[2].before.values,[c('int','9007199254740993')]);
+  assert.deepEqual(changes[2].after.values,[c('text','9007199254740993')]);
+  assert.deepEqual(compareProperties(a,{...a,rows:[...a.rows].reverse()},'node',id),[]);
+  const unprojected = {v:1,seq:2,columns:['node'],rows:[[c('vertex',id)]]};
+  assert.deepEqual(compareProperties(b,unprojected,'node',id)[0].after,{unprojected:true,absent:false,values:[]});
+  const mixed = {v:1,seq:1,columns:['relationship','relationship_properties','node','node_properties'],
+    rows:[[c('edge',id),c('map',{x:c('int','1')}),c('vertex',id),c('map',{x:c('int','2')})]]};
+  assert.deepEqual(compareProperties(mixed,unprojected,'edge',id)[0].before.values,[c('int','1')]);
+});
+
+test('structured display-name properties remain inspectable across snapshots', () => {
+  const a = node('3'), b = node('3');
+  a.rows[0][1] = c('map', { name:c('map',{ part:c('text','A') }), title:c('text','Library') });
+  b.rows[0][1] = c('map', { name:c('list',[c('map',{ part:c('text','B') })]) });
+  const diff = compareResults(a,b);
+  assert.equal(extractGraph(a).nodes[0].title,'Library');
+  assert.equal(diff.nodes[0].title,'Vertex 3');
+  assert.equal(diff.nodes[0].change,'changed');
+  assert.deepEqual(compareProperties(a,b,'node','3').map(d => d.name),['name','title']);
 });

@@ -31,6 +31,50 @@ function signatures(result){
   }
   return new Map([...seen].map(([key,values])=>[key,[...values].sort().join('\n')]));
 }
+// Track every distinct typed observation for the selected element. Joining rows
+// can return the same identity several times or with different projections.
+function propertyEvidence(result, kind, id) {
+  const columns = new Map(result.columns.map((name, i) => [name, i]));
+  const aliases = kind === 'edge' ? ['relationship'] : ['node', 'source', 'target'];
+  const fields = new Map();
+  let maps = 0;
+  for (const row of result.rows) {
+    for (const alias of aliases) {
+      const entity = row[columns.get(alias)];
+      if (entity?.type !== (kind === 'edge' ? 'edge' : 'vertex') || entity.value !== id) continue;
+      const properties = row[columns.get(alias + '_properties')];
+      if (properties?.type !== 'map') continue;
+      maps++;
+      for (const [name, cell] of Object.entries(properties.value)) {
+        if (!fields.has(name)) fields.set(name, { present: 0, values: new Map() });
+        const field = fields.get(name);
+        field.present++;
+        field.values.set(canonical(cell), cell);
+      }
+    }
+  }
+  return { maps, fields };
+}
+
+export function compareProperties(before, after, kind, id) {
+  const a = propertyEvidence(before, kind, id), b = propertyEvidence(after, kind, id);
+  const keys = new Set([...a.fields.keys(), ...b.fields.keys()]);
+  const observation = (side, field) => {
+    const values = field?.values ?? new Map();
+    return {
+      unprojected: side.maps === 0,
+      absent: side.maps > (field?.present ?? 0),
+      values: [...values.keys()].sort().map(key => values.get(key)),
+    };
+  };
+  const differences = [];
+  for (const name of [...keys].sort()) {
+    const left = observation(a, a.fields.get(name)), right = observation(b, b.fields.get(name));
+    if (canonical(left) !== canonical(right)) differences.push({ name, before: left, after: right });
+  }
+  return differences;
+}
+
 export function compareResults(before,after){
   const index = result => {
     const identities = { nodes: new Set(), edges: new Map() };
