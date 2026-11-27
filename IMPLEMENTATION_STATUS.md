@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-26 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-27 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,40 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Native FGP over WebSocket — qualification pending
+
+A dedicated `--websocket-listen` / `Server::serve_websocket` listener now
+upgrades `/v1/fgp` with the required `fgp.v1` subprotocol and delegates to
+the existing FGP connection machine. Reads, writes, explicit transactions,
+prepared execution, source/ordered streams and live subscriptions retain
+their existing authorization, budgets, flow credit and completion owners.
+
+The upgrade has explicit Host and browser Origin policies, a 16 KiB header
+bound and strict no-body HTTP/1.1 framing. The existing absolute establishment
+timer covers upgrade through READY. TLS configuration also protects this
+listener, using HTTP/1.1 ALPN. The foundation owns WebSocket parsing, masks,
+control validation and accept keys; the adapter owns bounded binary-message
+reassembly, partial-write retention and the byte-stream mapping.
+
+Application output returns through the ordinary send guard before each lower
+write or flush. Read-side controls cannot flush dirty application bytes.
+FrameWriter abandonment now treats any attempted lower write as potentially
+partial, including a header-only or buffered-TLS attempt that acknowledged no
+FGP payload. No durable result ownership, resume guarantee or new transaction
+semantics are claimed.
+
+Regression sources cover carrier framing and cancellation, strict upgrade
+policy, real-socket FGP transactions compared with a TCP observer, scoped
+prepared streams crossing flow windows, cancellation followed by reuse, and
+TLS-protected WebSocket execution. Source/API reviews completed against the
+pinned foundation. Scoped pinned rustfmt and whitespace checks passed after
+the execution host recovered. Locked targeted compilation reached dependency
+builds, but rustc was killed by SIGKILL inside zerocopy before product
+compilation; a resource-bounded retry is pending. Runtime tests, Clippy, UBS
+and exact-tree qualification remain UNRUN. The earlier whole-workspace
+format check failed in the pre-existing SIMD sorted-set source. Keep
+`fgdb-w10-adapters-b1f` and `fgdb-qualify-integrated-nov22-maz0p` open.
 
 ### Compact path-list comparisons — qualification pending
 

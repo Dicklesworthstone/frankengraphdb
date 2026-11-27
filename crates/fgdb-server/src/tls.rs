@@ -990,4 +990,114 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
+
+    const WEBSOCKET_UPGRADE: &[u8] = b"GET /v1/fgp HTTP/1.1\r\n\
+Host: localhost\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+Sec-WebSocket-Protocol: fgp.v1\r\n\r\n";
+
+    #[test]
+    fn websocket_upgrade_and_fgp_share_one_absolute_setup_deadline() {
+        use asupersync::bytes::BytesMut;
+        use asupersync::codec::{Decoder as _, Encoder as _};
+        use asupersync::net::websocket::{Frame as WsFrame, FrameCodec, Opcode};
+
+        with_setup_clock(|cx, clock, timer| {
+            let server = crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
+            let config = crate::WebSocketConfig::new(vec!["localhost".into()], Vec::new()).unwrap();
+            let wire = Arc::new(SetupWire::default());
+            let boundary = WEBSOCKET_UPGRADE.len() - 2;
+            wire.feed(&WEBSOCKET_UPGRADE[..boundary]);
+            let mut connection = Box::pin(crate::websocket::run(
+                cx,
+                &server,
+                Box::new(SetupIo(Arc::clone(&wire))),
+                &config,
+            ));
+            let wakes = Arc::new(crate::recovery::tests::WakeCounter::default());
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task = Context::from_waker(&waker);
+            assert!(connection.as_mut().poll(&mut task).is_pending());
+            assert!(wire.take_output().is_empty());
+            assert_eq!(timer.pending_count(), 1);
+
+            clock.advance_to(Time::from_secs(29));
+            let mut hello = BytesMut::new();
+            FrameCodec::client()
+                .encode(WsFrame::binary(setup_request(Protocol::Fgp)), &mut hello)
+                .unwrap();
+            // Complete the late HTTP upgrade and pipeline HELLO in the same
+            // lower read. Entering FGP must retain the original expiry.
+            wire.feed(&WEBSOCKET_UPGRADE[boundary..]);
+            wire.feed(&hello);
+            assert!(connection.as_mut().poll(&mut task).is_pending());
+            let response = wire.take_output();
+            assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+            let end = response
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let mut frames = BytesMut::from(response[end..].to_vec());
+            let response = FrameCodec::client().decode(&mut frames).unwrap().unwrap();
+            assert_eq!(response.opcode, Opcode::Binary);
+            assert!(response.fin);
+            assert!(frames.is_empty());
+            let decoded = Decoder::new(FrameLimits::new(4096).unwrap())
+                .decode(&response.payload, |_| Ok(()))
+                .unwrap();
+            assert_eq!(decoded.consumed, response.payload.len());
+            assert_eq!(decoded.frame.unwrap().header().kind(), FrameKind::HelloAck);
+            assert_eq!(timer.pending_count(), 1);
+
+            // AUTH and READY are still absent. Upgrade and HELLO progress at
+            // t=29 must not buy another thirty seconds for authentication.
+            let before = wakes.0.load(Ordering::Relaxed);
+            clock.advance_to(Time::from_secs(30));
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wakes.0.load(Ordering::Relaxed) > before);
+            assert!(connection.as_mut().poll(&mut task).is_ready());
+            drop(connection);
+            assert!(wire.dropped.load(Ordering::Acquire));
+            assert!(wire.take_output().is_empty());
+            assert_eq!(timer.pending_count(), 0);
+        });
+    }
+
+    #[test]
+    fn websocket_upgrade_blocked_on_101_flush_wakes_and_drains_immediately() {
+        with_setup_clock(|cx, _, timer| {
+            let server = crate::Server::new(cx, crate::ServerLimits::default()).unwrap();
+            let config = crate::WebSocketConfig::new(vec!["localhost".into()], Vec::new()).unwrap();
+            let wire = Arc::new(SetupWire::default());
+            wire.block_flush.store(true, Ordering::Release);
+            wire.feed(WEBSOCKET_UPGRADE);
+            let mut connection = Box::pin(crate::websocket::run(
+                cx,
+                &server,
+                Box::new(SetupIo(Arc::clone(&wire))),
+                &config,
+            ));
+            let wakes = Arc::new(crate::recovery::tests::WakeCounter::default());
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task = Context::from_waker(&waker);
+            assert!(connection.as_mut().poll(&mut task).is_pending());
+            let response = wire.take_output();
+            assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+            assert!(response.ends_with(b"\r\n\r\n"));
+            assert_eq!(timer.pending_count(), 1);
+
+            let before = wakes.0.load(Ordering::Relaxed);
+            server.shutdown().trigger();
+            assert!(wakes.0.load(Ordering::Relaxed) > before);
+            assert!(connection.as_mut().poll(&mut task).is_ready());
+            drop(connection);
+            assert!(wire.dropped.load(Ordering::Acquire));
+            assert_eq!(timer.pending_count(), 0);
+            assert_eq!(cx.now(), Time::ZERO);
+        });
+    }
 }
