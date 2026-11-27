@@ -249,7 +249,8 @@ and CSV remain the current result, without comparison ghosts.
 These are comparisons of **returned samples**, not complete commit-stream diffs.
 A LIMIT, different query or changed projection can explain an omitted element;
 omission does not establish deletion. The interface marks differing query inputs
-and capped comparison canvases. One baseline is retained in tab memory only and
+and capped comparison canvases. Change counts include every returned vertex and
+relationship with known endpoints, even when it falls outside the drawing limit. One baseline is retained in tab memory only and
 is cleared on session changes, permission denial, disconnect or page exit. It is
 not a durable snapshot lease. Retaining a baseline and current result may retain
 two individually admitted responses plus decoded presentation state; 8 MiB is a

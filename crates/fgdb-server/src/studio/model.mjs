@@ -101,13 +101,14 @@ export function csv(result) {
   return [result.columns.map(field).join(','), ...result.rows.map(row => row.map(cellText).map(field).join(','))].join('\r\n');
 }
 function identity(value) { return typeof value === 'string' && /^(0|[1-9]\d{0,38})$/.test(value) && BigInt(value) <= (1n << 128n) - 1n; }
-export function extractGraph(result) {
+export function extractGraph(result, comparisonIndex) {
   validateResult(result);
   const nodes = new Map(), edges = new Map(), unresolved = new Set();
   let omittedNodes = 0, omittedEdges = 0;
   const index = new Map(result.columns.map((name, i) => [name, i]));
   const addNode = (id, labels, properties) => {
     if (!identity(id)) throw new Error('Invalid vertex identity in result.');
+    comparisonIndex?.nodes.add(id);
     let node = nodes.get(id);
     if (!node) {
       if (nodes.size >= LIMITS.nodes) { omittedNodes++; return null; }
@@ -124,9 +125,19 @@ export function extractGraph(result) {
     if (!identity(id) || !identity(source) || !identity(target)) throw new Error('Invalid relationship identity in result.');
     addNode(source); addNode(target);
     const old = edges.get(id);
+    const previous = comparisonIndex?.edges.get(id) ?? old;
+    if (previous) {
+      const same = previous.source === source && previous.target === target;
+      const reversed = previous.source === target && previous.target === source;
+      if (!same && !((!previous.directed || !directed) && reversed)) {
+        throw new Error('A relationship has inconsistent endpoints in this result.');
+      }
+    }
+    // Keep only endpoint evidence for comparison edges outside the draw limit.
+    if (comparisonIndex && (!previous || (directed && !previous.directed))) {
+      comparisonIndex.edges.set(id, { source, target, directed });
+    }
     if (old) {
-      const samePair = (old.source === source && old.target === target) || ((!old.directed || !directed) && old.source === target && old.target === source);
-      if (!samePair) throw new Error('A relationship has inconsistent endpoints in this result.');
       if (directed && !old.directed) Object.assign(old, { source, target, directed, label, properties: properties || Object.create(null) });
       unresolved.delete(id);
       return;

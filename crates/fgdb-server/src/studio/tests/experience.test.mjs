@@ -62,3 +62,27 @@ test('capabilities are admitted only to HTTPS or explicit HTTP loopback origins'
  for(const origin of ['https://graph.example','http://127.0.0.1:8080','http://localhost:8000','http://[::1]:8080'])assert.equal(capabilityOrigin(origin),true);
  for(const origin of ['http://graph.example','http://127.0.0.1.evil.example','ftp://localhost','file:///studio/','null',''])assert.equal(capabilityOrigin(origin),false);
 });
+
+test('reordering rows across the canvas boundary cannot create snapshot changes', () => {
+  const rows = Array.from({ length: LIMITS.nodes + 2 }, (_, i) =>
+    [c('vertex', String(i)), c('map', { name: c('text', String(i)) })]);
+  const a = { v: 1, seq: 1, columns: ['node', 'node_properties'], rows };
+  const b = { ...a, seq: 2, rows: [...rows].reverse() };
+  const reordered = compareResults(a, b);
+  assert.deepEqual(reordered.counts.nodes, { added: 0, removed: 0, changed: 0 });
+  assert.ok(reordered.nodes.every(n => n.change === null));
+  // The changed value lies outside the second canvas but inside the response.
+  b.rows[b.rows.length - 1] = [c('vertex', '0'), c('map', { name: c('text', 'changed') })];
+  assert.deepEqual(compareResults(a, b).counts.nodes, { added: 0, removed: 0, changed: 1 });
+});
+test('parallel edges across the draw limit compare using their returned endpoints', () => {
+  const path = (id, nodes) => [c('path', { nodes, edges: [String(id)] })];
+  const rows = Array.from({ length: LIMITS.edges + 1 }, (_, i) => path(i, ['1', '2']));
+  const a = { v: 1, seq: 1, columns: ['route'], rows };
+  const b = { ...a, seq: 2, rows: rows.map((_, i) => path(i, ['2', '1'])).reverse() };
+  assert.deepEqual(compareResults(a, b).counts.edges, { added: 0, removed: 0, changed: 0 });
+  b.rows.pop();
+  b.rows[0] = path(LIMITS.edges, ['2', '3']);
+  b.rows.push(path(LIMITS.edges + 1, ['3', '3']));
+  assert.deepEqual(compareResults(a, b).counts.edges, { added: 1, removed: 1, changed: 1 });
+});

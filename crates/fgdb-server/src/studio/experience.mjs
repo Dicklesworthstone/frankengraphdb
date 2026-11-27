@@ -32,21 +32,50 @@ function signatures(result){
   return new Map([...seen].map(([key,values])=>[key,[...values].sort().join('\n')]));
 }
 export function compareResults(before,after){
-  const a=extractGraph(before),b=extractGraph(after),as=signatures(before),bs=signatures(after);
-  const counts={nodes:{added:0,removed:0,changed:0},edges:{added:0,removed:0,changed:0}};
-  const merge=(old,current,kind,prefix)=>{
-    const prior=new Map(old.map(v=>[v.id,v])),now=new Set(current.map(v=>v.id));
-    const output=current.map(value=>{const previous=prior.get(value.id);let change=null;
-      if(!previous)change='added';else if((as.get(prefix+value.id)??'')!==(bs.get(prefix+value.id)??'')||kind==='edges'&&(previous.source!==value.source||previous.target!==value.target||previous.directed!==value.directed))change='changed';
-      if(change)counts[kind][change]++;return {...value,change};});
-    for(const value of old)if(!now.has(value.id)){counts[kind].removed++;output.push({...value,change:'removed'});}return output;
+  const index = result => {
+    const identities = { nodes: new Set(), edges: new Map() };
+    const graph = extractGraph(result, identities);
+    return { graph, identities, values: signatures(result) };
   };
-  const allNodes=merge(a.nodes,b.nodes,'nodes','n:'),allEdges=merge(a.edges,b.edges,'edges','e:');
-  const nodes=allNodes.slice(0,LIMITS.nodes),ids=new Set(nodes.map(n=>n.id));
-  const edges=allEdges.filter(e=>ids.has(e.source)&&ids.has(e.target)).slice(0,LIMITS.edges);
-  const warnings=[...a.warnings,...b.warnings];
-  if(nodes.length!==allNodes.length||edges.length!==allEdges.length)warnings.push('Comparison canvas is capped; counts describe the two mapped samples, not the full database.');
-  return {nodes,edges,warnings,counts};
+  const a = index(before), b = index(after);
+  const counts = { nodes: { added: 0, removed: 0, changed: 0 }, edges: { added: 0, removed: 0, changed: 0 } };
+  function change(kind, id) {
+    if (!a.identities[kind].has(id)) return 'added';
+    if (!b.identities[kind].has(id)) return 'removed';
+    const key = (kind === 'nodes' ? 'n:' : 'e:') + id;
+    if (a.values.get(key) !== b.values.get(key)) return 'changed';
+    if (kind === 'edges') {
+      const old = a.identities.edges.get(id), next = b.identities.edges.get(id);
+      if (old.directed !== next.directed) return 'changed';
+      const same = old.source === next.source && old.target === next.target;
+      const reversed = old.source === next.target && old.target === next.source;
+      if (!same && (next.directed || !reversed)) return 'changed';
+    }
+    return null;
+  }
+  function compare(kind) {
+    for (const id of b.identities[kind].keys()) {
+      const status = change(kind, id);
+      if (status) counts[kind][status]++;
+    }
+    for (const id of a.identities[kind].keys()) {
+      if (!b.identities[kind].has(id)) counts[kind].removed++;
+    }
+    const current = b.graph[kind].map(item => ({ ...item, change: change(kind, item.id) }));
+    for (const item of a.graph[kind]) {
+      if (!b.identities[kind].has(item.id)) current.push({ ...item, change: 'removed' });
+    }
+    return current;
+  }
+  const allNodes = compare('nodes'), allEdges = compare('edges');
+  const nodes = allNodes.slice(0, LIMITS.nodes), ids = new Set(nodes.map(node => node.id));
+  const edges = allEdges.filter(edge => ids.has(edge.source) && ids.has(edge.target)).slice(0, LIMITS.edges);
+  const warnings = [...a.graph.warnings, ...b.graph.warnings];
+  if (nodes.length < b.identities.nodes.size + counts.nodes.removed ||
+      edges.length < b.identities.edges.size + counts.edges.removed) {
+    warnings.push('Comparison canvas is capped. Counts include mapped identities throughout both received results.');
+  }
+  return { nodes, edges, warnings, counts };
 }
 export function tracePath(graph,start,end,{directed=true}={}){
   const adjacency=new Map(graph.nodes.map(n=>[n.id,[]]));
