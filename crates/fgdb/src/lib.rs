@@ -786,6 +786,12 @@ pub enum DatabaseState {
 /// Why a write could not be committed.
 #[derive(Debug)]
 pub enum WriteError {
+    /// Earlier commits exist, but this coordinate has no explicit head. A
+    /// conditional writer cannot attest that the database is empty or name
+    /// an existing branch head until an ordinary write records one.
+    BranchHeadUnrecorded {
+        frontier: CommitSeq,
+    },
     /// A prepared template belongs to a different opened handle lifetime.
     /// Equal keys, paths or commit sequences cannot transfer its ownership.
     ForeignPreparedWrite,
@@ -1165,6 +1171,10 @@ impl core::fmt::Display for RebuildError {
 impl core::fmt::Display for WriteError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::BranchHeadUnrecorded { frontier } => write!(
+                f,
+                "the embedded branch has no recorded head at nonempty frontier {frontier:?}"
+            ),
             Self::ForeignPreparedWrite => {
                 f.write_str("prepared write belongs to a different database handle")
             }

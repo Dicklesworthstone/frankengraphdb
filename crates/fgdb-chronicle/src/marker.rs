@@ -84,6 +84,19 @@ pub struct HeadUpdate {
 }
 
 impl HeadUpdate {
+    /// Check the same head comparison at caller admission and marker append.
+    pub fn check_previous(&self, actual: Option<MarkerRef>) -> Result<(), ChainError> {
+        if actual == self.expected_previous {
+            return Ok(());
+        }
+        Err(ChainError::HeadCasMismatch(Box::new(HeadCasMismatch {
+            graph: self.graph,
+            branch: self.branch,
+            expected: self.expected_previous,
+            actual,
+        })))
+    }
+
     fn write_into(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.graph.0.to_be_bytes());
         out.extend_from_slice(&self.branch.0.to_be_bytes());
@@ -674,15 +687,7 @@ fn validate_marker_structure(
     // All CASes are checked before any is applied: advancing several branches
     // must remain atomic even when an earlier update would have succeeded.
     for update in &marker.head_updates {
-        let actual = heads.get(&(update.graph, update.branch)).copied();
-        if actual != update.expected_previous {
-            return Err(ChainError::HeadCasMismatch(Box::new(HeadCasMismatch {
-                graph: update.graph,
-                branch: update.branch,
-                expected: update.expected_previous,
-                actual,
-            })));
-        }
+        update.check_previous(heads.get(&(update.graph, update.branch)).copied())?;
     }
 
     Ok(())
