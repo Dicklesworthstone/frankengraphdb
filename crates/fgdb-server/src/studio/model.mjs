@@ -58,9 +58,24 @@ export function validateResult(result) {
   if (result.columns.length > 256 || !result.columns.every(x => typeof x === 'string')) throw new Error('Invalid result columns.');
   if (result.rows.length > LIMITS.rows) throw new Error('Result exceeds 10,000 rows. Add a LIMIT before sending it to Studio.');
   let cells = 0;
+  const compact = ids => {
+    if (!Array.isArray(ids)) throw new Error('Invalid graph identity list.');
+    cells += ids.length;
+    if (cells > LIMITS.cells) throw new Error('Result exceeds the browser value bounds.');
+    for (const id of ids) if (!identity(id)) throw new Error('Invalid graph identity in result.');
+  };
   const visit = (cell, depth) => {
     if (++cells > LIMITS.cells || depth > 32 || !cell || typeof cell.type !== 'string') throw new Error('Result exceeds the browser value bounds or contains an invalid cell.');
-    if (cell.type === 'list') {
+    if (cell.type === 'vertex' || cell.type === 'edge') {
+      if (!identity(cell.value)) throw new Error('Invalid graph identity in result.');
+    } else if (cell.type === 'vertices' || cell.type === 'edges') {
+      compact(cell.value);
+    } else if (cell.type === 'path') {
+      const path = cell.value;
+      if (!Array.isArray(path?.nodes) || !Array.isArray(path?.edges) || path.nodes.length !== path.edges.length + 1) throw new Error('Invalid path cell.');
+      compact(path.nodes);
+      compact(path.edges);
+    } else if (cell.type === 'list') {
       if (!Array.isArray(cell.value)) throw new Error('Invalid list cell.');
       for (const item of cell.value) visit(item, depth + 1);
     } else if (cell.type === 'map') {
@@ -142,9 +157,12 @@ export function typedProperties(result, id, kind) {
 export function extractGraph(result, comparisonIndex) {
   validateResult(result);
   const nodes = new Map(), edges = new Map(), unresolved = new Set();
+  // Endpoint evidence must survive canvas clipping. The comparison index
+  // uses this same evidence to count and check all returned relationships.
+  const endpoints = comparisonIndex?.edges ?? new Map();
+  const observeEdgeId = id => { if (!endpoints.has(id)) unresolved.add(id); };
   let omittedNodes = 0, omittedEdges = 0;
   const addNode = (id, labels, properties) => {
-    if (!identity(id)) throw new Error('Invalid vertex identity in result.');
     comparisonIndex?.nodes.add(id);
     let node = nodes.get(id);
     if (!node) {
@@ -163,10 +181,9 @@ export function extractGraph(result, comparisonIndex) {
     return node;
   };
   const addEdge = (id, source, target, directed, label = '', properties = null) => {
-    if (!identity(id) || !identity(source) || !identity(target)) throw new Error('Invalid relationship identity in result.');
     addNode(source); addNode(target);
     const old = edges.get(id);
-    const previous = comparisonIndex?.edges.get(id) ?? old;
+    const previous = endpoints.get(id);
     if (previous) {
       const same = previous.source === source && previous.target === target;
       const reversed = previous.source === target && previous.target === source;
@@ -174,32 +191,27 @@ export function extractGraph(result, comparisonIndex) {
         throw new Error('A relationship has inconsistent endpoints in this result.');
       }
     }
-    // Keep only endpoint evidence for comparison edges outside the draw limit.
-    if (comparisonIndex && (!previous || (directed && !previous.directed))) {
-      comparisonIndex.edges.set(id, { source, target, directed });
-    }
+    if (!previous || (directed && !previous.directed)) endpoints.set(id, { source, target, directed });
+    unresolved.delete(id);
     if (old) {
       if (directed) {
         Object.assign(old, { source, target, directed });
         if (label) old.label = label;
         if (properties) old.properties = properties;
       }
-      unresolved.delete(id);
       return;
     }
     if (!nodes.has(source) || !nodes.has(target) || edges.size >= LIMITS.edges) { omittedEdges++; return; }
     edges.set(id, { id, source, target, directed, label, properties: properties || Object.create(null) });
-    unresolved.delete(id);
   };
   const visit = cell => {
     switch (cell.type) {
       case 'vertex': addNode(cell.value); break;
-      case 'edge': if (identity(cell.value)) unresolved.add(cell.value); else throw new Error('Invalid edge identity.'); break;
+      case 'edge': observeEdgeId(cell.value); break;
       case 'vertices': for (const id of cell.value) addNode(id); break;
-      case 'edges': for (const id of cell.value) { if (!identity(id)) throw new Error('Invalid edge identity.'); unresolved.add(id); } break;
+      case 'edges': for (const id of cell.value) observeEdgeId(id); break;
       case 'path': {
         const path = cell.value;
-        if (!Array.isArray(path?.nodes) || !Array.isArray(path?.edges) || path.nodes.length !== path.edges.length + 1) throw new Error('Invalid path cell.');
         for (const id of path.nodes) addNode(id);
         // The path protocol records traversal order, NOT stored edge orientation.
         for (let i = 0; i < path.edges.length; i++) addEdge(path.edges[i], path.nodes[i], path.nodes[i + 1], false);
@@ -223,11 +235,10 @@ export function extractGraph(result, comparisonIndex) {
   for (const edge of edges.values()) {
     nodes.get(edge.source).degree++;
     if (edge.source !== edge.target) nodes.get(edge.target).degree++;
-    unresolved.delete(edge.id);
   }
   const warnings = [];
   if (omittedNodes || omittedEdges) warnings.push(`Canvas capped at ${LIMITS.nodes} nodes / ${LIMITS.edges} relationships. The table and JSON retain the complete received result.`);
-  if (unresolved.size) warnings.push(`${unresolved.size} relationship IDs have no endpoints. Return source, relationship, target to draw directed connections.`);
+  if (unresolved.size) warnings.push(`${unresolved.size} relationship ${unresolved.size === 1 ? 'ID has' : 'IDs have'} no endpoints. Return source, relationship, target to draw directed connections.`);
   if ([...edges.values()].some(edge => !edge.directed)) warnings.push('Path connections show traversal adjacency; stored direction is not supplied.');
   return { nodes: [...nodes.values()], edges: [...edges.values()], warnings };
 }
