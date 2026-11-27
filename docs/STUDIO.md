@@ -309,8 +309,7 @@ vertex ID even when it lies outside the pinned sample. Gray vertices have no
 returned assignment. Colors repeat after eight components, so the selector uses
 exact IDs and mapped counts. Table, JSON and CSV keep the original procedure rows.
 
-The inspector's Start trace / Trace here action follows only the returned
-subgraph. It honors known stored direction and treats direction-unknown path
+The inspector’s **Start trace / Trace here** follows the visible returned subgraph. In comparison mode, Studio independently searches the full returned topology at each revision and shows each route with its vertex and edge IDs. A route can be highlighted when the canvas includes every hop with its observed endpoints and direction. It honors known stored direction and treats direction-unknown path
 adjacency as undirected. It makes no HTTP request and is not presented as a
 Prism query over the whole database.
 

@@ -16,6 +16,7 @@ let graph={nodes:[],edges:[],warnings:[]},shown=graph,selection=null,traceStart=
 let hiddenLabels=new Set(),schema={labels:[],relations:[],properties:[]},history=[],page='explore',view='graph',tablePage=0,tableSort=null,sortAscending=true;
 let difference = null, differencePage = 0, differenceTicket = null;
 let comparisonResult=null,analysisResult=null,componentFocus='';
+let comparedTrace = null;
 function analyticsView() {
   if (analysisResult === null) {
     try { analysisResult = analyticsOverlay(baseline.data, current.data); }
@@ -54,7 +55,7 @@ function busy(value){$('difference-open').disabled=value||!session;$('run-query'
 function cancel(notify=true){if(differenceTicket!==null){differenceTicket=null;$('difference-run').disabled=false;$('difference-status').textContent='Historical comparison interrupted.';}requestId++;controller?.abort();controller=null;clearTimeout(timeout);timeout=null;connecting=false;$('connect-submit').disabled=false;busy(false);if(notify){status('Browser request cancelled. Server-side cancellation is not guaranteed.');toast('Cancelled in this browser.');}}
 function finish(ticket){if(ticket!==requestId)return;clearTimeout(timeout);timeout=null;controller=null;busy(false);}
 function begin(){cancel(false);const ticket=requestId;controller=new AbortController();const signal=controller.signal;timeout=setTimeout(()=>{if(ticket===requestId){cancel(false);status('Browser request timed out after 30 seconds.',true);if($('difference-dialog').open)$('difference-status').textContent='Comparison timed out after 30 seconds.';if($('connect-dialog').open){$('connection-error').hidden=false;$('connection-error').textContent='Connection timed out.';}}},30000);return{ticket,signal};}
-function clearCurrent(keepPositions=false){comparisonResult=null;analysisResult=null;componentFocus='';current=null;graph={nodes:[],edges:[],warnings:[]};selection=null;traceStart=null;hiddenLabels=new Set();tableSort=null;tablePage=0;renderer.pathNodes=null;renderer.pathEdges=null;renderer.focus=false;if(keepPositions){renderer.stop();renderer.setVisible(graph);}else renderer.setData(graph,{preserve:false});renderResult();}
+function clearCurrent(keepPositions=false){resetTrace();comparisonResult=null;analysisResult=null;componentFocus='';current=null;graph={nodes:[],edges:[],warnings:[]};selection=null;traceStart=null;hiddenLabels=new Set();tableSort=null;tablePage=0;renderer.pathNodes=null;renderer.pathEdges=null;renderer.focus=false;if(keepPositions){renderer.stop();renderer.setVisible(graph);}else renderer.setData(graph,{preserve:false});renderResult();}
 function clearSession(keepDraft=false){cancel(false);clearDifferenceDialog();if($('difference-dialog').open)$('difference-dialog').close();session=null;sample=false;baseline=null;comparison=false;analysis=false;history=[];schema={labels:[],relations:[],properties:[]};$('capability-token').value='';if(!keepDraft)$('query-parameters').value='{}';clearCurrent();renderHistory();renderSchema();updateConnection();}
 function updateConnection(){const name=sample?(sampleKind==='atlas'?'Research atlas':'Classic sample'):session?.name||'Local workspace';$('workspace-name').textContent=name;$('collection-name').textContent=name;$('canvas-name').textContent=name;$('source-name').textContent=name.toUpperCase();$('collection-note').textContent=sample?'Illustrative knowledge graph':session?'Capability-scoped connection':'Connect a local database';$('connection-label').textContent=session?.name||'Connect database';$('connection-dot').classList.toggle('live',Boolean(session));$('dataset-badge').textContent=sample?'SAMPLE DATA':session?'QUERY RESULT':'NOT CONNECTED';$('footer-status').textContent=sample?'Sample workspace · not connected':session?'Connected · same-origin API':'Not connected';$('disconnect-button').hidden=!session;busy(false);renderChronicle();}
 async function api(path,token,body,signal){const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:{Accept:'application/json',Authorization:`Bearer ${token}`,...(body===undefined?{}:{'Content-Type':'application/json'})},body,signal,credentials: 'omit',redirect: 'error',cache:'no-store',referrerPolicy:'no-referrer'});try{const raw=await boundedText(response);let data;try{data=parseResponse(raw);}catch(error){throw new Error(`Cannot read the server response: ${error.message}`);}if(!response.ok||data?.error)throw new Error(`${data?.error?.code||response.status}: ${data?.error?.message||'Request refused'}`);return{data,raw};}catch(error){error.status=response.status;throw error;}}
@@ -84,9 +85,9 @@ $('run-query').onclick=execute;$('cancel-query').onclick=()=>cancel();$('disconn
 function publish(data,raw,statement,parameters,elapsed,isSample){const mapped=extractGraph(data);comparisonResult=null;analysisResult=null;componentFocus='';current={data,raw,statement,parameters,elapsed,sample:isSample};graph=mapped;sample=isSample;analysis=false;selection=null;traceStart=null;hiddenLabels=new Set();tablePage=0;tableSort=null;sortAscending=true;$('node-search').value='';$('table-filter').value='';renderer.pathNodes=null;renderer.pathEdges=null;renderer.focus=false;refreshGraph(true);renderResult();}
 function loadSample(kind='classic',cut=104,retain=false){if(!retain)clearSession();else cancel(false);sampleKind=kind;sampleCut=cut;sample=true;const data=kind==='atlas'?atlasResult(cut):demoResult();const query=graphQuery();$('query-editor').value=query;$('query-parameters').value='{}';highlight();publish(data,JSON.stringify(data,null,2),query,'{}',null,true);updateConnection();showPage('explore');status('Illustrative sample · connect to execute the editor');}
 $('load-sample').onclick=()=>loadSample();$('load-atlas').onclick=()=>loadSample('atlas');
-function refreshGraph(restart=false){shown=analysis&&baseline&&current?focusComponent(analyticsView(),componentFocus):comparison&&baseline&&current?(comparisonResult??=compareResults(baseline.data,current.data)):graph;const filtered=filterGraph(shown,hiddenLabels,$('node-search').value);if(restart)renderer.setData(shown,{preserve:true});renderer.setVisible(filtered);$('metric-nodes').textContent=current?String(filtered.nodes.length):'—';$('metric-edges').textContent=current?String(filtered.edges.length):'—';$('graph-empty').hidden=filtered.nodes.length!==0;renderLabels();renderNodes();renderInspector();renderComparison();const warnings=[...new Set(shown.warnings||[])];$('graph-notice').hidden=!warnings.length;$('graph-notice').textContent=warnings.join(' ');}
+function refreshGraph(restart=false){if(restart)resetTrace();shown=analysis&&baseline&&current?focusComponent(analyticsView(),componentFocus):comparison&&baseline&&current?(comparisonResult??=compareResults(baseline.data,current.data)):graph;const filtered=filterGraph(shown,hiddenLabels,$('node-search').value);if(restart)renderer.setData(shown,{preserve:true});renderer.setVisible(filtered);$('metric-nodes').textContent=current?String(filtered.nodes.length):'—';$('metric-edges').textContent=current?String(filtered.edges.length):'—';$('graph-empty').hidden=filtered.nodes.length!==0;renderLabels();renderNodes();renderInspector();renderComparison();const warnings=[...new Set(shown.warnings||[])];$('graph-notice').hidden=!warnings.length;$('graph-notice').textContent=warnings.join(' ');}
 function renderResult(){$('export-button').disabled=!current;$('pin-baseline').disabled=!current;$('snapshot-status').textContent=current?`snapshot ${current.data.seq??'not supplied'}`:'No result';$('canvas-sequence').textContent=current?`SEQ ${current.data.seq??'—'}`:'NO RESULT';refreshGraph();renderChronicle();if(view==='table')renderTable();if(view==='json')renderJSON();}
-function renderLabels(){const counts=new Map();for(const n of shown.nodes)counts.set(n.group,(counts.get(n.group)||0)+1);$('label-count').textContent=String(counts.size);$('label-filters').replaceChildren(...[...counts].sort((a,b)=>b[1]-a[1]).map(([label,count])=>{const b=button('',()=>{hiddenLabels.has(label)?hiddenLabels.delete(label):hiddenLabels.add(label);refreshGraph();},'label-button'+(hiddenLabels.has(label)?' off':''));b.setAttribute('aria-pressed',String(!hiddenLabels.has(label)));b.replaceChildren();const name=el('span');name.append(swatch(label),document.createTextNode(label));b.append(name,el('code',String(count)));return b;}));}
+function renderLabels(){const counts=new Map();for(const n of shown.nodes)counts.set(n.group,(counts.get(n.group)||0)+1);$('label-count').textContent=String(counts.size);$('label-filters').replaceChildren(...[...counts].sort((a,b)=>b[1]-a[1]).map(([label,count])=>{const b=button('',()=>{hiddenLabels.has(label)?hiddenLabels.delete(label):hiddenLabels.add(label);resetTrace();refreshGraph();},'label-button'+(hiddenLabels.has(label)?' off':''));b.setAttribute('aria-pressed',String(!hiddenLabels.has(label)));b.replaceChildren();const name=el('span');name.append(swatch(label),document.createTextNode(label));b.append(name,el('code',String(count)));return b;}));}
 function renderNodes(){const visible=filterGraph(shown,hiddenLabels,$('node-search').value),nodes=visible.nodes.filter(n=>visible.matches.has(n.id)).sort((a,b)=>b.degree-a.degree||a.title.localeCompare(b.title));$('node-list-count').textContent=String(nodes.length);$('node-list').replaceChildren(...nodes.slice(0,150).map(n=>{const b=button('',()=>renderer.select({kind:'node',id:n.id},true),'node-option'+(selection?.kind==='node'&&selection.id===n.id?' selected':''));b.replaceChildren(swatch(n.group),el('span',n.title),el('small',String(n.degree)));b.title=`${n.title} · ${n.id}`;return b;}));if(nodes.length>150)$('node-list').append(el('p','Showing the first 150 matches. Refine your search.','muted'));}
 $('node-search').oninput=()=>refreshGraph();
 function renderPropertyComparison(root, kind, id) {
@@ -109,6 +110,71 @@ function renderPropertyComparison(root, kind, id) {
   }
   if (changes.length > 60) root.append(el('p', 'Showing 60 of ' + changes.length + ' changed properties.', 'muted'));
 }
+function highlightTrace(path) {
+  renderer.pathNodes = path ? new Set(path.nodes) : null;
+  renderer.pathEdges = path ? new Set(path.edges) : null;
+  renderer.drawSoon();
+}
+
+function resetTrace() {
+  traceStart = null;
+  comparedTrace = null;
+  highlightTrace(null);
+}
+
+function traceTo(end) {
+  if (!traceStart || traceStart === end) {
+    resetTrace();
+    traceStart = end;
+    toast('Select another vertex, then choose Trace here.');
+  } else if (comparison) {
+    const paths = comparisonResult.trace(traceStart, end, renderer.graph);
+    const active = paths.after?.drawable ? 'after' : paths.before?.drawable ? 'before' : null;
+    comparedTrace = { end, paths, active };
+    renderer.focus = false;
+    highlightTrace(paths[active]);
+  } else {
+    const path = tracePath(renderer.graph, traceStart, end);
+    renderer.focus = false;
+    highlightTrace(path);
+    toast(path ? `${path.edges.length} hops in the visible topology.` : 'No path found in the visible topology.');
+  }
+  renderInspector();
+}
+
+function renderComparedTrace(root) {
+  root.append(el('div', `TRACE FROM VERTEX ${traceStart}`, 'section-heading'));
+  for (const [key, label, result] of [['before', 'A', baseline], ['after', 'B', current]]) {
+    const path = comparedTrace.paths[key];
+    const row = el('div', '', 'property');
+    row.append(el('strong', `${label} · snapshot ${result.data.seq ?? 'unspecified'}`));
+    if (!path) {
+      row.append(el('span', 'No path in the returned topology.'));
+    } else {
+      const details = el('details');
+      details.append(el('summary', `${path.edges.length} ${path.edges.length === 1 ? 'hop' : 'hops'} · route`));
+      for (let i = 0; i < Math.min(path.edges.length, 30); i++) {
+        details.append(el('code', `${path.nodes[i]} → ${path.nodes[i + 1]} · edge ${path.edges[i]}`));
+      }
+      if (path.edges.length > 30) details.append(el('small', `Showing the first 30 of ${path.edges.length} hops.`));
+      row.append(details);
+      if (path.drawable) {
+        const active = comparedTrace.active === key;
+        const action = button(active ? `Showing ${label}` : `Highlight ${label}`, () => {
+          comparedTrace.active = key;
+          highlightTrace(path);
+          renderInspector();
+        });
+        action.setAttribute('aria-pressed', String(active));
+        row.append(action);
+      } else {
+        row.append(el('small', 'This canvas does not show the complete route with its returned endpoints and directions.'));
+      }
+    }
+    root.append(row);
+  }
+}
+
 function renderInspector(){const root=$('inspector');root.replaceChildren();const item=selection&&(selection.kind==='node'?shown.nodes:shown.edges).find(v=>v.id===selection.id);
   if(!item){const wrap=el('div','','inspector-placeholder'),orb=el('div','','orb');orb.append(icon('graph'));wrap.append(orb,el('h2','Follow your curiosity.'),el('p','Select a node to inspect its identity, trace connections, and discover the evidence behind it.'));const hint=el('div','','inspector-hint');hint.append(el('strong','A graph, not a screenshot.'),el('p','Drag a node and watch its neighbors respond. Pin a baseline to see how returned snapshots differ.'));wrap.append(hint);root.append(wrap);return;}
   const kind=selection.kind;const kicker=el('div','','element-kicker');kicker.append(swatch(kind==='node'?item.group:item.label),document.createTextNode(kind==='node'?item.group:item.label||'Relationship'));root.append(kicker,el('h2',kind==='node'?item.title:item.label||'Relationship','element-title'));
@@ -119,7 +185,12 @@ function renderInspector(){const root=$('inspector');root.replaceChildren();cons
       $('layout-mode').value = 'radial';
       renderer.arrange('radial');
     }, 'secondary', 'graph'));
-    actions.append(button(traceStart&&traceStart!==item.id?'Trace here':'Start trace',()=>{if(traceStart&&traceStart!==item.id){const path=tracePath(shown,traceStart,item.id);renderer.pathNodes=new Set(path?.nodes||[]);renderer.pathEdges=new Set(path?.edges||[]);renderer.focus=false;renderer.drawSoon();toast(path?`${path.edges.length} hops in the returned subgraph only.`:'No directed path in the returned subgraph.');}else{traceStart=item.id;toast('Select another node, then choose Trace here.');}renderInspector();},'secondary','link'));root.append(actions);if(traceStart)root.append(el('p','Trace uses returned edges only, not a new database query.','trace-note'));}
+    actions.append(button(traceStart && traceStart !== item.id ? 'Trace here' : 'Start trace', () => traceTo(item.id), 'secondary', 'link'));
+    if (traceStart) actions.append(button('Clear trace', () => { resetTrace(); renderInspector(); }));
+    root.append(actions);
+    if (comparedTrace && comparedTrace.end === item.id) renderComparedTrace(root);
+    else if (traceStart) root.append(el('p', `Trace origin · vertex ${traceStart}`, 'trace-note'));
+  }
   if (item.component !== undefined) {
     const membership = el('div', '', 'property');
     membership.append(el('span', 'Component representative'), el('code', item.component?.id ?? 'No returned assignment'));
@@ -254,9 +325,7 @@ function componentChooser(groups) {
   select.onchange = () => {
     componentFocus = select.value;
     selection = null;
-    traceStart = null;
-    renderer.pathNodes = null;
-    renderer.pathEdges = null;
+    resetTrace();
     renderer.select(null);
     refreshGraph();
     $('component-focus').focus();

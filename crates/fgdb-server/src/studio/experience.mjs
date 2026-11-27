@@ -151,17 +151,59 @@ export function compareResults(before,after){
       edges.length < b.identities.edges.size + counts.edges.removed) {
     warnings.push('Comparison canvas is capped. Counts include mapped identities throughout both received results.');
   }
-  return { nodes, edges, warnings, counts };
+  return { nodes, edges, warnings, counts, trace: comparisonTracer(a.identities, b.identities) };
 }
-export function tracePath(graph,start,end,{directed=true}={}){
-  const adjacency=new Map(graph.nodes.map(n=>[n.id,[]]));
-  if(!adjacency.has(start)||!adjacency.has(end))return null;
-  for(const e of graph.edges){adjacency.get(e.source)?.push([e.target,e.id]);if(!directed||!e.directed)adjacency.get(e.target)?.push([e.source,e.id]);}
-  const queue=[start],previous=new Map([[start,null]]);
-  for(let i=0;i<queue.length&&!previous.has(end);i++)for(const [next,edge]of adjacency.get(queue[i])||[])if(!previous.has(next)){previous.set(next,[queue[i],edge]);queue.push(next);}
-  if(!previous.has(end))return null;const nodes=[end],edges=[];
-  for(let at=end;at!==start;){const [prev,edge]=previous.get(at);nodes.push(prev);edges.push(edge);at=prev;}
-  return {nodes:nodes.reverse(),edges:edges.reverse()};
+
+function findPath(vertices, edges, start, end, directed) {
+  const adjacency = new Map();
+  for (const id of vertices) adjacency.set(id, []);
+  if (!adjacency.has(start) || !adjacency.has(end)) return null;
+  for (const [id, edge] of edges) {
+    adjacency.get(edge.source)?.push([edge.target, id]);
+    if (!directed || !edge.directed) adjacency.get(edge.target)?.push([edge.source, id]);
+  }
+  const queue = [start], previous = new Map([[start, null]]);
+  for (let i = 0; i < queue.length && !previous.has(end); i++) {
+    for (const [next, edge] of adjacency.get(queue[i]) || []) {
+      if (previous.has(next)) continue;
+      previous.set(next, [queue[i], edge]);
+      queue.push(next);
+    }
+  }
+  if (!previous.has(end)) return null;
+  const nodes = [end], pathEdges = [];
+  for (let at = end; at !== start;) {
+    const [prev, edge] = previous.get(at);
+    nodes.push(prev);
+    pathEdges.push(edge);
+    at = prev;
+  }
+  return { nodes: nodes.reverse(), edges: pathEdges.reverse() };
+}
+
+export function tracePath(graph, start, end, { directed = true } = {}) {
+  return findPath(graph.nodes.map(n => n.id), graph.edges.map(e => [e.id, e]), start, end, directed);
+}
+
+// Keep the complete returned topology of each result. The union can contain
+// routes that never existed in either result, and its canvas may be capped.
+function comparisonTracer(before, after) {
+  return (start, end, visible) => {
+    const displayedNodes = new Set(visible.nodes.map(n => n.id));
+    const displayedEdges = new Map(visible.edges.map(e => [e.id, e]));
+    function traceSide(index) {
+      const path = findPath(index.nodes, index.edges, start, end, true);
+      if (!path) return null;
+      const drawable = path.nodes.every(id => displayedNodes.has(id)) && path.edges.every(id => {
+        const edge = index.edges.get(id), drawn = displayedEdges.get(id);
+        if (!drawn || drawn.directed !== edge.directed) return false;
+        return (drawn.source === edge.source && drawn.target === edge.target)
+          || (!edge.directed && drawn.source === edge.target && drawn.target === edge.source);
+      });
+      return { ...path, drawable };
+    }
+    return { before: traceSide(before), after: traceSide(after) };
+  };
 }
 
 // Sequence equality is necessary, not a signed certificate or proof of completeness.
