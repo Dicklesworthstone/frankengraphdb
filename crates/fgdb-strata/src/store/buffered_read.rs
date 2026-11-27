@@ -13,12 +13,13 @@
 
 mod admission;
 mod block_directory;
+mod edge_admission;
 mod patch_directory;
 mod scan_access;
 
 pub(crate) use scan_access::native_runs::{NativeRunRow, NativeRunSuffix};
 
-use super::{BlockStore, ExtentError, RootReadEvent, RootWalk, StoreError};
+use super::{BlockStore, ExtentError, RootReadEvent, StoreError};
 use crate::edge_props::{BlockProps, EdgePropertyRow};
 use crate::root::PartitionRoot;
 use crate::root::descriptor::{BlockDescriptor, BlockSummary, PatchDescriptor, RootDescriptors};
@@ -879,17 +880,8 @@ impl<V: Vfs + Clone> BlockStore<V> {
             let mut descriptors_match = !verify_published
                 || (blocks.len() == root.blocks.len()
                     && patches.len() == root.vertex_patches.len());
-            // This charge outlives the validator. A block is charged at its
-            // worst case before the walk updates any chain or allocates.
-            let mut edge_history_charge = pool.reserve(
-                cx,
-                if root.blocks.is_empty() {
-                    0
-                } else {
-                    INITIAL_EDGE_HISTORY_BYTES
-                },
-            )?;
-            let mut walk = RootWalk::default();
+            let mut edge_history =
+                edge_admission::EdgeAdmission::new(cx, &pool, !root.blocks.is_empty())?;
             let mut vertex_history =
                 admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
             let mut source_bytes = 0usize;
@@ -942,45 +934,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     )
                     .await?;
                 let (entries, _, predecessor) = &read.resolved;
-                let family = entries.first().map(|first| (first.src, first.relation));
-                let expected = family.and_then(|key| walk.chain_heads.get(&key).copied());
-                let new_head = usize::from(family.is_some() && expected.is_none());
-                edge_history_charge.grow(
-                    cx,
-                    entries
-                        .len()
-                        .checked_add(new_head)
-                        .and_then(|rows| rows.checked_mul(HISTORY_ENTRY_BYTES))
-                        .ok_or(BufferedReadError::SizeOverflow)?,
-                )?;
-                if let Some(family) = family {
-                    if predecessor.map(|link| link.0) != expected {
-                        return Err(StoreError::MalformedRoot(
-                            crate::root::RootError::BlockChainMismatch {
-                                at,
-                                declared: predecessor.map(|link| link.0),
-                                expected,
-                            },
-                        )
-                        .into());
-                    }
-                    walk.chain_heads.insert(family, reference.block_id);
-                }
-                let retained_before = walk.history.statement_count();
-                walk.history
-                    .observe_block(at, entries)
-                    .map_err(StoreError::MalformedRoot)?;
-                let retained = walk.history.statement_count() - retained_before;
-                // Retain one head per distinct family and one statement per
-                // version. A verified restatement only overwrites its slot.
-                let redundant = (entries.len() - retained) * HISTORY_ENTRY_BYTES;
-                if redundant != 0 {
-                    drop(
-                        edge_history_charge
-                            .split_off(redundant)
-                            .expect("the incoming block already reserved every row"),
-                    );
-                }
+                edge_history.observe_block(cx, at, reference.block_id, entries, *predecessor)?;
                 let actual = BlockDescriptor {
                     block: descriptor(reference.block_id, &read.bytes)?,
                     properties: read
@@ -999,8 +953,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
             }
             // Vertex history reads only vertex patches. Release the completed
             // edge validator, then its reservations, before this second walk.
-            drop(walk);
-            drop(edge_history_charge);
+            drop(edge_history);
             for (at, reference) in root.vertex_patches.iter().enumerate() {
                 let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
                 let (rows, bytes) = self

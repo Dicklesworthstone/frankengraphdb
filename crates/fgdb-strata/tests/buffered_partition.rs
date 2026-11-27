@@ -98,7 +98,7 @@ fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> 
 }
 
 #[test]
-fn cold_admission_refunds_repeated_edge_statements_without_hiding_retirement() {
+fn cold_admission_compacts_distinct_edges_and_preserves_retirement() {
     run(|contexts, dir| async move {
         let commit = contexts.commit();
         let query = contexts.query();
@@ -188,12 +188,26 @@ fn cold_admission_refunds_repeated_edge_statements_without_hiding_retirement() {
                 drop(view);
                 assert_eq!(tight.used(), 0);
             } else {
+                let mut view = opened.expect("6,144 distinct edge identities fit a 3 MiB pool");
+                for eid in [1, 128, 129, 6144] {
+                    let found = view
+                        .edge_at(&query, EId(eid), CommitSeq(2))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(found.entry, edge(eid, 7, 11, 1, None));
+                }
+                drop(view);
+                let tight = MemoryPool::new(1_282_000, 0).unwrap();
                 assert!(matches!(
-                    opened,
+                    store
+                        .open_buffered_root(&query, root, tight.clone(), limits)
+                        .await,
                     Err(BufferedReadError::Memory(
                         MemoryError::ResourceExhausted { .. }
                     ))
                 ));
+                assert_eq!(tight.used(), 0);
             }
             assert_eq!(pool.used(), 0);
         }
