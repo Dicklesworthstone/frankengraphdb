@@ -28,7 +28,7 @@ fn refused<T>(result: Result<T, Refusal>, expected: ErrorCode) {
 }
 
 #[test]
-fn subscriptions_bind_durable_names_at_registration_and_refuse_later_schema_changes() {
+fn subscriptions_keep_durable_name_bindings_across_additive_catalog_ticks() {
     use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
     use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
     use fgdb_types::{CanonicalScalar, CommitSeq, VId};
@@ -62,15 +62,24 @@ fn subscriptions_bind_durable_names_at_registration_and_refuse_later_schema_chan
             );
         }
         let statement = request("SUBSCRIBE TO MATCH (n:Person) RETURN n.score AS score");
-        let mut selected = success(subscribe(&root, db, &token, &statement).await);
-        let baseline = success(poll(&root, db, &token, &mut selected).await).unwrap();
-        assert_eq!(selected.columns, ["score"]);
-        assert!(baseline.batch.is_snapshot());
-        assert_eq!(baseline.entries, [(1, vec![WireValue::Int(42)])]);
-        selected
-            .consumer
-            .acknowledge(baseline.batch.receipt())
+        let scoped = token
+            .attenuate(Restriction::Labels(fgdb_warden::Scope::only([LabelId(1)])))
             .unwrap();
+        let mut selected = success(subscribe(&root, db, &token, &statement).await);
+        let mut projected = success(subscribe(&root, db, &scoped, &statement).await);
+        for (capability, subscription, cut) in
+            [(&token, &mut selected, 2), (&scoped, &mut projected, 1)]
+        {
+            let baseline = success(poll(&root, db, capability, subscription).await).unwrap();
+            assert_eq!(subscription.columns, ["score"]);
+            assert!(baseline.batch.is_snapshot());
+            assert_eq!(baseline.batch.frontier(), CommitSeq(cut));
+            assert_eq!(baseline.entries, [(1, vec![WireValue::Int(42)])]);
+            subscription
+                .consumer
+                .acknowledge(baseline.batch.receipt())
+                .unwrap();
+        }
         {
             let mut changed = fgdb::WriteBatch::new(RelationId(1));
             changed.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
@@ -82,43 +91,109 @@ fn subscriptions_bind_durable_names_at_registration_and_refuse_later_schema_chan
                 .await
                 .unwrap();
         }
-        let delta = success(poll(&root, db, &token, &mut selected).await).unwrap();
-        assert!(!delta.batch.is_snapshot());
-        assert_eq!(delta.entries.len(), 2);
-        assert!(delta.entries.contains(&(-1, vec![WireValue::Int(42)])));
-        assert!(delta.entries.contains(&(1, vec![WireValue::Int(7)])));
-        selected
-            .consumer
-            .acknowledge(delta.batch.receipt())
-            .unwrap();
+        for (capability, subscription, previous) in
+            [(&token, &mut selected, 2), (&scoped, &mut projected, 1)]
+        {
+            let delta = success(poll(&root, db, capability, subscription).await).unwrap();
+            assert!(!delta.batch.is_snapshot());
+            assert_eq!(delta.batch.from(), Some(CommitSeq(previous)));
+            assert_eq!(delta.batch.frontier(), CommitSeq(previous + 1));
+            assert_eq!(delta.entries.len(), 2);
+            assert!(delta.entries.contains(&(-1, vec![WireValue::Int(42)])));
+            assert!(delta.entries.contains(&(1, vec![WireValue::Int(7)])));
+            subscription
+                .consumer
+                .acknowledge(delta.batch.receipt())
+                .unwrap();
+        }
         {
             let mut names = SymbolCatalog::default();
             names
                 .bind("Later", CatalogSymbol::Label(LabelId(8)))
                 .unwrap();
-            db.db
-                .write(&root)
-                .await
-                .unwrap()
-                .register_symbols(&contexts.commit(), &names)
-                .await
+            let mut writer = db.db.write(&root).await.unwrap();
+            assert_eq!(
+                writer
+                    .register_symbols(&contexts.commit(), &names)
+                    .await
+                    .unwrap(),
+                CommitSeq(4)
+            );
+            let mut conflicting = SymbolCatalog::default();
+            conflicting
+                .bind("Person", CatalogSymbol::Label(LabelId(9)))
                 .unwrap();
+            assert!(matches!(
+                writer
+                    .register_symbols(&contexts.commit(), &conflicting)
+                    .await,
+                Err(fgdb::SymbolCatalogError::Binding(_))
+            ));
+            assert_eq!(writer.frontier().unwrap(), CommitSeq(4));
         }
-        refused(
-            poll(&root, db, &token, &mut selected).await,
-            ErrorCode::Execution,
+        let empty = success(poll(&root, db, &token, &mut selected).await).unwrap();
+        assert!(!empty.batch.is_snapshot());
+        assert_eq!(
+            (empty.batch.from(), empty.batch.frontier()),
+            (Some(CommitSeq(3)), CommitSeq(4))
         );
-        // Only an explicit new registration accepts the current schema epoch.
-        // The existing subscription never silently replaces its definition.
+        assert!(empty.entries.is_empty());
+        let repeated = success(poll(&root, db, &token, &mut selected).await).unwrap();
+        assert!(Arc::ptr_eq(&empty.batch, &repeated.batch));
+        selected
+            .consumer
+            .acknowledge(empty.batch.receipt())
+            .unwrap();
+        assert!(success(poll(&root, db, &scoped, &mut projected).await).is_none());
+        assert_eq!(
+            projected.consumer.acknowledged_frontier(),
+            Some(CommitSeq(2))
+        );
+
+        // A fresh registration sees the same row at the new catalog cut.
         let mut replacement = success(subscribe(&root, db, &token, &statement).await);
         let fresh = success(poll(&root, db, &token, &mut replacement).await).unwrap();
         assert!(fresh.batch.is_snapshot());
+        assert_eq!(fresh.batch.frontier(), CommitSeq(4));
         assert_eq!(fresh.entries, [(1, vec![WireValue::Int(7)])]);
         replacement
             .consumer
             .acknowledge(fresh.batch.receipt())
             .unwrap();
+        {
+            let mut changed = fgdb::WriteBatch::new(RelationId(1));
+            changed.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(11)));
+            assert_eq!(
+                db.db
+                    .write(&root)
+                    .await
+                    .unwrap()
+                    .write(&contexts.commit(), changed)
+                    .await
+                    .unwrap(),
+                CommitSeq(5)
+            );
+        }
+        for (capability, subscription, previous) in [
+            (&token, &mut selected, 4),
+            (&scoped, &mut projected, 2),
+            (&token, &mut replacement, 4),
+        ] {
+            let delta = success(poll(&root, db, capability, subscription).await).unwrap();
+            assert!(!delta.batch.is_snapshot());
+            assert_eq!(delta.batch.from(), Some(CommitSeq(previous)));
+            assert_eq!(delta.batch.frontier(), CommitSeq(previous + 1));
+            assert_eq!(
+                delta.entries,
+                [(-1, vec![WireValue::Int(7)]), (1, vec![WireValue::Int(11)])]
+            );
+            subscription
+                .consumer
+                .acknowledge(delta.batch.receipt())
+                .unwrap();
+        }
         drop(selected);
+        drop(projected);
         drop(replacement);
         server.finish_shutdown(&root).await;
     });
