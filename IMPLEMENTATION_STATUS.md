@@ -12,6 +12,27 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Computed native source projections — qualification pending
+
+Native graph row pulls now prove explicit ascending order by the complete
+source identity prefix before admitting computed projections. Vertex, directed
+and undirected edge, and fixed-join expressions use the existing row VM and
+scoped property readers. Compiler-private ordering cells can be removed after
+every original expression and payload charge, without collecting an answer or
+changing canonical query definitions. Final SKIP/LIMIT retains full reached
+expression validation, including the unselected suffix before successful EOF.
+
+Resident local, Send, cooperative and ordinary FGP/prepared paths share this
+proof. Bare property-only canonical value order, descending/incomplete identity
+keys, DISTINCT in this computed profile, arbitrary relational barriers and
+configured cold/buffered Set streams retain their refusals. Regression sources
+cover private keys, occurrence counts, every projection checkpoint, scope,
+prepared historical rebinding, flow credit, cancellation and suffix failures.
+Independent source/API reviews, scoped pinned formatting and whitespace checks
+completed. Native build/runtime, Clippy, UBS and exact-tree qualification remain
+pending after executor loss.
+Keep `fgdb-w5-executor-olp` and `fgdb-qualify-integrated-nov22-maz0p` open.
+
 ### Native FGP over WebSocket — qualification pending
 
 A dedicated `--websocket-listen` / `Server::serve_websocket` listener now
@@ -19,6 +40,20 @@ upgrades `/v1/fgp` with the required `fgp.v1` subprotocol and delegates to
 the existing FGP connection machine. Reads, writes, explicit transactions,
 prepared execution, source/ordered streams and live subscriptions retain
 their existing authorization, budgets, flow credit and completion owners.
+
+`Client::connect_websocket` and `connect_websocket_stream` now own native
+upgrade establishment, and `fgdb remote --websocket` uses them for every remote
+operation. Targets are bounded HTTP authorities; the client validates a strict
+101 response and exact `fgp.v1` negotiation before any FGP byte or credential.
+Foundation context entropy supplies each nonce. Read-ahead remains attached to
+the carrier, and one context-clock deadline/cancellation owner covers setup
+through AUTH_OK. WSS uses the existing verified TLS path with HTTP/1.1 ALPN.
+Native callers send no Origin header; browser Origin admission is unchanged.
+Regression sources cover rejected upgrades with no credential output, fresh
+nonces, fragmented/read-ahead authentication, absolute deadlines and blocked
+setup cancellation. Existing real-socket transaction and WSS fixtures now use
+the public SDK connection methods; CLI parsing rejects ambiguous targets
+before credential access.
 
 The upgrade has explicit Host and browser Origin policies, a 16 KiB header
 bound and strict no-body HTTP/1.1 framing. The existing absolute establishment
@@ -41,8 +76,12 @@ TLS-protected WebSocket execution. Source/API reviews completed against the
 pinned foundation. Scoped pinned rustfmt and whitespace checks passed after
 the execution host recovered. Locked targeted compilation reached dependency
 builds, but rustc was killed by SIGKILL inside zerocopy before product
-compilation; a resource-bounded retry is pending. Runtime tests, Clippy, UBS
-and exact-tree qualification remain UNRUN. The earlier whole-workspace
+compilation; a resource-bounded retry lost its executor without a verdict.
+The subsequent SDK test build reached the pinned asupersync dependency and
+was also killed by SIGKILL before protocol compilation. Native runtime tests,
+Clippy, UBS and exact-tree qualification remain UNRUN. Scoped pinned formatting
+and whitespace checks passed for the SDK, CLI and integration sources.
+The earlier whole-workspace
 format check failed in the pre-existing SIMD sorted-set source. Keep
 `fgdb-w10-adapters-b1f` and `fgdb-qualify-integrated-nov22-maz0p` open.
 

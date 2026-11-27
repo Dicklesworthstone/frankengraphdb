@@ -11,7 +11,7 @@ use fgdb::{Database, DatabaseKeys};
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_gql::GraphSymbolKind;
 use fgdb_protocol::body::{ErrorCode, Execute, ExecuteMode, Outcome, PreparedReadMode, WireValue};
-use fgdb_protocol::client::{Client, ClientError};
+use fgdb_protocol::client::{Client, ClientError, WebSocketTarget};
 use fgdb_protocol::websocket::WebSocketIo;
 use fgdb_server::{
     DatabaseConfig, Server, ServerLimits, Shutdown, Symbols, WebSocketConfig, issue_token, issuer,
@@ -168,6 +168,14 @@ async fn headers(stream: &mut (impl AsyncRead + Unpin)) -> Vec<u8> {
 }
 
 async fn connect(cx: &Cx, address: SocketAddr, scope: &Grant, origin: Option<&str>) -> Client {
+    if origin.is_none() {
+        let target = WebSocketTarget::new(address.to_string()).unwrap();
+        let mut client = Client::connect_websocket(cx, &target, address, token(scope))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        return client;
+    }
     let handshake = handshake(address, origin);
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream.write_all(&handshake.request_bytes()).await.unwrap();
@@ -207,7 +215,7 @@ async fn count(cx: &Cx, client: &mut Client) -> (Vec<Vec<WireValue>>, Outcome) {
 fn websocket_preserves_atomic_transactions_scoped_streams_and_cancellation() {
     run(async |cx| {
         let (address, tcp_address, shutdown, tasks) = start(cx, "execution").await;
-        let mut writer = connect(cx, address, &grant(Rights::ReadWrite), Some(ORIGIN)).await;
+        let mut writer = connect(cx, address, &grant(Rights::ReadWrite), None).await;
         let mut observer = Client::connect(cx, tcp_address, token(&grant(Rights::Read)))
             .await
             .unwrap();

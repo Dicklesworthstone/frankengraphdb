@@ -59,7 +59,10 @@ fn computed_identity_orders_preserve_scoped_occurrences_and_prepared_arguments()
                 2,
             ),
         ] {
-            let handle = reader.prepare_read(cx, statement, shifted(1)).await.unwrap();
+            let handle = reader
+                .prepare_read(cx, statement, shifted(1))
+                .await
+                .unwrap();
             for by in [4, -2] {
                 let eager = reader
                     .execute(cx, ExecuteMode::Read, statement, shifted(by))
@@ -181,12 +184,7 @@ fn prepared_computed_identity_orders_rebind_history_and_final_pages() {
             )
             .await
             .unwrap();
-        for (cut, by, skip, take) in [
-            (1, 7, 0, 12),
-            (3, -4, 0, 12),
-            (1, 17, 1, 3),
-            (1, 0, 0, 0),
-        ] {
+        for (cut, by, skip, take) in [(1, 7, 0, 12), (3, -4, 0, 12), (1, 17, 1, 3), (1, 0, 0, 0)] {
             let result = prepared_source(
                 cx,
                 &mut reader,
@@ -340,12 +338,17 @@ fn computed_identity_streams_keep_credit_cancellation_budgets_and_suffix_failure
             .await
             .unwrap_err();
         assert_eq!(server_code(limited), ErrorCode::Budget);
-        assert_eq!(prefix.len(), 4, "one row allowance spans every credit window");
+        assert_eq!(
+            prefix.len(),
+            4,
+            "one row allowance spans every credit window"
+        );
         reader.release_prepared(cx, handle).await.unwrap();
 
         // The last identity has a unique age. Its division failure lies after
         // the selected four rows and cannot disappear behind LIMIT, even zero.
-        let statement = "MATCH (n:Person) RETURN n AS id,100/(n.age-$bad) AS quotient ORDER BY id LIMIT $take";
+        let statement =
+            "MATCH (n:Person) RETURN n AS id,100/(n.age-$bad) AS quotient ORDER BY id LIMIT $take";
         let arguments = |bad, take| {
             vec![
                 ("bad".into(), WireValue::Int(bad)),

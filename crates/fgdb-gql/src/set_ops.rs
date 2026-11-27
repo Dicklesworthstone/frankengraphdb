@@ -2538,7 +2538,11 @@ mod pulled_projection_tests {
                     1,
                     &mut |_| {
                         visited += 1;
-                        if visited == stop { Err("stopped") } else { Ok(()) }
+                        if visited == stop {
+                            Err("stopped")
+                        } else {
+                            Ok(())
+                        }
                     },
                     |_, _| "expression",
                 ),

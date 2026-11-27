@@ -1051,9 +1051,39 @@ no token. Explicit Host and Origin policies fence the upgrade, and one
 This adapter has source review and regression sources. Native build and runtime
 qualification are recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
+The native CLI and Rust client also open this transport directly. For example:
+
+```bash
+fgdb remote --websocket --addr 127.0.0.1:8789 \
+  --token-file token.hex --database social query "MATCH (n) RETURN n LIMIT 10"
+```
+
+`--websocket` applies to every remote operation, including transactions,
+prepared batches and subscriptions. `--websocket-host host[:port]` selects an
+explicit virtual Host; otherwise the address is used. The existing paired TLS
+options enable WSS with certificate/name verification and HTTP/1.1 ALPN.
+The client validates the complete upgrade before sending an FGP credential,
+retains upgrade read-ahead, and bounds establishment through authentication
+with one context-clock deadline. Rust callers use `WebSocketTarget` and
+`Client::connect_websocket`, or `connect_websocket_stream` with an already
+verified TLS transport.
+
 FGP also supports reusable native read templates through `Client::prepare_read`, `execute_prepared`/`execute_prepared_streaming`, and `release_prepared`. Preparation binds syntax and operand types without executing or pinning a snapshot; each execution supplies its parameters again and opens a fresh authorized read. Handles belong to one connection, are invalidated by authority refresh or database recovery, and cannot be used to execute writes. Each connection retains at most 64 templates and 4 MiB of original query text. Both schema and row callbacks return `Result<(), ClientError>`; a callback error cancels and drains its result before the client can execute another request.
 
 Remote queries select their execution path with `--read-mode buffered|source|ordered`. The default `buffered` mode collects the ordinary eager answer. `source` uses the authorized native row or aggregate cursor with transport credit driving source demand. Its row profile is identity-leading: a vertex scan's rows begin with the scanned vertex and a fixed-edge scan's with the captured edge, so `MATCH (p:Person) RETURN p.name` refuses in `source` mode (re-measured 2026-11-24) while `buffered` answers it; [Native source streams](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) gives the exact profile. `ordered` uses the server's private external sorter for property-only vertex and fixed-edge/join projections, hidden sort keys, DISTINCT and SKIP/LIMIT. It also accepts terminal `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` and `COLLECT` over admitted graph and complete relational inputs, including prepared historical reads. Groups spill through the existing bounded reducer; exact counts, wide sums and rational averages retain their native wire types, and collections retain native occurrence order. Both native modes flush the schema and each row without collecting the complete result in the CLI. Unsupported source profiles and terminal aggregate expressions that require an additional graph-element lookup refuse before execution. New external aggregate regressions have source and formatting review; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
+
+Resident source streams additionally admit computed projections with an explicit
+ascending order by the complete source identity, for example
+`MATCH (n) RETURN n AS id, n.age + 1 AS next_age ORDER BY id`. The identity may
+be a private ranking key, as in
+`MATCH (n) RETURN {node:n, next_age:n.age+1} AS doc ORDER BY n SKIP 1 LIMIT 10`.
+Directed edges use the edge identity; undirected roots also require the source
+vertex, and fixed joins retain every traversal identity. Expressions use the
+same scoped readers and cumulative allowance as the source. Every reached
+expression, including the unselected suffix, is checked before successful
+exhaustion. Bare property-only queries still require canonical value ordering,
+and configured cold/buffered source streams retain their existing narrower
+profile. These new source projections have qualification pending.
 
 Enable external ordered reads by adding `--query-scratch-dir /existing/private/scratch` to the database's `fgdbd serve` options, after its `--database` argument. This is an operator path; clients cannot choose files or physical limits. Defaults bound the database's shared tracked spill buffers to 64 MiB and concurrent ordered sessions to four, with three private files of at most 512 MiB each per session and at most 100,000 input rows. The complete sort-work ceiling is reserved from the same signed allowance that pays for source work and final delivery. The server announces the stream before sorting, handles controls while setup or sort I/O is pending, and streams only the completed final rows under credit. Aggregate inputs and completed-group expressions finish even when `LIMIT 0` suppresses output; only delivered groups spend the signed result-row allowance. Each collection must fit the per-value memory and encoded-row limits. On Unix, scratch files are exclusive and unlinked before query data is written. The source graph remains resident. [Ordered stream details and limits](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) describe the supported profile and ownership boundaries.
 

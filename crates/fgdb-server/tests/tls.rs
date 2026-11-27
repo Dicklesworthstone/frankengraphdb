@@ -3,7 +3,6 @@
 //! local test names. They are never deployment identities.
 
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
-use asupersync::net::websocket::{ClientHandshake, HttpResponse, WsUrl};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::security::key::AuthKey;
 use asupersync::tls::{Certificate, TlsConnector, TlsConnectorBuilder, TlsStream};
@@ -12,14 +11,12 @@ use fgdb::{Database, DatabaseKeys};
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_gql::GraphSymbolKind;
 use fgdb_protocol::body::{ExecuteMode, Outcome, WireValue};
-use fgdb_protocol::client::Client;
-use fgdb_protocol::websocket::WebSocketIo;
+use fgdb_protocol::client::{Client, WebSocketTarget};
 use fgdb_server::{
     DatabaseConfig, Server, ServerLimits, Symbols, TlsConfig, WebSocketConfig, issue_token, issuer,
 };
 use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -204,32 +201,12 @@ async fn http_response(stream: &mut TlsStream<TcpStream>) -> String {
     }
 }
 
-async fn websocket(cx: &Cx, addr: SocketAddr) -> WebSocketIo<TlsStream<TcpStream>> {
-    let mut stream = encrypted(addr, Some(b"http/1.1")).await;
-    let handshake = ClientHandshake::new_for_test(
-        WsUrl::parse(&format!("wss://localhost:{}/v1/fgp", addr.port())).unwrap(),
-        "dGhlIHNhbXBsZSBub25jZQ==".into(),
-        vec!["fgp.v1".into()],
-        Vec::new(),
-        BTreeMap::new(),
-    )
-    .header("Origin", "https://console.example");
-    stream.write_all(&handshake.request_bytes()).await.unwrap();
-    stream.flush().await.unwrap();
-    // Stop exactly at the HTTP boundary so TLS-buffered WebSocket bytes
-    // remain available to the binary adapter.
-    let mut bytes = Vec::new();
-    while !bytes.ends_with(b"\r\n\r\n") {
-        assert!(bytes.len() < 16 * 1024, "bounded upgrade response");
-        let mut byte = [0];
-        assert_eq!(stream.read(&mut byte).await.unwrap(), 1, "complete upgrade");
-        bytes.push(byte[0]);
-    }
-    let response = HttpResponse::parse(&bytes).unwrap();
-    handshake.validate_response(&response).unwrap();
-    assert_eq!(response.header("sec-websocket-protocol"), Some("fgp.v1"));
-    assert_eq!(response.header("sec-websocket-extensions"), None);
-    WebSocketIo::client(cx, stream, 1 << 20, Vec::new()).unwrap()
+async fn websocket(cx: &Cx, addr: SocketAddr) -> Client {
+    let stream = encrypted(addr, Some(b"http/1.1")).await;
+    let target = WebSocketTarget::new(format!("localhost:{}", addr.port())).unwrap();
+    Client::connect_websocket_stream(cx, &target, stream, token(true))
+        .await
+        .unwrap()
 }
 
 #[test]
@@ -315,10 +292,7 @@ fn encrypted_fgp_http_bolt_and_websocket_share_authorized_execution_and_drain() 
                 .await
                 .is_err()
         );
-        let mut websocket_reader =
-            Client::connect_stream(cx, websocket(cx, addresses[3]).await, token(true))
-                .await
-                .unwrap();
+        let mut websocket_reader = websocket(cx, addresses[3]).await;
         websocket_reader.select(cx, "social").await.unwrap();
         let websocket_answer = websocket_reader
             .execute(

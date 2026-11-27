@@ -1036,11 +1036,28 @@ header or ciphertext prefix may already have escaped even when zero FGP bytes
 were acknowledged.
 
 When TLS is enabled this listener uses `wss://` with `http/1.1` ALPN and the
-same TLS 1.3 identity and admission path as HTTPS. A native client that has
-completed and validated the HTTP upgrade can wrap its stream using
-`WebSocketIo::client(cx, io, max_message_bytes, upgrade_read_ahead)`, then pass
-that carrier to `Client::connect_stream`. Browser clients select `fgp.v1`,
-use binary messages, and implement the same FGP handshake and frame contract.
+same TLS 1.3 identity and admission path as HTTPS. The native Rust client opens
+this transport using `WebSocketTarget::new(authority)` and
+`Client::connect_websocket(cx, target, address, credential)`. For WSS, complete
+certificate/name verification and HTTP/1.1 negotiation before passing the
+transport to `Client::connect_websocket_stream(cx, target, stream, credential)`.
+Targets contain only a validated HTTP authority; path, credentials, query
+strings and redirects are unavailable. Native clients send no Origin header.
+
+The client uses the foundation's context-entropy handshake and verifies the
+exact accept transcript and `fgp.v1` response before sending HELLO or AUTH.
+It rejects extensions, duplicate/malformed headers and body framing, bounds
+headers to 16 KiB/128 fields, and retains co-read binary bytes. One absolute
+30-second context-clock deadline covers its setup through AUTH_OK, including
+TCP establishment for `connect_websocket`; cancellation wakes blocked setup.
+The server's independent establishment deadline still runs through READY.
+
+`fgdb remote --websocket` uses this path for every operation. Host defaults to
+`--addr`; `--websocket-host host[:port]` overrides it and requires `--websocket`.
+The existing paired TLS flags select verified WSS with HTTP/1.1 ALPN. Direct
+FGP retains its `fgp/1` ALPN. No failed upgrade or TLS handshake retries through
+another transport. Browser clients select `fgp.v1`, use binary messages, and
+implement the same FGP handshake and frame contract.
 
 Regression sources cover framing, fragmentation, masks, bounded allocation,
 partial writes, control replies, cancellation, HTTP policy refusals, real FGP
@@ -1246,7 +1263,18 @@ application output is admitted.
   connected fixed joins. An undirected root also requires its root-source
   vertex immediately after the root edge to distinguish orientations. Admitted masked scalar columns and
   native existence probes, DISTINCT and SKIP/LIMIT retain their normal cursor
-  semantics. Vertex and fixed-edge aggregates also use the native cursor:
+  semantics. Resident computed projections can instead explicitly order by the
+  complete ascending source identity prefix. The bound projection may move
+  these keys or keep compiler-private keys outside visible output; it evaluates
+  every original expression under the same meter and admitted property readers
+  before trimming private cells. This admits vertex, directed/undirected edge
+  and fixed-join computations without a sort or collected answer. The final
+  page does not suppress skipped or suffix expression failures. Descending or
+  incomplete identity orders, DISTINCT for this computed profile, arbitrary
+  relational barriers, metadata reads and random draws still refuse. Configured
+  cold/buffered Set streams retain their separate narrower admission.
+
+  Vertex and fixed-edge aggregates also use the native cursor:
   the first credited demand consumes the complete authorized input and later
   demands move completed groups out. Grouping, HAVING, aggregate expressions,
   DISTINCT, ordering, paging and admitted historical reads retain their native
