@@ -118,6 +118,8 @@ fn standalone_filter_preserves_row_scope_bags_and_page_boundaries() {
     ];
     for statement in [
         "MATCH (n) FILTER WHERE n.p > 1 FILTER n.p < 3 RETURN n.p AS p",
+        "MATCH (n) WHERE n.p > 0 FILTER n.p = 2 MATCH (m) WHERE m.p = 3 RETURN n.p AS p",
+        "MATCH (filter) WHERE filter.p = 2 MATCH (m) WHERE m.p = 3 RETURN filter.p AS p",
         "MATCH (n) WITH n.p AS p ORDER BY p NULLS LAST LIMIT 3 FILTER p > 1 RETURN p",
         "UNWIND [1,2,2,NULL,3] AS x FILTER x > 1 WITH x AS p FILTER WHERE p < 3 RETURN p",
         "UNWIND [2,2] AS filter WITH filter AS kept FILTER kept = 2 RETURN kept",
@@ -127,7 +129,7 @@ fn standalone_filter_preserves_row_scope_bags_and_page_boundaries() {
         "UNWIND [1,1] AS filter WITH CASE WHEN filter = 1 THEN 1 + filter ELSE 3 END AS p RETURN p",
     ] {
         let query = prepare(statement);
-        let result = run(&query, &values, wide(), &mut || Ok(())).unwrap();
+        let result = run_reading(&query, &values, wide(), &mut || Ok(()), true).unwrap();
         assert_eq!(ints(&result.value, 0), [Some(2), Some(2)], "{statement}");
     }
     for statement in [

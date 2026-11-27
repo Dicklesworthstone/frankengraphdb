@@ -815,7 +815,8 @@ impl<'a> Parser<'a> {
         // Those reads are hidden columns too, but scoped to that part.
         let mut scoped: Vec<(&'a str, Option<&'a str>, usize)> = Vec::new();
         let mut read_locals = ReadLocals::default();
-        let mut before_return = head.plain && !unwind && pending.is_none() && !self.is_word("FILTER");
+        let mut before_return =
+            head.plain && !unwind && pending.is_none() && !self.is_word("FILTER");
         let mut functions = Vec::new();
         // Pattern comprehensions in the head's own scope, before any later
         // WITH: hidden list columns (hoist_comprehension), the end of the one
@@ -869,8 +870,8 @@ impl<'a> Parser<'a> {
                 && !matches!(window[2], Some(TokenKind::Word(previous))
                     if previous.eq_ignore_ascii_case("AS"))
                 && [
-                    "WHERE", "FILTER", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH", "UNWIND", "CREATE",
-                    "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
+                    "WHERE", "FILTER", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH", "UNWIND",
+                    "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
                 ]
                 .iter()
                 .any(|clause| word.eq_ignore_ascii_case(clause))

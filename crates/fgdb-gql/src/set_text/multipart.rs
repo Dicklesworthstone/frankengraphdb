@@ -163,7 +163,9 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
                     && (previous.is_none()
                         || previous.is_some_and(|token| token.punct(b')'))
                         || index.checked_sub(2).is_some_and(|at| tokens[at].word("AS"))
-                        || tokens.get(index + 1).is_some_and(|token| token.word("WHERE")));
+                        || tokens
+                            .get(index + 1)
+                            .is_some_and(|token| token.word("WHERE")));
                 if !name && (filter || (matched && token.word("UNWIND"))) {
                     with = true;
                 }
