@@ -2848,7 +2848,13 @@ fn a_two_level_root_publishes_its_segments_and_reopens_through_them() {
         let reopened = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
             .await
             .expect("reopens");
-        assert_eq!(reopened.get_root(&cx, root_id).await.expect("reads"), root);
+        let selected = reopened.get_root(&cx, root_id).await.expect("reads");
+        assert_eq!(selected, root);
+        assert_eq!(
+            selected.blocks.capacity(),
+            root.blocks.len(),
+            "the 88-reference tail must not double the retained membership"
+        );
         let (read_back, blocks, _, _) = reopened
             .reopen(&cx, root_id)
             .await
