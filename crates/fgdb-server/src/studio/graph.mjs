@@ -93,15 +93,34 @@ export class GraphCanvas {
     const focusId = mode === 'radial' && this.selection?.kind === 'node' ? this.selection.id : null;
     const revision=++this.revision;this.worker.postMessage({id:this.id,revision,nodes:this.simulationNodes,edges:this.graph.edges.map(({source,target,directed})=>({source,target,directed})),mode,previous,settings:{...this.settings,focusId}});
   }
+  overview(){
+    if(!this.width||!this.height)return null;
+    let left=Infinity,right=-Infinity,top=Infinity,bottom=-Infinity;
+    for(const node of this.graph.nodes){
+      const p=this.points.get(node.id);
+      if(!p||!Number.isFinite(p.x)||!Number.isFinite(p.y))continue;
+      left=Math.min(left,p.x);right=Math.max(right,p.x);
+      top=Math.min(top,p.y);bottom=Math.max(bottom,p.y);
+    }
+    if(left===Infinity)return {x:this.width/2,y:this.height/2,k:1};
+    const availableWidth=this.width-Math.min(80,this.width*0.2);
+    const availableHeight=this.height-Math.min(100,this.height*0.2);
+    const k=Math.min(2,availableWidth/(right-left+130),availableHeight/(bottom-top+130));
+    return {x:this.width/2-(left+right)*k/2,y:this.height/2-(top+bottom+10)*k/2,k};
+  }
   fit(interacted=true){
-    if(!this.width||!this.height)return;const p=this.graph.nodes.map(n=>this.points.get(n.id)).filter(Boolean);
-    if(!p.length){this.view={x:this.width/2,y:this.height/2,k:1};this.drawSoon();return;}
-    const l=Math.min(...p.map(p=>p.x))-65,r=Math.max(...p.map(p=>p.x))+65,t=Math.min(...p.map(p=>p.y))-60,b=Math.max(...p.map(p=>p.y))+70;
-    const k=Math.max(0.1,Math.min(2,(this.width-80)/(r-l),(this.height-100)/(b-t)));
-    this.view={x:this.width/2-(l+r)*k/2,y:this.height/2-(t+b)*k/2,k};if(interacted)this.interacted=true;this.drawSoon();
+    const overview=this.overview();if(!overview)return;
+    this.view=overview;if(interacted)this.interacted=true;this.drawSoon();
   }
   zoom(factor){this.interacted=true;this.zoomAt(this.width/2,this.height/2,factor);}
-  zoomAt(x,y,factor){const k=Math.max(0.08,Math.min(6,this.view.k*factor)),r=k/this.view.k;this.view={x:x-(x-this.view.x)*r,y:y-(y-this.view.y)*r,k};this.drawSoon();}
+  zoomAt(x,y,factor){
+    if(!Number.isFinite(factor)||factor<=0)return;
+    // A long hop layout can span tens of thousands of world units. Allow a
+    // full overview and let the next wheel/pinch step grow smoothly from it.
+    const minimum=factor<1?Math.min(0.08,this.view.k,this.overview()?.k??1):0;
+    const k=Math.max(minimum,Math.min(6,this.view.k*factor)),r=k/this.view.k;
+    this.view={x:x-(x-this.view.x)*r,y:y-(y-this.view.y)*r,k};this.drawSoon();
+  }
   select(selection,center=false){this.selection=selection;if(center&&selection?.kind==='node'){const p=this.points.get(selection.id);if(p){this.interacted=true;this.view.x=this.width/2-p.x*this.view.k;this.view.y=this.height/2-p.y*this.view.k;}}this.onSelect(selection);this.drawSoon();}
   togglePin(id){const p=this.points.get(id);if(!p)return;this.paused=false;this.pinned.has(id)?this.pinned.delete(id):this.pinned.add(id);p.pinned=this.pinned.has(id);this.worker?.postMessage({action:'pin',id:this.id,revision:++this.revision,node:id,x:p.x,y:p.y,fixed:p.pinned});this.onSelect(this.selection);this.drawSoon();}
   unpin(){for(const id of [...this.pinned])this.togglePin(id);}
