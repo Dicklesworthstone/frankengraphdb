@@ -108,6 +108,41 @@ fn ints(rows: &[GraphValueRow], column: usize) -> Vec<Option<i64>> {
 }
 
 #[test]
+fn standalone_filter_preserves_row_scope_bags_and_page_boundaries() {
+    let values = [
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(3),
+    ];
+    for statement in [
+        "MATCH (n) FILTER WHERE n.p > 1 FILTER n.p < 3 RETURN n.p AS p",
+        "MATCH (n) WITH n.p AS p ORDER BY p NULLS LAST LIMIT 3 FILTER p > 1 RETURN p",
+        "UNWIND [1,2,2,NULL,3] AS x FILTER x > 1 WITH x AS p FILTER WHERE p < 3 RETURN p",
+        "UNWIND [2,2] AS filter WITH filter AS kept FILTER kept = 2 RETURN kept",
+        "MATCH (filter) WITH filter AS n FILTER WHERE n.p = 2 RETURN n.p AS p",
+        "MATCH (node) WITH node AS n, 1 AS filter WITH 1 + filter AS v, n AS kept \
+         FILTER v = 2 AND kept.p = 2 RETURN kept.p AS p",
+        "UNWIND [1,1] AS filter WITH CASE WHEN filter = 1 THEN 1 + filter ELSE 3 END AS p RETURN p",
+    ] {
+        let query = prepare(statement);
+        let result = run(&query, &values, wide(), &mut || Ok(())).unwrap();
+        assert_eq!(ints(&result.value, 0), [Some(2), Some(2)], "{statement}");
+    }
+    for statement in [
+        "UNWIND [1] AS x WITH x AS y FILTER x > 0 RETURN y",
+        "MATCH (n) WITH n.p AS p FILTER WHERE n.p = 2 RETURN p",
+        "MATCH (n) FILTER WHERE RETURN n",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
 fn imported_nested_map_correlations_share_read_equality_and_preserve_occurrences() {
     let prefix = "UNWIND [{key:{p:2},ordinal:8},{key:{p:1},ordinal:9},\
                          {key:{p:2},ordinal:10},{key:null},{key:{}},\

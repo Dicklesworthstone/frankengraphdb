@@ -156,7 +156,15 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
                 // a continuation of the expanded row, not another pattern in
                 // the first MATCH. Leading UNWIND sources keep their existing
                 // correlated-root compiler (fgdb-0s2pq).
-                if matched && !name && token.word("UNWIND") {
+                // FILTER can also name a binding. At an unprojected input
+                // recognize the clause at a graph/UNWIND boundary or by its
+                // explicit WHERE. WITH has already established a row here.
+                let filter = token.word("FILTER")
+                    && (previous.is_none()
+                        || previous.is_some_and(|token| token.punct(b')'))
+                        || index.checked_sub(2).is_some_and(|at| tokens[at].word("AS"))
+                        || tokens.get(index + 1).is_some_and(|token| token.word("WHERE")));
+                if !name && (filter || (matched && token.word("UNWIND"))) {
                     with = true;
                 }
                 if with && !name && token.word("MATCH") {

@@ -181,9 +181,18 @@ pub(in crate::graph_text::scoped::mutation) fn later_with_keeps<'a>(
     lexer: Lexer<'a>,
     carried: &[(&'a str, &'a str)],
 ) -> Result<Vec<(&'a str, &'a str)>, GraphPatternTextError> {
+    Ok(later_with_carry(lexer, carried)?.0)
+}
+
+/// Record the clause boundary along with the carried names so a binding named
+/// FILTER inside a WITH expression cannot install its output aliases early.
+fn later_with_carry<'a>(
+    lexer: Lexer<'a>,
+    carried: &[(&'a str, &'a str)],
+) -> Result<(IdentityAliases<'a>, usize), GraphPatternTextError> {
     let names: Vec<_> = carried.iter().map(|&(name, _)| name).collect();
-    let (kept, grouping) = later_with_items(lexer, &names)?;
-    Ok(if grouping {
+    let (kept, grouping, end) = later_with_items(lexer, &names)?;
+    let aliases = if grouping {
         Vec::new()
     } else {
         kept.into_iter()
@@ -194,7 +203,8 @@ pub(in crate::graph_text::scoped::mutation) fn later_with_keeps<'a>(
                     .map(|&(_, original)| (alias, original))
             })
             .collect()
-    })
+    };
+    Ok((aliases, end))
 }
 
 /// The aliases of `carried` a later grouping WITH keeps as bare grouping
@@ -204,7 +214,7 @@ fn later_grouping_keys<'a>(
     lexer: Lexer<'a>,
     carried: &[&'a str],
 ) -> Result<Option<Vec<&'a str>>, GraphPatternTextError> {
-    let (kept, grouping) = later_with_items(lexer, carried)?;
+    let (kept, grouping, _) = later_with_items(lexer, carried)?;
     // Pattern-comprehension hoisting still requires a grouping key to keep
     // its graph-scope name. Property aliases use the row owner separately.
     Ok(grouping.then(|| {
@@ -222,7 +232,7 @@ type IdentityAliases<'a> = Vec<(&'a str, &'a str)>;
 fn later_with_items<'a>(
     mut lexer: Lexer<'a>,
     carried: &[&'a str],
-) -> Result<(IdentityAliases<'a>, bool), GraphPatternTextError> {
+) -> Result<(IdentityAliases<'a>, bool, usize), GraphPatternTextError> {
     const ENDS: [&str; 19] = [
         "WHERE",
         "ORDER",
@@ -273,8 +283,14 @@ fn later_with_items<'a>(
                 None => true,
             },
             TokenKind::Word(word) => {
+                // FILTER can also be a binding. Only a completed WITH item
+                // can precede the clause. An expression needs its AS alias.
+                let filter = word.eq_ignore_ascii_case("FILTER")
+                    && (matches!(item.as_slice(), [TokenKind::Punct(b'*')])
+                        || matches!(item.as_slice(), [TokenKind::Word(name)] if carried.contains(name))
+                        || matches!(item.as_slice(), [.., TokenKind::Word(as_kw), TokenKind::Word(_)] if as_kw.eq_ignore_ascii_case("AS")));
                 depth == 0
-                    && ENDS.iter().any(|clause| word.eq_ignore_ascii_case(clause))
+                    && (ENDS.iter().any(|clause| word.eq_ignore_ascii_case(clause)) || filter)
                     && !matches!(previous, Some(TokenKind::Word(previous))
                         if previous.eq_ignore_ascii_case("STARTS")
                             || previous.eq_ignore_ascii_case("ENDS"))
@@ -303,7 +319,7 @@ fn later_with_items<'a>(
                 }
             }
             if ends {
-                return Ok((kept, grouping));
+                return Ok((kept, grouping, token.at));
             }
             item.clear();
             continue;
@@ -753,7 +769,7 @@ impl<'a> Parser<'a> {
         // different element. `pending` takes effect only after that WITH's
         // items, which still read the incoming row, end.
         let mut carried: Option<Vec<(&'a str, &'a str)>> = None;
-        let mut pending: Option<Vec<(&'a str, &'a str)>> = None;
+        let mut pending: Option<(IdentityAliases<'a>, usize)> = None;
         // When the first later WITH groups, its bare keys (`WITH a, b,
         // count(*) AS c` keeps `a` and `b`), from the end of its items on. A
         // pattern the scope after it reads over those keys alone is a
@@ -787,7 +803,7 @@ impl<'a> Parser<'a> {
             let incoming: Vec<&'a str> = head.outputs.iter().map(|(name, _)| name.text).collect();
             pending_grouping = later_grouping_keys(self.lexer.clone(), &incoming)?;
             let aliases: Vec<_> = incoming.iter().map(|&name| (name, name)).collect();
-            pending = Some(later_with_keeps(self.lexer.clone(), &aliases)?);
+            pending = Some(later_with_carry(self.lexer.clone(), &aliases)?);
         }
         let visible = head.outputs.len();
         // Existence predicates of the WHERE come first among the hidden
@@ -799,7 +815,7 @@ impl<'a> Parser<'a> {
         // Those reads are hidden columns too, but scoped to that part.
         let mut scoped: Vec<(&'a str, Option<&'a str>, usize)> = Vec::new();
         let mut read_locals = ReadLocals::default();
-        let mut before_return = head.plain && !unwind && pending.is_none();
+        let mut before_return = head.plain && !unwind && pending.is_none() && !self.is_word("FILTER");
         let mut functions = Vec::new();
         // Pattern comprehensions in the head's own scope, before any later
         // WITH: hidden list columns (hoist_comprehension), the end of the one
@@ -853,14 +869,16 @@ impl<'a> Parser<'a> {
                 && !matches!(window[2], Some(TokenKind::Word(previous))
                     if previous.eq_ignore_ascii_case("AS"))
                 && [
-                    "WHERE", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH", "UNWIND", "CREATE",
+                    "WHERE", "FILTER", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH", "UNWIND", "CREATE",
                     "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
                 ]
                 .iter()
                 .any(|clause| word.eq_ignore_ascii_case(clause))
                 && (!word.eq_ignore_ascii_case("WITH")
                     || ends_boundary_scope(word, window[2], &lexer)?)
-                && let Some(kept) = pending.take()
+                && (!word.eq_ignore_ascii_case("FILTER")
+                    || pending.as_ref().is_some_and(|(_, end)| *end == token.at))
+                && let Some((kept, _)) = pending.take()
             {
                 carried = Some(kept);
                 grouping = pending_grouping.take();
@@ -998,7 +1016,7 @@ impl<'a> Parser<'a> {
                         let names: Vec<_> = incoming.iter().map(|&(name, _)| name).collect();
                         pending_grouping = later_grouping_keys(lexer.clone(), &names)?;
                     }
-                    pending = Some(later_with_keeps(lexer.clone(), &incoming)?);
+                    pending = Some(later_with_carry(lexer.clone(), &incoming)?);
                 }
                 TokenKind::Word(word)
                     if depth == 0
@@ -2275,6 +2293,13 @@ impl<'a> Parser<'a> {
             }
             self.projected_sources = None;
             let at = self.current.at;
+            // FILTER consumes the completed row. Only the visible bindings
+            // and their carried properties survive the preceding WITH.
+            if self.take_word("FILTER")? {
+                self.take_word("WHERE")?;
+                self.row_selection(&schema, &mut stages, &mut depth, at)?;
+                continue;
+            }
             if !self.is_word("WITH") {
                 // A terminal RETURN, plain or aggregate, resolves the hidden
                 // reads; the next MATCH part or the end must not see them.
