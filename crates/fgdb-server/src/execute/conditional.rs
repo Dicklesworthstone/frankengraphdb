@@ -75,6 +75,35 @@ pub(crate) async fn current_write_head(
     Ok((head, guard.generation()))
 }
 
+/// Compare the complete marker while the calling operation owns the writer.
+pub(super) fn check_write_head(guard: &fgdb::Database, head: BranchHead) -> Result<(), Refusal> {
+    let expected = match head {
+        BranchHead::Empty => None,
+        BranchHead::Recorded { seq, chain_hash } => Some(fgdb_types::MarkerRef {
+            marker_oid: fgdb_types::ObjectId(chain_hash),
+            commit_seq: CommitSeq(seq.get()),
+        }),
+    };
+    guard.check_branch_head(expected).map_err(|error| {
+        let conflict = match &error {
+            fgdb::WriteError::BranchHeadUnrecorded { .. } => true,
+            fgdb::WriteError::Commit(error) => matches!(
+                error.as_ref(),
+                fgdb_chronicle::CommitError::Chain(fgdb_chronicle::ChainError::HeadCasMismatch(_))
+            ),
+            _ => false,
+        };
+        if conflict {
+            Refusal::new(
+                ErrorCode::Conflict,
+                "the expected branch head is not current",
+            )
+        } else {
+            write_refusal(&error)
+        }
+    })
+}
+
 /// Execute once only if the current healthy frontier still equals the caller's
 /// observation. This is a precondition on ordinary current-state autocommit,
 /// not a historical transaction, saved snapshot, or automatic retry.
@@ -161,35 +190,7 @@ async fn write_if_current_inner(
                 ));
             }
         }
-        Precondition::Head(head) => {
-            let expected = match head {
-                BranchHead::Empty => None,
-                BranchHead::Recorded { seq, chain_hash } => Some(fgdb_types::MarkerRef {
-                    marker_oid: fgdb_types::ObjectId(chain_hash),
-                    commit_seq: CommitSeq(seq.get()),
-                }),
-            };
-            guard.check_branch_head(expected).map_err(|error| {
-                let conflict = match &error {
-                    fgdb::WriteError::BranchHeadUnrecorded { .. } => true,
-                    fgdb::WriteError::Commit(error) => matches!(
-                        error.as_ref(),
-                        fgdb_chronicle::CommitError::Chain(
-                            fgdb_chronicle::ChainError::HeadCasMismatch(_)
-                        )
-                    ),
-                    _ => false,
-                };
-                if conflict {
-                    Refusal::new(
-                        ErrorCode::Conflict,
-                        "the expected branch head is not current",
-                    )
-                } else {
-                    write_refusal(&error)
-                }
-            })?;
-        }
+        Precondition::Head(head) => check_write_head(&guard, head)?,
     }
     let mut permit = write_permit(db, token)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);

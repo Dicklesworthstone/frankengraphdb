@@ -74,6 +74,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | BEGIN_READ_TRANSACTION | 0x0037 | client |
 | EXECUTE_HEAD_WRITE | 0x0038 | client |
 | GET_BRANCH_HEAD / BRANCH_HEAD | 0x0039 / 0x003a | client / server |
+| BEGIN_HEAD_TRANSACTION | 0x003b | client |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -948,6 +949,15 @@ value. The token is `empty` or `<positive-sequence>@<64 hex digits>` in
 human CLI output. Pass it to `fgdb remote ... write --if-head "$head" <gql>`.
 Both the success reply and the branch mutation are fenced by database
 generation and live credentials. Legacy unrecorded history refuses discovery.
+
+A write transaction can also begin with `BEGIN_HEAD_TRANSACTION` carrying
+one tagged BRANCH_HEAD. The server compares it under the writer before
+creating the native workspace and compares it again under the final COMMIT
+writer. Even an unrelated intervening commit makes completion return Conflict
+and discards every staged effect. Rows already delivered remain provisional.
+The transaction can also be rolled back explicitly. Use
+`fgdb remote ... --statements-file steps.json transaction --if-head "$head"`
+or the Rust client's `begin_transaction_if_head`.
 
 For a marker-bound precondition, the Rust client accepts
 `execute_write_if_head(cx, expected, text, parameters)`. The

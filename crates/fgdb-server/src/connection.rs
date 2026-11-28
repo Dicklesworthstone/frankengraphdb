@@ -625,6 +625,7 @@ pub(crate) async fn run_inner(
                 establishment.complete();
             }
             FrameKind::BeginTransaction
+            | FrameKind::BeginHeadTransaction
             | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction
@@ -2065,6 +2066,7 @@ impl Lane {
                 }
             }
             FrameKind::BeginTransaction
+            | FrameKind::BeginHeadTransaction
             | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction
@@ -2506,6 +2508,7 @@ impl Lane {
                 Err(Stop::Drain)
             }
             FrameKind::BeginTransaction
+            | FrameKind::BeginHeadTransaction
             | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction

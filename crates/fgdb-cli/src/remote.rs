@@ -353,9 +353,15 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "remote branch-head does not take statement parameters",
         ));
     }
-    if condition.is_some() && (verb != "write" || rows_file.is_some() || prepared_jsonl.is_some()) {
+    let guarded_transaction = verb == "transaction"
+        && !read_only_transaction
+        && matches!(condition, Some(WriteCondition::Head(_)));
+    if condition.is_some()
+        && !guarded_transaction
+        && (verb != "write" || rows_file.is_some() || prepared_jsonl.is_some())
+    {
         return Err(Failure::usage(
-            "--if-current and --if-head apply only to a single text write, without --rows-file or --prepared-jsonl",
+            "choose a single text write, or use --if-head with a write transaction",
         ));
     }
     let tls = match (tls_server_name, tls_ca_file) {
@@ -759,6 +765,9 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 transaction::TransactionScript::read(&cx, path, options.read_only_transaction)
                     .await?;
             script.rollback = options.rollback_transaction;
+            if let Some(WriteCondition::Head(expected)) = options.condition {
+                script.expected_head = Some(expected);
+            }
             let mut client = connect(&cx, &options).await?;
             client
                 .select(&cx, &options.database)

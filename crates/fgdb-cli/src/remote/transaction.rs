@@ -24,6 +24,7 @@ pub(super) struct TransactionScript {
     statements: Vec<Execute>,
     read_only: bool,
     pub(super) rollback: bool,
+    pub(super) expected_head: Option<fgdb_protocol::body::BranchHead>,
 }
 
 enum Completion {
@@ -168,6 +169,7 @@ impl TransactionScript {
             statements,
             read_only,
             rollback: false,
+            expected_head: None,
         })
     }
 
@@ -208,34 +210,30 @@ impl TransactionScript {
             |index, basis, columns: &[String]| lock().columns(cx, index, basis, columns);
         let on_row = |index, row: Vec<WireValue>| lock().row(cx, index, &row);
         let on_result_end = |index, rows| lock().result_end(cx, index, rows);
+        use fgdb_protocol::client::TransactionAccess;
+        let access = match self.expected_head {
+            Some(head) => TransactionAccess::WriteIfHead(head),
+            None if self.read_only => TransactionAccess::ReadOnly,
+            None => TransactionAccess::Write,
+        };
         let result = if self.rollback {
             client
-                .preview_transaction_batch_streaming(
+                .preview_transaction_batch_with_access(
                     cx,
                     self.statements,
-                    self.read_only,
+                    access,
                     on_columns,
                     on_row,
                     on_result_end,
                 )
                 .await
                 .map(Completion::Rollback)
-        } else if self.read_only {
-            client
-                .execute_read_transaction_batch_streaming(
-                    cx,
-                    self.statements,
-                    on_columns,
-                    on_row,
-                    on_result_end,
-                )
-                .await
-                .map(Completion::Commit)
         } else {
             client
-                .execute_transaction_batch_streaming(
+                .execute_transaction_batch_with_access(
                     cx,
                     self.statements,
+                    access,
                     on_columns,
                     on_row,
                     on_result_end,

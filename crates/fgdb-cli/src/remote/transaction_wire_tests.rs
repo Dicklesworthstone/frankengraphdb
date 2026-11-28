@@ -1004,3 +1004,92 @@ fn preview_requires_a_matching_rollback_ack_and_never_commits() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn transaction_guard_is_sent_on_begin_and_final_conflict_never_publishes_a_receipt() {
+    let args = [
+        "--addr",
+        "127.0.0.1:7688",
+        "--token-file",
+        "token",
+        "--database",
+        "social",
+        "--statements-file",
+        "steps.json",
+        "transaction",
+        "--if-head",
+        "empty",
+    ]
+    .map(str::to_owned);
+    let admitted = parse(&args).unwrap_or_else(|error| panic!("{}", error.message));
+    assert_eq!(
+        admitted.condition,
+        Some(WriteCondition::Head(BranchHead::Empty))
+    );
+    let mut read_only = args.to_vec();
+    read_only.push("--read-only".into());
+    assert_eq!(parse(&read_only).err().unwrap().code, 2);
+    let ((), report) = run_async_under_lab(0x3b10_1563, |root| async move {
+        let head = BranchHead::Recorded {
+            seq: BASIS.try_into().unwrap(),
+            chain_hash: [0xa7; 32],
+        };
+        let refusal = frame(
+            FrameKind::Error,
+            6,
+            StreamId::CONTROL,
+            Binding::Ready(ready().binding(session())),
+            &ErrorBody {
+                code: ErrorCode::Conflict,
+                message: "head changed".into(),
+            },
+        );
+        let io = script(
+            vec![
+                (begun(), 0),
+                (
+                    provisional_chunk(
+                        5,
+                        Some(vec!["name".into()]),
+                        vec![vec![WireValue::Text("Ada".into())]],
+                    ),
+                    0,
+                ),
+                (statement_end(5, 1, 1), 0),
+                (refusal, 0),
+            ],
+            Arc::default(),
+        );
+        let written = Arc::clone(&io.written);
+        let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+        client.select(&root, "social").await.unwrap();
+        let mut script = single(true);
+        script.expected_head = Some(head);
+        let mut output = Vec::new();
+        let failure = script
+            .execute(&root, &mut client, true, &mut output)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(failure.refusal, Code::Conflict);
+        let delivered = String::from_utf8(output).unwrap();
+        assert!(delivered.contains(r#""provisional":true"#));
+        assert!(!delivered.contains(r#""kind":"transaction""#));
+        let frames = sent_frames(&written.lock().unwrap());
+        assert_eq!(frames[3].header().kind(), FrameKind::BeginHeadTransaction);
+        assert_eq!(BranchHead::decode(frames[3].payload()).unwrap(), head);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|f| f.header().kind() == FrameKind::CommitTransaction)
+                .count(),
+            1
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|f| f.header().kind() != FrameKind::Execute)
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

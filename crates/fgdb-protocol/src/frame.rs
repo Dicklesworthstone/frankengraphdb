@@ -65,6 +65,7 @@ pub enum FrameKind {
     ExecuteHeadWrite = 0x0038,
     GetBranchHead = 0x0039,
     BranchHead = 0x003a,
+    BeginHeadTransaction = 0x003b,
 }
 
 impl TryFrom<u16> for FrameKind {
@@ -125,6 +126,7 @@ impl TryFrom<u16> for FrameKind {
             0x0038 => Self::ExecuteHeadWrite,
             0x0039 => Self::GetBranchHead,
             0x003a => Self::BranchHead,
+            0x003b => Self::BeginHeadTransaction,
             _ => return Err(ProtocolError::UnknownFrameKind),
         })
     }

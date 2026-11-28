@@ -138,6 +138,7 @@ impl Connection {
             | FrameKind::ExecuteReadStatements
             | FrameKind::ExecutePreparedReadBatch
             | FrameKind::BeginTransaction
+            | FrameKind::BeginHeadTransaction
             | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction

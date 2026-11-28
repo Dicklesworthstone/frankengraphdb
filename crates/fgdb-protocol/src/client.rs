@@ -36,7 +36,7 @@ pub use read_batch::{ReadBatchAnswer, ReadBatchResult};
 #[path = "client/transaction.rs"]
 mod transaction;
 pub use transaction::{
-    MAX_TRANSACTION_BATCH_STATEMENTS, TransactionAnswer, TransactionBatchAnswer,
+    MAX_TRANSACTION_BATCH_STATEMENTS, TransactionAccess, TransactionAnswer, TransactionBatchAnswer,
     TransactionBatchEnd, TransactionBatchResult, TransactionBatchRollback,
 };
 #[path = "client/websocket.rs"]
@@ -2807,6 +2807,40 @@ mod tests {
             assert_eq!(frames[4].header().kind(), FrameKind::ExecuteHeadWrite);
             let write = ExecuteHeadWrite::decode(frames[4].payload()).unwrap();
             assert_eq!(write.expected, expected);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn guarded_transaction_rejects_mismatched_begin_basis_before_sending_steps() {
+        let ((), report) = run_async_under_lab(0x1ad0_7533, |root| async move {
+            let begun = rpc(
+                FrameKind::TransactionBegun,
+                4,
+                StreamId::CONTROL,
+                &crate::body::TransactionBegun {
+                    basis: 1,
+                    handle: crate::body::TransactionHandle([4; 16]),
+                },
+            );
+            let io = script(vec![begun]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let result = client
+                .begin_transaction_if_head(&root, crate::body::BranchHead::Empty)
+                .await;
+            assert!(matches!(
+                result,
+                Err(ClientError::Protocol(
+                    "guarded transaction returned a different basis"
+                ))
+            ));
+            requires_reconnect(client.ping(&root, 1).await);
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(frames.len(), 4);
+            assert_eq!(frames[3].header().kind(), FrameKind::BeginHeadTransaction);
+            assert_eq!(frames[3].payload(), [0]);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
