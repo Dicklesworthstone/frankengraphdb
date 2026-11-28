@@ -49,6 +49,47 @@ impl EmbeddedReadView {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Open a retained revision from an immutable published generation while
+    /// another handle may own the writer. This path never takes a lease or
+    /// repairs the database. It binds the graph root and the exact recorded
+    /// coordinate update to one verified log scan. An unknown marker returns
+    /// `None`; a verified marker beyond the selected publication is an error.
+    pub async fn open_branch_revision_with_vfs(
+        cx: &fgdb_types::CommitCx,
+        vfs: V,
+        path: impl AsRef<std::path::Path>,
+        keys: crate::DatabaseKeys,
+        marker: fgdb_types::MarkerRef,
+    ) -> Result<Option<crate::BranchRevision>, crate::BranchRevisionOpenError> {
+        use crate::{BranchRevisionOpenError as Error, ReadGeneration};
+        let path = path.as_ref();
+        crate::require_database_dir(cx, &vfs, path)
+            .await
+            .map_err(Error::Open)?;
+        let (generation, matched) =
+            Self::read_current_generation_inner(cx, &vfs, path, &keys, None, Some(marker))
+                .await
+                .map_err(Error::Open)?;
+        let published = match generation {
+            ReadGeneration::Current(root) | ReadGeneration::Lagging(root) => root,
+            ReadGeneration::Unselected => return Err(Error::Unpublished { published: None }),
+        };
+        if !matched {
+            return Ok(None);
+        }
+        if published.published_at < marker.commit_seq {
+            return Err(Error::Unpublished {
+                published: Some(published.published_at),
+            });
+        }
+        let view = Self::read_published(cx, &keys, published)
+            .await
+            .map_err(Error::Open)?;
+        crate::BranchRevision::from_view(view, marker)
+            .map(Some)
+            .map_err(Error::Catalog)
+    }
+
     /// The explicit branch head of the published embedded graph. A fresh
     /// database or a frontier written without a head update returns `None`.
     /// This also covers an older writer appending after a tracked generation.
@@ -93,12 +134,7 @@ impl<V: Vfs + Clone> Database<V> {
             return Ok(None);
         }
         let view = self.read_session()?;
-        let catalog = view.symbol_catalog_at(marker.commit_seq)?;
-        Ok(Some(crate::BranchRevision {
-            marker,
-            view,
-            catalog,
-        }))
+        crate::BranchRevision::from_view(view, marker).map(Some)
     }
 
     /// Check a write precondition on the current embedded branch.
@@ -175,7 +211,34 @@ impl<V: Vfs + Clone> Database<V> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl Database<asupersync::fs::UnixVfs> {
+    /// Open the exact recorded branch revision without acquiring the writer.
+    /// See [`Self::open_branch_revision_with_vfs`] for selection and errors.
+    pub async fn open_branch_revision(
+        cx: &fgdb_types::CommitCx,
+        path: impl AsRef<std::path::Path>,
+        keys: crate::DatabaseKeys,
+        marker: fgdb_types::MarkerRef,
+    ) -> Result<Option<crate::BranchRevision>, crate::BranchRevisionOpenError> {
+        Self::open_branch_revision_with_vfs(cx, asupersync::fs::UnixVfs::new(), path, keys, marker)
+            .await
+    }
+}
+
 impl crate::BranchRevision {
+    fn from_view(
+        view: EmbeddedReadView,
+        marker: fgdb_types::MarkerRef,
+    ) -> Result<Self, crate::SymbolCatalogError> {
+        let catalog = view.symbol_catalog_at(marker.commit_seq)?;
+        Ok(Self {
+            marker,
+            view,
+            catalog,
+        })
+    }
+
     /// The exact revision used for reads and conditional writes.
     pub fn marker(&self) -> fgdb_types::MarkerRef {
         self.marker
@@ -198,14 +261,33 @@ impl crate::BranchRevision {
         params: &GqlParameters,
         policy: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
+        self.query_with_resolver(
+            cx,
+            text,
+            params,
+            fgdb_gql::symbol_bindings::CatalogSymbolResolver::new(&self.catalog),
+            policy,
+        )
+    }
+
+    /// Run a read with host-supplied statement name bindings and pinned time
+    /// zones. Start from [`Self::symbol_catalog`] when extending the symbol
+    /// namespace. The data cut remains this revision for every query operand.
+    pub fn query_with_resolver(
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+        policy: GqlQueryPolicy,
+    ) -> Result<QueryResult, QueryError> {
         use crate::PreparedNativeRead;
-        use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
 
         let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
         let (text, params) = lowered
             .as_ref()
             .map_or((text, params), |(text, params)| (text.text(), params));
-        let prepared = PreparedNativeRead::prepare(text, params, CatalogSymbolResolver::new(&self.catalog))
+        let prepared = PreparedNativeRead::prepare(text, params, resolver)
             .map_err(|error| error.original_text(0, lowered.as_ref().map(|(text, _)| text)))?;
         if prepared.has_procedure_call() {
             return Err(QueryError::Unsupported {
@@ -364,6 +446,11 @@ mod head_tests {
                     })
                     .await
                     .unwrap();
+                // A global-only marker is not a recorded branch update,
+                // even when its complete chain digest was supplied.
+                assert!(Database::open_branch_revision_with_vfs(
+                    &cx, vfs.clone(), &dir, keys(), old,
+                ).await.unwrap().is_none());
                 drop(db);
                 let mut reopened = Database::open_with_vfs(&cx, vfs, &dir, keys())
                     .await
@@ -389,6 +476,67 @@ mod head_tests {
                     old.commit_seq.checked_successor().unwrap()
                 );
             }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn committed_but_unpublished_revision_does_not_replace_the_reader_cut() {
+        let ((), report) = run_async_under_lab(0xb4a1_0004, |runtime| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&runtime).commit();
+            let vfs = MemVfs::new().unwrap();
+            let dir = vfs.database_dir();
+            let keys = || DatabaseKeys::new([3; 32], DatabaseSecurityNamespaceId([4; 32]), [5; 32]);
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, keys())
+                .await
+                .unwrap();
+            let mut first = WriteBatch::new(RelationId(1));
+            first.create_vertex(VId(1), vec![], vec![]);
+            db.write(&cx, first).await.unwrap();
+            let published = db.branch_head().unwrap().unwrap();
+            let mut second = WriteBatch::new(RelationId(1));
+            second.create_vertex(VId(2), vec![], vec![]);
+            let template = db.build_write_template(second).unwrap();
+            let capsule =
+                crate::prepare_capsule(db.keys.k_oid(), db.keys.namespace, &template).unwrap();
+            let head = fgdb_chronicle::HeadUpdate {
+                graph: crate::GRAPH,
+                branch: crate::BRANCH,
+                expected_previous: Some(published),
+            };
+            let pending = db
+                .coordinator
+                .commit(&cx, &capsule.bytes, |seq, oid| {
+                    crate::marker_for_capsule(seq, oid, &capsule, vec![head])
+                })
+                .await
+                .unwrap();
+            let read =
+                Database::open_branch_revision_with_vfs(&cx, vfs.clone(), &dir, keys(), pending)
+                    .await;
+            assert!(
+                matches!(read, Err(crate::BranchRevisionOpenError::Unpublished { published: Some(at) }) if at == published.commit_seq)
+            );
+            let older =
+                Database::open_branch_revision_with_vfs(&cx, vfs.clone(), &dir, keys(), published)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(older.marker(), published);
+            let (scan, on_sibling) =
+                fgdb_chronicle::CommitCoordinator::scan_committed_branch_prefix(
+                    &cx,
+                    &vfs,
+                    &dir,
+                    pending.commit_seq,
+                    crate::GRAPH,
+                    fgdb_types::BranchId(2),
+                    published,
+                )
+                .await
+                .unwrap();
+            assert_eq!(scan.frontier(), pending.commit_seq);
+            assert!(!on_sibling);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -420,6 +568,15 @@ mod head_tests {
             two.create_vertex(VId(2), vec![LabelId(1)], vec![]);
             db.write(&cx, two).await.unwrap();
             let newest = db.current_branch_revision().unwrap().unwrap();
+            // Reopen immutable storage while this writer still owns its lease.
+            let readonly = Database::open_branch_revision_with_vfs(
+                &cx, vfs.clone(), &dir, keys(), original.marker(),
+            ).await.unwrap().unwrap();
+            assert!(Database::open_branch_revision_with_vfs(
+                &cx, vfs.clone(), &dir, keys(), fgdb_types::MarkerRef {
+                    marker_oid: newest.marker().marker_oid, ..original.marker()
+                },
+            ).await.unwrap().is_none());
             drop(db);
             let reopened = Database::open_with_vfs(&cx, vfs, &dir, keys()).await.unwrap();
             let historical = reopened.read_branch_revision(original.marker()).unwrap().unwrap();
@@ -429,10 +586,11 @@ mod head_tests {
             drop(reopened);
             let params = GqlParameters::new();
             let policy = GqlQueryPolicy::new(100, 100, 10000, 10000);
-            for (revision, count) in [(&original, 1), (&historical, 1), (&newest, 2)] {
+            for (revision, count) in [(&original, 1), (&historical, 1), (&readonly, 1), (&newest, 2)] {
                 let result = revision.query(&query, "MATCH (v:Early) RETURN v", &params, policy).unwrap();
                 assert!(matches!(result, QueryResult::Rows { rows, .. } if rows.len() == count));
             }
+            assert!(readonly.symbol_catalog().resolve(CatalogSymbolKind::Label, "Later").is_none());
             assert!(historical.symbol_catalog().resolve(CatalogSymbolKind::Label, "Later").is_none());
             assert!(historical.query(&query, "MATCH (v:Later) RETURN v", &params, policy).is_err());
             assert!(newest.query(&query, "MATCH (v:Later) RETURN v", &params, policy).is_ok());

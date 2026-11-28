@@ -2438,6 +2438,41 @@ pub struct BranchRevision {
     catalog: fgdb_delta_types::catalog::SymbolCatalog,
 }
 
+/// A lease-free revision open could not authenticate or serve the selected publication.
+#[derive(Debug)]
+pub enum BranchRevisionOpenError {
+    /// Chronicle, root selection, graph storage, or publication failed validation.
+    Open(OpenError),
+    /// The database has no published root yet, or the verified requested
+    /// marker lies beyond that root. A writer must finish publication.
+    Unpublished { published: Option<CommitSeq> },
+    /// The selected generation could not supply the marker's historical schema.
+    Catalog(SymbolCatalogError),
+}
+
+impl core::fmt::Display for BranchRevisionOpenError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Open(error) => error.fmt(f),
+            Self::Unpublished { published } => write!(
+                f,
+                "branch revision is not published (published frontier {published:?})"
+            ),
+            Self::Catalog(error) => error.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for BranchRevisionOpenError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Open(error) => Some(error),
+            Self::Catalog(error) => Some(error),
+            Self::Unpublished { .. } => None,
+        }
+    }
+}
+
 /// A non-owning reference to one authenticated embedded generation.
 ///
 /// Upgrading pins that exact generation, including its namespace and search
@@ -3284,13 +3319,11 @@ impl<V: Vfs + Clone> Database<V> {
     where
         V: 'a,
     {
-        Box::pin(Self::read_current_generation_inner(
-            cx,
-            vfs,
-            path,
-            keys,
-            root_limits,
-        ))
+        Box::pin(async move {
+            Self::read_current_generation_inner(cx, vfs, path, keys, root_limits, None)
+                .await
+                .map(|(generation, _)| generation)
+        })
     }
 
     async fn read_current_generation_inner(
@@ -3299,20 +3332,32 @@ impl<V: Vfs + Clone> Database<V> {
         path: &Path,
         keys: &DatabaseKeys,
         root_limits: Option<&fgdb_strata::store::RootReadLimits>,
-    ) -> Result<ReadGeneration<V>, OpenError> {
+        branch_marker: Option<fgdb_types::MarkerRef>,
+    ) -> Result<(ReadGeneration<V>, bool), OpenError> {
         let Some(store) = open_block_store_for_read(cx, vfs, path, keys).await? else {
-            return Ok(ReadGeneration::Unselected);
+            return Ok((ReadGeneration::Unselected, false));
         };
         let probe = RootStore::with_vfs(vfs.clone(), path);
         let Some((claimed, resolved)) =
             read_slot_with_source_limits(cx, &store, &probe, keys, path, root_limits).await?
         else {
-            return Ok(ReadGeneration::Unselected);
+            return Ok((ReadGeneration::Unselected, false));
         };
         let requested = resolved
             .first()
             .map_or(CommitSeq::ORIGIN, |(_, root)| root.published_at);
-        let scan = CommitCoordinator::scan_committed_prefix(cx, vfs, path, requested).await?;
+        let (scan, matched) = match branch_marker {
+            Some(marker) => {
+                CommitCoordinator::scan_committed_branch_prefix(
+                    cx, vfs, path, requested, GRAPH, BRANCH, marker,
+                )
+                .await?
+            }
+            None => (
+                CommitCoordinator::scan_committed_prefix(cx, vfs, path, requested).await?,
+                false,
+            ),
+        };
         let checkpoint = checkpoint_from_manifest_commitment(
             |at| scan.checkpoint_commitment(at),
             claimed,
@@ -3326,11 +3371,12 @@ impl<V: Vfs + Clone> Database<V> {
             published_at: checkpoint.published_at,
             schema: checkpoint.schema,
         };
-        Ok(if scan.frontier() == checkpoint.published_at {
+        let generation = if scan.frontier() == checkpoint.published_at {
             ReadGeneration::Current(published)
         } else {
             ReadGeneration::Lagging(published)
-        })
+        };
+        Ok((generation, matched))
     }
 
     /// Read a selected published root into a read view: the same verified

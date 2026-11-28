@@ -51,7 +51,7 @@ use fgdb_crypto::Digest;
 use fgdb_types::StorageReadCx;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
-use fgdb_types::{CommitSeq, MarkerRef};
+use fgdb_types::{BranchId, CommitSeq, GraphId, MarkerRef};
 use std::collections::BTreeSet;
 use std::fs::TryLockError;
 use std::path::{Path, PathBuf};
@@ -167,6 +167,8 @@ impl ScanCollector for MarkerChain {
 
 struct PrefixScan {
     prefix: MarkerPrefix,
+    branch_probe: Option<(GraphId, BranchId, MarkerRef)>,
+    matched_branch: bool,
     requested: CommitSeq,
     commitment: Option<Digest>,
 }
@@ -175,6 +177,8 @@ impl PrefixScan {
     fn new(requested: CommitSeq) -> Self {
         Self {
             prefix: MarkerPrefix::default(),
+            branch_probe: None,
+            matched_branch: false,
             requested,
             commitment: (requested == CommitSeq::ORIGIN).then_some(CHAIN_ORIGIN),
         }
@@ -204,7 +208,18 @@ impl ScanCollector for PrefixScan {
         marker: CommitMarker,
         stored_hash: Digest,
     ) -> Result<(), ChainVerifyFailure> {
+        // A marker can update several heads or only the global stream. Its
+        // global identity alone does not establish coordinate membership.
+        let matched = self.branch_probe.is_some_and(|(graph, branch, at)| {
+            at.commit_seq.0 == marker.commit_seq
+                && at.marker_oid.0 == stored_hash.0
+                && marker
+                    .head_updates
+                    .binary_search_by_key(&(graph, branch), |update| (update.graph, update.branch))
+                    .is_ok()
+        });
         self.prefix.recover(marker, stored_hash)?;
+        self.matched_branch |= matched;
         if self.prefix.frontier() == self.requested {
             self.commitment = Some(self.prefix.chain_value());
         }
@@ -620,6 +635,27 @@ impl<V: Vfs> CommitCoordinator<V> {
         let mut scan = PrefixScan::new(requested);
         Self::scan_chain_into(cx, vfs, database_dir.as_ref(), false, &mut scan).await?;
         Ok(scan.finish())
+    }
+
+    /// Select a checkpoint commitment and authenticate an exact branch update
+    /// in the same captured log extent. The probe may precede the checkpoint.
+    /// A global-only marker, another coordinate, or the wrong digest misses.
+    /// Corruption anywhere in the captured complete prefix is an error even
+    /// after a match. No marker history is retained.
+    pub async fn scan_committed_branch_prefix(
+        cx: &CommitCx,
+        vfs: &V,
+        database_dir: impl AsRef<Path>,
+        checkpoint: CommitSeq,
+        graph: GraphId,
+        branch: BranchId,
+        at: MarkerRef,
+    ) -> Result<(CommitScanSummary, bool), CommitError> {
+        let mut scan = PrefixScan::new(checkpoint);
+        scan.branch_probe = Some((graph, branch, at));
+        Self::scan_chain_into(cx, vfs, database_dir.as_ref(), false, &mut scan).await?;
+        let matched = scan.matched_branch;
+        Ok((scan.finish(), matched))
     }
 
     /// Install the steps-2–3 validator every subsequent commit is judged by.
