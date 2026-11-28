@@ -90,10 +90,59 @@ fn scrub_imports_a_committed_backup_capsule_across_process_opens() {
     let oid2 = second.file_stem().unwrap().to_str().unwrap();
     let history_path = root.join("graph/commits.log");
     let history = fs::read(&history_path).unwrap();
+    let verified =
+        String::from_utf8(success(&root, "verify-history", &["--through", "3"])).unwrap();
+    let anchor = verified
+        .split(r#""chain_hash":""#)
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
     fs::rename(&live, root.join("backup.capsule")).unwrap();
     fs::rename(&second, root.join("second.capsule")).unwrap();
     fs::write(&second, b"damaged").unwrap();
     assert!(!invoke(&root, "scrub", &[]).status.success());
+
+    // The keys and capsule data are unnecessary for a marker inventory. An
+    // independently retained commitment anchors the list before repair.
+    let inventory = |cut, hash| {
+        Command::new(env!("CARGO_BIN_EXE_fgdb"))
+            .current_dir(&root)
+            .args([
+                "--robot",
+                "list-capsules",
+                "--db",
+                "graph",
+                "--through",
+                cut,
+                "--expect-chain",
+                hash,
+            ])
+            .output()
+            .unwrap()
+    };
+    let listed = inventory("3", anchor);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+    let output = String::from_utf8(listed.stdout).unwrap();
+    assert_eq!(output.matches(r#""event":"capsule_ref""#).count(), 3);
+    for (seq, id) in [(2, oid), (3, oid2)] {
+        assert!(output.contains(&format!(
+            r#""event":"capsule_ref","seq":{seq},"object":"{id}""#
+        )));
+    }
+    assert!(output.contains(r#""kind":"capsule_inventory""#));
+    let invalid_anchor = "00".repeat(32);
+    for refused in [inventory("3", &invalid_anchor), inventory("4", anchor)] {
+        assert!(!refused.status.success());
+        assert!(
+            !String::from_utf8_lossy(&refused.stdout).contains(r#""kind":"capsule_inventory""#)
+        );
+    }
 
     // The first source is valid but the second file contains the wrong object.
     // Neither missing nor corrupt local data may be replaced by this batch.
