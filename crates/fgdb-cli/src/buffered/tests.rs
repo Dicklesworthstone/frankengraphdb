@@ -384,6 +384,42 @@ fn buffered_flags_are_query_only_unique_and_do_not_change_ordinary_streaming() {
             .collect::<Vec<_>>();
         assert!(crate::parse(&args, command).is_err());
     }
+    for flags in [
+        vec!["--buffer-history-bytes", "32"],
+        vec!["--buffered", "--buffer-history-bytes", "1"],
+        vec!["--buffered", "--buffer-history-bytes", "31"],
+        vec![
+            "--buffered",
+            "--buffer-history-bytes",
+            "0",
+            "--buffer-history-bytes",
+            "32",
+        ],
+    ] {
+        let args = base
+            .into_iter()
+            .chain(flags)
+            .chain(["MATCH (n) RETURN n"])
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert!(crate::parse(&args, "query").is_err());
+    }
+    for (value, bytes) in [("0", 0), ("32", 32), ("97", 97)] {
+        let args = base
+            .into_iter()
+            .chain([
+                "--buffered",
+                "--buffer-history-bytes",
+                value,
+                "MATCH (n) RETURN n",
+            ])
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            okay(crate::parse(&args, "query")).buffered.history_bytes(),
+            bytes
+        );
+    }
     for flag in BufferedOptions::FLAGS {
         for value in ["", "-1", "+1", "1.5", " 1", "18446744073709551616"] {
             let args = base

@@ -6478,6 +6478,56 @@ fn buffered_query_dispatch_uses_cold_admission_and_preserves_native_stream_contr
         assert_eq!(actual.terminal().get("stream"), &Json::Bool(true));
         assert_eq!(actual.events[1].get("seq").unsigned(), seq);
     }
+    // The public option reaches the same selected graph before either streaming
+    // or external execution, including a repeated edge whose property changed.
+    let head = db.command("branch-head", &[]);
+    assert_eq!(head.sequence("branch_head"), latest);
+    let revision = format!("{latest}@{}", head.terminal().get("chain_hash").string());
+    let changed =
+        db.write(&["MATCH (a:Person {team:1})-[e:KNOWS]->(b:Person {team:2}) SET e.born=9"]);
+    let directory = scratch("history-counts-spill");
+    std::fs::create_dir(&directory).unwrap();
+    let spill = directory.to_str().unwrap();
+    for (flags, text, count, expected_seq) in [
+        (
+            &[][..],
+            "MATCH (a)-[r:KNOWS]->(b) RETURN r,a,b,r.born",
+            2,
+            changed,
+        ),
+        (
+            &["--spill-dir", spill][..],
+            "MATCH (a)-[r:KNOWS]->(b) RETURN a.team AS team ORDER BY team DESC",
+            2,
+            changed,
+        ),
+        (
+            &["--at-revision", revision.as_str()][..],
+            "MATCH (n) RETURN {node:n,next_team:n.team+1} AS doc ORDER BY n",
+            3,
+            latest,
+        ),
+    ] {
+        let run = |history: Option<&str>| {
+            let mut args = vec!["--buffered"];
+            args.extend_from_slice(flags);
+            if let Some(value) = history {
+                args.extend(["--buffer-history-bytes", value]);
+            }
+            args.push(text);
+            db.command("query", &args)
+        };
+        let baseline = run(None);
+        baseline.success();
+        assert_eq!(baseline.terminal().get("count").unsigned(), count);
+        assert_eq!(baseline.sequence("rows"), expected_seq);
+        for value in ["0", "32"] {
+            let counted = run(Some(value));
+            counted.success();
+            assert_eq!(counted.stdout, baseline.stdout);
+        }
+    }
+    assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
     for flag in [
         "--buffer-memory-bytes",
         "--buffer-source-bytes",

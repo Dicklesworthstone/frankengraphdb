@@ -34,6 +34,7 @@ pub(super) struct BufferedOptions {
     enabled: bool,
     memory: Option<u64>,
     source: Option<u64>,
+    history_bytes: Option<usize>,
     native_rows: Option<u64>,
     native_incidences: Option<u64>,
     native_image: Option<u64>,
@@ -41,9 +42,10 @@ pub(super) struct BufferedOptions {
 }
 
 impl BufferedOptions {
-    pub(super) const FLAGS: [&str; 6] = [
+    pub(super) const FLAGS: [&str; 7] = [
         "--buffer-memory-bytes",
         "--buffer-source-bytes",
+        "--buffer-history-bytes",
         "--native-run-max-rows",
         "--native-run-max-incidences",
         "--native-run-image-bytes",
@@ -66,6 +68,21 @@ impl BufferedOptions {
         let value = match flag {
             "--buffer-memory-bytes" => &mut self.memory,
             "--buffer-source-bytes" => &mut self.source,
+            "--buffer-history-bytes" => {
+                if self.history_bytes.is_some() {
+                    return Err(Failure::usage(
+                        "--buffer-history-bytes must be supplied only once",
+                    ));
+                }
+                let bytes = super::decimal_usize(flag, raw)?;
+                if (1..32).contains(&bytes) {
+                    return Err(Failure::usage(
+                        "--buffer-history-bytes requires zero or at least 32 bytes",
+                    ));
+                }
+                self.history_bytes = Some(bytes);
+                return Ok(());
+            }
             "--native-run-max-rows" => &mut self.native_rows,
             "--native-run-max-incidences" => &mut self.native_incidences,
             "--native-run-image-bytes" => &mut self.native_image,
@@ -75,8 +92,14 @@ impl BufferedOptions {
         set_decimal(value, flag, raw)
     }
 
+    pub(super) fn history_bytes(&self) -> usize {
+        self.history_bytes.unwrap_or(0)
+    }
+
     pub(super) fn validate(&self) -> Result<(), Failure> {
-        if !self.enabled && (self.memory.is_some() || self.source.is_some()) {
+        if !self.enabled
+            && (self.memory.is_some() || self.source.is_some() || self.history_bytes.is_some())
+        {
             return Err(Failure::usage("buffer limits require --buffered"));
         }
         self.native_run_limits()?;
