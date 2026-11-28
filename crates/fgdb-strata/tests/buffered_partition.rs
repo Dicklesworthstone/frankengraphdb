@@ -199,14 +199,23 @@ fn cold_admission_compacts_distinct_edges_and_preserves_retirement() {
                 }
                 drop(view);
                 let tight = MemoryPool::new(1_282_000, 0).unwrap();
+                // The 48 nonoverlapping EId ranges retain no cross-block
+                // singleton map, while their one family still checks every link.
+                let view = store
+                    .open_buffered_root(&query, root, tight.clone(), limits)
+                    .await
+                    .expect("disjoint EIds fit the same pool as repeated publications");
+                drop(view);
+                let below_workspace = MemoryPool::new(1_100_000, 0).unwrap();
                 assert!(matches!(
                     store
-                        .open_buffered_root(&query, root, tight.clone(), limits)
+                        .open_buffered_root(&query, root, below_workspace.clone(), limits)
                         .await,
                     Err(BufferedReadError::Memory(
                         MemoryError::ResourceExhausted { .. }
                     ))
                 ));
+                assert_eq!(below_workspace.used(), 0);
                 assert_eq!(tight.used(), 0);
             }
             assert_eq!(pool.used(), 0);
@@ -2590,90 +2599,114 @@ fn cold_edge_and_vertex_history_reuse_the_same_admission_budget() {
         let query = contexts.query();
         let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
         let at = CommitSeq(1);
-        let mut root = PartitionRoot {
-            graph: GraphId(1),
-            branch: BranchId(2),
-            partition: 0,
-            published_at: at,
-            blocks: Vec::new(),
-            vertex_patches: Vec::new(),
-        };
-        for source in 0..4 {
-            let ids = source * 96..(source + 1) * 96;
-            let edges: Vec<_> = ids
-                .clone()
-                .map(|id| edge(id, source, id, 1, None))
-                .collect();
-            let vertices: Vec<_> = ids.map(|id| scan_vertex(id, 1, None, 7)).collect();
-            let block = store
-                .put(&commit, &encode_block(0, None, &edges).unwrap())
+        for interleaved in [false, true] {
+            let mut root = PartitionRoot {
+                graph: GraphId(1),
+                branch: BranchId(2),
+                partition: 0,
+                published_at: at,
+                blocks: Vec::new(),
+                vertex_patches: Vec::new(),
+            };
+            for source in 0..4 {
+                // Preserve the original contiguous populations, and interleave
+                // the same number of distinct IDs to make every range overlap.
+                let ids = (0..96).map(|offset| {
+                    if interleaved {
+                        4 * offset + source
+                    } else {
+                        96 * source + offset
+                    }
+                });
+                let edges: Vec<_> = ids
+                    .clone()
+                    .map(|id| edge(id, source, id, 1, None))
+                    .collect();
+                let vertices: Vec<_> = ids.map(|id| scan_vertex(id, 1, None, 7)).collect();
+                let block = store
+                    .put(&commit, &encode_block(0, None, &edges).unwrap())
+                    .await
+                    .unwrap();
+                let patch = store
+                    .put_patch(&commit, &encode_patch(&vertices).unwrap())
+                    .await
+                    .unwrap();
+                root.blocks.push(BlockRef {
+                    block_id: block.0,
+                    first_seq: at,
+                    last_seq: at,
+                });
+                root.vertex_patches.push(PatchRef {
+                    patch_id: patch.0,
+                    first_seq: at,
+                    last_seq: at,
+                });
+            }
+            let id = store.put_root(&commit, &root).await.unwrap();
+            let read = BufferedReadLimits {
+                max_source_bytes: 256 * 1024,
+                max_work: 16_384,
+                ..limits()
+            };
+            // One object workspace and either 384-entry validation history fit.
+            // Keeping the completed edge history throughout the vertex walk does
+            // not. Only the overlapping populations need that global history.
+            let pool = MemoryPool::new(1_400_000, 0).unwrap();
+            let view = store
+                .open_buffered_root(&query, id, pool.clone(), read)
                 .await
                 .unwrap();
-            let patch = store
-                .put_patch(&commit, &encode_patch(&vertices).unwrap())
-                .await
-                .unwrap();
-            root.blocks.push(BlockRef {
-                block_id: block.0,
-                first_seq: at,
-                last_seq: at,
-            });
-            root.vertex_patches.push(PatchRef {
-                patch_id: patch.0,
-                first_seq: at,
-                last_seq: at,
-            });
-        }
-        let id = store.put_root(&commit, &root).await.unwrap();
-        let read = BufferedReadLimits {
-            max_source_bytes: 256 * 1024,
-            max_work: 16_384,
-            ..limits()
-        };
-        // One object workspace and either 384-entry validation history fit.
-        // Keeping the completed edge history throughout the vertex walk does
-        // not. A smaller pool still refuses before successful admission.
-        let pool = MemoryPool::new(1_400_000, 0).unwrap();
-        let view = store
-            .open_buffered_root(&query, id, pool.clone(), read)
-            .await
-            .unwrap();
-        assert_eq!(view.root(), &root);
-        drop(view);
-        assert_eq!(pool.used(), 0);
-        let small = MemoryPool::new(1_200_000, 0).unwrap();
-        assert!(matches!(
-            store
+            assert_eq!(view.root(), &root);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+            let small = MemoryPool::new(1_200_000, 0).unwrap();
+            let opened = store
                 .open_buffered_root(&query, id, small.clone(), read)
-                .await,
-            Err(BufferedReadError::Memory(
-                MemoryError::ResourceExhausted { .. }
-            ))
-        ));
-        assert_eq!(small.used(), 0);
+                .await;
+            if interleaved {
+                assert!(matches!(
+                    opened,
+                    Err(BufferedReadError::Memory(
+                        MemoryError::ResourceExhausted { .. }
+                    ))
+                ));
+            } else {
+                let view = opened.expect("disjoint histories fit within the tighter pool");
+                assert_eq!(view.root(), &root);
+                drop(view);
+            }
+            assert_eq!(small.used(), 0);
 
-        // With only vertex patches, a single locator/lifecycle entry per
-        // version fits between the old two-map bound and the object workspace.
-        root.blocks.clear();
-        let vertices = store.put_root(&commit, &root).await.unwrap();
-        let pool = MemoryPool::new(1_270_000, 0).unwrap();
-        let view = store
-            .open_buffered_root(&query, vertices, pool.clone(), read)
-            .await
-            .unwrap();
-        assert_eq!(view.root(), &root);
-        drop(view);
-        assert_eq!(pool.used(), 0);
-        let small = MemoryPool::new(1_190_000, 0).unwrap();
-        assert!(matches!(
-            store
+            // With only vertex patches, a single locator/lifecycle entry per
+            // version fits between the old two-map bound and the object workspace.
+            root.blocks.clear();
+            let vertices = store.put_root(&commit, &root).await.unwrap();
+            let pool = MemoryPool::new(1_270_000, 0).unwrap();
+            let view = store
+                .open_buffered_root(&query, vertices, pool.clone(), read)
+                .await
+                .unwrap();
+            assert_eq!(view.root(), &root);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+            let small = MemoryPool::new(1_190_000, 0).unwrap();
+            let opened = store
                 .open_buffered_root(&query, vertices, small.clone(), read)
-                .await,
-            Err(BufferedReadError::Memory(
-                MemoryError::ResourceExhausted { .. }
-            ))
-        ));
-        assert_eq!(small.used(), 0);
+                .await;
+            if interleaved {
+                assert!(matches!(
+                    opened,
+                    Err(BufferedReadError::Memory(
+                        MemoryError::ResourceExhausted { .. }
+                    ))
+                ));
+            } else {
+                let view = opened.expect("disjoint histories fit within the tighter pool");
+                assert_eq!(view.root(), &root);
+                drop(view);
+            }
+            assert_eq!(small.used(), 0);
+        }
     });
 }
 

@@ -12,6 +12,42 @@ use std::collections::btree_map::Entry;
 // INITIAL_EDGE_HISTORY_BYTES covers root nodes and the first small allocations.
 const SINGLETON_BYTES: usize = 192;
 
+pub(super) fn may_exhaust_edge_history(blocks: usize, pool: &MemoryPool) -> bool {
+    let rows = blocks.saturating_mul(crate::MAX_BLOCK_ENTRIES as usize);
+    rows.saturating_mul(SINGLETON_BYTES)
+        .saturating_add(blocks.saturating_mul(HISTORY_ENTRY_BYTES))
+        > pool
+            .available()
+            .saturating_sub(OBJECT_WORKSPACE_BYTES + INITIAL_EDGE_HISTORY_BYTES)
+}
+
+/// For V6, original descriptor ordinals identify both the birth family and
+/// the preceding publication. Complete payload agreement gates every hint.
+pub(super) struct RoutedFamily<'a> {
+    pub(super) descriptors: &'a [BlockDescriptor],
+    pub(super) expected: Option<ObjectId>,
+    pub(super) isolated: bool,
+}
+
+fn check_predecessor(
+    at: usize,
+    predecessor: Option<crate::DeltaBlockVersion>,
+    expected: Option<ObjectId>,
+) -> Result<(), BufferedReadError> {
+    let declared = predecessor.map(|link| link.0);
+    if declared != expected {
+        return Err(
+            StoreError::MalformedRoot(crate::root::RootError::BlockChainMismatch {
+                at,
+                declared,
+                expected,
+            })
+            .into(),
+        );
+    }
+    Ok(())
+}
+
 struct Singleton {
     family: usize,
     dst: VId,
@@ -68,17 +104,7 @@ impl EdgeAdmission {
             Entry::Occupied(slot) => Some(self.heads[*slot.get()].block),
             Entry::Vacant(_) => None,
         };
-        let declared = predecessor.map(|link| link.0);
-        if declared != expected {
-            return Err(
-                StoreError::MalformedRoot(crate::root::RootError::BlockChainMismatch {
-                    at,
-                    declared,
-                    expected,
-                })
-                .into(),
-            );
-        }
+        check_predecessor(at, predecessor, expected)?;
         match slot {
             Entry::Occupied(slot) => {
                 let index = *slot.get();
@@ -104,11 +130,32 @@ impl EdgeAdmission {
         id: ObjectId,
         entries: &[AdjacencyEntry],
         predecessor: Option<crate::DeltaBlockVersion>,
+        routed: Option<RoutedFamily<'_>>,
     ) -> Result<(), BufferedReadError> {
         let Some(head) = entries.first() else {
             return Ok(());
         };
-        let family = self.advance_family(cx, at, (head.src, head.relation), id, predecessor)?;
+        let family = if let Some(route) = &routed {
+            check_predecessor(at, predecessor, route.expected)?;
+            if route.isolated {
+                // The decoder already checked each row. A strict EId order
+                // proves uniqueness in this block. Otherwise run the canonical
+                // identity law with at most one format-bounded block in memory.
+                if !entries.windows(2).all(|pair| pair[0].eid < pair[1].eid) {
+                    let _local = self.charge.pool().reserve(
+                        cx,
+                        INITIAL_EDGE_HISTORY_BYTES + entries.len() * HISTORY_ENTRY_BYTES,
+                    )?;
+                    crate::root::EdgeHistoryValidator::default()
+                        .observe_block(at, entries)
+                        .map_err(StoreError::MalformedRoot)?;
+                }
+                return Ok(());
+            }
+            at
+        } else {
+            self.advance_family(cx, at, (head.src, head.relation), id, predecessor)?
+        };
         // Pay for the whole format-bounded input before inserting its first
         // key. Refund repeated keys after the walk, keeping new births to one
         // pool acquisition per block.
@@ -126,7 +173,21 @@ impl EdgeAdmission {
                 }
                 Entry::Occupied(mut slot) => {
                     if let Some(first) = slot.get_mut() {
-                        let (src, relation) = self.heads[first.family].family;
+                        let (src, relation) = match &routed {
+                            Some(route) => {
+                                let birth = route
+                                    .descriptors
+                                    .get(first.family)
+                                    .and_then(|descriptor| descriptor.summary.as_ref())
+                                    .ok_or_else(|| {
+                                        StoreError::MalformedRoot(
+                                            crate::root::RootError::InvalidDescriptor,
+                                        )
+                                    })?;
+                                (birth.source, birth.relation)
+                            }
+                            None => self.heads[first.family].family,
+                        };
                         let original = AdjacencyEntry {
                             eid: row.eid,
                             src,

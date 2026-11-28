@@ -23,6 +23,14 @@ struct Interval {
     maximum: usize,
 }
 
+/// Publication order of the preceding block in this source/relation family.
+/// The first block names itself. Disjoint EId ranges need only local history.
+#[derive(Clone, Copy)]
+pub(super) struct HistoryHint {
+    pub(super) previous: usize,
+    pub(super) isolated: bool,
+}
+
 pub(super) struct BlockDirectory {
     routes: Routes,
     _charge: MemoryCharge,
@@ -72,6 +80,30 @@ impl BlockDirectory {
             routes: Routes::build(blocks, control)?,
             _charge: charge,
         })
+    }
+
+    /// Reuse both ordered routes while proving a cold V6 root. These hints
+    /// become valid only if every descriptor matches its decoded payload.
+    pub(super) fn history_hints(
+        &self,
+        blocks: &[BlockDescriptor],
+        cx: &impl BufferedReadCx,
+        pool: &MemoryPool,
+        control: &mut impl FnMut() -> Result<(), BufferedReadError>,
+    ) -> Result<super::BufferedValue<Vec<HistoryHint>>, BufferedReadError> {
+        let bytes = blocks
+            .len()
+            .checked_mul(size_of::<HistoryHint>())
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        let charge = pool.reserve(cx, bytes)?;
+        let mut hints = slots(blocks.len())?;
+        hints.extend((0..blocks.len()).map(|previous| HistoryHint {
+            previous,
+            isolated: false,
+        }));
+        self.routes
+            .fill_history_hints(blocks, &mut hints, control)?;
+        Ok(super::BufferedValue::from_reserved(hints, charge))
     }
 
     pub(super) fn candidates(
@@ -169,6 +201,33 @@ fn sort_ordinals<T, K: Ord, E>(
 }
 
 impl Routes {
+    fn fill_history_hints<E>(
+        &self,
+        blocks: &[BlockDescriptor],
+        hints: &mut [HistoryHint],
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        // The outgoing route sorts by (source, relation, publication ordinal).
+        for pair in self.outgoing.windows(2) {
+            control()?;
+            let older = summary(blocks, pair[0]);
+            let newer = summary(blocks, pair[1]);
+            if (older.source, older.relation) == (newer.source, newer.relation) {
+                hints[pair[1]].previous = pair[0];
+            }
+        }
+        super::visit_isolated_ranges(
+            self.edges.len(),
+            |at| {
+                let block = self.edges[at].block;
+                let fields = summary(blocks, block);
+                (block, fields.first_edge.0, fields.last_edge)
+            },
+            control,
+            |at, isolated| hints[at].isolated = isolated,
+        )
+    }
+
     fn build(
         blocks: &[BlockDescriptor],
         control: &mut impl FnMut() -> Result<(), BufferedReadError>,

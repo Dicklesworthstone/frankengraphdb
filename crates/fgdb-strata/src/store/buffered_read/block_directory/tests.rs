@@ -10,8 +10,7 @@ struct Fixture {
 }
 
 fn fixture(summaries: impl Iterator<Item = super::super::BlockSummary>) -> Fixture {
-    let extent =
-        crate::tiered::buffer::ExtentKey::new(ObjectId([7; 32]), 0, 1, [8; 32]).unwrap();
+    let extent = crate::tiered::buffer::ExtentKey::new(ObjectId([7; 32]), 0, 1, [8; 32]).unwrap();
     let blocks: Vec<_> = summaries
         .map(|summary| BlockDescriptor {
             block: extent,
@@ -25,16 +24,17 @@ fn fixture(summaries: impl Iterator<Item = super::super::BlockSummary>) -> Fixtu
 }
 
 fn ordered(bounds: &[Bounds]) -> Fixture {
-    let summaries = bounds.iter().map(|&(source, relation, first, last)| {
-        super::super::BlockSummary {
-            first_edge: (EId(first), CommitSeq(1)),
-            last_edge: EId(last),
-            source: VId(source),
-            relation: RelationId(relation),
-            first_destination: VId(first),
-            last_destination: VId(last),
-        }
-    });
+    let summaries =
+        bounds.iter().map(
+            |&(source, relation, first, last)| super::super::BlockSummary {
+                first_edge: (EId(first), CommitSeq(1)),
+                last_edge: EId(last),
+                source: VId(source),
+                relation: RelationId(relation),
+                first_destination: VId(first),
+                last_destination: VId(last),
+            },
+        );
     fixture(summaries)
 }
 
@@ -53,10 +53,15 @@ fn lookup(
     let mut work = 0;
     let mut result = Vec::new();
     while let Some(block) = candidates
-        .next(&f.blocks, &f.routes.outgoing, &f.routes.incoming, &mut || {
-            work += 1;
-            Ok::<_, ()>(())
-        })
+        .next(
+            &f.blocks,
+            &f.routes.outgoing,
+            &f.routes.incoming,
+            &mut || {
+                work += 1;
+                Ok::<_, ()>(())
+            },
+        )
         .unwrap()
     {
         result.push(block);
@@ -185,24 +190,14 @@ fn disjoint_routing_is_logarithmic_and_wide_incoming_ranges_do_not_inflate_outgo
         .collect();
     let f = ordered(&wide);
     for endpoint in [0, 1, 1024, u128::MAX] {
-        let (_, work) = lookup(
-            &f,
-            endpoint,
-            None,
-            BufferedEdgeDirection::Outgoing,
-        );
+        let (_, work) = lookup(&f, endpoint, None, BufferedEdgeDirection::Outgoing);
         // An outgoing seek is the lower-bound search (at most ilog2 + 1
         // steps), one unit per matching block and one terminal check of the
         // next descriptor: a matching endpoint costs ilog2 + 3, measured 15
         // at 4,096 blocks.
         assert!(work <= count.ilog2() as usize + 3);
     }
-    let (actual, work) = lookup(
-        &f,
-        7,
-        None,
-        BufferedEdgeDirection::Incoming,
-    );
+    let (actual, work) = lookup(&f, 7, None, BufferedEdgeDirection::Incoming);
     assert_eq!(actual, (0..count).collect::<Vec<_>>());
     assert_eq!(work, count);
     assert!(size_of::<Candidates>() <= 2048, "no allocated overlap bag");
@@ -266,10 +261,15 @@ fn root_lookup(
     let mut work = 0;
     let mut result = Vec::new();
     while let Some(block) = cursor
-        .next(&f.blocks, &f.routes.outgoing, &f.routes.incoming, &mut || {
-            work += 1;
-            Ok::<_, ()>(())
-        })
+        .next(
+            &f.blocks,
+            &f.routes.outgoing,
+            &f.routes.incoming,
+            &mut || {
+                work += 1;
+                Ok::<_, ()>(())
+            },
+        )
         .unwrap()
     {
         result.push(block);
@@ -305,8 +305,7 @@ fn complete_root_domains_equal_linear_oracle_without_duplicate_descriptors() {
                 BufferedEdgeDirection::Incoming,
                 BufferedEdgeDirection::Undirected,
             ] {
-                let (mut actual, _) =
-                    root_lookup(&f, &vertices, relation, direction);
+                let (mut actual, _) = root_lookup(&f, &vertices, relation, direction);
                 actual.sort_unstable();
                 let expected: Vec<_> = bounds
                     .iter()
@@ -335,10 +334,7 @@ fn complete_root_domains_equal_linear_oracle_without_duplicate_descriptors() {
         BufferedEdgeDirection::Incoming,
         BufferedEdgeDirection::Undirected,
     ] {
-        assert_eq!(
-            root_lookup(&f, &[], None, direction),
-            (vec![], 0)
-        );
+        assert_eq!(root_lookup(&f, &[], None, direction), (vec![], 0));
         assert!(
             root_lookup(&ordered(&[]), &[VId(0), VId(u128::MAX)], None, direction)
                 .0
@@ -368,8 +364,7 @@ fn sparse_domain_routing_is_logarithmic_and_overlapping_domains_share_one_tree_w
                 BufferedEdgeDirection::Incoming,
                 BufferedEdgeDirection::Undirected,
             ] {
-                let (mut actual, work) =
-                    root_lookup(&f, &[VId(endpoint)], None, direction);
+                let (mut actual, work) = root_lookup(&f, &[VId(endpoint)], None, direction);
                 actual.sort_unstable();
                 assert_eq!(actual, oracle(&bounds, endpoint, None, direction));
                 // Includes BOTH the count and initialization passes. This is
@@ -386,12 +381,7 @@ fn sparse_domain_routing_is_logarithmic_and_overlapping_domains_share_one_tree_w
     let bounds: Vec<_> = (0..64).map(|at| (1000 + at, 7, 0, u128::MAX)).collect();
     let f = ordered(&bounds);
     let vertices: Vec<_> = (0..256).map(VId).collect();
-    let (mut actual, work) = root_lookup(
-        &f,
-        &vertices,
-        Some(7),
-        BufferedEdgeDirection::Incoming,
-    );
+    let (mut actual, work) = root_lookup(&f, &vertices, Some(7), BufferedEdgeDirection::Incoming);
     actual.sort_unstable();
     assert_eq!(actual, (0..bounds.len()).collect::<Vec<_>>());
     assert!(
@@ -418,8 +408,7 @@ fn every_domain_route_checkpoint_preserves_the_selected_prefix_on_refusal() {
             BufferedEdgeDirection::Incoming,
             BufferedEdgeDirection::Undirected,
         ] {
-            let (expected, total) =
-                root_lookup(&f, &vertices, relation, direction);
+            let (expected, total) = root_lookup(&f, &vertices, relation, direction);
             for stop in 1..=total {
                 let mut cursor = RootCandidates::new(
                     f.routes.incoming.len(),
@@ -454,7 +443,12 @@ fn every_domain_route_checkpoint_preserves_the_selected_prefix_on_refusal() {
 }
 
 fn ordered_edges(bounds: &[(u128, u128)]) -> Fixture {
-    ordered(&bounds.iter().map(|&(first, last)| (0, 0, first, last)).collect::<Vec<_>>())
+    ordered(
+        &bounds
+            .iter()
+            .map(|&(first, last)| (0, 0, first, last))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn edge_lookup(ranges: &Fixture, eid: u128) -> (Vec<usize>, usize) {
@@ -571,7 +565,12 @@ fn every_edge_interval_control_can_refuse_before_inspection() {
 }
 
 fn ordered_relations(relations: &[u64]) -> Fixture {
-    ordered(&relations.iter().map(|&relation| (0, relation, 0, 0)).collect::<Vec<_>>())
+    ordered(
+        &relations
+            .iter()
+            .map(|&relation| (0, relation, 0, 0))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn relation_lookup(blocks: &Fixture, relation: u64) -> (Vec<usize>, usize, usize) {
@@ -631,7 +630,10 @@ fn relation_ranges_preserve_publication_order_and_full_width_identities() {
         assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
     }
     for relation in [0, u64::MAX] {
-        assert_eq!(relation_lookup(&ordered_relations(&[]), relation), (vec![], 0, 0));
+        assert_eq!(
+            relation_lookup(&ordered_relations(&[]), relation),
+            (vec![], 0, 0)
+        );
     }
 }
 
@@ -698,7 +700,10 @@ fn every_relation_seek_and_selected_descriptor_can_refuse_before_consumption() {
                 Ok(Some(block))
             );
         }
-        assert_eq!(cursor.next(&blocks.routes.relations, &mut || Err("unused")), Ok(None));
+        assert_eq!(
+            cursor.next(&blocks.routes.relations, &mut || Err("unused")),
+            Ok(None)
+        );
     }
 }
 
@@ -827,4 +832,47 @@ fn routing_construction_is_charged_before_allocation_and_every_refusal_refunds()
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn admission_hints_match_independent_family_predecessors_and_inclusive_edge_ranges() {
+    let options = [
+        (3, 1, 0, 1),
+        (2, 1, 1, 2),
+        (3, 2, 0, 3),
+        (3, 1, 7, 9),
+        (2, 2, u128::MAX, u128::MAX),
+    ];
+    for mut code in 0..options.len().pow(5) {
+        let bounds = std::array::from_fn::<_, 5, _>(|_| {
+            let item = options[code % options.len()];
+            code /= options.len();
+            item
+        });
+        let f = ordered(&bounds);
+        let mut hints: Vec<_> = (0..bounds.len())
+            .map(|previous| HistoryHint {
+                previous,
+                isolated: false,
+            })
+            .collect();
+        f.routes
+            .fill_history_hints(&f.blocks, &mut hints, &mut || Ok::<_, ()>(()))
+            .unwrap();
+        for (at, &(source, relation, first, last)) in bounds.iter().enumerate() {
+            let prior = bounds[..at]
+                .iter()
+                .rposition(|&(s, r, _, _)| (s, r) == (source, relation))
+                .unwrap_or(at);
+            assert_eq!(hints[at].previous, prior, "{bounds:?}");
+            assert_eq!(
+                hints[at].isolated,
+                bounds
+                    .iter()
+                    .enumerate()
+                    .all(|(other, &(_, _, lo, hi))| other == at || hi < first || last < lo),
+                "{bounds:?}"
+            );
+        }
+    }
 }

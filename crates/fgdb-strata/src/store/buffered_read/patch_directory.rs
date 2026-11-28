@@ -111,17 +111,15 @@ fn mark_isolated<E>(
     isolated: &mut [bool],
     control: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
-    let mut previous_maximum = None;
-    for (at, range) in ranges.iter().enumerate() {
-        control()?;
-        isolated[range.patch] = previous_maximum.is_none_or(|last| last < range.first)
-            && ranges
-                .get(at + 1)
-                .is_none_or(|next| range.last < next.first);
-        previous_maximum =
-            Some(previous_maximum.map_or(range.last, |last: VId| last.max(range.last)));
-    }
-    Ok(())
+    super::visit_isolated_ranges(
+        ranges.len(),
+        |at| {
+            let range = ranges[at];
+            (range.patch, range.first, range.last)
+        },
+        control,
+        |at, exclusive| isolated[at] = exclusive,
+    )
 }
 
 // Midpoint recursion has at most usize::BITS levels, including a full usize

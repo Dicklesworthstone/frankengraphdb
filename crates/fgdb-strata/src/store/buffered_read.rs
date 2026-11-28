@@ -628,6 +628,27 @@ fn limit(
     }
 }
 
+/// Visit ranges sorted by lower fence. Earlier ranges can intersect exactly
+/// when their greatest high fence reaches this low fence. Only the next low
+/// fence is needed to rule out every later range. Equality is an overlap.
+fn visit_isolated_ranges<K: Ord + Copy, E>(
+    count: usize,
+    range: impl Fn(usize) -> (usize, K, K),
+    control: &mut impl FnMut() -> Result<(), E>,
+    mut visit: impl FnMut(usize, bool),
+) -> Result<(), E> {
+    let mut previous_maximum = None;
+    for at in 0..count {
+        control()?;
+        let (object, first, last) = range(at);
+        let isolated = previous_maximum.is_none_or(|upper| upper < first)
+            && (at + 1 == count || last < range(at + 1).1);
+        visit(object, isolated);
+        previous_maximum = Some(previous_maximum.map_or(last, |upper: K| upper.max(last)));
+    }
+    Ok(())
+}
+
 fn advance(work: &mut usize, amount: usize, maximum: usize) -> Result<(), BufferedReadError> {
     let next = work
         .checked_add(amount)
@@ -877,11 +898,27 @@ impl<V: Vfs + Clone> BlockStore<V> {
         // Incoming and refaulted objects keep their independent reservations.
         limits.retain_root_charge(&mut metadata, &root, blocks.capacity(), patches.capacity())?;
         let mut work = 0;
+        let mut early_blocks = None;
         let mut early_patches = None;
         if !certified {
             let mut descriptors_match = !verify_published
                 || (blocks.len() == root.blocks.len()
                     && patches.len() == root.vertex_patches.len());
+            let mut hints = None;
+            if verify_published
+                && blocks.len() == root.blocks.len()
+                && edge_admission::may_exhaust_edge_history(blocks.len(), &pool)
+            {
+                let mut control = || {
+                    cx.buffered_checkpoint()
+                        .map_err(BufferedReadError::Interrupted)?;
+                    advance(&mut work, 1, limits.max_work)
+                };
+                let directory =
+                    block_directory::BlockDirectory::new(&blocks, cx, &pool, &mut control)?;
+                hints = Some(directory.history_hints(&blocks, cx, &pool, &mut control)?);
+                early_blocks = Some(directory);
+            }
             let mut edge_history =
                 edge_admission::EdgeAdmission::new(cx, &pool, !root.blocks.is_empty())?;
             let mut source_bytes = 0usize;
@@ -934,7 +971,22 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     )
                     .await?;
                 let (entries, _, predecessor) = &read.resolved;
-                edge_history.observe_block(cx, at, reference.block_id, entries, *predecessor)?;
+                let routed = hints.as_ref().and_then(|hints| hints.get(at)).map(|hint| {
+                    edge_admission::RoutedFamily {
+                        descriptors: &blocks,
+                        expected: (hint.previous != at)
+                            .then(|| root.blocks[hint.previous].block_id),
+                        isolated: hint.isolated,
+                    }
+                });
+                edge_history.observe_block(
+                    cx,
+                    at,
+                    reference.block_id,
+                    entries,
+                    *predecessor,
+                    routed,
+                )?;
                 let actual = BlockDescriptor {
                     block: descriptor(reference.block_id, &read.bytes)?,
                     properties: read
@@ -954,6 +1006,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
             // Vertex history reads only vertex patches. Release the completed
             // edge validator, then its reservations, before this second walk.
             drop(edge_history);
+            drop(hints);
             // A root descriptor covers at most MAX_PATCH_ROWS. If even that
             // population fits beside a decoded object, keep the original
             // admission and avoid building a second index during the walk.
@@ -1027,12 +1080,14 @@ impl<V: Vfs + Clone> BlockStore<V> {
         };
         // Publication (V6), or this open's complete legacy walk, authenticated
         // descriptor topology before these fences may exclude payloads.
-        let block_directory =
-            block_directory::BlockDirectory::new(&blocks, cx, &pool, &mut || {
+        let block_directory = match early_blocks {
+            Some(directory) => directory,
+            None => block_directory::BlockDirectory::new(&blocks, cx, &pool, &mut || {
                 cx.buffered_checkpoint()
                     .map_err(BufferedReadError::Interrupted)?;
                 advance(&mut work, 1, limits.max_work)
-            })?;
+            })?,
+        };
         cx.buffered_checkpoint()
             .map_err(BufferedReadError::Interrupted)?;
         Ok(BufferedPartition {
