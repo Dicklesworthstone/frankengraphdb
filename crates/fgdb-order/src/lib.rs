@@ -500,6 +500,10 @@ pub enum Event<C> {
     /// starts its initial interval; protected elections start it at election.
     LivenessTimeout,
     Heartbeat,
+    /// A local host explicitly enlarged this member's retained-log budget.
+    /// Does not resize peer limits or change the maximum append RPC. The new
+    /// limit must also be supplied on recovery if the retained suffix grew.
+    IncreaseLogCapacity(usize),
     /// Freeze new proposals while one existing voter catches up, then request
     /// its normal next-term election. Repeating the target retries without
     /// extending the deadline. Continue heartbeat, apply and liveness work.
@@ -662,7 +666,8 @@ pub struct Output<C> {
     /// Compaction alone does not produce an application installation event.
     pub installed_snapshot: Option<SnapshotCut>,
     /// A verified local snapshot through at least this index would make room
-    /// for the outstanding append. This is a capacity hint, never a verified
+    /// for the outstanding append or leader election fence. This is a local
+    /// capacity hint, never a verified
     /// snapshot, an applied/visible cut, or permission to drop any entries.
     pub requested_compaction_through: Option<u64>,
     /// A granted vote, campaign, or non-stale leader append resets the timer.
@@ -877,6 +882,7 @@ impl<C: Clone + Eq> Raft<C> {
             Event::AbortLeadershipTransfer(_) => self.handoff = None,
             Event::Heartbeat => {
                 if self.role == Role::Leader {
+                    self.append_election_barrier(&mut output);
                     self.broadcast(&mut output, true)?;
                     self.retry_quorum_probe(&mut output);
                 }
@@ -886,7 +892,18 @@ impl<C: Clone + Eq> Raft<C> {
             }
             Event::ProposeBatch(commands) => self.append_proposals(commands, &mut output)?,
             Event::Receive(envelope) => self.receive(envelope, &mut output)?,
-            Event::Compact(snapshot) => self.compact(snapshot),
+            Event::Compact(snapshot) => {
+                self.compact(snapshot);
+                if self.append_election_barrier(&mut output) {
+                    self.broadcast(&mut output, false)?;
+                }
+            }
+            Event::IncreaseLogCapacity(maximum) => {
+                self.limits.max_log_entries = maximum;
+                if self.append_election_barrier(&mut output) {
+                    self.broadcast(&mut output, false)?;
+                }
+            }
             Event::SnapshotReady(_) => self.install_snapshot(&mut output)?,
             Event::SnapshotFailed(_) => self.incoming_snapshot = None,
         }
@@ -963,6 +980,9 @@ impl<C: Clone + Eq> Raft<C> {
             }
             Event::LivenessTimeout if self.role != Role::Leader && self.state.term == u64::MAX => {
                 return Err(Error::CounterExhausted);
+            }
+            Event::IncreaseLogCapacity(maximum) if *maximum < self.limits.max_log_entries => {
+                return Err(Error::InvalidLimits);
             }
             Event::Propose(_) => self.validate_proposal_count(1)?,
             Event::ProposeBatch(commands) => self.validate_proposal_count(commands.len())?,
@@ -1292,21 +1312,37 @@ impl<C: Clone + Eq> Raft<C> {
                 );
             }
         }
-        // Only a current-term quorum commits inherited entries. At capacity or
-        // absolute-index exhaustion, never infer commitment from older terms.
-        if self.state.entries.len() < self.limits.max_log_entries && next < u64::MAX {
-            self.log_changed = true;
-            self.state.entries.push(Entry {
-                term: self.state.term,
-                command: None,
-            });
-        }
-        self.advance_commit();
+        self.append_election_barrier(output);
         self.broadcast(output, false)?;
         if self.liveness.enabled() {
             self.start_quorum_probe(output);
         }
         Ok(())
+    }
+
+    /// If election found a full inherited suffix, retry its current-term
+    /// no-op as soon as a verified compaction or host budget increase permits.
+    /// Every copy, including this retry, goes through ordinary log publication
+    /// and quorum commit. Never move the endpoint of a leadership handoff.
+    fn append_election_barrier(&mut self, output: &mut Output<C>) -> bool {
+        if self.role != Role::Leader
+            || self.handoff.is_some()
+            || self.last_term() == self.state.term
+            || self.last_index() == u64::MAX - 1
+        {
+            return false;
+        }
+        if self.state.entries.len() == self.limits.max_log_entries {
+            output.requested_compaction_through = Some(self.state.base_index() + 1);
+            return false;
+        }
+        self.log_changed = true;
+        self.state.entries.push(Entry {
+            term: self.state.term,
+            command: None,
+        });
+        self.advance_commit();
+        true
     }
 
     fn advance_commit(&mut self) -> bool {

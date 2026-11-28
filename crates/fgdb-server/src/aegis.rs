@@ -150,6 +150,21 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
         self.replica.step(publisher, Event::Compact(snapshot)).await
     }
 
+    /// Increase the local retained-log allowance after host resource admission.
+    /// An elected leader blocked on an inherited log can resume its ordinary
+    /// current-term commit even if no verified cut can yet release space.
+    /// Followers retry the outstanding append on the next leader heartbeat.
+    /// Configure the same allowance when restarting this member.
+    pub async fn increase_log_capacity<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        maximum: usize,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica
+            .step(publisher, Event::IncreaseLogCapacity(maximum))
+            .await
+    }
+
     /// Bind a persisted peer offer to the verifier's complete seed inventory.
     /// The owned download allows normal peer traffic while objects are staged.
     /// The host keeps source retention pins alive and cancels transfers named
