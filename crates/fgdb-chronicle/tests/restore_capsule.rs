@@ -159,6 +159,97 @@ fn recovered(plaintext: &[u8]) -> VerifiedObject {
 }
 
 #[test]
+fn mounted_donor_reuses_verified_local_objects_and_streams_only_damaged_evidence() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.commit();
+    let repl = contexts.repl();
+    let cap = std::num::NonZeroUsize::new(1 << 20).unwrap();
+    runtime.block_on(async {
+        let dir = directory();
+        let donor = directory();
+        std::fs::create_dir(donor.join(CAPSULE_DIR)).unwrap();
+        let mut owner = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        for n in 1..=5 {
+            let previous = owner
+                .chain()
+                .entries()
+                .last()
+                .map(|m| fgdb_types::MarkerRef {
+                    marker_oid: m.marker_oid,
+                    commit_seq: CommitSeq(m.marker.commit_seq),
+                });
+            owner
+                .commit(&cx, &[n; 2048], |seq, oid| {
+                    let mut next = marker(seq, oid);
+                    next.prev_global = previous;
+                    next
+                })
+                .await
+                .unwrap();
+        }
+        let log = std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap();
+        let mut events = Vec::new();
+        assert_eq!(
+            owner
+                .restore_lost_from_donor(&cx, &repl, &donor, cap, &mut events)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(events.is_empty());
+        let missing = keys().identify(&[2; 2048]);
+        let damaged = keys().identify(&[4; 2048]);
+        std::fs::rename(capsule_path(&dir, missing), capsule_path(&donor, missing)).unwrap();
+        std::fs::rename(capsule_path(&dir, damaged), capsule_path(&donor, damaged)).unwrap();
+        std::fs::write(capsule_path(&dir, damaged), b"unreadable").unwrap();
+        // Bound the donor file before decoding or replacing a destination.
+        assert!(
+            owner
+                .restore_lost_from_donor(
+                    &cx,
+                    &repl,
+                    &donor,
+                    std::num::NonZeroUsize::MIN,
+                    &mut events
+                )
+                .await
+                .is_err()
+        );
+        assert!(!capsule_path(&dir, missing).exists());
+        assert_eq!(
+            owner
+                .restore_lost_from_donor(&cx, &repl, &donor, cap, &mut events)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(!events.is_empty());
+        for n in 1..=5 {
+            let expected = vec![n; 2048];
+            assert_eq!(
+                owner
+                    .read_capsule(&cx, keys().identify(&expected), &mut Vec::new())
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        drop(owner);
+        let mut reopened = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(
+            reopened
+                .restore_lost_from_donor(&cx, &repl, &dir.join("absent"), cap, &mut Vec::new())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap(), log);
+    });
+}
+
+#[test]
 fn bonded_bytes_restore_missing_and_locally_unrecoverable_committed_capsules() {
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);

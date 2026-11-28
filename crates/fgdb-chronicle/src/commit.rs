@@ -891,90 +891,95 @@ impl<V: Vfs> CommitCoordinator<V> {
                 continue;
             }
             summary.objects += 1;
-            let path = Self::capsule_path(&self.dir, object_id);
-            let read = cx
-                .with_restriction_async(async {
-                    let file = self.vfs.open_read(&path).await.map_err(CapsuleError::Io)?;
-                    let bytes = read_bounded_capsule_container(file).await?;
-                    decode_container(&bytes)
-                })
-                .await;
-            let (descriptor, symbols) = match read {
-                Ok(value) => value,
-                Err(error) => {
-                    summary.lost.push(LostCapsule {
-                        object_id,
-                        reason: capsule_loss(error)?,
-                    });
-                    continue;
-                }
-            };
-            let encoding = match descriptor.validated_encoding(object_id, verification) {
-                Ok(encoding) => encoding,
-                Err(error) => {
-                    summary.lost.push(LostCapsule {
-                        object_id,
-                        reason: capsule_loss(error)?,
-                    });
-                    continue;
-                }
-            };
-            let report = scrub_object(
-                &encoding,
-                &symbols,
-                RecoveryTarget {
-                    k_oid: self.keys.k_oid(),
-                    namespace: self.keys.namespace(),
-                    object_id,
-                    canonical_header: &[],
-                    protected_len: descriptor.protected_len() as usize,
-                },
-                self.keys.dek(),
-                verification,
-            );
-            if let ScrubVerdict::Lost { reason } = report.verdict {
-                summary.lost.push(LostCapsule { object_id, reason });
-                continue;
-            }
-            // Intact describes only supplied symbols. A truncated tail or an
-            // authenticated duplicate can still leave the canonical inventory
-            // short of its registered source-plus-repair budget.
-            let expected = report.source_symbols + descriptor.repair_symbols as usize;
-            let complete = if matches!(report.verdict, ScrubVerdict::Intact)
-                && symbols.len() == expected
-                && report.symbols_distinct_authentic == expected
+            match self
+                .scrub_one(cx, object_id, crash_at, verification)
+                .await?
             {
-                symbols.iter().all(|bytes| {
-                    SymbolRecord::verify(bytes, &encoding, self.keys.dek(), verification).is_ok_and(
-                        |record| record.source_block == 0 && (record.esi as usize) < expected,
-                    )
-                })
-            } else {
-                false
-            };
-            if complete {
-                summary.clean.push(object_id);
-                continue;
-            }
-            let repaired = match self
-                .keys
-                .repair(&descriptor, &symbols, object_id, verification)
-            {
-                Ok(repaired) => repaired,
-                Err(error) => {
-                    summary.lost.push(LostCapsule {
-                        object_id,
-                        reason: capsule_loss(error)?,
-                    });
-                    continue;
+                ScrubDisposition::Intact => summary.clean.push(object_id),
+                ScrubDisposition::Repaired => summary.repaired.push(object_id),
+                ScrubDisposition::Lost(reason) => {
+                    summary.lost.push(LostCapsule { object_id, reason })
                 }
-            };
-            let bytes = encode_container(&repaired);
-            self.replace_scrubbed_capsule(cx, &path, &bytes, crash_at)
-                .await?;
-            summary.repaired.push(object_id);
+            }
         }
         Ok(summary)
+    }
+
+    async fn scrub_one(
+        &self,
+        cx: &CommitCx,
+        object_id: ObjectId,
+        crash_at: Option<ScrubCrashPoint>,
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<ScrubDisposition, CommitError> {
+        let path = Self::capsule_path(&self.dir, object_id);
+        let read = cx
+            .with_restriction_async(async {
+                let file = self.vfs.open_read(&path).await.map_err(CapsuleError::Io)?;
+                let bytes = read_bounded_capsule_container(file).await?;
+                decode_container(&bytes)
+            })
+            .await;
+        let (descriptor, symbols) = match read {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(ScrubDisposition::Lost(capsule_loss(error)?));
+            }
+        };
+        let encoding = match descriptor.validated_encoding(object_id, verification) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                return Ok(ScrubDisposition::Lost(capsule_loss(error)?));
+            }
+        };
+        let report = scrub_object(
+            &encoding,
+            &symbols,
+            RecoveryTarget {
+                k_oid: self.keys.k_oid(),
+                namespace: self.keys.namespace(),
+                object_id,
+                canonical_header: &[],
+                protected_len: descriptor.protected_len() as usize,
+            },
+            self.keys.dek(),
+            verification,
+        );
+        if let ScrubVerdict::Lost { reason } = report.verdict {
+            return Ok(ScrubDisposition::Lost(reason));
+        }
+        // Intact describes only supplied symbols. A truncated tail or an
+        // authenticated duplicate can still leave the canonical inventory
+        // short of its registered source-plus-repair budget.
+        let expected = report.source_symbols + descriptor.repair_symbols as usize;
+        let complete = if matches!(report.verdict, ScrubVerdict::Intact)
+            && symbols.len() == expected
+            && report.symbols_distinct_authentic == expected
+        {
+            symbols.iter().all(|bytes| {
+                SymbolRecord::verify(bytes, &encoding, self.keys.dek(), verification).is_ok_and(
+                    |record| record.source_block == 0 && (record.esi as usize) < expected,
+                )
+            })
+        } else {
+            false
+        };
+        if complete {
+            return Ok(ScrubDisposition::Intact);
+        }
+        let repaired = match self
+            .keys
+            .repair(&descriptor, &symbols, object_id, verification)
+        {
+            Ok(repaired) => repaired,
+            Err(error) => {
+                return Ok(ScrubDisposition::Lost(capsule_loss(error)?));
+            }
+        };
+        let bytes = encode_container(&repaired);
+        self.replace_scrubbed_capsule(cx, &path, &bytes, crash_at)
+            .await?;
+        Ok(ScrubDisposition::Repaired)
     }
 
     async fn replace_scrubbed_capsule(
@@ -1743,6 +1748,12 @@ fn scrub_stop(requested: Option<ScrubCrashPoint>, point: ScrubCrashPoint) -> std
         ));
     }
     Ok(())
+}
+
+enum ScrubDisposition {
+    Intact,
+    Repaired,
+    Lost(LostReason),
 }
 
 fn capsule_loss(error: CapsuleError) -> Result<LostReason, CommitError> {

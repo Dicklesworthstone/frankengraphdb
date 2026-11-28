@@ -225,7 +225,6 @@ impl Database<asupersync::fs::UnixVfs> {
     ) -> Result<Self, CapsuleRecoveryError> {
         let vfs = asupersync::fs::UnixVfs::new();
         crate::require_database_dir(cx, &vfs, path).await?;
-        let capsule_keys = keys.capsule_keys();
         let mut coordinator = fgdb_chronicle::CommitCoordinator::open_with_vfs(
             cx,
             vfs.clone(),
@@ -243,42 +242,19 @@ impl Database<asupersync::fs::UnixVfs> {
                 missing: "an authenticated published checkpoint for donor recovery",
             })?;
         let mut verification = Vec::new();
-        let through = coordinator
-            .chain()
-            .entries()
-            .last()
-            .map_or(fgdb_types::CommitSeq::ORIGIN, |entry| {
-                fgdb_types::CommitSeq(entry.marker.commit_seq)
-            });
-        let lost = coordinator
-            .scrub_capsules(cx, through, None, &mut verification)
-            .await
-            .map_err(crate::OpenError::from)?
-            .lost;
         let ceiling =
             std::num::NonZeroUsize::new(fgdb_chronicle::capsule::MAX_CAPSULE_CONTAINER_BYTES_V1)
                 .expect("native capsule framing has a nonempty header");
-        for item in lost {
-            checkpoint(cx).map_err(crate::OpenError::from)?;
-            let object_id = item.object_id;
-            let object = fgdb_chronicle::commit::donor::read_capsule(
-                repl,
-                donor,
-                &capsule_keys,
-                object_id,
-                ceiling,
-                &mut verification,
-            )
+        use fgdb_chronicle::commit::donor::DonorRepairError;
+        coordinator
+            .restore_lost_from_donor(cx, repl, donor, ceiling, &mut verification)
             .await
-            .map_err(|error| CapsuleRecoveryError::Capsule {
-                object_id,
-                source: error.into(),
+            .map_err(|error| match error {
+                DonorRepairError::Coordinator(error) => CapsuleRecoveryError::Open(error.into()),
+                DonorRepairError::Capsule { object_id, source } => {
+                    CapsuleRecoveryError::Capsule { object_id, source }
+                }
             })?;
-            coordinator
-                .restore_capsule(cx, object_id, &object, &mut verification)
-                .await
-                .map_err(|source| CapsuleRecoveryError::Capsule { object_id, source })?;
-        }
         Self::finish_capsule_recovery(cx, vfs, path, keys, coordinator, verification).await
     }
 
