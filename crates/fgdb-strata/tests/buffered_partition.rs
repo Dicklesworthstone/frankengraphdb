@@ -3887,6 +3887,26 @@ fn three_level_root_admits_in_a_small_pool_without_weakening_source_or_reference
                 last_seq: CommitSeq(if retirement { 2 } else { 1 }),
             });
         }
+        // A full leaf of vertex descriptors has a different wire width.
+        let mut patches = Vec::new();
+        for vid in 1..=fgdb_strata::root_segment::SEGMENT_REFS {
+            let bytes = encode_patch(&[VertexRow {
+                vid: VId(vid as u128),
+                birth_ordinal: vid as u64,
+                created_at: CommitSeq(1),
+                retired_at: None,
+                labels: vec![],
+                props: vec![],
+            }])
+            .unwrap();
+            source += bytes.len();
+            let patch = batch.put_patch_verified(&commit, &bytes).await.unwrap();
+            patches.push(PatchRef {
+                patch_id: patch.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(1),
+            });
+        }
         batch.finish(&commit).await.unwrap();
         let root = store
             .put_root_verified(
@@ -3897,7 +3917,7 @@ fn three_level_root_admits_in_a_small_pool_without_weakening_source_or_reference
                     partition: 0,
                     published_at: CommitSeq(2),
                     blocks,
-                    vertex_patches: Vec::new(),
+                    vertex_patches: patches,
                 },
                 &mut receipts,
             )
@@ -3906,10 +3926,42 @@ fn three_level_root_admits_in_a_small_pool_without_weakening_source_or_reference
         drop(receipts);
         drop(store);
         let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
-        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        // The typed output columns fit once but not twice in this pool.
+        let pool = MemoryPool::new(4 * 1024 * 1024, 0).unwrap();
+        let top = store.get_root_bytes(&commit, root).await.unwrap();
+        let fgdb_strata::root::RootFrame::V6(frame) =
+            fgdb_strata::root::decode_root_frame(&top).unwrap()
+        else {
+            panic!("expected a described root")
+        };
+        let index_ref = frame.membership.block_index[0];
+        let index_path = store.path(index_ref.segment_id);
+        let index = std::fs::read(&index_path).unwrap();
+        let leaves = fgdb_strata::root_segment::read_index(
+            &KEY,
+            NS,
+            &index,
+            &index_ref,
+            0,
+            frame.membership.coordinate(),
+            fgdb_strata::root_segment::SegmentClass::Blocks,
+        )
+        .unwrap();
+        let metadata_size = top.len()
+            + index.len()
+            + leaves
+                .iter()
+                .chain(&frame.membership.patch_segments)
+                .map(|leaf| {
+                    std::fs::metadata(store.path(leaf.segment_id))
+                        .unwrap()
+                        .len() as usize
+                })
+                .sum::<usize>();
         let bounds = BufferedReadLimits {
-            max_root_bytes: 2 * 1024 * 1024,
+            max_root_bytes: metadata_size,
             max_blocks: count + 1,
+            max_vertex_patches: fgdb_strata::root_segment::SEGMENT_REFS,
             max_source_bytes: source,
             max_work: 2_000_000,
             ..limits()
@@ -3919,6 +3971,14 @@ fn three_level_root_admits_in_a_small_pool_without_weakening_source_or_reference
             .await
             .unwrap();
         assert_eq!(view.root().blocks.len(), count + 1);
+        assert_eq!(
+            view.vertex_at(&query, VId(128), CommitSeq(2))
+                .await
+                .unwrap()
+                .unwrap()
+                .birth_ordinal,
+            128
+        );
         let legacy = PartitionRoot {
             graph: GraphId(1),
             branch: BranchId(2),
@@ -3944,13 +4004,16 @@ fn three_level_root_admits_in_a_small_pool_without_weakening_source_or_reference
         );
         drop(view);
         assert_eq!(pool.used(), 0);
+        // Give the source-limited incremental fallback enough column
+        // workspace to reach its independent encoded-byte refusal.
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
         for (case, refused) in [
             BufferedReadLimits {
                 max_blocks: count,
                 ..bounds
             },
             BufferedReadLimits {
-                max_root_bytes: 512 * 1024,
+                max_root_bytes: metadata_size - 1,
                 ..bounds
             },
             BufferedReadLimits {
@@ -4040,5 +4103,14 @@ fn three_level_root_admits_in_a_small_pool_without_weakening_source_or_reference
             ))
         ));
         assert_eq!(tight.used(), 0);
+        let mut damaged = index;
+        *damaged.last_mut().unwrap() ^= 1;
+        std::fs::write(index_path, damaged).unwrap();
+        assert!(
+            matches!(store.open_buffered_root(&query, root, pool.clone(), bounds).await,
+            Err(BufferedReadError::Store(error)) if matches!(*error, StoreError::MalformedRoot(
+                fgdb_strata::root::RootError::Segment(_))))
+        );
+        assert_eq!(pool.used(), 0);
     });
 }

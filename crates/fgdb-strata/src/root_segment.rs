@@ -59,8 +59,11 @@ const REF_LEN: usize = 32 + 8 + 8;
 /// The exact length of every segment: segments are always full.
 pub const SEGMENT_BYTES: usize = HEADER_LEN + SEGMENT_REFS * REF_LEN;
 /// Largest readable leaf, including V2's block descriptors.
-pub const MAX_SEGMENT_BYTES: usize =
-    SEGMENT_BYTES + 32 + SEGMENT_REFS * crate::root::descriptor::BLOCK_BYTES;
+pub const MAX_SEGMENT_BYTES: usize = described_segment_bytes(SegmentClass::Blocks);
+
+pub(crate) const fn described_segment_bytes(class: SegmentClass) -> usize {
+    SEGMENT_BYTES + 32 + crate::root::descriptor::encoded_len(class, SEGMENT_REFS)
+}
 
 /// `FGSI` — FrankenGraph Strata root Index segment (fgdb-5gzaa).
 pub const INDEX_MAGIC: [u8; 4] = *b"FGSI";
@@ -506,7 +509,7 @@ pub(crate) fn decode_described_segment(
         .copied()
         .and_then(SegmentClass::from_tag)
         .ok_or(SegmentError::InvalidDescriptor)?;
-    let expected = SEGMENT_BYTES + 32 + crate::root::descriptor::encoded_len(class, SEGMENT_REFS);
+    let expected = described_segment_bytes(class);
     let (_, _, declared) = decode_header(
         bytes,
         (SEGMENT_MAGIC, SEGMENT_FORMAT_V2),

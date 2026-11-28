@@ -712,7 +712,8 @@ pub(super) fn reserve_frame_decode(
     .map_err(|error| StoreError::Extent(ExtentError::Memory(error)))
 }
 
-/// Charge both generations of each geometrically growing output column.
+/// Charge one exact allocation per output column, or both generations when
+/// a legacy or source-limited traversal must grow them geometrically.
 /// Flattening one index also holds its decoded children, a flat list, and
 /// the segment cache. Eight slots per leaf cover those three lists, their
 /// geometric capacities, and the much smaller index lists and Vec headers
@@ -723,8 +724,10 @@ pub(super) fn reserve_root_columns(
     metadata: &mut MemoryCharge,
     blocks: usize,
     patches: usize,
+    exact: bool,
 ) -> Result<(), StoreError> {
-    let column = |count: usize, width: usize| count.checked_mul(width)?.checked_mul(2);
+    let generations = if exact { 1 } else { 2 };
+    let column = |count: usize, width: usize| count.checked_mul(width)?.checked_mul(generations);
     let leaves =
         blocks / crate::root_segment::SEGMENT_REFS + patches / crate::root_segment::SEGMENT_REFS;
     let result = column(
