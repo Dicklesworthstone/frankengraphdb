@@ -3346,3 +3346,107 @@ fn a_cancelled_read_only_scan_returns_no_checkpoint_or_history_and_writes_nothin
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn pinned_history_backup_publishes_only_the_verified_cut_and_never_overwrites() {
+    use std::num::NonZeroU64;
+    fn template(bytes: &[u8]) -> Digest {
+        let mut hasher = fgdb_crypto::Hasher::new();
+        hasher.update(bytes);
+        hasher.finalize()
+    }
+
+    let parent = scratch_dir("pinned-history-backup");
+    let source = parent.join("source");
+    std::fs::create_dir(&source).unwrap();
+    under_lab(0xbac1, move |cx| async move {
+        let vfs = UnixVfs::new();
+        let keys = keys();
+        let mut coordinator = CommitCoordinator::open(&cx, &source, keys.clone())
+            .await
+            .unwrap();
+        let mut cuts = Vec::new();
+        for id in [1, 1, 3] {
+            let payload = capsule_bytes(id);
+            let chain = coordinator.chain().clone();
+            coordinator
+                .commit(&cx, &payload, |seq, oid| {
+                    let mut marker = marker_for(seq, oid, &chain);
+                    marker.effect_source = EffectSource::Local {
+                        capsule_ref: oid,
+                        logical_delta_template_digest: template(&payload),
+                    };
+                    marker
+                })
+                .await
+                .unwrap();
+            cuts.push((coordinator.chain().chain_value(), log_bytes(&source)));
+        }
+        let seq = NonZeroU64::new(2).unwrap();
+        let archive = parent.join("archive");
+        macro_rules! backup {
+            ($dest:expr, $hash:expr) => {
+                CommitCoordinator::backup_history_through(
+                    &cx,
+                    &vfs,
+                    &source,
+                    $dest,
+                    &keys,
+                    (seq, $hash),
+                    template,
+                )
+            };
+        }
+        assert_eq!(backup!(&archive, cuts[1].0).await.unwrap(), cuts[1].0);
+        assert_eq!(
+            std::fs::read(archive.join(COMMIT_LOG_NAME)).unwrap(),
+            cuts[1].1
+        );
+        assert_eq!(
+            std::fs::read_dir(archive.join(CAPSULE_DIR))
+                .unwrap()
+                .count(),
+            1
+        );
+        let failed = parent.join("wrong-cut");
+        assert!(backup!(&failed, cuts[2].0).await.is_err());
+        assert!(!failed.join(COMMIT_LOG_NAME).exists());
+        assert!(backup!(&source.join("nested"), cuts[1].0).await.is_err());
+        assert!(!source.join("nested").exists());
+        assert!(backup!(&archive, cuts[2].0).await.is_err());
+        assert_eq!(log_bytes(&source), cuts[2].1);
+        #[cfg(unix)]
+        {
+            let linked = parent.join("linked-journal");
+            std::fs::create_dir(&linked).unwrap();
+            std::os::unix::fs::symlink(source.join(COMMIT_LOG_NAME), linked.join(COMMIT_LOG_NAME))
+                .unwrap();
+            let refused = parent.join("from-link");
+            assert!(
+                CommitCoordinator::backup_history_through(
+                    &cx,
+                    &vfs,
+                    &linked,
+                    &refused,
+                    &keys,
+                    (seq, cuts[1].0),
+                    template
+                )
+                .await
+                .is_err()
+            );
+            assert!(!refused.exists());
+        }
+        let name = only_capsule_path(&archive).file_name().unwrap().to_owned();
+        std::fs::write(source.join(CAPSULE_DIR).join(name), b"unrecoverable").unwrap();
+        let broken = parent.join("broken");
+        assert!(backup!(&broken, cuts[1].0).await.is_err());
+        assert!(!broken.join(COMMIT_LOG_NAME).exists());
+        assert_eq!(
+            CommitCoordinator::verify_history_through(&cx, &vfs, &archive, &keys, seq, template)
+                .await
+                .unwrap(),
+            cuts[1].0
+        );
+    });
+}

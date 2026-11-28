@@ -27,6 +27,7 @@
 //! normal outcome of crashing, not corruption. A torn entry anywhere EARLIER
 //! is corruption, because entries before it were durable.
 
+pub mod backup;
 pub mod donor;
 pub mod restore;
 pub mod verify;
