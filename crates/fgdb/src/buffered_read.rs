@@ -151,14 +151,32 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
         self,
         cx: &CommitCx,
     ) -> Result<BufferedReadView<V>, BufferedOpenError> {
+        self.into_read_view_with_history_counts(cx, 0).await
+    }
+
+    /// Admit this same publication with a bounded EId counting prepass for
+    /// overlapping V6 block ranges. Zero uses ordinary cold admission. A
+    /// positive allowance of at least 32 bytes is drawn from the source pool.
+    /// Every extra block visit spends the same source-byte and work budgets.
+    pub async fn into_read_view_with_history_counts(
+        self,
+        cx: &CommitCx,
+        bytes: usize,
+    ) -> Result<BufferedReadView<V>, BufferedOpenError> {
         let published = self.published;
         let admission: crate::SendFuture<'_, _> = match self.source {
-            BufferedReadSource::Selected(selection) => Box::pin(selection.into_partition(cx)),
-            BufferedReadSource::Deferred { pool, limits } => Box::pin(
-                published
-                    .store
-                    .open_buffered_root(cx, published.root_id, pool, limits),
-            ),
+            BufferedReadSource::Selected(selection) => {
+                Box::pin(selection.into_partition_with_history_counts(cx, bytes))
+            }
+            BufferedReadSource::Deferred { pool, limits } => {
+                Box::pin(published.store.open_buffered_root_with_history_counts(
+                    cx,
+                    published.root_id,
+                    pool,
+                    limits,
+                    bytes,
+                ))
+            }
         };
         Ok(BufferedReadView {
             partition: admission.await?,

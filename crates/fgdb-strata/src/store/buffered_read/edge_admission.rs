@@ -27,6 +27,7 @@ pub(super) struct RoutedFamily<'a> {
     pub(super) descriptors: &'a [BlockDescriptor],
     pub(super) expected: Option<ObjectId>,
     pub(super) isolated: bool,
+    pub(super) counts: Option<&'a super::edge_counts::EdgeCounts>,
 }
 
 fn check_predecessor(
@@ -159,11 +160,20 @@ impl EdgeAdmission {
         // Pay for the whole format-bounded input before inserting its first
         // key. Refund repeated keys after the walk, keeping new births to one
         // pool acquisition per block.
-        self.charge.grow(cx, entries.len() * SINGLETON_BYTES)?;
+        let counts = routed.as_ref().and_then(|route| route.counts);
+        if counts.is_none() {
+            self.charge.grow(cx, entries.len() * SINGLETON_BYTES)?;
+        }
         let before = self.first.len();
         for row in entries {
+            if counts.is_some_and(|counts| !counts.needs_history(row.eid)) {
+                continue;
+            }
             match self.first.entry(row.eid) {
                 Entry::Vacant(slot) => {
+                    if counts.is_some() {
+                        self.charge.grow(cx, SINGLETON_BYTES)?;
+                    }
                     slot.insert(Some(Singleton {
                         family,
                         dst: row.dst,
@@ -232,7 +242,7 @@ impl EdgeAdmission {
             }
         }
         let unused = (entries.len() - (self.first.len() - before)) * SINGLETON_BYTES;
-        if unused != 0 {
+        if counts.is_none() && unused != 0 {
             drop(
                 self.charge
                     .split_off(unused)
