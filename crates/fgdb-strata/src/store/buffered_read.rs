@@ -4,7 +4,8 @@
 //! A live opaque receipt for the exact admitted root permits metadata-only
 //! source construction. Every cold open, including V6, still walks payloads
 //! and proves history: a keyed root or raw slot publication is not admission.
-//! Vertex admission retains charged lifecycle metadata and birth
+//! Disjoint V6 patch ranges can prove vertex history within a single decoded
+//! patch. Overlapping and legacy patch histories retain charged lifecycle metadata and birth
 //! locators; restatements refault their authenticated birth patch for exact
 //! payload comparison. Resident admission therefore depends on version count,
 //! not the sum of vertex property bytes. A metadata-heavy history may still
@@ -876,16 +877,15 @@ impl<V: Vfs + Clone> BlockStore<V> {
         // Incoming and refaulted objects keep their independent reservations.
         limits.retain_root_charge(&mut metadata, &root, blocks.capacity(), patches.capacity())?;
         let mut work = 0;
+        let mut early_patches = None;
         if !certified {
             let mut descriptors_match = !verify_published
                 || (blocks.len() == root.blocks.len()
                     && patches.len() == root.vertex_patches.len());
             let mut edge_history =
                 edge_admission::EdgeAdmission::new(cx, &pool, !root.blocks.is_empty())?;
-            let mut vertex_history =
-                admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
             let mut source_bytes = 0usize;
-            let mut observe = |event| {
+            let mut observe = |work: &mut usize, event| {
                 cx.buffered_checkpoint()
                     .map_err(BufferedReadError::Interrupted)?;
                 match event {
@@ -895,7 +895,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
                             source_bytes.saturating_add(1),
                             limits.max_source_bytes,
                         )?;
-                        advance(&mut work, 1, limits.max_work)
+                        advance(work, 1, limits.max_work)
                     }
                     RootReadEvent::SourceBytes(bytes) => {
                         source_bytes = source_bytes
@@ -908,13 +908,13 @@ impl<V: Vfs + Clone> BlockStore<V> {
                         )
                     }
                     RootReadEvent::Incidences(rows) | RootReadEvent::VertexVersions(rows) => {
-                        advance(&mut work, rows, limits.max_work)
+                        advance(work, rows, limits.max_work)
                     }
                 }
             };
             for (at, reference) in root.blocks.iter().enumerate() {
                 let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
-                observe(RootReadEvent::ObjectStart)?;
+                observe(&mut work, RootReadEvent::ObjectStart)?;
                 // Keep decoding in this future: the ordinary open's optional
                 // blocking-pool decode could outlive a dropped admission future
                 // and thus outlive this affine workspace charge. For the same
@@ -930,7 +930,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
                         root.partition,
                         reference,
                         Ok(((bytes, decoded), None)),
-                        &mut observe,
+                        &mut |event| observe(&mut work, event),
                     )
                     .await?;
                 let (entries, _, predecessor) = &read.resolved;
@@ -954,14 +954,43 @@ impl<V: Vfs + Clone> BlockStore<V> {
             // Vertex history reads only vertex patches. Release the completed
             // edge validator, then its reservations, before this second walk.
             drop(edge_history);
+            // A root descriptor covers at most MAX_PATCH_ROWS. If even that
+            // population fits beside a decoded object, keep the original
+            // admission and avoid building a second index during the walk.
+            let mut isolated = None;
+            if verify_published && admission::may_exhaust_vertex_history(patches.len(), &pool) {
+                let mut control = || {
+                    cx.buffered_checkpoint()
+                        .map_err(BufferedReadError::Interrupted)?;
+                    advance(&mut work, 1, limits.max_work)
+                };
+                let directory =
+                    patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut control)?;
+                isolated =
+                    Some(directory.isolated_patches(patches.len(), cx, &pool, &mut control)?);
+                early_patches = Some(directory);
+            }
+            let mut vertex_history =
+                admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
             for (at, reference) in root.vertex_patches.iter().enumerate() {
                 let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
                 let (rows, bytes) = self
-                    .resolve_root_patch_observed(cx, at, reference, &mut observe)
+                    .resolve_root_patch_observed(cx, at, reference, &mut |event| {
+                        observe(&mut work, event)
+                    })
                     .await?;
-                vertex_history
-                    .observe_patch(cx, at, &rows, &mut observe)
-                    .await?;
+                // The canonical decoder already proved ordering, birth ordinals
+                // and contiguous lifetimes inside this patch. The disjointness
+                // proof becomes authoritative only after *every* descriptor has
+                // matched its decoded payload below.
+                if !isolated
+                    .as_ref()
+                    .is_some_and(|fences| fences.get(at) == Some(&true))
+                {
+                    vertex_history
+                        .observe_patch(cx, at, &rows, &mut |event| observe(&mut work, event))
+                        .await?;
+                }
                 let actual = PatchDescriptor {
                     extent: descriptor(reference.patch_id, &bytes)?,
                     first: rows.first().map(|row| (row.vid, row.created_at)),
@@ -988,12 +1017,14 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 advance(&mut work, 1, limits.max_work)?;
             }
         }
-        let patch_directory =
-            patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut || {
+        let patch_directory = match early_patches {
+            Some(directory) => directory,
+            None => patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut || {
                 cx.buffered_checkpoint()
                     .map_err(BufferedReadError::Interrupted)?;
                 advance(&mut work, 1, limits.max_work)
-            })?;
+            })?,
+        };
         // Publication (V6), or this open's complete legacy walk, authenticated
         // descriptor topology before these fences may exclude payloads.
         let block_directory =
@@ -1687,11 +1718,12 @@ impl<V: Vfs> BufferedPartition<V> {
     ) -> Result<Option<EdgePointWinner>, C> {
         let mut result: Option<EdgePointWinner> = None;
         let mut candidates = self.block_directory.edge_candidates(eid);
-        while let Some(at) = self.block_directory.next_edge(
-            &self.blocks,
-            &mut candidates,
-            &mut || control(PointReadEvent::Directory),
-        )? {
+        while let Some(at) =
+            self.block_directory
+                .next_edge(&self.blocks, &mut candidates, &mut || {
+                    control(PointReadEvent::Directory)
+                })?
+        {
             let descriptor = self.blocks[at];
             if self.root.blocks[at].first_seq.0 > as_of.0
                 || descriptor
@@ -1856,10 +1888,13 @@ impl<V: Vfs> BufferedPartition<V> {
             crate::tiered::edge_scan::BufferedEdgeDirection::Outgoing
         };
         let mut blocks = self.block_directory.candidates(vertex, relation, direction);
-        while let Some(at) = self.block_directory.next(&self.blocks, &mut blocks, &mut || {
-            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, self.limits.max_work)
-        })? {
+        while let Some(at) = self
+            .block_directory
+            .next(&self.blocks, &mut blocks, &mut || {
+                cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+                advance(&mut work, 1, self.limits.max_work)
+            })?
+        {
             let descriptor = self.blocks[at];
             if self.root.blocks[at].first_seq.0 > as_of.0
                 || descriptor.summary.is_none_or(|summary| {

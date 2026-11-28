@@ -13,6 +13,16 @@ const INITIAL_TREE_BYTES: usize = 4096;
 // allowance also covers internal nodes and spare slots after a tree split.
 const VERTEX_HISTORY_ENTRY_BYTES: usize = 256;
 
+/// A conservative upper bound for the ordinary map. A positive result only
+/// selects a cheaper history proof; every allocation is still admitted.
+pub(super) fn may_exhaust_vertex_history(patches: usize, pool: &MemoryPool) -> bool {
+    let rows = patches.saturating_mul(crate::vertex::MAX_PATCH_ROWS as usize);
+    rows.saturating_mul(VERTEX_HISTORY_ENTRY_BYTES)
+        > pool
+            .available()
+            .saturating_sub(OBJECT_WORKSPACE_BYTES + INITIAL_TREE_BYTES)
+}
+
 struct VertexStatement {
     patch: usize,
     row: usize,

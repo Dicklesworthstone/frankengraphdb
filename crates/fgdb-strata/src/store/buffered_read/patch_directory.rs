@@ -69,6 +69,30 @@ impl PatchDirectory {
         })
     }
 
+    /// Mark publication ordinals whose inclusive VID range intersects no other
+    /// patch. A sorted range overlaps an earlier one exactly when the greatest
+    /// earlier upper fence reaches its start. Its next neighbour has the
+    /// smallest start of all later ranges. Equal endpoints therefore overlap.
+    pub(super) fn isolated_patches(
+        &self,
+        count: usize,
+        cx: &impl BufferedReadCx,
+        pool: &MemoryPool,
+        control: &mut impl FnMut() -> Result<(), BufferedReadError>,
+    ) -> Result<super::BufferedValue<Vec<bool>>, BufferedReadError> {
+        let charge = pool.reserve(cx, count)?;
+        let mut isolated = Vec::new();
+        isolated
+            .try_reserve_exact(count)
+            .map_err(|_| MemoryError::AllocationFailed { requested: count })?;
+        if isolated.capacity() > count {
+            return Err(BufferedReadError::SizeOverflow);
+        }
+        isolated.resize(count, false);
+        mark_isolated(&self.ranges, &mut isolated, control)?;
+        Ok(super::BufferedValue::from_reserved(isolated, charge))
+    }
+
     pub(super) fn candidates(&self, vid: VId) -> Candidates {
         Candidates::new(self.ranges.len(), vid)
     }
@@ -80,6 +104,24 @@ impl PatchDirectory {
     ) -> Result<Option<usize>, E> {
         cursor.next(&self.ranges, control)
     }
+}
+
+fn mark_isolated<E>(
+    ranges: &[Range],
+    isolated: &mut [bool],
+    control: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    let mut previous_maximum = None;
+    for (at, range) in ranges.iter().enumerate() {
+        control()?;
+        isolated[range.patch] = previous_maximum.is_none_or(|last| last < range.first)
+            && ranges
+                .get(at + 1)
+                .is_none_or(|next| range.last < next.first);
+        previous_maximum =
+            Some(previous_maximum.map_or(range.last, |last: VId| last.max(range.last)));
+    }
+    Ok(())
 }
 
 // Midpoint recursion has at most usize::BITS levels, including a full usize

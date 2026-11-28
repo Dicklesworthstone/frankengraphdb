@@ -233,6 +233,92 @@ fn scan_vertex(vid: u128, created: u64, retired: Option<u64>, value: i64) -> Ver
     }
 }
 
+#[test]
+fn disjoint_vertex_patches_open_below_the_global_history_allowance() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let mut patches = Vec::new();
+        let mut source_bytes = 0;
+        // Reverse publication order exercises interval sorting. Each patch
+        // contains a two-version VID alongside independent singletons.
+        for group in (0..48u128).rev() {
+            let first = group * 256 + 1;
+            let mut rows = vec![
+                scan_vertex(first, 1, Some(2), 10),
+                scan_vertex(first, 2, None, 20),
+            ];
+            rows.extend((1..192).map(|offset| scan_vertex(first + offset, 1, None, 30)));
+            let bytes = encode_patch(&rows).unwrap();
+            source_bytes += bytes.len();
+            let version = store.put_patch(&commit, &bytes).await.unwrap();
+            patches.push(PatchRef {
+                patch_id: version.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(2),
+            });
+        }
+        let version = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(2),
+                    blocks: Vec::new(),
+                    vertex_patches: patches,
+                },
+            )
+            .await
+            .unwrap();
+        // The decoder needs 1,114,112 bytes. The 9,264 former map entries
+        // alone needed another 2,371,584, above this complete pool.
+        let pool = MemoryPool::new(3 * 1024 * 1024, 0).unwrap();
+        let limits = BufferedReadLimits {
+            max_vertex_patches: 48,
+            max_source_bytes: source_bytes,
+            max_work: 20_000,
+            ..limits()
+        };
+        let mut view = store
+            .open_buffered_root(&query, version, pool.clone(), limits)
+            .await
+            .unwrap();
+        for group in [0, 23, 47] {
+            let vid = group * 256 + 1;
+            for (cut, expected) in [
+                (1, scan_vertex(vid, 1, Some(2), 10)),
+                (2, scan_vertex(vid, 2, None, 20)),
+            ] {
+                let row = view
+                    .vertex_at(&query, VId(vid), CommitSeq(cut))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(row.as_ref(), &expected);
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        let short = BufferedReadLimits {
+            max_source_bytes: source_bytes - 1,
+            ..limits
+        };
+        assert!(matches!(
+            store
+                .open_buffered_root(&query, version, pool.clone(), short)
+                .await,
+            Err(BufferedReadError::Limit {
+                resource: "buffered source bytes",
+                ..
+            })
+        ));
+        assert_eq!(pool.used(), 0);
+    });
+}
+
 async fn vertex_scan_fixture(
     contexts: &PurposeContexts,
     dir: &std::path::Path,
