@@ -65,13 +65,7 @@ pub(super) fn parse_marker(raw: &str, requirement: &str) -> Result<fgdb_types::M
     let seq = super::symbol_ordinal(seq)
         .filter(|&seq| seq != 0)
         .ok_or_else(invalid)?;
-    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(invalid());
-    }
-    let mut oid = [0; 32];
-    for (at, byte) in oid.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hash[2 * at..2 * at + 2], 16).map_err(|_| invalid())?;
-    }
+    let oid = parse_chain_hash(hash).ok_or_else(invalid)?.0;
     Ok(fgdb_types::MarkerRef {
         commit_seq: fgdb_types::CommitSeq(seq),
         marker_oid: fgdb_types::ObjectId(oid),
@@ -84,6 +78,17 @@ fn revision_open_failure(error: fgdb::BranchRevisionOpenError) -> Failure {
         fgdb::BranchRevisionOpenError::Catalog(error) => super::execution_failure(error),
         fgdb::BranchRevisionOpenError::Unpublished { .. } => Failure::open(error),
     }
+}
+
+fn parse_chain_hash(raw: &str) -> Option<fgdb_crypto::Digest> {
+    if raw.len() != 64 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = [0; 32];
+    for (at, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&raw[2 * at..2 * at + 2], 16).ok()?;
+    }
+    Some(fgdb_crypto::Digest(bytes))
 }
 
 pub(super) async fn query_revision(
@@ -120,12 +125,14 @@ pub(super) async fn query_revision(
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum Command {
     VerifyHistory,
+    BackupHistory,
     ListCapsules,
 }
 
 impl Command {
     fn name(self) -> &'static str {
         match self {
+            Self::BackupHistory => "backup-history",
             Self::VerifyHistory => "verify-history",
             Self::ListCapsules => "list-capsules",
         }
@@ -133,7 +140,8 @@ impl Command {
 }
 
 enum Source<'a> {
-    Verify {
+    Verified {
+        backup: Option<(&'a Path, fgdb_crypto::Digest)>,
         key: &'a Path,
         passphrase: Option<&'a Path>,
     },
@@ -144,7 +152,7 @@ struct Options<'a> {
     db: &'a Path,
     source: Source<'a>,
     through: NonZeroU64,
-    expected: Option<&'a str>,
+    expected: Option<fgdb_crypto::Digest>,
 }
 
 fn parse(command: Command, args: &[String]) -> Result<Options<'_>, Failure> {
@@ -152,6 +160,7 @@ fn parse(command: Command, args: &[String]) -> Result<Options<'_>, Failure> {
     let mut db = None;
     let mut key = None;
     let mut passphrase = None;
+    let mut output = None;
     let mut through = None;
     let mut expected = None;
     let mut args = args.iter();
@@ -162,13 +171,14 @@ fn parse(command: Command, args: &[String]) -> Result<Options<'_>, Failure> {
             .ok_or_else(|| Failure::usage(format!("{flag} requires a value")))?;
         match flag.as_str() {
             "--db" if db.is_none() => db = Some(Path::new(value)),
-            "--key-file" if command == Command::VerifyHistory && key.is_none() => {
+            "--key-file" if command != Command::ListCapsules && key.is_none() => {
                 key = Some(Path::new(value))
             }
-            "--kek-passphrase-file"
-                if command == Command::VerifyHistory && passphrase.is_none() =>
-            {
+            "--kek-passphrase-file" if command != Command::ListCapsules && passphrase.is_none() => {
                 passphrase = Some(Path::new(value))
+            }
+            "--output" if command == Command::BackupHistory && output.is_none() => {
+                output = Some(Path::new(value));
             }
             "--through" if through.is_none() => {
                 if !value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -181,12 +191,9 @@ fn parse(command: Command, args: &[String]) -> Result<Options<'_>, Failure> {
                 })?);
             }
             "--expect-chain" if expected.is_none() => {
-                if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    return Err(Failure::usage(
-                        "--expect-chain requires 64 hexadecimal characters",
-                    ));
-                }
-                expected = Some(value.as_str());
+                expected = Some(parse_chain_hash(value).ok_or_else(|| {
+                    Failure::usage("--expect-chain requires 64 hexadecimal characters")
+                })?);
             }
             _ => {
                 return Err(Failure::usage(format!(
@@ -198,8 +205,18 @@ fn parse(command: Command, args: &[String]) -> Result<Options<'_>, Failure> {
     Ok(Options {
         db: db.ok_or_else(|| Failure::usage(format!("{name} requires --db")))?,
         source: match command {
-            Command::VerifyHistory => Source::Verify {
-                key: key.ok_or_else(|| Failure::usage("verify-history requires --key-file"))?,
+            Command::VerifyHistory | Command::BackupHistory => Source::Verified {
+                backup: if command == Command::BackupHistory {
+                    Some((
+                        output.ok_or_else(|| Failure::usage("backup-history requires --output"))?,
+                        expected.ok_or_else(|| {
+                            Failure::usage("backup-history requires --expect-chain")
+                        })?,
+                    ))
+                } else {
+                    None
+                },
+                key: key.ok_or_else(|| Failure::usage(format!("{name} requires --key-file")))?,
                 passphrase,
             },
             Command::ListCapsules => Source::List,
@@ -224,17 +241,35 @@ pub(super) fn run(
             let cx = contexts.commit();
             let vfs = UnixVfs::new();
             match options.source {
-                Source::Verify { key, passphrase } => {
+                Source::Verified {
+                    key,
+                    passphrase,
+                    backup,
+                } => {
                     let keys = read_keys(&contexts.query(), key, passphrase, false).await?;
-                    CommitCoordinator::verify_history_through(
-                        &cx,
-                        &vfs,
-                        options.db,
-                        &keys.capsule_keys(),
-                        options.through,
-                        fgdb::template_digest,
-                    )
-                    .await
+                    let capsule_keys = keys.capsule_keys();
+                    if let Some((destination, expected)) = backup {
+                        CommitCoordinator::backup_history_through(
+                            &cx,
+                            &vfs,
+                            options.db,
+                            destination,
+                            &capsule_keys,
+                            (options.through, expected),
+                            fgdb::template_digest,
+                        )
+                        .await
+                    } else {
+                        CommitCoordinator::verify_history_through(
+                            &cx,
+                            &vfs,
+                            options.db,
+                            &capsule_keys,
+                            options.through,
+                            fgdb::template_digest,
+                        )
+                        .await
+                    }
                 }
                 Source::List => CommitCoordinator::visit_capsule_refs_through(
                     &cx,
@@ -258,17 +293,15 @@ pub(super) fn run(
             }
             .map_err(Failure::io)
         })?;
-    let hash = hex(&hash.0);
     let seq = options.through;
-    if options
-        .expected
-        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&hash))
-    {
+    if options.expected.is_some_and(|expected| expected != hash) {
         return Err(Failure::io(format!(
             "marker chain through commit {seq} differs from --expect-chain"
         )));
     }
+    let hash = hex(&hash.0);
     let (kind, description) = match command {
+        Command::BackupHistory => ("history_backup", "backed up marker history and capsules"),
         Command::VerifyHistory => ("verified_history", "verified marker history and capsules"),
         Command::ListCapsules => ("capsule_inventory", "listed marker capsule references"),
     };
@@ -287,6 +320,25 @@ pub(super) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_requires_a_new_destination_and_exact_chain_commitment() {
+        let mut args = ["--db", "db", "--key-file", "keys", "--through", "3"]
+            .map(str::to_owned)
+            .to_vec();
+        assert!(parse(Command::BackupHistory, &args).is_err());
+        args.extend(["--output", "archive"].map(str::to_owned));
+        assert!(parse(Command::BackupHistory, &args).is_err());
+        args.extend(["--expect-chain".to_owned(), "AB".repeat(32)]);
+        assert!(
+            matches!(parse(Command::BackupHistory, &args).unwrap().source,
+            Source::Verified { backup: Some((path, hash)), .. } if path == Path::new("archive") && hash.0 == [0xab; 32])
+        );
+        assert!(parse(Command::VerifyHistory, &args).is_err());
+        assert!(parse(Command::ListCapsules, &args).is_err());
+        args.extend(["--output", "second"].map(str::to_owned));
+        assert!(parse(Command::BackupHistory, &args).is_err());
+    }
 
     #[test]
     fn require_exact_nonempty_cut_and_unambiguous_anchor() {
