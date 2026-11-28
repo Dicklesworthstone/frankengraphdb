@@ -204,6 +204,107 @@ impl Database<asupersync::fs::UnixVfs> {
         )
         .await
     }
+
+    /// Open using a mounted native Chronicle donor to replace capsules lost
+    /// from the locally committed history. The host supplies both contexts and
+    /// the donor database directory. Donor markers and roots have no authority
+    /// over this database. The donor must use compatible capsule keys.
+    ///
+    /// Authenticate the selected local checkpoint and its chain binding before
+    /// repairing anything. Scrub local redundancy first, then fetch only lost
+    /// objects, one bounded native container at a time. A storage failure,
+    /// unavailable donor object or cancellation can leave verified repairs on
+    /// disk. Retrying resumes from the actual contents. A serving handle is
+    /// returned only after replay of the entire repaired local history.
+    pub async fn open_with_capsule_donor(
+        cx: &CommitCx,
+        repl: &fgdb_types::ReplCx,
+        path: &std::path::Path,
+        keys: crate::DatabaseKeys,
+        donor: &std::path::Path,
+    ) -> Result<Self, CapsuleRecoveryError> {
+        let vfs = asupersync::fs::UnixVfs::new();
+        crate::require_database_dir(cx, &vfs, path).await?;
+        let capsule_keys = keys.capsule_keys();
+        let mut coordinator = fgdb_chronicle::CommitCoordinator::open_with_vfs(
+            cx,
+            vfs.clone(),
+            path,
+            keys.capsule_keys(),
+        )
+        .await
+        .map_err(crate::OpenError::from)?;
+        let root = crate::authenticated_root_store(cx, &vfs, path, &keys).await?;
+        let store = crate::open_block_store(cx, &vfs, path, &keys).await?;
+        crate::select_checkpoint(cx, coordinator.chain(), &store, &root, &keys, path)
+            .await?
+            .ok_or_else(|| crate::OpenError::NotADatabase {
+                path: path.to_path_buf(),
+                missing: "an authenticated published checkpoint for donor recovery",
+            })?;
+        let mut verification = Vec::new();
+        let through = coordinator
+            .chain()
+            .entries()
+            .last()
+            .map_or(fgdb_types::CommitSeq::ORIGIN, |entry| {
+                fgdb_types::CommitSeq(entry.marker.commit_seq)
+            });
+        let lost = coordinator
+            .scrub_capsules(cx, through, None, &mut verification)
+            .await
+            .map_err(crate::OpenError::from)?
+            .lost;
+        let ceiling =
+            std::num::NonZeroUsize::new(fgdb_chronicle::capsule::MAX_CAPSULE_CONTAINER_BYTES_V1)
+                .expect("native capsule framing has a nonempty header");
+        for item in lost {
+            checkpoint(cx).map_err(crate::OpenError::from)?;
+            let object_id = item.object_id;
+            let object = fgdb_chronicle::commit::donor::read_capsule(
+                repl,
+                donor,
+                &capsule_keys,
+                object_id,
+                ceiling,
+                &mut verification,
+            )
+            .await
+            .map_err(|error| CapsuleRecoveryError::Capsule {
+                object_id,
+                source: error.into(),
+            })?;
+            coordinator
+                .restore_capsule(cx, object_id, &object, &mut verification)
+                .await
+                .map_err(|source| CapsuleRecoveryError::Capsule { object_id, source })?;
+        }
+        Self::finish_capsule_recovery(cx, vfs, path, keys, coordinator, verification).await
+    }
+
+    /// When supervision fences a writer, resume from its on-disk history and
+    /// obtain lost capsules from the configured donor. A healthy owner keeps
+    /// its current generation. Cache limits and the statement clock survive
+    /// a successful reopen just as in ordinary authoritative recovery.
+    pub async fn recover_with_capsule_donor(
+        self,
+        cx: &CommitCx,
+        repl: &fgdb_types::ReplCx,
+        donor: &std::path::Path,
+    ) -> Result<Self, CapsuleRecoveryError> {
+        if matches!(self.state(), crate::DatabaseState::Healthy { .. }) {
+            return Ok(self);
+        }
+        let path = self.path().to_owned();
+        let keys = self.keys.clone();
+        let read_caches = std::sync::Arc::clone(&self.snapshot.read_caches);
+        let statement_clock = self.statement_clock.clone();
+        drop(self);
+        let mut database = Self::open_with_capsule_donor(cx, repl, &path, keys, donor).await?;
+        std::sync::Arc::make_mut(&mut database.snapshot).read_caches = read_caches;
+        database.statement_clock = statement_clock;
+        Ok(database)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -247,6 +348,17 @@ impl<V: Vfs + Clone> Database<V> {
                 .await
                 .map_err(|source| CapsuleRecoveryError::Capsule { object_id, source })?;
         }
+        Self::finish_capsule_recovery(cx, vfs, path, keys, coordinator, verification).await
+    }
+
+    async fn finish_capsule_recovery(
+        cx: &CommitCx,
+        vfs: V,
+        path: &std::path::Path,
+        keys: crate::DatabaseKeys,
+        coordinator: fgdb_chronicle::CommitCoordinator<V>,
+        mut verification: Vec<crate::CryptoVerificationEvent>,
+    ) -> Result<Self, CapsuleRecoveryError> {
         // Move the lease-owning coordinator into the authoritative binder.
         // Checkpoint selection could hide an unrepaired retained capsule;
         // force the same full fold as recover_authoritatively. Dropping the
