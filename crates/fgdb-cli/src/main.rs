@@ -58,7 +58,7 @@ Usage: fgdb [--robot] <command>
   adopt --db <dir>
   compact --db <dir> --key-file <file>
   seal --db <dir> --key-file <file> --seal-relation <u64> [--retain-from <u64>] [seal limits]
-  scrub --db <dir> --key-file <file> [--rebuild-derived]
+  scrub --db <dir> --key-file <file> [--rebuild-derived | --restore-capsule <OID> <file> ...]
   verify-history --db <dir> --key-file <file> --through <positive-seq> [--expect-chain <64-hex>]
     Verify marker ancestry and every referenced capsule through this commit; later writes and derived files are outside the cut.
   write --db <dir> --key-file <file> [bindings] [--if-current <seq>] [--if-head <revision>] [--param name=value]... [--rows json:<objects>] <gql>
@@ -109,6 +109,10 @@ create --persist-bindings also accepts NAME without an ID. Other commands retain
 NAME=ID declarations local to their invocation. Names containing '=' require an
 explicit NAME=ID binding. Automatic registration requires complete retained
 history; it refuses if that history cannot be authenticated.
+scrub --restore-capsule accepts a native backup container and its committed 64-hex
+object ID. Repeat for up to 64 objects and 64 MiB of serialized input in total.
+Use a backup made with the same database keys. Each backup_verified scrub record
+identifies a supplied object confirmed during authoritative reopen, including on retry.
 scrub --rebuild-derived reconstructs graph data from the complete authenticated
 commit history before verifying the recovered generation. Root metadata and all
 retained capsules must still authenticate. No commit is appended. Damaged packed
@@ -903,6 +907,7 @@ struct Options {
     rollback: bool,
     stream: bool,
     rebuild_derived: bool,
+    restore_capsules: scrub::restore::Inputs,
     seal: seal::SealOptions,
     buffered: buffered::BufferedOptions,
     spill: spill::SpillOptions,
@@ -1112,6 +1117,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut rollback = false;
     let mut stream = false;
     let mut rebuild_derived = false;
+    let mut restore_capsules = scrub::restore::Inputs::default();
     let mut seal = seal::SealOptions::default();
     let mut overwrite = false;
     let mut buffered = buffered::BufferedOptions::default();
@@ -1139,6 +1145,19 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 return Err(Failure::usage("--strata-ecs is allowed once"));
             }
             strata_ecs = true;
+            continue;
+        }
+        if arg == "--restore-capsule" {
+            if command != "scrub" {
+                return Err(Failure::usage("--restore-capsule is only valid on scrub"));
+            }
+            let oid = iter
+                .next()
+                .ok_or_else(|| Failure::usage("--restore-capsule requires an object ID"))?;
+            let path = iter
+                .next()
+                .ok_or_else(|| Failure::usage("--restore-capsule requires a file"))?;
+            restore_capsules.add(oid, path)?;
             continue;
         }
         if arg == "--rebuild-derived" {
@@ -1583,6 +1602,11 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
             ));
         }
     }
+    if rebuild_derived && !restore_capsules.is_empty() {
+        return Err(Failure::usage(
+            "--rebuild-derived and --restore-capsule are separate repair operations",
+        ));
+    }
     Ok(Options {
         db: db.ok_or_else(|| Failure::usage("--db required"))?,
         key: key.ok_or_else(|| Failure::usage("--key-file required"))?,
@@ -1629,6 +1653,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         rollback,
         stream,
         rebuild_derived,
+        restore_capsules,
         seal,
         buffered,
         spill,
@@ -2671,12 +2696,14 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     return outcome;
                 }
                 let mut db = if command == "create" {
-                    Database::create(&contexts.commit(), &options.db, keys).await
+                    Database::create(&contexts.commit(), &options.db, keys).await.map_err(open_failure)?
+                } else if !options.restore_capsules.is_empty() {
+                    options.restore_capsules.open(&contexts.commit(), &options.db, keys).await?
                 } else if options.rebuild_derived {
-                    Database::open_repairing_derived(&contexts.commit(), &options.db, keys).await
+                    Database::open_repairing_derived(&contexts.commit(), &options.db, keys).await.map_err(open_failure)?
                 } else {
-                    Database::open(&contexts.commit(), &options.db, keys).await
-                }.map_err(open_failure)?;
+                    Database::open(&contexts.commit(), &options.db, keys).await.map_err(open_failure)?
+                };
                 symbols::check_frontier(&options, db.frontier().map_err(Failure::io)?)?;
                 if let Some(guard) = &options.if_head {
                     guard.check(&db)?;
@@ -2710,7 +2737,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     return seal::run(&mut db, &contexts, &options.seal, robot, out).await;
                 }
                 if command == "scrub" {
-                    return scrub::run(&mut db, &contexts.commit(), robot, out).await;
+                    return scrub::run(&mut db, &contexts.commit(), &options.restore_capsules, robot, out).await;
                 }
                 if let Some(prepared) = import {
                     return import::run(&mut db, &contexts, prepared, robot, out).await;

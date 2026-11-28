@@ -4,15 +4,19 @@
 //! patches and publication metadata. Strata objects carry no local redundancy,
 //! so an ordinary sweep reports damaged data. `--rebuild-derived` explicitly
 //! reopens through authenticated full-history data reconstruction before this
-//! sweep, including when ordinary checkpoint admission would refuse.
+//! sweep, including when ordinary checkpoint admission would refuse. With
+//! `--restore-capsule`, authenticated native backup capsules repair objects
+//! selected by the existing marker history before the database reopens.
 //!
 //! Output: one `scrub` record per damaged object, then either a `scrubbed`
 //! result (nothing lost, exit 0) or, like fsck, an io-class error after the
-//! records when anything is lost (exit 5). Lost objects are never overwritten.
+//! records when anything is still lost (exit 5).
 //!
 //! Opening authenticates the admitted root closure. Checkpoint open can defer
 //! capsule history, which scrub verifies in full. The loss records also cover
 //! damage to the admitted generation first discovered during this sweep.
+pub(super) mod restore;
+
 use super::{Failure, emit, execution_failure, hex};
 use asupersync::fs::Vfs;
 use fgdb::{Database, LostCapsule, ScrubSummary};
@@ -23,12 +27,18 @@ use std::io::Write;
 pub(super) async fn run<V: Vfs + Clone>(
     db: &mut Database<V>,
     cx: &CommitCx,
+    backups: &restore::Inputs,
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     // Scrub fences the handle when it discovers any lost object. Capture its
     // admitted sequence first so that the fence cannot suppress loss evidence.
     let seq = db.frontier().map_err(Failure::io)?.0;
+    // Returning from offline recovery proves every supplied object durable and
+    // replayable, including copies already present on an idempotent retry.
+    for id in backups.object_ids() {
+        record(out, robot, "capsule", id, "backup_verified", None)?;
+    }
     let summary = db.scrub(cx).await.map_err(execution_failure)?;
     report(&summary, seq, robot, out)
 }
