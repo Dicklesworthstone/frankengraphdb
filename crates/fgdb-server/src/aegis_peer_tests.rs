@@ -12,11 +12,15 @@ struct Member {
 
 #[test]
 fn lagging_member_installs_the_compacted_cut_and_recovers_its_suffix() {
+    use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile, encode_container};
     use fgdb_chronicle::seed::{ObjectPublication, SeedAnchor, SeedLimits, SeedObjectSpec};
     use fgdb_chronicle::store::RootPublicationEvidence;
     use fgdb_repl::SnapshotPublication;
+    use fgdb_repl::driver::directory::{CapsuleDirectorySource, CapsuleSourceError};
     use fgdb_types::ObjectId;
+    use fgdb_types::PurposeContexts;
     use std::collections::BTreeSet;
+    use std::num::NonZeroUsize;
 
     // Capture the one installation image for recovery. The test exercises
     // real object verification and consensus; this publisher models storage.
@@ -57,6 +61,8 @@ fn lagging_member_installs_the_compacted_cut_and_recovers_its_suffix() {
     }
 
     let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let cx = PurposeContexts::narrow_runtime_root(&root).repl();
     runtime.block_on(async {
         let voters = [MemberId(1), MemberId(2), MemberId(3)];
         let config = Configuration::stable(Domain([1; 32]), [2; 32], voters, []).unwrap();
@@ -89,6 +95,38 @@ fn lagging_member_installs_the_compacted_cut_and_recovers_its_suffix() {
         let state = leader.publisher.latest().unwrap();
         assert_eq!(state.commit_index(), 2);
         let objects = [1, 2, 3, 4].map(bonded::Fixture::new);
+        // This closure also owns one ordinary native Chronicle capsule on a
+        // mounted donor. Its file is the only source used for this object.
+        let keys = CapsuleKeys::new(
+            bonded::KEY,
+            bonded::namespace(),
+            bonded::DEK,
+            bonded::KIND,
+            CapsuleProfile::balanced(),
+        );
+        let payload = b"replicated commit capsule";
+        let mut sealed = keys.seal(payload).unwrap();
+        let capsule = SeedObjectSpec {
+            object_id: sealed.object_id,
+            object_kind: keys.object_kind(),
+            compressed_len: payload.len() as u64,
+        };
+        let directory =
+            std::env::temp_dir().join(format!("fgdb-aegis-donor-{}", std::process::id()));
+        let capsule_dir = directory.join(fgdb_chronicle::commit::CAPSULE_DIR);
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        let name: String = capsule
+            .object_id
+            .0
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let path = capsule_dir.join(format!("{name}.capsule"));
+        // One bad source symbol is recoverable using the actual erasure decoder.
+        *sealed.symbols[0].last_mut().unwrap() ^= 1;
+        let container = encode_container(&sealed);
+        std::fs::write(&path, &container).unwrap();
+
         let anchor = SeedAnchor {
             namespace: bonded::namespace(),
             consensus_domain: config.domain().0,
@@ -138,11 +176,14 @@ fn lagging_member_installs_the_compacted_cut_and_recovers_its_suffix() {
         let transfer = offered.consensus.snapshot_transfers.pop().unwrap();
         let plan = SeedPlan::from_authenticated_inventory(
             anchor.clone(),
-            objects.iter().map(|o| SeedObjectSpec {
-                object_id: o.encoding.object_id(),
-                object_kind: bonded::KIND,
-                compressed_len: o.plaintext.len() as u64,
-            }),
+            objects
+                .iter()
+                .map(|o| SeedObjectSpec {
+                    object_id: o.encoding.object_id(),
+                    object_kind: bonded::KIND,
+                    compressed_len: o.plaintext.len() as u64,
+                })
+                .chain([capsule]),
             SeedLimits::default(),
         )
         .unwrap();
@@ -163,6 +204,34 @@ fn lagging_member_installs_the_compacted_cut_and_recovers_its_suffix() {
             download.stage(object.verified()).unwrap();
             download.publish_next(&mut store).await.unwrap();
         }
+        let mut verification = Vec::new();
+        let short = NonZeroUsize::new(container.len() - 1).unwrap();
+        let mut source =
+            CapsuleDirectorySource::new(&cx, &directory, &keys, short, &mut verification);
+        assert!(matches!(
+            download.recover_next(&mut source).await,
+            Err(SeedDriveError::Source(CapsuleSourceError::Capsule(_)))
+        ));
+        assert_eq!(download.published_count(), objects.len());
+
+        let mut source = CapsuleDirectorySource::new(
+            &cx,
+            &directory,
+            &keys,
+            NonZeroUsize::new(container.len()).unwrap(),
+            &mut verification,
+        );
+        assert_eq!(
+            download.recover_next(&mut source).await.unwrap(),
+            Some(capsule.object_id)
+        );
+        download.publish_next(&mut store).await.unwrap();
+        assert_eq!(download.recover_next(&mut source).await.unwrap(), None);
+        assert_eq!(std::fs::read(&path).unwrap(), container);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(capsule_dir).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+
         let ack = lagging
             .coordinator
             .install_download(download, &mut store)
