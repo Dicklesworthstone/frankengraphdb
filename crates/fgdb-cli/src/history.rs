@@ -1,5 +1,7 @@
 //! Verify a Chronicle recovery cut without opening a writer or repairing storage.
 
+pub(super) mod head;
+
 use super::{Failure, emit, hex, read_keys};
 use asupersync::Budget;
 use asupersync::fs::UnixVfs;
@@ -76,6 +78,14 @@ pub(super) fn parse_marker(raw: &str, requirement: &str) -> Result<fgdb_types::M
     })
 }
 
+fn revision_open_failure(error: fgdb::BranchRevisionOpenError) -> Failure {
+    match error {
+        fgdb::BranchRevisionOpenError::Open(error) => super::open_failure(error),
+        fgdb::BranchRevisionOpenError::Catalog(error) => super::execution_failure(error),
+        fgdb::BranchRevisionOpenError::Unpublished { .. } => Failure::open(error),
+    }
+}
+
 pub(super) async fn query_revision(
     contexts: &PurposeContexts,
     options: &mut super::Options,
@@ -87,11 +97,7 @@ pub(super) async fn query_revision(
     let revision =
         fgdb::Database::open_branch_revision(&contexts.commit(), &options.db, keys, marker)
             .await
-            .map_err(|error| match error {
-                fgdb::BranchRevisionOpenError::Open(error) => super::open_failure(error),
-                fgdb::BranchRevisionOpenError::Catalog(error) => super::execution_failure(error),
-                fgdb::BranchRevisionOpenError::Unpublished { .. } => Failure::open(error),
-            })?
+            .map_err(revision_open_failure)?
             .ok_or_else(|| {
                 Failure::coded(
                     super::refusal::Code::NotFound,

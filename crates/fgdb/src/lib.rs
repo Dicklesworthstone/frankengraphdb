@@ -2440,6 +2440,16 @@ pub struct BranchRevision {
     catalog: fgdb_delta_types::catalog::SymbolCatalog,
 }
 
+/// The branch write precondition a read-only observer can obtain from the
+/// current authenticated publication. An untracked nonempty frontier needs
+/// an ordinary write to establish its next recorded head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublishedBranchHead {
+    Empty,
+    Recorded(fgdb_types::MarkerRef),
+    Unrecorded { frontier: CommitSeq },
+}
+
 /// A lease-free revision open could not authenticate or serve the selected publication.
 #[derive(Debug)]
 pub enum BranchRevisionOpenError {
@@ -3334,32 +3344,33 @@ impl<V: Vfs + Clone> Database<V> {
         path: &Path,
         keys: &DatabaseKeys,
         root_limits: Option<&fgdb_strata::store::RootReadLimits>,
-        branch_marker: Option<fgdb_types::MarkerRef>,
-    ) -> Result<(ReadGeneration<V>, bool), OpenError> {
+        branch_sequence: Option<CommitSeq>,
+    ) -> Result<(ReadGeneration<V>, Option<fgdb_types::MarkerRef>), OpenError> {
         let Some(store) = open_block_store_for_read(cx, vfs, path, keys).await? else {
-            return Ok((ReadGeneration::Unselected, false));
+            return Ok((ReadGeneration::Unselected, None));
         };
         let probe = RootStore::with_vfs(vfs.clone(), path);
         let Some((claimed, resolved)) =
             read_slot_with_source_limits(cx, &store, &probe, keys, path, root_limits).await?
         else {
-            return Ok((ReadGeneration::Unselected, false));
+            return Ok((ReadGeneration::Unselected, None));
         };
         let requested = resolved
             .first()
             .map_or(CommitSeq::ORIGIN, |(_, root)| root.published_at);
-        let (scan, matched) = match branch_marker {
-            Some(marker) => {
-                CommitCoordinator::scan_committed_branch_prefix(
-                    cx, vfs, path, requested, GRAPH, BRANCH, marker,
-                )
-                .await?
-            }
-            None => (
-                CommitCoordinator::scan_committed_prefix(cx, vfs, path, requested).await?,
-                false,
-            ),
-        };
+        // Ordinary current reads select the checkpoint's own sequence, so a
+        // metadata-only observer can learn its exact branch write basis in
+        // this same scan. Historical revision opens request a separate cut.
+        let (scan, recorded) = CommitCoordinator::scan_committed_branch_at(
+            cx,
+            vfs,
+            path,
+            requested,
+            GRAPH,
+            BRANCH,
+            branch_sequence.unwrap_or(requested),
+        )
+        .await?;
         let checkpoint = checkpoint_from_manifest_commitment(
             |at| scan.checkpoint_commitment(at),
             claimed,
@@ -3378,7 +3389,7 @@ impl<V: Vfs + Clone> Database<V> {
         } else {
             ReadGeneration::Lagging(published)
         };
-        Ok((generation, matched))
+        Ok((generation, recorded))
     }
 
     /// Read a selected published root into a read view: the same verified

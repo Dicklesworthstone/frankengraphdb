@@ -168,8 +168,8 @@ impl ScanCollector for MarkerChain {
 
 struct PrefixScan {
     prefix: MarkerPrefix,
-    branch_probe: Option<(GraphId, BranchId, MarkerRef)>,
-    matched_branch: bool,
+    branch_probe: Option<(GraphId, BranchId, CommitSeq)>,
+    recorded_branch: Option<MarkerRef>,
     requested: CommitSeq,
     commitment: Option<Digest>,
 }
@@ -179,7 +179,7 @@ impl PrefixScan {
         Self {
             prefix: MarkerPrefix::default(),
             branch_probe: None,
-            matched_branch: false,
+            recorded_branch: None,
             requested,
             commitment: (requested == CommitSeq::ORIGIN).then_some(CHAIN_ORIGIN),
         }
@@ -212,15 +212,19 @@ impl ScanCollector for PrefixScan {
         // A marker can update several heads or only the global stream. Its
         // global identity alone does not establish coordinate membership.
         let matched = self.branch_probe.is_some_and(|(graph, branch, at)| {
-            at.commit_seq.0 == marker.commit_seq
-                && at.marker_oid.0 == stored_hash.0
+            at.0 == marker.commit_seq
                 && marker
                     .head_updates
                     .binary_search_by_key(&(graph, branch), |update| (update.graph, update.branch))
                     .is_ok()
         });
         self.prefix.recover(marker, stored_hash)?;
-        self.matched_branch |= matched;
+        if matched {
+            self.recorded_branch = Some(MarkerRef {
+                commit_seq: self.prefix.frontier(),
+                marker_oid: ObjectId(self.prefix.chain_value().0),
+            });
+        }
         if self.prefix.frontier() == self.requested {
             self.commitment = Some(self.prefix.chain_value());
         }
@@ -652,11 +656,36 @@ impl<V: Vfs> CommitCoordinator<V> {
         branch: BranchId,
         at: MarkerRef,
     ) -> Result<(CommitScanSummary, bool), CommitError> {
+        Self::scan_committed_branch_at(
+            cx,
+            vfs,
+            database_dir,
+            checkpoint,
+            graph,
+            branch,
+            at.commit_seq,
+        )
+        .await
+        .map(|(scan, marker)| (scan, marker == Some(at)))
+    }
+
+    /// Resolve the recorded coordinate update at one sequence while validating
+    /// the checkpoint against the same captured log. A global-only marker or
+    /// an unrelated coordinate returns no revision, even if an older head exists.
+    pub async fn scan_committed_branch_at(
+        cx: &CommitCx,
+        vfs: &V,
+        database_dir: impl AsRef<Path>,
+        checkpoint: CommitSeq,
+        graph: GraphId,
+        branch: BranchId,
+        sequence: CommitSeq,
+    ) -> Result<(CommitScanSummary, Option<MarkerRef>), CommitError> {
         let mut scan = PrefixScan::new(checkpoint);
-        scan.branch_probe = Some((graph, branch, at));
+        scan.branch_probe = Some((graph, branch, sequence));
         Self::scan_chain_into(cx, vfs, database_dir.as_ref(), false, &mut scan).await?;
-        let matched = scan.matched_branch;
-        Ok((scan.finish(), matched))
+        let marker = scan.recorded_branch;
+        Ok((scan.finish(), marker))
     }
 
     /// Install the steps-2–3 validator every subsequent commit is judged by.

@@ -2532,6 +2532,65 @@ fn buffered_revision_keeps_one_cut_for_stream_sort_set_and_aggregate() {
 }
 
 #[test]
+fn published_branch_head_is_copyable_while_writer_owns_the_store() {
+    let fixture = Fixture::new("discover-branch-head");
+    let human_head = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+            .current_dir(&fixture.dir)
+            .args(["branch-head", "--db", "db", "--key-file", "keys"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end()
+            .to_owned()
+    };
+    succeeded(&fixture.robot("create", &[]), "created");
+    let empty = fixture.discovered("branch-head", &[]);
+    assert_eq!(succeeded(&empty, "branch_head"), 0);
+    assert!(!terminal(&empty).contains("chain_hash"));
+    assert_eq!(human_head(), "empty");
+    let statement = "CREATE (:Person {id: 8})";
+    let guarded = |head: &str| fixture.robot("write", &["--if-head", head, statement]);
+    assert_eq!(succeeded(&guarded(&human_head()), "written"), 1);
+    let expected = verified_head(&fixture, 1);
+    let runtime = fgdb::runtime_builder().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let cx = PurposeContexts::narrow_runtime_root(&root).commit();
+    let writer = runtime
+        .block_on(Database::open(&cx, fixture.db(), keys()))
+        .unwrap();
+    let before = directory_bytes(&fixture.db());
+    assert_eq!(human_head(), expected);
+    let result = fixture.discovered("branch-head", &[]);
+    assert_eq!(succeeded(&result, "branch_head"), 1);
+    assert!(terminal(&result).contains(expected.split_once('@').unwrap().1));
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    drop(writer);
+    assert_eq!(succeeded(&guarded(&expected), "written"), 2);
+    refused(&guarded(&expected), 3, "query");
+    let current = verified_head(&fixture, 2);
+    // Head discovery authenticates the journal and selected manifest, so it can
+    // report the write basis while a missing source capsule awaits restoration.
+    let capsule = std::fs::read_dir(fixture.db().join("capsules"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "capsule"))
+        .unwrap();
+    std::fs::rename(&capsule, fixture.dir.join("saved.capsule")).unwrap();
+    let damaged = directory_bytes(&fixture.db());
+    assert_eq!(human_head(), current);
+    assert!(
+        !fixture
+            .discovered("verify-history", &["--through", "2"])
+            .status
+            .success()
+    );
+    assert_eq!(directory_bytes(&fixture.db()), damaged);
+}
+
+#[test]
 fn local_writes_and_transactions_check_the_exact_verified_marker() {
     let fixture = Fixture::new("branch-head");
     assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);

@@ -49,6 +49,43 @@ impl EmbeddedReadView {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Discover the current write precondition from the published manifest
+    /// and verified marker chain. This metadata-only open takes no writer
+    /// lease, touches no graph or capsule payload, and does not repair a
+    /// lagging or missing publication. A legacy global-only tail is distinct
+    /// from an empty database and cannot authorize an `empty` write guard.
+    pub async fn open_current_branch_head_with_vfs(
+        cx: &fgdb_types::CommitCx,
+        vfs: V,
+        path: impl AsRef<std::path::Path>,
+        keys: crate::DatabaseKeys,
+    ) -> Result<crate::PublishedBranchHead, crate::BranchRevisionOpenError> {
+        use crate::{BranchRevisionOpenError as Error, PublishedBranchHead, ReadGeneration};
+        let path = path.as_ref();
+        crate::require_database_dir(cx, &vfs, path)
+            .await
+            .map_err(Error::Open)?;
+        let (generation, recorded) =
+            Self::read_current_generation_inner(cx, &vfs, path, &keys, None, None)
+                .await
+                .map_err(Error::Open)?;
+        match generation {
+            ReadGeneration::Unselected => Err(Error::Unpublished { published: None }),
+            ReadGeneration::Lagging(root) => Err(Error::Unpublished {
+                published: Some(root.published_at),
+            }),
+            ReadGeneration::Current(root) => Ok(match recorded {
+                Some(marker) => PublishedBranchHead::Recorded(marker),
+                None if root.published_at == fgdb_types::CommitSeq::ORIGIN => {
+                    PublishedBranchHead::Empty
+                }
+                None => PublishedBranchHead::Unrecorded {
+                    frontier: root.published_at,
+                },
+            }),
+        }
+    }
+
     /// Open a retained revision from an immutable published generation while
     /// another handle may own the writer. This path never takes a lease or
     /// repairs the database. It binds the graph root and the exact recorded
@@ -66,15 +103,15 @@ impl<V: Vfs + Clone> Database<V> {
         crate::require_database_dir(cx, &vfs, path)
             .await
             .map_err(Error::Open)?;
-        let (generation, matched) =
-            Self::read_current_generation_inner(cx, &vfs, path, &keys, None, Some(marker))
+        let (generation, recorded) =
+            Self::read_current_generation_inner(cx, &vfs, path, &keys, None, Some(marker.commit_seq))
                 .await
                 .map_err(Error::Open)?;
         let published = match generation {
             ReadGeneration::Current(root) | ReadGeneration::Lagging(root) => root,
             ReadGeneration::Unselected => return Err(Error::Unpublished { published: None }),
         };
-        if !matched {
+        if recorded != Some(marker) {
             return Ok(None);
         }
         if published.published_at < marker.commit_seq {
@@ -213,6 +250,17 @@ impl<V: Vfs + Clone> Database<V> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Database<asupersync::fs::UnixVfs> {
+    /// Discover the exact published write basis while another process can
+    /// own the writer. See [`Self::open_current_branch_head_with_vfs`].
+    pub async fn open_current_branch_head(
+        cx: &fgdb_types::CommitCx,
+        path: impl AsRef<std::path::Path>,
+        keys: crate::DatabaseKeys,
+    ) -> Result<crate::PublishedBranchHead, crate::BranchRevisionOpenError> {
+        Self::open_current_branch_head_with_vfs(cx, asupersync::fs::UnixVfs::new(), path, keys)
+            .await
+    }
+
     /// Open the exact recorded branch revision without acquiring the writer.
     /// See [`Self::open_branch_revision_with_vfs`] for selection and errors.
     pub async fn open_branch_revision(
@@ -362,6 +410,10 @@ mod head_tests {
                 .await
                 .unwrap();
             assert_eq!(db.branch_head().unwrap(), None);
+            assert_eq!(
+                Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys()).await.unwrap(),
+                crate::PublishedBranchHead::Empty,
+            );
             let batch = |id| {
                 let mut batch = WriteBatch::new(RelationId(1));
                 batch.create_vertex(VId(id), vec![], vec![]);
@@ -370,6 +422,10 @@ mod head_tests {
             db.write_if_branch_head(&cx, None, batch(1)).await.unwrap();
             let first = db.branch_head().unwrap().unwrap();
             assert_eq!(first.commit_seq, CommitSeq(1));
+            assert_eq!(
+                Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys()).await.unwrap(),
+                crate::PublishedBranchHead::Recorded(first),
+            );
             drop(db);
             let mut reopened = Database::open_with_vfs(&cx, vfs, &dir, keys())
                 .await
@@ -461,10 +517,14 @@ mod head_tests {
                     &cx, vfs.clone(), &dir, keys(), old,
                 ).await.unwrap().is_none());
                 drop(db);
-                let mut reopened = Database::open_with_vfs(&cx, vfs, &dir, keys())
+                let mut reopened = Database::open_with_vfs(&cx, vfs.clone(), &dir, keys())
                     .await
                     .unwrap();
                 assert_eq!(reopened.branch_head().unwrap(), None);
+                assert_eq!(
+                    Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys()).await.unwrap(),
+                    crate::PublishedBranchHead::Unrecorded { frontier: old.commit_seq },
+                );
                 assert!(
                     reopened
                         .vertex_at(VId(1), old.commit_seq)
@@ -520,6 +580,10 @@ mod head_tests {
                 })
                 .await
                 .unwrap();
+            assert!(matches!(
+                Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys()).await,
+                Err(crate::BranchRevisionOpenError::Unpublished { published: Some(at) }) if at == published.commit_seq
+            ));
             let read =
                 Database::open_branch_revision_with_vfs(&cx, vfs.clone(), &dir, keys(), pending)
                     .await;
