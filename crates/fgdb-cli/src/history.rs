@@ -20,24 +20,10 @@ impl BranchGuard {
         if raw == "empty" {
             return Ok(Self::Empty);
         }
-        let invalid = || {
-            Failure::usage("--if-head requires empty or <positive seq>@<64 hexadecimal digits>")
-        };
-        let (seq, hash) = raw.split_once('@').ok_or_else(invalid)?;
-        let seq = super::symbol_ordinal(seq)
-            .filter(|&seq| seq != 0)
-            .ok_or_else(invalid)?;
-        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(invalid());
-        }
-        let mut oid = [0; 32];
-        for (at, byte) in oid.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&hash[2 * at..2 * at + 2], 16).map_err(|_| invalid())?;
-        }
-        Ok(Self::At(fgdb_types::MarkerRef {
-            commit_seq: fgdb_types::CommitSeq(seq),
-            marker_oid: fgdb_types::ObjectId(oid),
-        }))
+        Ok(Self::At(parse_marker(
+            raw,
+            "--if-head requires empty or <positive seq>@<64 hexadecimal digits>",
+        )?))
     }
 
     pub(super) fn check<V: asupersync::fs::Vfs + Clone>(
@@ -69,6 +55,60 @@ impl BranchGuard {
             }
         })
     }
+}
+
+pub(super) fn parse_marker(raw: &str, requirement: &str) -> Result<fgdb_types::MarkerRef, Failure> {
+    let invalid = || Failure::usage(requirement);
+    let (seq, hash) = raw.split_once('@').ok_or_else(invalid)?;
+    let seq = super::symbol_ordinal(seq)
+        .filter(|&seq| seq != 0)
+        .ok_or_else(invalid)?;
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let mut oid = [0; 32];
+    for (at, byte) in oid.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hash[2 * at..2 * at + 2], 16).map_err(|_| invalid())?;
+    }
+    Ok(fgdb_types::MarkerRef {
+        commit_seq: fgdb_types::CommitSeq(seq),
+        marker_oid: fgdb_types::ObjectId(oid),
+    })
+}
+
+pub(super) async fn query_revision(
+    contexts: &PurposeContexts,
+    options: &mut super::Options,
+    keys: fgdb::DatabaseKeys,
+    marker: fgdb_types::MarkerRef,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let revision =
+        fgdb::Database::open_branch_revision(&contexts.commit(), &options.db, keys, marker)
+            .await
+            .map_err(|error| match error {
+                fgdb::BranchRevisionOpenError::Open(error) => super::open_failure(error),
+                fgdb::BranchRevisionOpenError::Catalog(error) => super::execution_failure(error),
+                fgdb::BranchRevisionOpenError::Unpublished { .. } => Failure::open(error),
+            })?
+            .ok_or_else(|| {
+                Failure::coded(
+                    super::refusal::Code::NotFound,
+                    "unknown recorded branch revision",
+                )
+            })?;
+    super::symbols::merge(options, revision.symbol_catalog())?;
+    let result = revision
+        .query_with_resolver(
+            &contexts.query(),
+            &options.text,
+            &options.params,
+            &*options,
+            options.budget.policy(),
+        )
+        .map_err(|error| super::read_failure(options, error))?;
+    super::render(result, marker.commit_seq.0, "rows", robot, out)
 }
 
 struct Options<'a> {

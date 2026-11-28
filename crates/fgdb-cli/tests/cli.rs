@@ -2376,6 +2376,76 @@ fn verified_head(fixture: &Fixture, seq: u64) -> String {
 }
 
 #[test]
+fn revision_read_opens_beside_writer_and_reuses_the_historical_catalog() {
+    let fixture = Fixture::new("branch-read");
+    assert_eq!(
+        succeeded(&fixture.robot("create", &["--persist-bindings"]), "created"),
+        1
+    );
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &["CREATE (:Person {id:10})"]),
+            "written"
+        ),
+        2
+    );
+    let at = verified_head(&fixture, 2);
+    assert_eq!(
+        succeeded(&fixture.discovered("schema", &["--label", "Later"]), "rows"),
+        3
+    );
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &["CREATE (:Person {id:20})"]),
+            "written"
+        ),
+        4
+    );
+    let current = verified_head(&fixture, 4);
+    let query = "MATCH (n:Person) RETURN n.id ORDER BY n.id";
+
+    // Keep the real OS writer lock across all reader processes.
+    let runtime = fgdb::runtime_builder().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let cx = PurposeContexts::narrow_runtime_root(&root).commit();
+    let writer = runtime
+        .block_on(Database::open(&cx, fixture.db(), keys()))
+        .unwrap();
+    let before = directory_bytes(&fixture.db());
+    let read =
+        |marker: &str, text: &str| fixture.discovered("query", &["--at-revision", marker, text]);
+    let old_rows = read(&at, query);
+    assert_eq!(succeeded(&old_rows, "rows"), 2);
+    assert_eq!(rows(&old_rows).len(), 1);
+    assert!(rows(&old_rows)[0].contains(r#""value":"10""#));
+    let latest = read(&current, query);
+    assert_eq!(succeeded(&latest, "rows"), 4);
+    assert_eq!(rows(&latest).len(), 2);
+    refused(&read(&at, "MATCH (n:Later) RETURN n"), 3, "query");
+    assert_eq!(
+        succeeded(&read(&current, "MATCH (n:Later) RETURN n"), "rows"),
+        4
+    );
+    let (_, wrong_digest) = current.split_once('@').unwrap();
+    let forged = read(&format!("2@{wrong_digest}"), query);
+    refused(&forged, 3, "query");
+    assert!(terminal(&forged).contains(r#""code":"not_found""#));
+    refused(&read("empty", query), 2, "usage");
+    refused(
+        &read(&at, "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 4 RETURN n"),
+        3,
+        "query",
+    );
+    refused(
+        &fixture.discovered("query", &["--at-revision", &at, "--stream", query]),
+        2,
+        "usage",
+    );
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    drop(writer);
+}
+
+#[test]
 fn local_writes_and_transactions_check_the_exact_verified_marker() {
     let fixture = Fixture::new("branch-head");
     assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
