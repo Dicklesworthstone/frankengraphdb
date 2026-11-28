@@ -661,6 +661,10 @@ pub struct Output<C> {
     /// Notification of the atomically published application/Raft snapshot cut.
     /// Compaction alone does not produce an application installation event.
     pub installed_snapshot: Option<SnapshotCut>,
+    /// A verified local snapshot through at least this index would make room
+    /// for the outstanding append. This is a capacity hint, never a verified
+    /// snapshot, an applied/visible cut, or permission to drop any entries.
+    pub requested_compaction_through: Option<u64>,
     /// A granted vote, campaign, or non-stale leader append resets the timer.
     pub reset_election_timer: bool,
     pub role: Role,
@@ -852,6 +856,7 @@ impl<C: Clone + Eq> Raft<C> {
             snapshot_transfers: Vec::new(),
             cancelled_snapshot_transfers: Vec::new(),
             installed_snapshot: None,
+            requested_compaction_through: None,
             reset_election_timer: false,
             role: self.role,
             leader: self.leader,
@@ -1024,7 +1029,7 @@ impl<C: Clone + Eq> Raft<C> {
                         if (*prev_index == 0) != (*prev_term == 0) || prev_term > term {
                             return Err(Error::InvalidMessage);
                         }
-                        let last = prev_index
+                        prev_index
                             .checked_add(entries.len() as u64)
                             .filter(|last| *last < u64::MAX)
                             .ok_or(Error::InvalidMessage)?;
@@ -1039,9 +1044,6 @@ impl<C: Clone + Eq> Raft<C> {
                         // capacity error: it does not allocate the absent gap.
                         if *term >= self.state.term && self.term_at(*prev_index) == Some(*prev_term)
                         {
-                            if last - self.state.base_index() > self.limits.max_log_entries as u64 {
-                                return Err(Error::LogFull);
-                            }
                             for (offset, entry) in entries.iter().enumerate() {
                                 let index = *prev_index + offset as u64 + 1;
                                 if let Some(local) = self.entry_at(index) {
@@ -1583,8 +1585,16 @@ impl<C: Clone + Eq> Raft<C> {
                     );
                     return Ok(());
                 }
-                let matched = prev_index + entries.len() as u64;
-                for (offset, entry) in entries.into_iter().enumerate() {
+                // A recovering follower may be behind on application/compaction.
+                // A full log still owes the higher-term transition and can learn
+                // the committed prefix that will let the host free capacity.
+                let base = self.state.base_index();
+                let offset = (prev_index - base) as usize;
+                let room = self.limits.max_log_entries - offset;
+                let count = entries.len().min(room);
+                let requested = prev_index + entries.len() as u64;
+                let matched = prev_index + count as u64;
+                for (offset, entry) in entries.into_iter().take(count).enumerate() {
                     let position = (prev_index - self.state.base_index()) as usize + offset;
                     if self
                         .state
@@ -1606,6 +1616,14 @@ impl<C: Clone + Eq> Raft<C> {
                     pending.transfer.snapshot.index <= self.state.commit_index
                 }) {
                     self.incoming_snapshot = None;
+                }
+                if matched < requested {
+                    // An Appended(success) identifies the ENTIRE request in
+                    // the leader's pipeline. Do not acknowledge a partial
+                    // prefix. Normal heartbeats retry the original flight.
+                    output.requested_compaction_through =
+                        Some(requested - self.limits.max_log_entries as u64);
+                    return Ok(());
                 }
                 self.emit(
                     from,
