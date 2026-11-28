@@ -104,6 +104,32 @@ fn mounted_capsule_donor_recovers_only_lost_local_history_across_reopens() {
                 .unwrap();
         assert_eq!(retry.vertices().unwrap(), vertices);
         drop(retry);
+        // A complete capsule-directory loss has the same recovery authority:
+        // the remaining local journal and its published, keyed root.
+        let full_backup = temp.join("whole");
+        fs::create_dir(&full_backup).unwrap();
+        fs::rename(path.join(CAPSULE_DIR), full_backup.join(CAPSULE_DIR)).unwrap();
+        let wrong_keys = DatabaseKeys::new(K_OID, NAMESPACE, [0xdd; 32]);
+        assert!(
+            Database::open_with_capsule_donor(&cx, &repl, &path, wrong_keys, &full_backup)
+                .await
+                .is_err()
+        );
+        assert!(!path.join(CAPSULE_DIR).exists());
+        let whole = Database::open_with_capsule_donor(&cx, &repl, &path, keys(), &full_backup)
+            .await
+            .unwrap();
+        assert_eq!(whole.vertices().unwrap(), vertices);
+        drop(whole);
+        let unrelated = temp.join("unrelated");
+        fs::create_dir(&unrelated).unwrap();
+        fs::write(unrelated.join(COMMIT_LOG_NAME), &chain).unwrap();
+        assert!(
+            Database::open_with_capsule_donor(&cx, &repl, &unrelated, keys(), &full_backup)
+                .await
+                .is_err()
+        );
+        assert!(!unrelated.join(CAPSULE_DIR).exists());
         assert_eq!(
             Database::open_rebuilding(&cx, &path, keys())
                 .await

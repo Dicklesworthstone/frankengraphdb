@@ -215,7 +215,9 @@ impl Database<asupersync::fs::UnixVfs> {
     /// objects, one bounded native container at a time. A storage failure,
     /// unavailable donor object or cancellation can leave verified repairs on
     /// disk. Retrying resumes from the actual contents. A serving handle is
-    /// returned only after replay of the entire repaired local history.
+    /// returned only after replay of the entire repaired local history. A
+    /// missing local capsule directory can be recreated when the retained
+    /// journal and selected keyed root identify the existing database.
     pub async fn open_with_capsule_donor(
         cx: &CommitCx,
         repl: &fgdb_types::ReplCx,
@@ -224,7 +226,43 @@ impl Database<asupersync::fs::UnixVfs> {
         donor: &std::path::Path,
     ) -> Result<Self, CapsuleRecoveryError> {
         let vfs = asupersync::fs::UnixVfs::new();
-        crate::require_database_dir(cx, &vfs, path).await?;
+        match crate::require_database_dir(cx, &vfs, path).await {
+            Ok(()) => {}
+            Err(
+                error @ crate::OpenError::NotADatabase {
+                    missing: fgdb_chronicle::commit::CAPSULE_DIR,
+                    ..
+                },
+            ) => {
+                // A complete capsule-directory loss is repairable only with
+                // independent local authority. Refuse nonregular directories
+                // and ordinary empty paths before the coordinator may create
+                // its replacement directory. Recheck the root under its lease.
+                let missing = cx
+                    .with_restriction_async(
+                        vfs.symlink_metadata(&path.join(fgdb_chronicle::commit::CAPSULE_DIR)),
+                    )
+                    .await;
+                if !missing.is_err_and(|io| io.kind() == std::io::ErrorKind::NotFound) {
+                    return Err(error.into());
+                }
+                let journal = cx
+                    .with_restriction_async(
+                        vfs.symlink_metadata(&path.join(fgdb_chronicle::commit::COMMIT_LOG_NAME)),
+                    )
+                    .await
+                    .map_err(crate::OpenError::Io)?;
+                if !journal.file_type().is_file() {
+                    return Err(error.into());
+                }
+                let slot = fgdb_chronicle::RootStore::with_vfs(vfs.clone(), path)
+                    .current(cx)
+                    .await
+                    .map_err(crate::OpenError::Slot)?;
+                crate::validate_plain_slot(&slot, &keys, path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
         let mut coordinator = fgdb_chronicle::CommitCoordinator::open_with_vfs(
             cx,
             vfs.clone(),
