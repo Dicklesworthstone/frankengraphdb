@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "tests/computed.rs"]
+mod computed;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, EmbeddedReadView, MemVfs, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -162,8 +165,8 @@ fn buffered_vertex_edge_and_temporal_cli_delivery_matches_native_rows() {
             let mut options = options(&[text]);
             let prepared = okay(prepare(&options));
             if matches!(
-                prepared.source,
-                StreamSource::VertexProbe | StreamSource::EdgeJoin
+                &prepared.source,
+                StreamSource::VertexProbe(_) | StreamSource::EdgeJoin(_)
             ) {
                 options.buffered.memory = Some(32 * 1024 * 1024);
             }
@@ -285,8 +288,8 @@ fn unsupported_definitions_and_open_budgets_refuse_before_delivery_while_late_er
             let mut options = options(&[text]);
             let prepared = okay(prepare(&options));
             if matches!(
-                prepared.source,
-                StreamSource::VertexProbe | StreamSource::EdgeJoin
+                &prepared.source,
+                StreamSource::VertexProbe(_) | StreamSource::EdgeJoin(_)
             ) {
                 options.buffered.memory = Some(32 * 1024 * 1024);
             }

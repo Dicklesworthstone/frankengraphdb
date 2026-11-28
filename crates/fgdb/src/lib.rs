@@ -121,9 +121,11 @@
 
 mod buffered_read;
 pub use buffered_read::{
-    BufferLimits, BufferStats, BufferedEdge, BufferedOpenError, BufferedQueryCursor,
-    BufferedQueryError, BufferedQueryRow, BufferedReadError, BufferedReadLimits,
-    BufferedReadPublication, BufferedReadView, BufferedValue, MemoryError, MemoryPool,
+    BufferLimits, BufferStats, BufferedEdge, BufferedOpenError, BufferedProjectionCursor,
+    BufferedProjectionError, BufferedProjectionOutputGuard, BufferedProjectionRow,
+    BufferedQueryCursor, BufferedQueryError, BufferedQueryRow, BufferedReadError,
+    BufferedReadLimits, BufferedReadPublication, BufferedReadView, BufferedValue, MemoryError,
+    MemoryPool,
 };
 
 mod bulk_load;

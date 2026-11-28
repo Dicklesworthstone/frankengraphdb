@@ -5,8 +5,9 @@
 use super::{Failure, Options, emit, execution_failure, set_decimal, stream};
 use asupersync::fs::Vfs;
 use fgdb::{
-    BufferedOpenError, BufferedQueryCursor, BufferedQueryError, BufferedQueryRow,
-    BufferedReadLimits, BufferedReadView, MemoryPool, PreparedNativeRead,
+    BufferedOpenError, BufferedProjectionCursor, BufferedProjectionError, BufferedProjectionRow,
+    BufferedQueryCursor, BufferedQueryError, BufferedQueryRow, BufferedReadLimits,
+    BufferedReadView, MemoryPool, PreparedNativeRead,
 };
 use fgdb_gql::algebra::{GlaOperator, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{
@@ -15,10 +16,10 @@ use fgdb_gql::edge_stream::{
     AsyncGraphWalkSource, EdgeScanError,
 };
 use fgdb_gql::stream::{
-    AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexScanOutput, AsyncVertexScanPlan,
-    VertexScanError,
+    AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexProjectionPlan, AsyncVertexScanOutput,
+    AsyncVertexScanPlan, VertexScanError,
 };
-use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
+use fgdb_gql::{GqlQueryError, GqlQueryPolicy, PreparedGraphSet};
 use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_types::{CommitSeq, QueryCx};
 use std::future::Future;
@@ -168,16 +169,28 @@ impl BufferedOptions {
 }
 
 pub(super) struct Prepared {
-    pattern: PreparedGraphPattern<GraphValueRow>,
     as_of: Option<CommitSeq>,
     source: StreamSource,
 }
 
 enum StreamSource {
-    Vertex,
-    VertexProbe,
-    Edge,
-    EdgeJoin,
+    Vertex(PreparedGraphPattern<GraphValueRow>),
+    VertexProbe(PreparedGraphPattern<GraphValueRow>),
+    Edge(PreparedGraphPattern<GraphValueRow>),
+    EdgeJoin(PreparedGraphPattern<GraphValueRow>),
+    VertexProjection(PreparedGraphSet),
+}
+
+impl StreamSource {
+    fn columns(&self) -> &[String] {
+        match self {
+            Self::Vertex(pattern)
+            | Self::VertexProbe(pattern)
+            | Self::Edge(pattern)
+            | Self::EdgeJoin(pattern) => pattern.columns(),
+            Self::VertexProjection(query) => query.columns(),
+        }
+    }
 }
 
 pub(super) enum PreparedQuery {
@@ -218,9 +231,21 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
                 .map_err(execution_failure)?;
             (bound.pattern().clone(), Some(bound.as_of()))
         }
+        PreparedNativeRead::Set(template) => {
+            let query = template
+                .bind_parameters(params)
+                .map_err(execution_failure)?;
+            return prepare_projection(query, options.at_revision.map(|marker| marker.commit_seq));
+        }
+        PreparedNativeRead::TemporalSet(template) => {
+            let bound = template
+                .bind_parameters(params)
+                .map_err(execution_failure)?;
+            return prepare_projection(bound.query().clone(), Some(bound.as_of()));
+        }
         _ => {
             return Err(Failure::query(
-                "this buffered stream requires a native graph pattern; use --spill-dir for supported aggregate and set queries",
+                "this buffered stream requires a supported native graph pattern or row-local vertex projection; use --spill-dir for supported aggregate and set queries",
             ));
         }
     };
@@ -240,10 +265,10 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
             )
         }) {
             AsyncEdgeJoinPlan::compile(plan).map_err(execution_failure)?;
-            StreamSource::EdgeJoin
+            StreamSource::EdgeJoin(pattern)
         } else {
             AsyncEdgeScanPlan::compile(plan).map_err(execution_failure)?;
-            StreamSource::Edge
+            StreamSource::Edge(pattern)
         }
     } else if plan
         .operators()
@@ -251,15 +276,24 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         .any(|op| matches!(op, GlaOperator::Probe { .. }))
     {
         AsyncVertexProbePlan::compile(plan).map_err(execution_failure)?;
-        StreamSource::VertexProbe
+        StreamSource::VertexProbe(pattern)
     } else {
         AsyncVertexScanPlan::compile(plan).map_err(execution_failure)?;
-        StreamSource::Vertex
+        StreamSource::Vertex(pattern)
     };
+    Ok(Prepared { as_of, source })
+}
+
+fn prepare_projection(
+    query: PreparedGraphSet,
+    as_of: Option<CommitSeq>,
+) -> Result<Prepared, Failure> {
+    // Prove the complete definition, including private keys and the property
+    // demand of every lazy branch, before opening or faulting any cold source.
+    AsyncVertexProjectionPlan::compile(&query).map_err(execution_failure)?;
     Ok(Prepared {
-        pattern,
         as_of,
-        source,
+        source: StreamSource::VertexProjection(query),
     })
 }
 
@@ -279,32 +313,37 @@ pub(super) async fn run<V: Vfs + Clone>(
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let seq = prepared.as_of.unwrap_or(view.frontier());
-    let columns = prepared.pattern.columns();
+    let columns = prepared.source.columns();
     let policy = options.budget.policy();
-    let pattern = &prepared.pattern;
     let checkpoint = || cx.checkpoint().map_err(Failure::query);
-    match prepared.source {
-        StreamSource::Vertex => {
+    match &prepared.source {
+        StreamSource::Vertex(pattern) => {
             let mut cursor = view
                 .stream_graph_values_governed_at(cx, pattern, seq, policy)
                 .map_err(execution_failure)?;
             deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
         }
-        StreamSource::VertexProbe => {
+        StreamSource::VertexProbe(pattern) => {
             let mut cursor = view
                 .stream_graph_probes_governed_at(cx, pattern, seq, policy)
                 .map_err(execution_failure)?;
             deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
         }
-        StreamSource::Edge => {
+        StreamSource::Edge(pattern) => {
             let mut cursor = view
                 .stream_graph_edges_governed_at(cx, pattern, seq, policy)
                 .map_err(execution_failure)?;
             deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
         }
-        StreamSource::EdgeJoin => {
+        StreamSource::EdgeJoin(pattern) => {
             let mut cursor = view
                 .stream_graph_edge_joins_governed_at(cx, pattern, seq, policy)
+                .map_err(execution_failure)?;
+            deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
+        }
+        StreamSource::VertexProjection(query) => {
+            let mut cursor = view
+                .stream_graph_projection_governed_at(cx, query, seq, policy)
                 .map_err(execution_failure)?;
             deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
         }
@@ -344,6 +383,14 @@ trait NativeRows {
 impl<V: Vfs + Clone> NativeRows for BufferedQueryCursor<'_, '_, V> {
     type Row = BufferedQueryRow<GraphValueRow>;
     type Error = BufferedQueryError;
+    fn pull(&mut self) -> Pulled<'_, Self::Row, Self::Error> {
+        Box::pin(self.next())
+    }
+}
+
+impl<V: Vfs + Clone> NativeRows for BufferedProjectionCursor<'_, '_, V> {
+    type Row = BufferedProjectionRow;
+    type Error = BufferedProjectionError;
     fn pull(&mut self) -> Pulled<'_, Self::Row, Self::Error> {
         Box::pin(self.next())
     }

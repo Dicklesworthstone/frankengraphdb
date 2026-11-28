@@ -13,7 +13,10 @@ use fgdb_types::{CanonicalPropertyValue, QueryCx};
 
 mod query;
 pub(crate) use query::BufferedVertexSeeds;
-pub use query::{BufferedQueryCursor, BufferedQueryError, BufferedQueryRow};
+pub use query::{
+    BufferedProjectionCursor, BufferedProjectionError, BufferedProjectionOutputGuard,
+    BufferedProjectionRow, BufferedQueryCursor, BufferedQueryError, BufferedQueryRow,
+};
 
 #[path = "query_prism/buffered.rs"]
 mod prism;
@@ -737,16 +740,19 @@ impl<V: Vfs + Clone> Database<V> {
         } else {
             BufferedReadSource::Selected(Box::new(selection))
         };
-        Ok((BufferedReadPublication {
-            namespace: keys.namespace,
-            published: PublishedRead {
-                store,
-                root_id: checkpoint.root_id,
-                manifest,
-                published_at: checkpoint.published_at,
-                schema: checkpoint.schema,
+        Ok((
+            BufferedReadPublication {
+                namespace: keys.namespace,
+                published: PublishedRead {
+                    store,
+                    root_id: checkpoint.root_id,
+                    manifest,
+                    published_at: checkpoint.published_at,
+                    schema: checkpoint.schema,
+                },
+                source,
             },
-            source,
-        }, matched))
+            matched,
+        ))
     }
 }
