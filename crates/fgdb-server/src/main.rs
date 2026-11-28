@@ -9,6 +9,7 @@ use asupersync::Budget;
 use asupersync::Cx;
 use asupersync::io::AsyncWriteExt as _;
 use asupersync::net::TcpListener;
+use fgdb::BufferedReadLimits;
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, VectorEncoding};
 use fgdb_beacon::{DistanceMetric, HnswConfig, IndexConfig};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -17,6 +18,7 @@ use fgdb_server::{
     BeaconIndexConfig, BufferedReadConfig, DatabaseConfig, MaintenanceEvent, MaintenanceSchedule,
     OrderedReadConfig, Server, ServerLimits, Symbols, WebSocketConfig,
 };
+use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_warden::{Grant, QueryLimits, Restriction, Rights, Scope};
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -38,6 +40,11 @@ USAGE:
                   [--kek-passphrase-file <path>] [--strata-ecs]
                   [--policy-epoch <n>] [--write-relation <u64>] [--query-scratch-dir <path>]
                   [--buffered-reads-memory-bytes <n>]
+                  [--buffered-reads-root-bytes <n>]
+                  [--buffered-reads-max-source-bytes <n>]
+                  [--buffered-reads-max-work-units <n>]
+                  [--buffered-reuse-live-admission]
+                  [--buffered-native-run-limits <rows,incidences,image-bytes,property-bytes>]
                   [--max-snapshot-records <n>] [--max-result-rows <n>]
                   [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
                   [--compact-interval-seconds <n>] [--scrub-interval-seconds <n>]
@@ -129,6 +136,34 @@ durable catalog names. Cold ordered reads compose native vertex/single-edge
 sources, including any or finite relation types, through external relational
 and aggregate operators; unsupported shapes refuse. Difference reads and the
 live writer retain their existing resident sources.
+
+--buffered-reads-root-bytes sets the encoded root and segment byte limit for
+one cold read. The default root decode reservation is one quarter of the
+shared pool. This option allows reserving up to half for root decoding, with
+pool admission and cache charges still enforced. It requires
+--buffered-reads-memory-bytes for the same database.
+
+--buffered-reads-max-source-bytes sets the positive encoded payload byte limit
+for full buffered source admission, including history validation. The default
+is 1073741824. It requires --buffered-reads-memory-bytes for the same database.
+Root bytes, resident memory and later scan work have separate limits.
+
+--buffered-reads-max-work-units sets the positive physical source work limit
+for admission and for each cumulative scan. The default is 10000000.
+It requires --buffered-reads-memory-bytes for the same database. Token and
+query evaluation limits also apply.
+
+--buffered-reuse-live-admission lets buffered readers reuse the live writer's
+exact root validation. Metadata and every accessed object still authenticate.
+Without matching proof, the full payload history is checked at open. This
+requires --buffered-reads-memory-bytes for the same database.
+
+--buffered-native-run-limits opts eligible buffered edge sources into
+authenticated sealed relation runs plus their post-seal history. Supply
+four comma-separated nonnegative decimal limits for rows, incidences,
+image bytes and property bytes. This requires --buffered-reads-memory-bytes
+for the same database. Selected run failures are terminal. The run and
+suffix share the existing pool and query allowance.
 
 --compact-interval-seconds and --scrub-interval-seconds opt that database
 into fixed periodic maintenance while fgdbd retains its writer lease. Both
@@ -296,6 +331,11 @@ struct DatabaseOptions {
     issuer_key_file: Option<PathBuf>,
     query_scratch_dir: Option<PathBuf>,
     buffered_reads_memory_bytes: Option<NonZeroUsize>,
+    buffered_reads_root_bytes: Option<NonZeroUsize>,
+    buffered_reads_source_bytes: Option<NonZeroUsize>,
+    buffered_reads_work: Option<NonZeroUsize>,
+    buffered_reuse_live_admission: bool,
+    buffered_native_run_limits: Option<SealedLimits>,
     policy_epoch: u64,
     write_relation: u64,
     /// `--max-snapshot-records`, `--max-result-rows`, `--max-work-units` and
@@ -308,6 +348,26 @@ struct DatabaseOptions {
     /// `--bindings-file`: more bindings, merged in before the database opens.
     bindings_file: Option<PathBuf>,
     beacon_indexes: Vec<BeaconIndexOptions>,
+}
+
+impl DatabaseOptions {
+    fn buffered_read_config(&self) -> Option<BufferedReadConfig> {
+        let mut buffered = BufferedReadConfig::new(self.buffered_reads_memory_bytes?.get());
+        if let Some(bytes) = self.buffered_reads_root_bytes {
+            buffered.limits.max_root_bytes = bytes.get();
+            buffered.limits.max_blocks = bytes.get();
+            buffered.limits.max_vertex_patches = bytes.get();
+        }
+        if let Some(bytes) = self.buffered_reads_source_bytes {
+            buffered.limits.max_source_bytes = bytes.get();
+        }
+        if let Some(work) = self.buffered_reads_work {
+            buffered.limits.max_work = work.get();
+        }
+        buffered.native_run_limits = self.buffered_native_run_limits;
+        buffered.reuse_live_admission = self.buffered_reuse_live_admission;
+        Some(buffered)
+    }
 }
 
 struct BeaconIndexOptions {
@@ -533,6 +593,25 @@ fn number<T: core::str::FromStr>(raw: &str, flag: &str) -> Result<T, Failure> {
         .map_err(|_| Failure::usage(format!("{flag} is out of range")))
 }
 
+fn native_run_limits(raw: &str, flag: &str) -> Result<SealedLimits, Failure> {
+    let mut fields = raw.split(',');
+    let mut next = || number(fields.next().unwrap_or_default(), flag);
+    let limits = SealedLimits {
+        max_rows: next()?,
+        max_incidences: next()?,
+        max_image_bytes: next()?,
+        max_property_bytes: next()?,
+    };
+    if fields.next().is_some() {
+        return Err(Failure::usage(format!(
+            "{flag} needs four comma-separated limits"
+        )));
+    }
+    fgdb::BufferedReadLimits::validate_native_run_limits(limits)
+        .map_err(|error| Failure::usage(format!("{flag}: {error}")))?;
+    Ok(limits)
+}
+
 fn binding(raw: &str, flag: &str) -> Result<(String, u64), Failure> {
     let (name, id) = raw
         .split_once('=')
@@ -602,6 +681,11 @@ impl ServeOptions {
                         issuer_key_file: None,
                         query_scratch_dir: None,
                         buffered_reads_memory_bytes: None,
+                        buffered_reads_root_bytes: None,
+                        buffered_reads_source_bytes: None,
+                        buffered_reads_work: None,
+                        buffered_reuse_live_admission: false,
+                        buffered_native_run_limits: None,
                         policy_epoch: 1,
                         write_relation: 1,
                         query_limits: [None; 4],
@@ -640,6 +724,29 @@ impl ServeOptions {
                         {
                             db.buffered_reads_memory_bytes =
                                 Some(number(value(args, &mut at, flag)?, flag)?);
+                        }
+                        "--buffered-reads-root-bytes" if db.buffered_reads_root_bytes.is_none() => {
+                            db.buffered_reads_root_bytes =
+                                Some(number(value(args, &mut at, flag)?, flag)?);
+                        }
+                        "--buffered-reads-max-source-bytes"
+                            if db.buffered_reads_source_bytes.is_none() =>
+                        {
+                            db.buffered_reads_source_bytes =
+                                Some(number(value(args, &mut at, flag)?, flag)?);
+                        }
+                        "--buffered-reads-max-work-units" if db.buffered_reads_work.is_none() => {
+                            db.buffered_reads_work =
+                                Some(number(value(args, &mut at, flag)?, flag)?);
+                        }
+                        "--buffered-reuse-live-admission" if !db.buffered_reuse_live_admission => {
+                            db.buffered_reuse_live_admission = true;
+                        }
+                        "--buffered-native-run-limits"
+                            if db.buffered_native_run_limits.is_none() =>
+                        {
+                            db.buffered_native_run_limits =
+                                Some(native_run_limits(value(args, &mut at, flag)?, flag)?);
                         }
                         "--policy-epoch" => {
                             db.policy_epoch = number(value(args, &mut at, flag)?, flag)?
@@ -752,6 +859,41 @@ impl ServeOptions {
             WebSocketConfig::new(hosts, websocket_origins.clone()).map_err(Failure::usage)?;
         }
         for db in &databases {
+            if db.buffered_reads_source_bytes.is_some() && db.buffered_reads_memory_bytes.is_none()
+            {
+                return Err(Failure::usage(
+                    "--buffered-reads-max-source-bytes requires --buffered-reads-memory-bytes for the same database",
+                ));
+            }
+            if db.buffered_reads_work.is_some() && db.buffered_reads_memory_bytes.is_none() {
+                return Err(Failure::usage(
+                    "--buffered-reads-max-work-units requires --buffered-reads-memory-bytes for the same database",
+                ));
+            }
+            if let Some(root_bytes) = db.buffered_reads_root_bytes {
+                let memory = db.buffered_reads_memory_bytes.ok_or_else(|| {
+                    Failure::usage(
+                        "--buffered-reads-root-bytes requires --buffered-reads-memory-bytes for the same database",
+                    )
+                })?;
+                let maximum = 2 * BufferedReadLimits::root_bytes_for_pool(memory.get());
+                if root_bytes.get() > maximum {
+                    return Err(Failure::usage(format!(
+                        "--buffered-reads-root-bytes exceeds {maximum} for database {:?}",
+                        db.name
+                    )));
+                }
+            }
+            if db.buffered_reuse_live_admission && db.buffered_reads_memory_bytes.is_none() {
+                return Err(Failure::usage(
+                    "--buffered-reuse-live-admission requires --buffered-reads-memory-bytes for the same database",
+                ));
+            }
+            if db.buffered_native_run_limits.is_some() && db.buffered_reads_memory_bytes.is_none() {
+                return Err(Failure::usage(
+                    "--buffered-native-run-limits requires --buffered-reads-memory-bytes for the same database",
+                ));
+            }
             for index in &db.beacon_indexes {
                 index.validate()?;
             }
@@ -894,6 +1036,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
             query_limits,
         )
         .await?;
+        let buffered_reads = db.buffered_read_config();
         let mut config = DatabaseConfig::new(db.name, keys, issuer_key);
         config.beacon_indexes = beacon_indexes;
         config.catalog_frontier = catalog_frontier;
@@ -901,9 +1044,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         config.write_relation = RelationId(db.write_relation);
         config.symbols = db.symbols;
         config.ordered_reads = db.query_scratch_dir.map(OrderedReadConfig::new);
-        config.buffered_reads = db
-            .buffered_reads_memory_bytes
-            .map(|bytes| BufferedReadConfig::new(bytes.get()));
+        config.buffered_reads = buffered_reads;
         if let Some(ticks) = db.subscription_coalesce_ticks {
             config.subscription_max_coalesced_ticks = ticks;
         }
@@ -2189,6 +2330,8 @@ mod tests {
         };
         let defaults = parse(&[]).unwrap_or_else(|error| panic!("{}", error.message));
         assert!(defaults.databases[0].buffered_reads_memory_bytes.is_none());
+        assert!(!defaults.databases[0].buffered_reuse_live_admission);
+        assert!(defaults.databases[0].buffered_native_run_limits.is_none());
         let flag = "--buffered-reads-memory-bytes";
         let second = [
             "--database",
@@ -2233,12 +2376,112 @@ mod tests {
             assert!(parse(&[flag, invalid]).is_err(), "{flag}={invalid}");
         }
         assert!(parse(&[flag, "67108864", flag, "134217728"]).is_err());
+        let reuse = "--buffered-reuse-live-admission";
+        assert!(parse(&[reuse]).is_err());
+        assert!(parse(&[flag, "67108864", reuse, reuse]).is_err());
+        let args: Vec<&str> = [flag, "67108864", reuse]
+            .into_iter()
+            .chain(second)
+            .collect();
+        let options = parse(&args).unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(options.databases[0].buffered_reuse_live_admission);
+        assert!(!options.databases[1].buffered_reuse_live_admission);
+        let runs = "--buffered-native-run-limits";
+        assert!(parse(&[runs, "32,128,65536,4096"]).is_err());
+        let args: Vec<&str> = [flag, "67108864", runs, "32,0,65536,4096"]
+            .into_iter()
+            .chain(second)
+            .collect();
+        let options = parse(&args).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            options.databases[0].buffered_native_run_limits,
+            Some(SealedLimits {
+                max_rows: 32,
+                max_incidences: 0,
+                max_image_bytes: 65_536,
+                max_property_bytes: 4096,
+            })
+        );
+        assert!(options.databases[1].buffered_native_run_limits.is_none());
+        for invalid in ["", "1,2,3", "1,2,3,4,5", "1,-2,3,4", "1,2,3,"] {
+            assert!(
+                parse(&[flag, "67108864", runs, invalid]).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(parse(&[flag, "67108864", runs, "1,2,3,4", runs, "1,2,3,4"]).is_err());
         let misplaced: Vec<String> = [flag, "67108864"]
             .iter()
             .chain(&base)
             .map(|s| (*s).to_owned())
             .collect();
         assert!(ServeOptions::parse(&misplaced).is_err());
+    }
+
+    #[test]
+    fn buffered_source_allowances_are_bounded_and_per_database() {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "first=first-db",
+            "--key-file",
+            "first.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let parse = |extra: &[&str]| {
+            let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+            ServeOptions::parse(&args)
+        };
+        let memory = "--buffered-reads-memory-bytes";
+        let root = "--buffered-reads-root-bytes";
+        let source = "--buffered-reads-max-source-bytes";
+        let work = "--buffered-reads-max-work-units";
+        assert!(parse(&[root, "1"]).is_err());
+        assert!(parse(&[source, "1"]).is_err());
+        assert!(parse(&[work, "1"]).is_err());
+        assert!(parse(&[memory, "67108864", root, "0"]).is_err());
+        for invalid in ["0", "-1", "1.5", "18446744073709551616"] {
+            assert!(parse(&[memory, "67108864", source, invalid]).is_err());
+        }
+        assert!(parse(&[memory, "67108864", work, "0"]).is_err());
+        assert!(parse(&[memory, "67108864", root, "2097153"]).is_err());
+        assert!(parse(&[memory, "67108864", root, "1", root, "2"]).is_err());
+        assert!(parse(&[memory, "67108864", source, "1", source, "2"]).is_err());
+        assert!(parse(&[memory, "67108864", work, "1", work, "2"]).is_err());
+
+        let options = parse(&[
+            root,
+            "2097152",
+            source,
+            "1",
+            work,
+            "21000000",
+            memory,
+            "67108864",
+            "--database",
+            "second=second-db",
+            "--key-file",
+            "second.key",
+            "--issuer-key-file",
+            "issuer.key",
+            memory,
+            "67108864",
+        ])
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let explicit = options.databases[0].buffered_read_config().unwrap();
+        let default = options.databases[1].buffered_read_config().unwrap();
+        assert_eq!(explicit.memory_bytes, default.memory_bytes);
+        assert_eq!(explicit.limits.max_root_bytes, 2_097_152);
+        assert_eq!(explicit.limits.max_blocks, 2_097_152);
+        assert_eq!(explicit.limits.max_vertex_patches, 2_097_152);
+        assert_eq!(default.limits.max_root_bytes, 1_048_576);
+        assert_eq!(explicit.limits.max_work, 21_000_000);
+        assert_eq!(default.limits.max_work, 10_000_000);
+        assert_eq!(explicit.limits.max_source_bytes, 1);
+        assert_eq!(default.limits.max_source_bytes, 1_073_741_824);
+        assert_eq!(explicit.max_concurrent, default.max_concurrent);
     }
 
     #[test]

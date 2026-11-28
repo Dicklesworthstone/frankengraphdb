@@ -1,6 +1,9 @@
 //! Public FGP source and ordered reads over the configured cold backend.
 use super::*;
 use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+use fgdb_strata::store::RootReadLimits;
+use fgdb_strata::tiered::sealed::SealedLimits;
+use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 
 #[path = "buffered_edge_projection.rs"]
 mod buffered_edge_projection;
@@ -30,6 +33,18 @@ async fn start_buffered_configured(
     asupersync::runtime::TaskHandle<()>,
     PathBuf,
 ) {
+    let (path, database) = create_buffered_database(cx, name).await;
+    drop(database);
+    start_buffered_at(cx, &path, ordered, buffered_config()).await
+}
+
+fn buffered_config() -> fgdb_server::BufferedReadConfig {
+    let mut config = fgdb_server::BufferedReadConfig::new(64 * 1024 * 1024);
+    config.max_concurrent = 1;
+    config
+}
+
+async fn create_buffered_database(cx: &Cx, name: &str) -> (PathBuf, Database) {
     let path = scratch(name);
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let mut database = Database::create(&contexts.commit(), &path, keys())
@@ -55,7 +70,20 @@ async fn start_buffered_configured(
             .0,
         1
     );
-    drop(database);
+    (path, database)
+}
+
+async fn start_buffered_at(
+    cx: &Cx,
+    path: &std::path::Path,
+    ordered: bool,
+    buffered: fgdb_server::BufferedReadConfig,
+) -> (
+    SocketAddr,
+    fgdb_server::Shutdown,
+    asupersync::runtime::TaskHandle<()>,
+    PathBuf,
+) {
     let limits = ServerLimits {
         max_frame_len: 4096,
         initial_window_bytes: 8192,
@@ -68,12 +96,12 @@ async fn start_buffered_configured(
     let mut config = DatabaseConfig::new("social", keys(), issuer_key());
     // Exact durable redeclarations are accepted. No request injects a resolver.
     config.symbols = symbols();
-    let mut buffered = fgdb_server::BufferedReadConfig::new(64 * 1024 * 1024);
-    buffered.max_concurrent = 1;
     config.buffered_reads = Some(buffered);
     let directory = path.join("query-scratch");
     if ordered {
-        asupersync::fs::create_dir(&directory).await.unwrap();
+        if let Err(error) = asupersync::fs::create_dir(&directory).await {
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error}");
+        }
         let mut order = fgdb_server::OrderedReadConfig::new(&directory);
         order.memory_bytes = 64 * 1024;
         order.sort.group_capacity = 2;
@@ -85,7 +113,7 @@ async fn start_buffered_configured(
         order.sort.max_input_rows = 100;
         config.ordered_reads = Some(order);
     }
-    server.open_database(cx, &path, config).await.unwrap();
+    server.open_database(cx, path, config).await.unwrap();
     let server = Arc::new(server);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -139,6 +167,243 @@ fn ages(rows: &[Vec<WireValue>]) -> Vec<i64> {
         .collect();
     ages.sort_unstable();
     ages
+}
+
+#[test]
+fn buffered_wire_reads_select_authenticated_runs_with_post_seal_history() {
+    run(async |cx| {
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let commit = contexts.commit();
+        let (path, mut database) = create_buffered_database(cx, "buffered-native-runs").await;
+        let relation = RelationId(1);
+        let weight = PropertyKeyId(2);
+        let left = VId(1);
+        let right = VId(2);
+        let hidden = VId(3);
+        let mut seed = fgdb::WriteBatch::new(relation);
+        seed.create_vertex(
+            left,
+            vec![LabelId(1)],
+            vec![(weight, CanonicalScalar::Int(10))],
+        );
+        seed.create_vertex(
+            right,
+            vec![LabelId(1)],
+            vec![(weight, CanonicalScalar::Int(20))],
+        );
+        seed.create_vertex(
+            hidden,
+            vec![LabelId(2)],
+            vec![(weight, CanonicalScalar::Int(999))],
+        );
+        for (id, to, age) in [(1, right, 3), (2, right, 4), (3, hidden, 999)] {
+            seed.add_edge(
+                EId(id),
+                left,
+                to,
+                vec![
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text("private").unwrap(),
+                    ),
+                    (weight, CanonicalScalar::Int(age)),
+                ],
+            );
+        }
+        assert_eq!(database.write(&commit, seed).await.unwrap(), CommitSeq(2));
+        let limits = SealedLimits {
+            max_rows: 32,
+            max_incidences: 128,
+            max_image_bytes: 65_536,
+            max_property_bytes: 4096,
+        };
+        database
+            .seal_relation(
+                &commit,
+                &contexts.query(),
+                relation,
+                CommitSeq(0),
+                limits,
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let mut suffix = fgdb::WriteBatch::new(relation);
+        suffix.delete_edge(EId(1));
+        suffix.set_edge_property(EId(2), weight, Some(CanonicalScalar::Int(7)));
+        suffix.add_edge(EId(4), left, right, vec![(weight, CanonicalScalar::Int(6))]);
+        assert_eq!(database.write(&commit, suffix).await.unwrap(), CommitSeq(3));
+        drop(database);
+        let narrow = SealedLimits {
+            max_incidences: 0,
+            ..limits
+        };
+
+        for profile in [None, Some(limits), Some(narrow)] {
+            let mut buffered = buffered_config();
+            buffered.native_run_limits = profile;
+            let (addr, shutdown, mut task, _) = start_buffered_at(cx, &path, true, buffered).await;
+            let mut reader = Client::connect(cx, addr, token(&reader_grant()))
+                .await
+                .unwrap();
+            reader.select(cx, "social").await.unwrap();
+            let current =
+                "MATCH (a)-[r:KNOWS]->(b) RETURN r.age AS age, r.name AS hidden ORDER BY r";
+            let result = reader
+                .execute(cx, ExecuteMode::ReadStream, current, vec![])
+                .await;
+            if profile == Some(narrow) {
+                assert_eq!(server_code(result.unwrap_err()), ErrorCode::Budget);
+                let vertices = reader
+                    .execute(
+                        cx,
+                        ExecuteMode::ReadStream,
+                        "MATCH (n:Person) RETURN n.age AS age, n.name AS hidden ORDER BY n",
+                        vec![],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(ages(&vertices.rows), [10, 20]);
+            } else {
+                let current = result.unwrap();
+                assert_eq!(ages(&current.rows), [6, 7]);
+                assert_eq!(current.outcome, Outcome::Rows { seq: 3 });
+                let historical = "MATCH (a)-[r:KNOWS]->(b) FOR SYSTEM_TIME AS OF SEQ $cut \
+                    RETURN r.age AS age, r.name AS hidden ORDER BY age DESC";
+                let args = vec![("cut".into(), WireValue::Count(2))];
+                let prepared = reader
+                    .prepare_read(cx, historical, args.clone())
+                    .await
+                    .unwrap();
+                let mut rows = Vec::new();
+                let outcome = reader
+                    .execute_prepared_streaming(
+                        cx,
+                        PreparedReadMode::OrderedStream,
+                        prepared,
+                        args,
+                        |columns| {
+                            assert_eq!(columns, ["age", "hidden"]);
+                            Ok(())
+                        },
+                        |row| {
+                            rows.push(row);
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    rows,
+                    [
+                        vec![WireValue::Int(4), WireValue::Null],
+                        vec![WireValue::Int(3), WireValue::Null],
+                    ]
+                );
+                assert_eq!(outcome, Outcome::Rows { seq: 2 });
+                reader.release_prepared(cx, prepared).await.unwrap();
+            }
+            reader.close(cx).await.unwrap();
+            shutdown.trigger();
+            task.join(cx).await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn live_root_admission_respects_signed_scopes_and_avoids_revalidating_history_per_read() {
+    run(async |cx| {
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let (path, mut database) = create_buffered_database(cx, "buffered-live-admission").await;
+        let age = PropertyKeyId(2);
+        let mut seed = fgdb::WriteBatch::new(RelationId(1));
+        for (id, label, value) in [(1, 1, 10), (2, 1, 20), (3, 2, 999)] {
+            seed.create_vertex(
+                VId(id),
+                vec![LabelId(label)],
+                vec![(age, CanonicalScalar::Int(value))],
+            );
+        }
+        for (id, to, value) in [(1, 2, 3), (2, 3, 999)] {
+            seed.add_edge(
+                EId(id),
+                VId(1),
+                VId(to),
+                vec![
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text("private").unwrap(),
+                    ),
+                    (age, CanonicalScalar::Int(value)),
+                ],
+            );
+        }
+        assert_eq!(
+            database.write(&contexts.commit(), seed).await.unwrap(),
+            CommitSeq(2)
+        );
+        drop(database);
+        let query = "MATCH (a)-[r:KNOWS]->(b) RETURN r.age AS age, r.name AS hidden ORDER BY r";
+        let historical = "MATCH (a)-[r:KNOWS]->(b) FOR SYSTEM_TIME AS OF SEQ 2 \
+            RETURN r.age AS age, r.name AS hidden ORDER BY age DESC";
+
+        for reuse in [false, true] {
+            let mut buffered = buffered_config();
+            buffered.limits.max_source_bytes = 1;
+            buffered.reuse_live_admission = reuse;
+            let (addr, shutdown, mut task, _) = start_buffered_at(cx, &path, true, buffered).await;
+            let mut reader = Client::connect(cx, addr, token(&reader_grant()))
+                .await
+                .unwrap();
+            reader.select(cx, "social").await.unwrap();
+            let eager = reader
+                .execute(cx, ExecuteMode::Read, query, vec![])
+                .await
+                .unwrap();
+            assert_eq!(ages(&eager.rows), [3]);
+            let streamed = reader
+                .execute(cx, ExecuteMode::ReadStream, query, vec![])
+                .await;
+            if reuse {
+                assert_eq!(streamed.unwrap(), eager);
+                let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+                    .await
+                    .unwrap();
+                owner.select(cx, "social").await.unwrap();
+                owner
+                    .execute(
+                        cx,
+                        ExecuteMode::Write,
+                        "MATCH (a:Person)-[r:KNOWS]->(b:Person) SET r.age = 7",
+                        vec![],
+                    )
+                    .await
+                    .unwrap();
+                let current = reader
+                    .execute(cx, ExecuteMode::ReadStream, query, vec![])
+                    .await
+                    .unwrap();
+                assert_eq!(ages(&current.rows), [7]);
+                assert_eq!(current.outcome, Outcome::Rows { seq: 3 });
+                let earlier = reader
+                    .execute(cx, ExecuteMode::ReadOrdered, historical, vec![])
+                    .await
+                    .unwrap();
+                assert_eq!(ages(&earlier.rows), [3]);
+                assert_eq!(earlier.outcome, Outcome::Rows { seq: 2 });
+                owner.close(cx).await.unwrap();
+            } else {
+                assert_eq!(server_code(streamed.unwrap_err()), ErrorCode::Budget);
+                let ordered = reader
+                    .execute(cx, ExecuteMode::ReadOrdered, historical, vec![])
+                    .await;
+                assert_eq!(server_code(ordered.unwrap_err()), ErrorCode::Budget);
+            }
+            reader.close(cx).await.unwrap();
+            shutdown.trigger();
+            task.join(cx).await.unwrap();
+        }
+    });
 }
 
 async fn seed_endpoint_edges(cx: &Cx, owner: &mut Client) {

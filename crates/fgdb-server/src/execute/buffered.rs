@@ -186,7 +186,12 @@ pub(super) async fn capture_prepared_publication_for(
         admission.checkpoint_at(unix_millis())
             .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
         query.checkpoint().map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-        let publication = guard.buffered_read_publication(&query, pool, limits)
+        let publication = if host.reuse_live_admission() {
+            guard.buffered_read_publication_reusing_admission(&query, pool, limits)
+        } else {
+            guard.buffered_read_publication(&query, pool, limits)
+        }
+            .and_then(|publication| publication.with_native_run_limits(host.native_run_limits()))
             .map_err(|error| refusal(AuthorizedBufferedError::Open(error)))?;
         let selected = cut.unwrap_or(publication.frontier());
         let definition = query.with_restriction(|| {

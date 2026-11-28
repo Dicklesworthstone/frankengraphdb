@@ -733,6 +733,47 @@ pub(crate) fn decode_admitted_patch_topology(
     decode_patch_fields(bytes, None, PatchPropertyAccess::SkipAdmitted)
 }
 
+/// Read topology and record each row's property byte range in the same pass.
+/// The buffered scan keeps these ranges with the authenticated frame that
+/// produced them. No property value is decoded by this operation.
+pub(crate) fn decode_admitted_patch_topology_with_ranges(
+    bytes: &[u8],
+) -> Result<(VertexPatchRows, Vec<core::ops::Range<usize>>), VertexPatchError> {
+    let mut ranges = Vec::new();
+    let rows = decode_patch_fields_with_ranges(
+        bytes,
+        None,
+        PatchPropertyAccess::SkipAdmitted,
+        Some(&mut ranges),
+    )?;
+    Ok((rows, ranges))
+}
+
+/// Read the entry count after winner selection and before the bounded decode.
+/// The span itself has already passed the admitted topology parser.
+pub(crate) fn admitted_row_property_entries(bytes: &[u8]) -> Result<u32, VertexPatchError> {
+    Cursor { bytes, at: 0 }.u32()
+}
+
+/// Decode selected values from one row's validated range in its original
+/// authenticated frame. The caller must select the authorized history winner
+/// before borrowing its range.
+pub(crate) fn decode_admitted_row_properties(
+    bytes: &[u8],
+    row: usize,
+    keys: PropertySelection,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+) -> Result<Vec<(PropertyKeyId, CanonicalPropertyValue)>, VertexPatchError> {
+    let mut cursor = Cursor { bytes, at: 0 };
+    let properties = decode_patch_properties(&mut cursor, row, resolver, false, Some(keys))?;
+    if cursor.at != bytes.len() {
+        return Err(VertexPatchError::TrailingBytes {
+            extra: bytes.len() - cursor.at,
+        });
+    }
+    Ok(properties)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PatchPropertyAccess {
     Decode,
@@ -746,6 +787,15 @@ fn decode_patch_fields(
     bytes: &[u8],
     resolver: Option<&dyn CanonicalScalarResolver>,
     properties: PatchPropertyAccess,
+) -> Result<VertexPatchRows, VertexPatchError> {
+    decode_patch_fields_with_ranges(bytes, resolver, properties, None)
+}
+
+fn decode_patch_fields_with_ranges(
+    bytes: &[u8],
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    properties: PatchPropertyAccess,
+    mut ranges: Option<&mut Vec<core::ops::Range<usize>>>,
 ) -> Result<VertexPatchRows, VertexPatchError> {
     let mut cursor = Cursor { bytes, at: 0 };
     if cursor.take::<4>()? != VERTEX_PATCH_MAGIC {
@@ -763,6 +813,9 @@ fn decode_patch_fields(
         return Err(VertexPatchError::ImplausibleRowCount { declared });
     }
     let mut rows = Vec::with_capacity(declared as usize);
+    if let Some(ranges) = &mut ranges {
+        ranges.reserve_exact(declared as usize);
+    }
     for at in 0..declared as usize {
         let vid = VId(cursor.u128()?);
         let birth_ordinal = cursor.u64()?;
@@ -774,7 +827,6 @@ fn decode_patch_fields(
         for _ in 0..label_count {
             labels.push(LabelId(cursor.u64()?));
         }
-        let prop_count = cursor.u32()?;
         let decode_properties = match properties {
             PatchPropertyAccess::Decode => true,
             PatchPropertyAccess::DecodeVertex(selected) => selected == vid,
@@ -790,29 +842,11 @@ fn decode_patch_fields(
             PatchPropertyAccess::DecodeRow(selected, keys) if selected == at => keys,
             _ => None,
         };
-        let mut props = if decode_properties {
-            Vec::with_capacity(prop_count.min(MAX_PATCH_ROWS) as usize)
-        } else if let Some(keys) = selected_keys {
-            Vec::with_capacity(keys.len().min(prop_count as usize))
-        } else {
-            Vec::new()
-        };
-        let mut previous_key = None;
-        for _ in 0..prop_count {
-            let key = PropertyKeyId(cursor.u64()?);
-            let len = cursor.u32()? as usize;
-            let encoded = cursor.take_slice(len)?;
-            if decode_properties {
-                props.push((key, decode_property_value(at, encoded, resolver)?));
-            } else {
-                if previous_key.is_some_and(|previous| previous >= key) {
-                    return Err(VertexPatchError::NonCanonicalProps { at });
-                }
-                previous_key = Some(key);
-                if selected_keys.is_some_and(|keys| keys.contains(key)) {
-                    props.push((key, decode_property_value(at, encoded, resolver)?));
-                }
-            }
+        let property_start = cursor.at;
+        let props =
+            decode_patch_properties(&mut cursor, at, resolver, decode_properties, selected_keys)?;
+        if let Some(ranges) = &mut ranges {
+            ranges.push(property_start..cursor.at);
         }
         let row = VertexRow {
             vid,
@@ -842,6 +876,41 @@ fn decode_patch_fields(
         }
     }
     Ok(VertexPatchRows(Arc::new(rows)))
+}
+
+fn decode_patch_properties(
+    cursor: &mut Cursor<'_>,
+    at: usize,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    decode_properties: bool,
+    selected_keys: Option<PropertySelection>,
+) -> Result<Vec<(PropertyKeyId, CanonicalPropertyValue)>, VertexPatchError> {
+    let prop_count = cursor.u32()?;
+    let mut props = if decode_properties {
+        Vec::with_capacity(prop_count.min(MAX_PATCH_ROWS) as usize)
+    } else if let Some(keys) = selected_keys {
+        Vec::with_capacity(keys.len().min(prop_count as usize))
+    } else {
+        Vec::new()
+    };
+    let mut previous_key = None;
+    for _ in 0..prop_count {
+        let key = PropertyKeyId(cursor.u64()?);
+        let len = cursor.u32()? as usize;
+        let encoded = cursor.take_slice(len)?;
+        if decode_properties {
+            props.push((key, decode_property_value(at, encoded, resolver)?));
+        } else {
+            if previous_key.is_some_and(|previous| previous >= key) {
+                return Err(VertexPatchError::NonCanonicalProps { at });
+            }
+            previous_key = Some(key);
+            if selected_keys.is_some_and(|keys| keys.contains(key)) {
+                props.push((key, decode_property_value(at, encoded, resolver)?));
+            }
+        }
+    }
+    Ok(props)
 }
 
 /// The §5.1 logical object identity of a patch's canonical bytes, namespaced
@@ -1118,6 +1187,40 @@ mod shared_rows_tests {
                 props: vec![(PropertyKeyId(3), CanonicalScalar::Int(42).into())],
             },
         ]
+    }
+
+    #[test]
+    fn admitted_property_ranges_select_exact_historical_rows() {
+        let expected = sample_rows();
+        let encoded = encode_patch(&expected).unwrap();
+        let (topology, ranges) = decode_admitted_patch_topology_with_ranges(&encoded).unwrap();
+        assert_eq!(ranges.len(), expected.len());
+        assert!(ranges[0].end <= ranges[1].start);
+        for (at, range) in ranges.into_iter().enumerate() {
+            let mut row = expected[at].clone();
+            row.props.clear();
+            assert_eq!(topology[at], row);
+            let bytes = &encoded[range];
+            assert_eq!(
+                admitted_row_property_entries(bytes).unwrap() as usize,
+                expected[at].props.len(),
+            );
+            for key in [PropertyKeyId(3), PropertyKeyId(8)] {
+                let keys = PropertySelection::one(key);
+                let actual = decode_admitted_row_properties(bytes, at, keys, None).unwrap();
+                let selected: Vec<_> = expected[at]
+                    .props
+                    .iter()
+                    .filter(|(property, _)| *property == key)
+                    .cloned()
+                    .collect();
+                assert_eq!(actual, selected);
+                assert!(matches!(
+                    decode_admitted_row_properties(&bytes[..bytes.len() - 1], at, keys, None),
+                    Err(VertexPatchError::Truncated { .. })
+                ));
+            }
+        }
     }
 
     #[test]

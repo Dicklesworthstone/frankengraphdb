@@ -635,7 +635,15 @@ fn live_admission_buffered_open_reads_descriptors_and_faults_only_selected_paylo
             .await
             .unwrap()
             .admission;
-        let receipts = fgdb_strata::store::PublishReceipts::for_published_root(admission);
+        let mut receipts = fgdb_strata::store::PublishReceipts::for_published_root(admission);
+        let proof = receipts.buffered_root_admission(root_id).unwrap();
+        let captured = writer
+            .buffered_read_publication_reusing_admission(
+                &query,
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                limits,
+            )
+            .unwrap();
         writer.write(&commit, spoke(7)).await.unwrap();
         let advanced = writer.partition_root().unwrap();
         let stale = store
@@ -659,7 +667,38 @@ fn live_admission_buffered_open_reads_descriptors_and_faults_only_selected_paylo
             ),
             "{stale:?}"
         );
+        let stale_capture = store
+            .open_buffered_root_with_admission(
+                &query,
+                advanced,
+                Some(proof),
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                limits,
+                32,
+            )
+            .await;
+        assert!(matches!(
+            stale_capture,
+            Err(fgdb::BufferedReadError::Limit {
+                resource: "buffered source bytes",
+                ..
+            })
+        ));
         drop(writer);
+        vfs.take_object_paths();
+        let mut captured = captured
+            .into_read_view_with_history_counts(&commit, 32)
+            .await
+            .unwrap();
+        let reads = vfs.take_object_paths();
+        assert!(!reads.is_empty());
+        assert!(reads.iter().all(|path| !payloads.contains(path)));
+        assert_eq!(captured.frontier(), CommitSeq(6));
+        assert!(captured.vertex(&query, VId(7)).await.unwrap().is_none());
+        assert_eq!(
+            captured.vertex(&query, VId(6)).await.unwrap().unwrap().vid,
+            VId(6)
+        );
         assert_eq!(view.frontier(), CommitSeq(6));
         assert!(
             view.vertex(&query, VId(7)).await.unwrap().is_none(),
@@ -683,6 +722,43 @@ fn live_admission_buffered_open_reads_descriptors_and_faults_only_selected_paylo
                 .iter()
                 .all(|path| !payloads.contains(path))
         );
+        receipts.rebind_root_binding(root_id, advanced);
+        assert!(receipts.buffered_root_admission(advanced).is_none());
+
+        let legacy = fgdb_strata::root::encode_root(&membership).unwrap();
+        let legacy_id = fgdb_strata::PartitionRootVersion(fgdb_strata::root::root_id(
+            &[0xc1; 32],
+            keys().namespace,
+            &legacy,
+        ));
+        vfs.memory
+            .write(&store.path(legacy_id.0), &legacy)
+            .await
+            .unwrap();
+        let legacy_admission = store
+            .reopen_sealed(&commit, legacy_id)
+            .await
+            .unwrap()
+            .admission;
+        let legacy_receipts =
+            fgdb_strata::store::PublishReceipts::for_published_root(legacy_admission);
+        let legacy_proof = legacy_receipts.buffered_root_admission(legacy_id).unwrap();
+        assert!(matches!(
+            store
+                .open_buffered_root_with_admission(
+                    &query,
+                    legacy_id,
+                    Some(legacy_proof),
+                    MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                    limits,
+                    0,
+                )
+                .await,
+            Err(fgdb::BufferedReadError::Limit {
+                resource: "buffered source bytes",
+                ..
+            })
+        ));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -749,6 +825,22 @@ fn live_admission_descriptor_open_defers_faults_but_never_serves_corruption() {
             vfs.take_writes().is_empty(),
             "read faults never repair storage"
         );
+        let publication = writer
+            .buffered_read_publication_reusing_admission(
+                &query,
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                limits,
+            )
+            .unwrap();
+        vfs.take_object_paths();
+        let mut captured = publication.into_read_view(&commit).await.unwrap();
+        assert!(!vfs.take_object_paths().contains(&damaged_path));
+        assert!(matches!(
+            captured.vertex(&query, VId(6)).await,
+            Err(fgdb::BufferedReadError::Buffer(
+                fgdb_strata::tiered::buffer::BufferError::ChecksumMismatch
+            ))
+        ));
         assert!(
             store.reopen_sealed(&commit, root_id).await.is_err(),
             "full recovery admission still visits and rejects the damaged extent"
@@ -814,6 +906,14 @@ fn a_recovery_fenced_writer_cannot_lend_an_old_admission_as_current() {
                     limits
                 )
                 .await,
+            Err(fgdb::BufferedOpenError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            writer.buffered_read_publication_reusing_admission(
+                &query,
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                limits,
+            ),
             Err(fgdb::BufferedOpenError::RecoveryRequired)
         ));
         assert!(

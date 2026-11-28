@@ -1771,10 +1771,9 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
         assert_eq!(pool.used(), baseline);
         drop(view);
         assert_eq!(pool.used(), 0);
-        // Admission is charged cumulatively against the same allowance. Since
-        // 68bf6b14 it costs more than this whole scan, so the scan's own
-        // refusal is unreachable through the shared limit here; the exact
-        // first-unit-over refusal is observed at open instead.
+        // Every cold block admission charges at least its object start and
+        // sole incidence. Find the exact open threshold independently of
+        // the scan so a cheaper directory does not invalidate this bound.
         let (mut below, mut cost) = (0, bounds.max_work);
         while below + 1 < cost {
             let mid = (below + cost) / 2;
@@ -1787,7 +1786,10 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
                 Err(_) => below = mid,
             }
         }
-        assert!(total < cost && cost < count * count);
+        assert!(
+            (2 * count..count * count).contains(&cost),
+            "scan work {total}, open work {cost}, {count} one-row blocks"
+        );
         bounds.max_work = cost - 1;
         assert!(matches!(
             store.open_buffered_root(&cx, id, pool.clone(), bounds).await,
@@ -1795,6 +1797,40 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
                 if (requested, limit) == (cost, cost - 1)
         ));
         assert_eq!(pool.used(), 0);
+
+        bounds.max_work = cost.max(total);
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), bounds)
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let mut below = view.edge_scan(&cx, CommitSeq(1)).unwrap();
+        below.work.limit = total - 1;
+        let refusal = loop {
+            match below.next(&cx).await {
+                Ok(Some(_)) => {}
+                terminal => break terminal,
+            }
+        };
+        assert!(matches!(
+            refusal,
+            Err(BufferedReadError::Limit { resource: "buffered source work", requested, limit })
+                if (requested, limit) == (total, total - 1)
+        ));
+        assert!(below.is_finished());
+        drop(below);
+        assert_eq!(pool.used(), baseline);
+
+        let mut exact = view.edge_scan(&cx, CommitSeq(1)).unwrap();
+        exact.work.limit = total;
+        for expected in 1..=count {
+            let found = exact.next(&cx).await.unwrap().unwrap();
+            assert_eq!(found.entry.eid, EId(expected as u128));
+        }
+        assert!(exact.next(&cx).await.unwrap().is_none());
+        assert_eq!(exact.work_used(), total);
+        drop(exact);
+        assert_eq!(pool.used(), baseline);
     });
 }
 

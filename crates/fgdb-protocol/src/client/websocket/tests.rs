@@ -365,13 +365,20 @@ fn validated_upgrade_preserves_read_ahead_and_fragmented_fgp_authentication() {
                 io,
                 token.clone(),
             ));
-            assert!(
-                connection
-                    .as_mut()
-                    .poll(&mut Context::from_waker(Waker::noop()))
-                    .is_pending()
-            );
-            let request = state.lock().unwrap().output.clone();
+            let mut task = Context::from_waker(Waker::noop());
+            // Short writes can yield before the complete request is flushed.
+            // The scripted peer sends its response once the client reads.
+            for _ in 0..512 {
+                assert!(connection.as_mut().poll(&mut task).is_pending());
+                if state.lock().unwrap().reader.is_some() {
+                    break;
+                }
+            }
+            let request = {
+                let state = state.lock().unwrap();
+                assert!(state.reader.is_some(), "client never awaited the response");
+                state.output.clone()
+            };
             assert_eq!(
                 HttpRequest::parse(&request).unwrap().header("host"),
                 Some("[::1]:9001"),

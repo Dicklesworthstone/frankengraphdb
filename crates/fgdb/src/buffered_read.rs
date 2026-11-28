@@ -5,10 +5,11 @@
 use super::*;
 use fgdb_delta_types::PropertyKeyId;
 pub use fgdb_strata::store::{BufferedEdge, BufferedReadError, BufferedReadLimits, BufferedValue};
-use fgdb_strata::store::{BufferedPartition, BufferedRootSelection};
+use fgdb_strata::store::{BufferedPartition, BufferedRootAdmission, BufferedRootSelection};
 pub use fgdb_strata::tiered::buffer::{BufferLimits, BufferStats};
 use fgdb_strata::tiered::edge_scan::{BufferedEdgeDirection, BufferedEdgeIncidenceScan};
 pub use fgdb_strata::tiered::memory::{MemoryError, MemoryPool};
+use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_types::{CanonicalPropertyValue, QueryCx};
 
 mod query;
@@ -121,6 +122,8 @@ pub struct BufferedReadPublication<V: Vfs = UnixVfs> {
     namespace: DatabaseSecurityNamespaceId,
     published: PublishedRead<V>,
     source: BufferedReadSource<V>,
+    admission: Option<BufferedRootAdmission>,
+    native_run_limits: Option<SealedLimits>,
 }
 
 enum BufferedReadSource<V: Vfs> {
@@ -139,6 +142,20 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
     /// Frontier of the exact catalog/graph publication selected at open.
     pub fn frontier(&self) -> CommitSeq {
         self.published.published_at
+    }
+
+    /// Select a host-owned decoder profile for eligible sources in this
+    /// publication. Validation needs no storage access. Runs load lazily
+    /// within the same buffered pool when a query demands them.
+    pub fn with_native_run_limits(
+        mut self,
+        limits: Option<SealedLimits>,
+    ) -> Result<Self, BufferedOpenError> {
+        if let Some(limits) = limits {
+            BufferedReadLimits::validate_native_run_limits(limits)?;
+        }
+        self.native_run_limits = limits;
+        Ok(self)
     }
 
     /// Read the selected generation's symbol history without opening graph payloads.
@@ -169,17 +186,22 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
                 Box::pin(selection.into_partition_with_history_counts(cx, bytes))
             }
             BufferedReadSource::Deferred { pool, limits } => {
-                Box::pin(published.store.open_buffered_root_with_history_counts(
+                Box::pin(published.store.open_buffered_root_with_admission(
                     cx,
                     published.root_id,
+                    self.admission,
                     pool,
                     limits,
                     bytes,
                 ))
             }
         };
+        let mut partition = admission.await?;
+        if let Some(limits) = self.native_run_limits {
+            partition.set_native_run_limits(cx, Some(limits))?;
+        }
         Ok(BufferedReadView {
-            partition: admission.await?,
+            partition,
             manifest: published.manifest,
             projection_cache: crate::query::BufferedProjectionCache::new(MemoryPool::new(
                 crate::query::PROJECTION_CACHE_BYTES,
@@ -244,7 +266,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     pub fn set_native_run_limits(
         &mut self,
         cx: &QueryCx,
-        limits: Option<fgdb_strata::tiered::sealed::SealedLimits>,
+        limits: Option<SealedLimits>,
     ) -> Result<(), BufferedReadError> {
         self.partition.set_native_run_limits(cx, limits)
     }
@@ -544,6 +566,30 @@ impl<V: Vfs + Clone> Database<V> {
         pool: MemoryPool,
         limits: BufferedReadLimits,
     ) -> Result<BufferedReadPublication<V>, BufferedOpenError> {
+        self.capture_buffered_read_publication(cx, pool, limits, None)
+    }
+
+    /// Pin a publication together with the writer's exact root admission.
+    /// The proof is small and survives writer progress or drop. The opened
+    /// source authenticates metadata and accessed objects, and falls back to
+    /// complete admission when a matching descriptor-bearing root is absent.
+    pub fn buffered_read_publication_reusing_admission(
+        &self,
+        cx: &QueryCx,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+    ) -> Result<BufferedReadPublication<V>, BufferedOpenError> {
+        let admission = self.receipts.buffered_root_admission(self.snapshot.root);
+        self.capture_buffered_read_publication(cx, pool, limits, admission)
+    }
+
+    fn capture_buffered_read_publication(
+        &self,
+        cx: &QueryCx,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+        admission: Option<BufferedRootAdmission>,
+    ) -> Result<BufferedReadPublication<V>, BufferedOpenError> {
         self.ensure_readable()
             .map_err(|_| BufferedOpenError::RecoveryRequired)?;
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
@@ -557,6 +603,8 @@ impl<V: Vfs + Clone> Database<V> {
                 schema: self.snapshot.schema.reference,
             },
             source: BufferedReadSource::Deferred { pool, limits },
+            admission,
+            native_run_limits: None,
         })
     }
 
@@ -769,6 +817,8 @@ impl<V: Vfs + Clone> Database<V> {
                     schema: checkpoint.schema,
                 },
                 source,
+                admission: None,
+                native_run_limits: None,
             },
             matched,
         ))

@@ -103,10 +103,16 @@ impl<V: Vfs + Clone> Database<V> {
         crate::require_database_dir(cx, &vfs, path)
             .await
             .map_err(Error::Open)?;
-        let (generation, recorded) =
-            Self::read_current_generation_inner(cx, &vfs, path, &keys, None, Some(marker.commit_seq))
-                .await
-                .map_err(Error::Open)?;
+        let (generation, recorded) = Self::read_current_generation_inner(
+            cx,
+            &vfs,
+            path,
+            &keys,
+            None,
+            Some(marker.commit_seq),
+        )
+        .await
+        .map_err(Error::Open)?;
         let published = match generation {
             ReadGeneration::Current(root) | ReadGeneration::Lagging(root) => root,
             ReadGeneration::Unselected => return Err(Error::Unpublished { published: None }),
@@ -350,19 +356,22 @@ impl crate::PreparedNativeRead {
     pub fn check_branch_revision_read(&self) -> Result<(), QueryError> {
         if self.has_procedure_call() {
             return Err(QueryError::Unsupported {
-                diagnostics: vec!["procedure sources are unavailable on recorded branch revisions".into()],
+                diagnostics: vec![
+                    "procedure sources are unavailable on recorded branch revisions".into(),
+                ],
             });
         }
         match self {
-            Self::TemporalPattern(_)
-            | Self::TemporalSet(_)
-            | Self::TemporalAggregate(_) => Err(QueryError::Unsupported {
-                diagnostics: vec!["the recorded branch revision already selects an exact snapshot".into()],
-            }),
-            Self::Pattern(_)
-            | Self::Aggregate(_)
-            | Self::PipelineAggregate(_)
-            | Self::Set(_) => Ok(()),
+            Self::TemporalPattern(_) | Self::TemporalSet(_) | Self::TemporalAggregate(_) => {
+                Err(QueryError::Unsupported {
+                    diagnostics: vec![
+                        "the recorded branch revision already selects an exact snapshot".into(),
+                    ],
+                })
+            }
+            Self::Pattern(_) | Self::Aggregate(_) | Self::PipelineAggregate(_) | Self::Set(_) => {
+                Ok(())
+            }
         }
     }
 }
@@ -411,7 +420,9 @@ mod head_tests {
                 .unwrap();
             assert_eq!(db.branch_head().unwrap(), None);
             assert_eq!(
-                Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys()).await.unwrap(),
+                Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys())
+                    .await
+                    .unwrap(),
                 crate::PublishedBranchHead::Empty,
             );
             let batch = |id| {
@@ -423,7 +434,9 @@ mod head_tests {
             let first = db.branch_head().unwrap().unwrap();
             assert_eq!(first.commit_seq, CommitSeq(1));
             assert_eq!(
-                Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys()).await.unwrap(),
+                Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys())
+                    .await
+                    .unwrap(),
                 crate::PublishedBranchHead::Recorded(first),
             );
             drop(db);
@@ -487,7 +500,8 @@ mod head_tests {
             for tracked_prefix in [false, true] {
                 let vfs = MemVfs::new().unwrap();
                 let dir = vfs.database_dir();
-                let keys = || DatabaseKeys::new([3; 32], DatabaseSecurityNamespaceId([4; 32]), [5; 32]);
+                let keys =
+                    || DatabaseKeys::new([3; 32], DatabaseSecurityNamespaceId([4; 32]), [5; 32]);
                 let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, keys())
                     .await
                     .unwrap();
@@ -513,17 +527,24 @@ mod head_tests {
                     .unwrap();
                 // A global-only marker is not a recorded branch update,
                 // even when its complete chain digest was supplied.
-                assert!(Database::open_branch_revision_with_vfs(
-                    &cx, vfs.clone(), &dir, keys(), old,
-                ).await.unwrap().is_none());
+                assert!(
+                    Database::open_branch_revision_with_vfs(&cx, vfs.clone(), &dir, keys(), old,)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
                 drop(db);
                 let mut reopened = Database::open_with_vfs(&cx, vfs.clone(), &dir, keys())
                     .await
                     .unwrap();
                 assert_eq!(reopened.branch_head().unwrap(), None);
                 assert_eq!(
-                    Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys()).await.unwrap(),
-                    crate::PublishedBranchHead::Unrecorded { frontier: old.commit_seq },
+                    Database::open_current_branch_head_with_vfs(&cx, vfs.clone(), &dir, keys())
+                        .await
+                        .unwrap(),
+                    crate::PublishedBranchHead::Unrecorded {
+                        frontier: old.commit_seq
+                    },
                 );
                 assert!(
                     reopened
@@ -626,16 +647,22 @@ mod head_tests {
             let vfs = MemVfs::new().unwrap();
             let dir = vfs.database_dir();
             let keys = || DatabaseKeys::new([3; 32], DatabaseSecurityNamespaceId([4; 32]), [5; 32]);
-            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()).await.unwrap();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, keys())
+                .await
+                .unwrap();
             let mut names = SymbolCatalog::default();
-            names.bind("Early", CatalogSymbol::Label(LabelId(1))).unwrap();
+            names
+                .bind("Early", CatalogSymbol::Label(LabelId(1)))
+                .unwrap();
             db.register_symbols(&cx, &names).await.unwrap();
             let mut one = WriteBatch::new(RelationId(1));
             one.create_vertex(VId(1), vec![LabelId(1)], vec![]);
             db.write(&cx, one).await.unwrap();
             let original = db.current_branch_revision().unwrap().unwrap();
             let mut later_names = SymbolCatalog::default();
-            later_names.bind("Later", CatalogSymbol::Label(LabelId(2))).unwrap();
+            later_names
+                .bind("Later", CatalogSymbol::Label(LabelId(2)))
+                .unwrap();
             db.register_symbols(&cx, &later_names).await.unwrap();
             let mut two = WriteBatch::new(RelationId(1));
             two.create_vertex(VId(2), vec![LabelId(1)], vec![]);
@@ -643,30 +670,83 @@ mod head_tests {
             let newest = db.current_branch_revision().unwrap().unwrap();
             // Reopen immutable storage while this writer still owns its lease.
             let readonly = Database::open_branch_revision_with_vfs(
-                &cx, vfs.clone(), &dir, keys(), original.marker(),
-            ).await.unwrap().unwrap();
-            assert!(Database::open_branch_revision_with_vfs(
-                &cx, vfs.clone(), &dir, keys(), fgdb_types::MarkerRef {
-                    marker_oid: newest.marker().marker_oid, ..original.marker()
-                },
-            ).await.unwrap().is_none());
+                &cx,
+                vfs.clone(),
+                &dir,
+                keys(),
+                original.marker(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                Database::open_branch_revision_with_vfs(
+                    &cx,
+                    vfs.clone(),
+                    &dir,
+                    keys(),
+                    fgdb_types::MarkerRef {
+                        marker_oid: newest.marker().marker_oid,
+                        ..original.marker()
+                    },
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
             drop(db);
-            let reopened = Database::open_with_vfs(&cx, vfs, &dir, keys()).await.unwrap();
-            let historical = reopened.read_branch_revision(original.marker()).unwrap().unwrap();
-            assert!(reopened.read_branch_revision(fgdb_types::MarkerRef {
-                marker_oid: newest.marker().marker_oid, ..original.marker()
-            }).unwrap().is_none());
+            let reopened = Database::open_with_vfs(&cx, vfs, &dir, keys())
+                .await
+                .unwrap();
+            let historical = reopened
+                .read_branch_revision(original.marker())
+                .unwrap()
+                .unwrap();
+            assert!(
+                reopened
+                    .read_branch_revision(fgdb_types::MarkerRef {
+                        marker_oid: newest.marker().marker_oid,
+                        ..original.marker()
+                    })
+                    .unwrap()
+                    .is_none()
+            );
             drop(reopened);
             let params = GqlParameters::new();
             let policy = GqlQueryPolicy::new(100, 100, 10000, 10000);
-            for (revision, count) in [(&original, 1), (&historical, 1), (&readonly, 1), (&newest, 2)] {
-                let result = revision.query(&query, "MATCH (v:Early) RETURN v", &params, policy).unwrap();
+            for (revision, count) in [
+                (&original, 1),
+                (&historical, 1),
+                (&readonly, 1),
+                (&newest, 2),
+            ] {
+                let result = revision
+                    .query(&query, "MATCH (v:Early) RETURN v", &params, policy)
+                    .unwrap();
                 assert!(matches!(result, QueryResult::Rows { rows, .. } if rows.len() == count));
             }
-            assert!(readonly.symbol_catalog().resolve(CatalogSymbolKind::Label, "Later").is_none());
-            assert!(historical.symbol_catalog().resolve(CatalogSymbolKind::Label, "Later").is_none());
-            assert!(historical.query(&query, "MATCH (v:Later) RETURN v", &params, policy).is_err());
-            assert!(newest.query(&query, "MATCH (v:Later) RETURN v", &params, policy).is_ok());
+            assert!(
+                readonly
+                    .symbol_catalog()
+                    .resolve(CatalogSymbolKind::Label, "Later")
+                    .is_none()
+            );
+            assert!(
+                historical
+                    .symbol_catalog()
+                    .resolve(CatalogSymbolKind::Label, "Later")
+                    .is_none()
+            );
+            assert!(
+                historical
+                    .query(&query, "MATCH (v:Later) RETURN v", &params, policy)
+                    .is_err()
+            );
+            assert!(
+                newest
+                    .query(&query, "MATCH (v:Later) RETURN v", &params, policy)
+                    .is_ok()
+            );
             let compound = "MATCH (v:Early) RETURN v AS x UNION ALL MATCH (w:Early) RETURN w AS x";
             assert!(matches!(
                 historical.query(&query, compound, &params, policy).unwrap(),
@@ -678,18 +758,52 @@ mod head_tests {
                 "MATCH (v) RETURN v AS x UNION ALL MATCH (w) FOR SYSTEM_TIME AS OF SEQ 4 RETURN w AS x",
                 "CALL { MATCH (v) FOR SYSTEM_TIME AS OF SEQ 4 RETURN v AS x } RETURN x",
             ] {
-                assert!(historical.query(&query, temporal, &params, policy).is_err(), "{temporal}");
+                assert!(
+                    historical.query(&query, temporal, &params, policy).is_err(),
+                    "{temporal}"
+                );
             }
             for value in [17, 23] {
                 let map = GqlParameters::new()
-                    .with_map("m", vec![("value".into(), fgdb_gql::algebra::GraphValue::Scalar(fgdb_types::CanonicalScalar::Int(value)))])
+                    .with_map(
+                        "m",
+                        vec![(
+                            "value".into(),
+                            fgdb_gql::algebra::GraphValue::Scalar(
+                                fgdb_types::CanonicalScalar::Int(value),
+                            ),
+                        )],
+                    )
                     .unwrap();
                 assert_eq!(
-                    historical.query(&query, "MATCH (v:Early) RETURN $m.value AS result", &map, policy).unwrap(),
-                    historical.query(&query, &format!("MATCH (v:Early) RETURN {value} AS result"), &params, policy).unwrap(),
+                    historical
+                        .query(
+                            &query,
+                            "MATCH (v:Early) RETURN $m.value AS result",
+                            &map,
+                            policy
+                        )
+                        .unwrap(),
+                    historical
+                        .query(
+                            &query,
+                            &format!("MATCH (v:Early) RETURN {value} AS result"),
+                            &params,
+                            policy
+                        )
+                        .unwrap(),
                 );
             }
-            assert!(historical.query(&query, "MATCH (v) RETURN v", &params, GqlQueryPolicy::new(0, 0, 0, 0)).is_err());
+            assert!(
+                historical
+                    .query(
+                        &query,
+                        "MATCH (v) RETURN v",
+                        &params,
+                        GqlQueryPolicy::new(0, 0, 0, 0)
+                    )
+                    .is_err()
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

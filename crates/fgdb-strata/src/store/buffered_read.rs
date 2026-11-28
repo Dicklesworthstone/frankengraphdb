@@ -37,12 +37,12 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::{PropertyKeyId, PropertySelection, RelationId};
 use fgdb_types::{CanonicalPropertyValue, CommitCx, CommitSeq, EId, QueryCx, StorageReadCx, VId};
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use std::sync::Arc;
 
 // One stored payload is at most 16 KiB, with at most 256 rows. This allowance
-// covers two encoded objects, their decoded vectors/scalars, temporary scalar
-// validation encodings, and a property's per-entry digest transcript. It is a
+// covers two encoded objects, their decoded vectors/scalars, row property
+// ranges, temporary validation encodings, and a per-entry digest transcript. It is a
 // conservative database charge, not allocator/RSS telemetry. Admission and each
 // read reserve it BEFORE any payload allocation or I/O.
 const OBJECT_WORKSPACE_BYTES: usize = super::MAX_STORED_OBJECT_BYTES as usize * 64 + 65_536;
@@ -551,16 +551,114 @@ struct DecodedVertexPatch {
     patch: usize,
     properties: VertexPropertyAccess,
     rows: Vec<VertexRow>,
+    frame: Option<VertexPropertyFrame>,
+    has_next: bool,
+}
+
+struct VertexPropertyFrame {
+    bytes: Vec<u8>,
+    ranges: Vec<core::ops::Range<usize>>,
+}
+
+// Keep the merge's existing workspace reservation. Half is available for
+// inactive topology images. The other half covers even a maximum-sized
+// topology decode: at most two row vectors, one range per row, labels bounded
+// by their encoded width (including vector growth), and the immutable byte
+// copy. Full-value decoding uses the entire workspace with no inactive images.
+const VERTEX_REVISIT_BYTES: usize = OBJECT_WORKSPACE_BYTES / 2;
+const MAX_VERTEX_SCAN_IMAGES: usize = 16;
+const _: () = assert!(
+    VERTEX_REVISIT_BYTES
+        + 4 * crate::vertex::MAX_PATCH_ROWS as usize * size_of::<VertexRow>()
+        + 8 * super::MAX_STORED_OBJECT_BYTES as usize
+        + 65_536
+        <= OBJECT_WORKSPACE_BYTES
+);
+
+#[derive(Default)]
+struct VertexScanImages {
+    active: Option<DecodedVertexPatch>,
+    inactive: VecDeque<(DecodedVertexPatch, usize)>,
+    inactive_bytes: usize,
+    charge: Option<MemoryCharge>,
+}
+
+impl VertexScanImages {
+    fn clear_inactive(&mut self) {
+        self.inactive = VecDeque::new();
+        self.inactive_bytes = 0;
+    }
+
+    fn park(&mut self, slots: usize) {
+        let Some(active) = self.active.take() else {
+            return;
+        };
+        let Some(frame) = active.frame.as_ref() else {
+            return;
+        };
+        // A heap head still names this image. A completed patch is a scan
+        // bypass, even if it was just read to obtain a winner's properties.
+        if !active.has_next || slots == 0 {
+            return;
+        }
+        let bytes = frame.bytes.capacity()
+            + frame.ranges.capacity() * size_of::<core::ops::Range<usize>>()
+            + active.rows.capacity() * size_of::<VertexRow>()
+            + active
+                .rows
+                .iter()
+                .map(|row| row.labels.capacity() * size_of::<fgdb_delta_types::LabelId>())
+                .sum::<usize>();
+        if self.inactive.capacity() == 0
+            && (self.inactive.try_reserve_exact(slots).is_err() || self.inactive.capacity() > slots)
+        {
+            self.clear_inactive();
+            return;
+        }
+        let overhead = self.inactive.capacity() * size_of::<(DecodedVertexPatch, usize)>();
+        if bytes > VERTEX_REVISIT_BYTES - overhead {
+            return;
+        }
+        while self.inactive.len() >= slots
+            || self.inactive_bytes + bytes + overhead > VERTEX_REVISIT_BYTES
+        {
+            let (_, released) = self
+                .inactive
+                .pop_front()
+                .expect("a retained image to evict");
+            self.inactive_bytes -= released;
+        }
+        self.inactive.push_back((active, bytes));
+        self.inactive_bytes += bytes;
+    }
+
+    fn activate(&mut self, at: usize, slots: usize) -> bool {
+        let Some(index) = self
+            .inactive
+            .iter()
+            .position(|(image, _)| image.patch == at)
+        else {
+            return false;
+        };
+        let (image, bytes) = self.inactive.remove(index).expect("the located image");
+        self.inactive_bytes -= bytes;
+        self.park(slots);
+        self.active = Some(image);
+        true
+    }
 }
 
 /// A canonical k-way merge over an authenticated immutable patch generation.
 ///
-/// The cursor retains one small head per patch and at most one decoded patch;
-/// it never constructs the full vertex directory or retains graph properties.
+/// The cursor retains one small head per patch. Selected-property scans may
+/// retain topology and authenticated bytes for up to sixteen live images in
+/// the cursor's fixed decode workspace, with a separate transient extent pin.
+/// They never construct the full vertex directory or retain all graph properties.
 /// A changed winning patch may refault, but every patch has at most
 /// `MAX_PATCH_ROWS` rows. For P patches and N stored row versions, the counted
 /// topology history events are bounded by P + N * (MAX_PATCH_ROWS + 2).
-/// Selected-property pulls add one bounded patch parse per visible winner.
+/// Selected-property pulls admit the row and each inspected property entry.
+/// A resident frame decodes only the selected row's recorded property range.
 /// Heap maintenance takes O(N log P) comparisons. Scan misses bypass resident
 /// cache admission.
 /// Output rows retain their own reservations. A failed or dropped in-flight
@@ -570,7 +668,7 @@ pub struct BufferedVertexScan<'source, V: Vfs> {
     as_of: CommitSeq,
     heads: BinaryHeap<Reverse<VertexScanHead>>,
     head_charge: Option<MemoryCharge>,
-    active: Option<BufferedValue<DecodedVertexPatch>>,
+    images: VertexScanImages,
     initialized: bool,
     done: bool,
     work: usize,
@@ -579,7 +677,7 @@ pub struct BufferedVertexScan<'source, V: Vfs> {
 
 /// The owned half of one vertex merge, temporarily detached from its exact
 /// admitted partition so another cursor can borrow that partition. This state
-/// retains the heap, decoded patch and their affine charges. It is not a
+/// retains the heap, live patch images and their affine charges. It is not a
 /// serializable continuation: only its original admitted partition may resume
 /// it, with the exact temporal cut and cumulative source allowance. Moving a
 /// partition preserves this ownership; reopening the same root does not.
@@ -589,7 +687,7 @@ pub struct BufferedVertexScanState {
     as_of: CommitSeq,
     heads: BinaryHeap<Reverse<VertexScanHead>>,
     head_charge: Option<MemoryCharge>,
-    active: Option<BufferedValue<DecodedVertexPatch>>,
+    images: VertexScanImages,
     initialized: bool,
     done: bool,
     work: usize,
@@ -681,7 +779,7 @@ pub struct BufferedRootSelection<V: Vfs> {
 
 #[derive(Default)]
 struct RootOpenOptions<'a> {
-    receipts: Option<&'a super::PublishReceipts>,
+    proof: Option<BufferedAdmissionProof<'a>>,
     selected: Option<DecodedBufferedRoot>,
     history_count_bytes: usize,
 }
@@ -720,6 +818,11 @@ impl<V: Vfs + Clone> BufferedRootSelection<V> {
             )
             .await
     }
+}
+
+enum BufferedAdmissionProof<'a> {
+    Borrowed(&'a super::RootMemo),
+    Captured(super::BufferedRootAdmission),
 }
 
 impl<V: Vfs + Clone> BlockStore<V> {
@@ -816,6 +919,24 @@ impl<V: Vfs + Clone> BlockStore<V> {
         limits: BufferedReadLimits,
         bytes: usize,
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
+        self.open_buffered_root_with_admission(cx, id, None, pool, limits, bytes)
+            .await
+    }
+
+    /// Reuse the exact writer admission carried out of its publication
+    /// guard. Only a matching descriptor-bearing root can use this proof.
+    /// Root metadata and every accessed payload still authenticate normally.
+    /// Fallback admission honors the same edge-history allowance as
+    /// [`Self::open_buffered_root_with_history_counts`].
+    pub async fn open_buffered_root_with_admission(
+        &self,
+        cx: &impl BufferedReadCx,
+        id: PartitionRootVersion,
+        admission: Option<super::BufferedRootAdmission>,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+        history_count_bytes: usize,
+    ) -> Result<BufferedPartition<V>, BufferedReadError> {
         self.clone()
             .with_buffered_reads(pool.clone())
             .open_buffered_root_inner(
@@ -824,7 +945,8 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 pool,
                 limits,
                 RootOpenOptions {
-                    history_count_bytes: bytes,
+                    proof: admission.map(BufferedAdmissionProof::Captured),
+                    history_count_bytes,
                     ..Default::default()
                 },
             )
@@ -856,7 +978,10 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 pool,
                 limits,
                 RootOpenOptions {
-                    receipts: Some(receipts),
+                    proof: receipts
+                        .root_memo
+                        .as_ref()
+                        .map(BufferedAdmissionProof::Borrowed),
                     ..Default::default()
                 },
             )
@@ -938,7 +1063,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
         options: RootOpenOptions<'_>,
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
         let RootOpenOptions {
-            receipts,
+            proof,
             selected,
             history_count_bytes,
         } = options;
@@ -980,21 +1105,24 @@ impl<V: Vfs + Clone> BlockStore<V> {
             }
         };
         let identity = self.root_identity_domain();
-        let trusted = receipts
-            .and_then(|receipts| receipts.root_memo.as_ref())
-            .filter(|memo| {
-                memo.partition == root.partition
+        let binding_matches = |binding: &super::RootBinding| {
+            binding.identity == identity
+                && binding.root == id
+                && binding.graph == root.graph
+                && binding.branch == root.branch
+                && binding.published_at == root.published_at
+        };
+        let trusted = match proof {
+            Some(BufferedAdmissionProof::Borrowed(memo))
+                if memo.partition == root.partition
                     && memo.blocks == root.blocks
                     && memo.patches == root.vertex_patches
-                    && memo.binding.as_ref().is_some_and(|binding| {
-                        binding.identity == identity
-                            && binding.root == id
-                            && binding.graph == root.graph
-                            && binding.branch == root.branch
-                            && binding.published_at == root.published_at
-                    })
-            })
-            .map(|memo| &memo.descriptors);
+                    && memo.binding.as_ref().is_some_and(binding_matches) =>
+            {
+                Some(&memo.descriptors)
+            }
+            _ => None,
+        };
         if trusted
             .zip(published.as_ref())
             .is_some_and(|(admitted, stored)| admitted != stored)
@@ -1003,7 +1131,18 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 StoreError::MalformedRoot(crate::root::RootError::InvalidDescriptor).into(),
             );
         }
-        let certified = trusted.is_some();
+        // The verified root identity commits to its complete stored
+        // descriptors, including those in authenticated metadata segments.
+        // Legacy roots still need the complete walk to construct descriptors.
+        let certified = trusted.is_some()
+            || matches!(
+                proof,
+                Some(BufferedAdmissionProof::Captured(admission))
+                    if published.is_some()
+                        && admission.partition == root.partition
+                        && admission.binding.verified_root == id
+                        && binding_matches(&admission.binding)
+            );
         let verify_published = published.is_some();
         let (mut blocks, mut patches) = match (published, trusted) {
             (Some(stored), _) => (stored.blocks, stored.patches),
@@ -1290,10 +1429,11 @@ impl<V: Vfs> BufferedPartition<V> {
     /// terminal.
     pub fn set_native_run_limits(
         &mut self,
-        cx: &QueryCx,
+        cx: &impl BufferedReadCx,
         limits: Option<crate::tiered::sealed::SealedLimits>,
     ) -> Result<(), BufferedReadError> {
-        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        cx.buffered_checkpoint()
+            .map_err(BufferedReadError::Interrupted)?;
         if let Some(limits) = limits {
             BufferedReadLimits::validate_native_run_limits(limits)?;
         }
@@ -1338,7 +1478,7 @@ impl<V: Vfs> BufferedPartition<V> {
             as_of,
             heads,
             head_charge: Some(head_charge),
-            active: None,
+            images: VertexScanImages::default(),
             initialized: false,
             done: false,
             work: 0,
@@ -1382,7 +1522,7 @@ impl<V: Vfs> BufferedPartition<V> {
             as_of,
             heads: state.heads,
             head_charge: state.head_charge,
-            active: state.active,
+            images: state.images,
             initialized: state.initialized,
             done: state.done,
             work,
@@ -1502,6 +1642,38 @@ impl<V: Vfs> BufferedPartition<V> {
             return Err(BufferError::InvalidLoad.into());
         }
         Ok(rows)
+    }
+
+    fn decode_vertex_scan_frame(
+        &self,
+        at: usize,
+        bytes: &[u8],
+    ) -> Result<DecodedVertexPatch, BufferedReadError> {
+        let (rows, ranges) = crate::vertex::decode_admitted_patch_topology_with_ranges(bytes)
+            .map_err(StoreError::MalformedPatch)?;
+        let rows = self.validate_vertex_point_patch(at, rows)?;
+        let mut frame_bytes = Vec::new();
+        frame_bytes
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| MemoryError::AllocationFailed {
+                requested: bytes.len(),
+            })?;
+        limit(
+            "buffered scan frame bytes",
+            frame_bytes.capacity(),
+            bytes.len(),
+        )?;
+        frame_bytes.extend_from_slice(bytes);
+        Ok(DecodedVertexPatch {
+            patch: at,
+            properties: VertexPropertyAccess::Skip,
+            rows: rows.into_iter().collect(),
+            frame: Some(VertexPropertyFrame {
+                bytes: frame_bytes,
+                ranges,
+            }),
+            has_next: false,
+        })
     }
 
     // Only the selected row may own values; every other row is topology.
@@ -2146,7 +2318,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
             as_of: self.as_of,
             heads: self.heads,
             head_charge: self.head_charge,
-            active: self.active,
+            images: self.images,
             initialized: self.initialized,
             done: self.done,
             work: self.work,
@@ -2165,7 +2337,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
 
     fn finish(&mut self) {
         self.done = true;
-        self.active = None;
+        self.images = VertexScanImages::default();
         // Release the actual capacity before refunding its affine charge.
         self.heads = BinaryHeap::new();
         self.head_charge = None;
@@ -2190,33 +2362,51 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         Ok(())
     }
 
-    async fn load_patch<C: Send>(
+    fn take_loaded_patch(
+        &mut self,
+        at: usize,
+        properties: VertexPropertyAccess,
+        retain_frame: bool,
+    ) -> bool {
+        let reusable = properties == VertexPropertyAccess::Skip;
+        self.images.active.as_ref().is_some_and(|active| {
+            active.patch == at
+                && (!retain_frame || active.frame.is_some())
+                && (reusable || active.properties == VertexPropertyAccess::Read)
+        }) || (reusable && self.images.activate(at, self.revisit_slots()))
+    }
+
+    fn revisit_slots(&self) -> usize {
+        self.partition
+            .limits
+            .buffer
+            .max_frames
+            .min(MAX_VERTEX_SCAN_IMAGES)
+            - 1
+    }
+
+    async fn read_scan_patch(
         &mut self,
         cx: &QueryCx,
         at: usize,
         properties: VertexPropertyAccess,
-        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
-    ) -> Result<(), BufferedScanError<C>> {
-        if self.active.as_ref().is_some_and(|active| {
-            active.patch == at
-                && (properties == VertexPropertyAccess::Skip
-                    || active.properties == VertexPropertyAccess::Read)
-        }) {
-            return Ok(());
-        }
+        retain_frame: bool,
+    ) -> Result<(), BufferedReadError> {
         let descriptor = self.partition.patches[at];
-        self.observe(cx, observe)?;
-        // The authenticated descriptor already knows the complete row count.
-        // Admit all decode visits before performing I/O or allocating rows.
-        for _ in 0..descriptor.rows {
-            self.observe(cx, observe)?;
+        if retain_frame {
+            self.images.park(self.revisit_slots());
+        } else {
+            self.images.active = None;
+            self.images.clear_inactive();
         }
-        self.active = None;
-        let charge = self
-            .partition
-            .buffer
-            .reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)
-            .map_err(BufferedReadError::from)?;
+        if self.images.charge.is_none() {
+            self.images.charge = Some(
+                self.partition
+                    .buffer
+                    .reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)
+                    .map_err(BufferedReadError::from)?,
+            );
+        }
         let bytes = self
             .partition
             .pin(
@@ -2226,27 +2416,51 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
                 Admission::ScanBypass,
             )
             .await?;
-        let rows = self
-            .partition
-            .decode_scan_patch(at, bytes.as_ref(), properties, None)?;
-        drop(bytes);
-        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-        self.active = Some(BufferedValue {
-            value: DecodedVertexPatch {
+        let value = if retain_frame {
+            self.partition
+                .decode_vertex_scan_frame(at, bytes.as_ref())?
+        } else {
+            let rows = self
+                .partition
+                .decode_scan_patch(at, bytes.as_ref(), properties, None)?;
+            DecodedVertexPatch {
                 patch: at,
                 properties,
                 rows: rows.into_iter().collect(),
-            },
-            _charge: charge,
-        });
+                frame: None,
+                has_next: false,
+            }
+        };
+        drop(bytes);
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        self.images.active = Some(value);
+        Ok(())
+    }
+
+    async fn load_patch<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        at: usize,
+        properties: VertexPropertyAccess,
+        retain_frame: bool,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<(), BufferedScanError<C>> {
+        if !self.take_loaded_patch(at, properties, retain_frame) {
+            // The authenticated descriptor already knows the complete row
+            // count. Admit decode visits before I/O or allocation on a miss.
+            self.observe(cx, observe)?;
+            for _ in 0..self.partition.patches[at].rows {
+                self.observe(cx, observe)?;
+            }
+            self.read_scan_patch(cx, at, properties, retain_frame)
+                .await?;
+        }
         Ok(())
     }
 
     // The merge has already proved the exact visible history winner. Reuse
-    // its active patch workspace for one positional selection; never rescan
-    // the identity's history or decode values from its superseded versions.
-    // Moving selected properties into the answer leaves a topology-only
-    // active patch that the remaining heap heads can continue to reuse.
+    // the matching authenticated frame. Topology stays available for the heap,
+    // and no other historical row's values are decoded.
     async fn materialize_properties<C: Send>(
         &mut self,
         cx: &QueryCx,
@@ -2255,53 +2469,63 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         output: &mut VertexRow,
         observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
     ) -> Result<(), BufferedScanError<C>> {
-        let descriptor = self.partition.patches[winner.patch];
+        self.load_patch(cx, winner.patch, VertexPropertyAccess::Skip, true, observe)
+            .await?;
+        // A frame miss was charged above. Admit the row lookup before reading
+        // the prefix of its validated property range.
         self.observe(cx, observe)?;
-        for _ in 0..descriptor.rows {
+        let active = self
+            .images
+            .active
+            .as_ref()
+            .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
+        if !active
+            .rows
+            .get(winner.row)
+            .is_some_and(|row| winner.matches(row))
+        {
+            return Err(BufferedReadError::Buffer(BufferError::InvalidLoad).into());
+        }
+        let frame = active
+            .frame
+            .as_ref()
+            .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
+        let range = frame
+            .ranges
+            .get(winner.row)
+            .cloned()
+            .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
+        let bytes = frame
+            .bytes
+            .get(range.clone())
+            .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
+        let malformed = |error| {
+            BufferedReadError::from(StoreError::MalformedRoot(crate::root::RootError::Patch {
+                at: winner.patch,
+                error,
+            }))
+        };
+        let entries = crate::vertex::admitted_row_property_entries(bytes).map_err(malformed)?;
+        // Every stored property header is inspected, including unrequested
+        // keys. The count already lives in the authenticated bytes.
+        for _ in 0..entries {
             self.observe(cx, observe)?;
         }
-        let BufferedValue {
-            value,
-            _charge: charge,
-        } = self
-            .active
-            .take()
-            .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
-        // Drop every old decoded allocation before reusing its reservation.
-        // The answer retains its separate workspace throughout this refault.
-        drop(value);
         let bytes = self
-            .partition
-            .pin(
-                cx,
-                super::StoredObjectKind::VertexPatch,
-                descriptor.extent,
-                Admission::ScanBypass,
-            )
-            .await?;
-        let rows = self.partition.decode_vertex_point_patch(
-            winner.patch,
-            bytes.as_ref(),
-            Some((winner.row, Some(keys))),
-        )?;
-        // This decoder owns its patch uniquely. Consume that allocation into
-        // the private active image, preserving each row's labels and values.
-        let mut rows: Vec<_> = rows.into_iter().collect();
-        let selected = rows
-            .get_mut(winner.row)
-            .filter(|row| winner.matches(row))
+            .images
+            .active
+            .as_ref()
+            .and_then(|active| active.frame.as_ref())
+            .and_then(|frame| frame.bytes.get(range))
             .ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
-        output.props = core::mem::take(&mut selected.props);
-        drop(bytes);
+        output.props = crate::vertex::decode_admitted_row_properties(
+            bytes,
+            winner.row,
+            keys,
+            self.partition.store.decode_resolver(),
+        )
+        .map_err(malformed)?;
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-        self.active = Some(BufferedValue {
-            value: DecodedVertexPatch {
-                patch: winner.patch,
-                properties: VertexPropertyAccess::Skip,
-                rows,
-            },
-            _charge: charge,
-        });
         Ok(())
     }
 
@@ -2318,6 +2542,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
                 VertexPropertyAccess::Skip
             }
         };
+        let retain_frame = matches!(access, VertexPointAccess::Properties(Some(_)));
         if !self.initialized {
             for at in 0..self.partition.patches.len() {
                 self.observe(cx, observe)?;
@@ -2346,10 +2571,12 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
                 break;
             }
             self.observe(cx, observe)?;
-            self.load_patch(cx, head.patch, properties, observe).await?;
+            self.load_patch(cx, head.patch, properties, retain_frame, observe)
+                .await?;
             let active = self
+                .images
                 .active
-                .as_ref()
+                .as_mut()
                 .ok_or_else(|| BufferedReadError::Buffer(BufferError::InvalidLoad))?;
             let row = active
                 .rows
@@ -2393,6 +2620,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
                     row: head.row + 1,
                 })
             });
+            active.has_next = next.is_some();
             self.heads.pop();
             if let Some(next) = next {
                 self.heads.push(next);
@@ -2578,6 +2806,167 @@ mod tests {
         BranchId, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, GraphId,
         PurposeContexts,
     };
+
+    #[test]
+    fn interleaved_vertex_images_reuse_only_their_own_scan_workspace() {
+        let dir = std::env::temp_dir().join(format!("fgdb-vertex-revisit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, report) = run_async_under_lab(0xb0_22, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query = contexts.query();
+            let store = BlockStore::open(
+                &commit,
+                &dir,
+                [0x75; 32],
+                DatabaseSecurityNamespaceId([0x76; 32]),
+            )
+            .await
+            .unwrap();
+            let key = PropertyKeyId(1);
+            let keys = PropertySelection::one(key);
+            let mut patches = Vec::new();
+            for identities in [[1_u64, 3, 5], [2, 4, 6]] {
+                let rows: Vec<_> = identities
+                    .into_iter()
+                    .map(|ordinal| VertexRow {
+                        vid: VId(u128::from(ordinal)),
+                        birth_ordinal: ordinal,
+                        created_at: CommitSeq(1),
+                        retired_at: None,
+                        labels: vec![fgdb_delta_types::LabelId(1)],
+                        props: (1..=if matches!(ordinal, 3 | 4) { 7 } else { 1 })
+                            .map(|key| {
+                                (
+                                    PropertyKeyId(key),
+                                    CanonicalScalar::Int(ordinal.cast_signed()).into(),
+                                )
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                let payload = crate::vertex::encode_patch(&rows).unwrap();
+                let patch = store.put_patch(&commit, &payload).await.unwrap();
+                patches.push(crate::root::PatchRef {
+                    patch_id: patch.0,
+                    first_seq: CommitSeq(1),
+                    last_seq: CommitSeq(1),
+                });
+            }
+            let root_id = store
+                .put_root(
+                    &commit,
+                    &PartitionRoot {
+                        graph: GraphId(1),
+                        branch: BranchId(1),
+                        partition: 0,
+                        published_at: CommitSeq(1),
+                        blocks: vec![],
+                        vertex_patches: patches,
+                    },
+                )
+                .await
+                .unwrap();
+
+            let mut measurements = Vec::new();
+            for slots in [1, 16] {
+                let limits = BufferedReadLimits {
+                    max_root_bytes: 32 * 1024,
+                    max_source_bytes: 32 * 1024,
+                    max_blocks: 0,
+                    max_vertex_patches: 2,
+                    max_work: 1024,
+                    buffer: BufferLimits {
+                        max_frames: slots,
+                        max_ghost_entries: 0,
+                        max_extent_bytes: 16 * 1024,
+                    },
+                };
+                let pool = MemoryPool::new(3 << 20, 0).unwrap();
+                let mut view = store
+                    .open_buffered_root(&query, root_id, pool.clone(), limits)
+                    .await
+                    .unwrap();
+                let baseline = pool.used();
+                let before = view.stats();
+                let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
+                let heap_bytes = pool.used() - baseline;
+                let mut observe = |_| Ok::<_, &str>(());
+                let mut dense_work = 0;
+                for ordinal in 1..=6_u64 {
+                    let start_work = scan.work_used();
+                    let row = scan
+                        .next_admitted_properties_candidate_with(
+                            &query,
+                            keys,
+                            &mut |vid, _| Ok(vid != VId(4)),
+                            &mut observe,
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(row.vid, VId(u128::from(ordinal)));
+                    if ordinal == 4 {
+                        assert!(row.row.is_none());
+                    } else {
+                        assert_eq!(
+                            row.row.unwrap().properties(),
+                            &[(key, CanonicalScalar::Int(ordinal.cast_signed()).into())]
+                        );
+                    }
+                    if slots == 16 {
+                        // All three rows reuse topology. The masked dense row
+                        // incurs only its merge visit. The admitted dense row
+                        // inspects six additional unrequested property headers.
+                        let work = scan.work_used() - start_work;
+                        match ordinal {
+                            3 => dense_work = work,
+                            4 => assert_eq!(work, 1),
+                            5 => assert_eq!(dense_work, work + 6),
+                            _ => {}
+                        }
+                    }
+                    if ordinal < 6 {
+                        assert_eq!(pool.used(), baseline + heap_bytes + OBJECT_WORKSPACE_BYTES);
+                    }
+                    if ordinal == 2 {
+                        let state = scan.into_state();
+                        scan = view.resume_vertex_scan(&query, state).unwrap();
+                        assert_eq!(scan.images.inactive.len(), usize::from(slots == 16));
+                    }
+                }
+                let work = scan.work_used();
+                assert!(scan.next(&query).await.unwrap().is_none());
+                drop(scan);
+                let after = view.stats();
+                assert_eq!(after.hits, before.hits);
+                assert_eq!(view.buffer.resident_frames(), 0);
+                assert_eq!(pool.used(), baseline);
+                measurements.push((after.misses - before.misses, work));
+
+                let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
+                for _ in 0..2 {
+                    scan.next_properties_candidate_with(&query, keys, &mut observe)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                assert!(matches!(
+                    scan.next_properties_candidate_with(&query, keys, &mut |_| Err("stop"))
+                        .await,
+                    Err(BufferedScanError::Control("stop"))
+                ));
+                drop(scan);
+                assert_eq!(pool.used(), baseline);
+                drop(view);
+                assert_eq!(pool.used(), 0);
+            }
+            assert_eq!(measurements[0].0, 6);
+            assert_eq!(measurements[1].0, 2);
+            assert_eq!(measurements[0].1 - measurements[1].1, 4 * (1 + 3));
+        });
+        assert!(report.invariant_violations.is_empty(), "{report:?}");
+    }
 
     #[test]
     fn retained_metadata_accounts_capacity_and_preserves_opening_peak() {
@@ -3359,6 +3748,7 @@ mod tests {
                         };
                         expected.retain(|(key, _)| keys.contains(*key));
                         for seeded in [false, true] {
+                            let before = view.stats();
                             let mut events = Vec::new();
                             let (candidate, work) = if seeded {
                                 let mut scan = view
@@ -3396,6 +3786,13 @@ mod tests {
                                 );
                                 (candidate, scan.work_used())
                             };
+                            if layout == 0 && !seeded && cut != 0 {
+                                let after = view.stats();
+                                assert_eq!(
+                                    after.hits + after.misses,
+                                    before.hits + before.misses + 1
+                                );
+                            }
                             assert_eq!(candidate.vid, VId(101));
                             assert_eq!(
                                 work,

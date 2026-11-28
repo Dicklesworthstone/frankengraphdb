@@ -1432,7 +1432,8 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     )?);
                 }
                 "--if-head"
-                    if matches!(command, "write" | "transaction" | "schema") && if_head.is_none() =>
+                    if matches!(command, "write" | "transaction" | "schema")
+                        && if_head.is_none() =>
                 {
                     if_head = Some(history::BranchGuard::parse(value)?);
                 }

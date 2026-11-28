@@ -262,23 +262,41 @@ pub(super) async fn discover(
             let (pool, limits) = options.buffered.admission(options.budget.policy())?;
             let vfs = asupersync::fs::UnixVfs::new();
             let selected = match options.at_revision {
-                Some(at) => Database::open_buffered_publication_containing_revision(
-                    open_cx, vfs, &options.db, keys, pool, limits, at,
-                ).await,
+                Some(at) => {
+                    Database::open_buffered_publication_containing_revision(
+                        open_cx,
+                        vfs,
+                        &options.db,
+                        keys,
+                        pool,
+                        limits,
+                        at,
+                    )
+                    .await
+                }
                 None => Database::open_buffered_publication_with_vfs(
-                    open_cx, vfs, &options.db, keys, pool, limits,
-                ).await.map(Some),
+                    open_cx,
+                    vfs,
+                    &options.db,
+                    keys,
+                    pool,
+                    limits,
+                )
+                .await
+                .map(Some),
             };
-            let publication = selected.map_err(|error| {
-                catalog_unreadable = matches!(
-                    error,
-                    fgdb::BufferedOpenError::Memory(_) | fgdb::BufferedOpenError::Read(_)
-                );
-                super::buffered::open_failure(error)
-            })?.ok_or_else(|| {
-                catalog_unreadable = true;
-                Failure::coded(refusal::Code::NotFound, "unknown recorded branch revision")
-            })?;
+            let publication = selected
+                .map_err(|error| {
+                    catalog_unreadable = matches!(
+                        error,
+                        fgdb::BufferedOpenError::Memory(_) | fgdb::BufferedOpenError::Read(_)
+                    );
+                    super::buffered::open_failure(error)
+                })?
+                .ok_or_else(|| {
+                    catalog_unreadable = true;
+                    Failure::coded(refusal::Code::NotFound, "unknown recorded branch revision")
+                })?;
             let view = publication.symbol_catalog(open_cx).await.map_err(|error| {
                 catalog_unreadable = true;
                 open_failure(error)

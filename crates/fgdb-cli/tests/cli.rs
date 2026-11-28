@@ -2616,7 +2616,10 @@ fn local_writes_and_transactions_check_the_exact_verified_marker() {
     let read = fixture.robot("query", &["MATCH (n:Person) RETURN n.id"]);
     assert_eq!(succeeded(&read, "rows"), 2);
     assert_eq!(
-        String::from_utf8(read.stdout).unwrap().matches("\"event\":\"row\"").count(),
+        String::from_utf8(read.stdout)
+            .unwrap()
+            .matches("\"event\":\"row\"")
+            .count(),
         2
     );
 }
@@ -2626,7 +2629,13 @@ fn schema_registration_checks_the_branch_marker_before_allocating_names() {
     let fixture = Fixture::new("schema-branch-head");
     assert_eq!(succeeded(&fixture.discovered("create", &[]), "created"), 0);
     let schema = |args: &[&str]| fixture.discovered("schema", args);
-    assert_eq!(succeeded(&schema(&["--if-head", "empty", "--label", "Person"]), "rows"), 1);
+    assert_eq!(
+        succeeded(
+            &schema(&["--if-head", "empty", "--label", "Person"]),
+            "rows"
+        ),
+        1
+    );
     let head = verified_head(&fixture, 1);
     let forged = format!("1@{}", "00".repeat(32));
     let before = directory_bytes(&fixture.db());

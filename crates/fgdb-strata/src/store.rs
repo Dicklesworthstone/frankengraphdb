@@ -4414,6 +4414,7 @@ impl<V: Vfs> BlockStore<V> {
         RootBinding {
             identity: self.root_identity_domain(),
             root,
+            verified_root: root,
             graph,
             branch,
             published_at,
@@ -4516,6 +4517,9 @@ impl<V: Vfs> BlockStore<V> {
         root.id = id;
         if let Some(binding) = &mut root.memo.binding {
             binding.root = id;
+            // This envelope contains the exact bytes whose descriptors
+            // were verified above.
+            binding.verified_root = id;
         }
         Ok(base_root)
     }
@@ -5176,18 +5180,43 @@ struct RootMemo {
 /// Exact publication provenance for the append fast path. The identity tag
 /// binds both the key and security namespace; block/patch counts and partition
 /// are carried by the enclosing memo.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct RootBinding {
     identity: ObjectId,
     root: PartitionRootVersion,
+    // A caller may rebind the full memo, whose membership and descriptors
+    // are checked again at reuse. That operation cannot confer this proof.
+    verified_root: PartitionRootVersion,
     graph: GraphId,
     branch: BranchId,
     published_at: CommitSeq,
 }
 
+/// A copyable, in-process proof of admission for one authenticated root.
+/// It contains no payload, descriptor copy, writer lease or query authority.
+#[derive(Clone, Copy, Debug)]
+pub struct BufferedRootAdmission {
+    binding: RootBinding,
+    partition: u64,
+}
+
 impl PublishReceipts {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Capture proof for the exact root earned by verification. A manually
+    /// rebound root needs its own verification before it can be captured.
+    pub fn buffered_root_admission(
+        &self,
+        root: PartitionRootVersion,
+    ) -> Option<BufferedRootAdmission> {
+        let memo = self.root_memo.as_ref()?;
+        let binding = memo.binding?;
+        (binding.root == root && binding.verified_root == root).then_some(BufferedRootAdmission {
+            binding,
+            partition: memo.partition,
+        })
     }
 
     /// Advance the memoised root identity when an envelope wraps the exact

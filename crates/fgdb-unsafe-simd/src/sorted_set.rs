@@ -43,9 +43,13 @@ pub const SORTED_SET_COMPILED_PATHS: &[SortedSetDispatch] = &[SortedSetDispatch:
 #[must_use]
 pub const fn active_sorted_set_path() -> SortedSetDispatch {
     #[cfg(feature = "nightly-simd")]
-    { SortedSetDispatch::PortableSimd4 }
+    {
+        SortedSetDispatch::PortableSimd4
+    }
     #[cfg(not(feature = "nightly-simd"))]
-    { SortedSetDispatch::PortableScalar }
+    {
+        SortedSetDispatch::PortableScalar
+    }
 }
 
 /// Portable scalar specification: returns `(first_index_ge_target, comparisons)`
@@ -194,10 +198,14 @@ pub fn seek_ge_u64_via(
         SortedSetDispatch::PortableScalar => seek_ge_u64_scalar(sorted, start, target),
         SortedSetDispatch::PortableSimd4 => {
             #[cfg(feature = "nightly-simd")]
-            { seek_ge_u64_simd4(sorted, start, target) }
+            {
+                seek_ge_u64_simd4(sorted, start, target)
+            }
             #[cfg(not(feature = "nightly-simd"))]
-            { seek_ge_u64_scalar(sorted, start, target) }
-        },
+            {
+                seek_ge_u64_scalar(sorted, start, target)
+            }
+        }
     }
 }
 
@@ -363,10 +371,14 @@ pub fn seek_ge_u128_via(
         SortedSetDispatch::PortableScalar => seek_ge_u128_scalar(sorted, start, target),
         SortedSetDispatch::PortableSimd4 => {
             #[cfg(feature = "nightly-simd")]
-            { seek_ge_u128_simd4(sorted, start, target) }
+            {
+                seek_ge_u128_simd4(sorted, start, target)
+            }
             #[cfg(not(feature = "nightly-simd"))]
-            { seek_ge_u128_scalar(sorted, start, target) }
-        },
+            {
+                seek_ge_u128_scalar(sorted, start, target)
+            }
+        }
     }
 }
 
@@ -489,7 +501,10 @@ mod tests {
     #[test]
     fn selected_backend_is_actually_compiled() {
         assert!(SORTED_SET_COMPILED_PATHS.contains(&active_sorted_set_path()));
-        assert_eq!(SORTED_SET_COMPILED_PATHS[0], SortedSetDispatch::PortableScalar);
+        assert_eq!(
+            SORTED_SET_COMPILED_PATHS[0],
+            SortedSetDispatch::PortableScalar
+        );
         #[cfg(not(feature = "nightly-simd"))]
         {
             assert_eq!(SORTED_SET_COMPILED_PATHS.len(), 1);

@@ -39,7 +39,6 @@ pub use transaction::{
     MAX_TRANSACTION_BATCH_STATEMENTS, TransactionAnswer, TransactionBatchAnswer,
     TransactionBatchEnd, TransactionBatchResult, TransactionBatchRollback,
 };
-#[path = "client/websocket.rs"]
 mod websocket;
 pub use websocket::WebSocketTarget;
 

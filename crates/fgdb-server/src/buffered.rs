@@ -4,6 +4,7 @@ use crate::ServerError;
 use crate::execute::Refusal;
 use fgdb::{BufferLimits, BufferedReadLimits, MemoryPool};
 use fgdb_protocol::body::ErrorCode;
+use fgdb_strata::tiered::sealed::SealedLimits;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -26,6 +27,12 @@ pub struct BufferedReadConfig {
     pub max_concurrent: usize,
     /// Physical root, history, extent and cumulative scan work ceilings.
     pub limits: BufferedReadLimits,
+    /// Optional decoder limits for authenticated sealed relation runs and
+    /// their post-seal suffixes. These share the buffered memory pool.
+    pub native_run_limits: Option<SealedLimits>,
+    /// Reuse this live database writer's exact root admission. Accessed
+    /// objects still authenticate and a missing proof takes the full walk.
+    pub reuse_live_admission: bool,
 }
 
 impl BufferedReadConfig {
@@ -35,6 +42,8 @@ impl BufferedReadConfig {
         Self {
             memory_bytes,
             max_concurrent: 4,
+            native_run_limits: None,
+            reuse_live_admission: false,
             limits: BufferedReadLimits {
                 max_root_bytes: root,
                 max_source_bytes: 1024 * 1024 * 1024,
@@ -83,6 +92,10 @@ impl BufferedReads {
             .limits
             .metadata_bytes()
             .map_err(|_| ServerError::InvalidLimits)?;
+        if let Some(limits) = config.native_run_limits {
+            BufferedReadLimits::validate_native_run_limits(limits)
+                .map_err(|_| ServerError::InvalidLimits)?;
+        }
         let pool =
             MemoryPool::new(config.memory_bytes, 0).map_err(|_| ServerError::InvalidLimits)?;
         Ok(Self {
@@ -95,6 +108,14 @@ impl BufferedReads {
     #[cfg(test)]
     pub(crate) fn pool(&self) -> &MemoryPool {
         &self.pool
+    }
+
+    pub(crate) fn native_run_limits(&self) -> Option<SealedLimits> {
+        self.config.native_run_limits
+    }
+
+    pub(crate) fn reuse_live_admission(&self) -> bool {
+        self.config.reuse_live_admission
     }
 
     /// Authentication precedes this admission; requests cannot replace any

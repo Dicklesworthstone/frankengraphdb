@@ -1074,8 +1074,8 @@ fn vertex_properties_topology_and_complete_pulls_keep_distinct_owners_and_reuse_
         drop(scan);
         assert_eq!(
             view.stats().bypasses - before,
-            7,
-            "one initial topology read, five winning-key reads and one complete upgrade; no per-identity history restart",
+            3,
+            "one initial read, one complete upgrade, and one refault when selected pulls resume",
         );
         drop(view);
         let retained = first.charged_bytes()
