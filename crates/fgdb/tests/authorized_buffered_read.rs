@@ -1436,14 +1436,20 @@ fn catalog_and_graph_stay_on_one_cut_and_profile_refusal_precedes_payloads() {
             "MATCH (n) RETURN n,n.score ORDER BY n.score",
             "MATCH (a)-[r*1..2]->(b) RETURN r",
             "MATCH (a)-[r:R]->(b) RETURN r,properties(a)",
-            "MATCH (n) RETURN n,42 AS value",
+            // Computed constants are supported; reversed identity order must
+            // still refuse before any physical read, including parameter cells.
+            "MATCH (n) RETURN n,42 AS value ORDER BY n DESC",
         ] {
             let prepared = session.prepare(&cx, text, &args).unwrap();
             assert!(session.stream(&cx, &prepared, &args).is_err(), "{text}");
         }
         let parameters = GqlParameters::new().with_int64("value", 42).unwrap();
         let projected = session
-            .prepare(&cx, "MATCH (n) RETURN n,$value AS value", &parameters)
+            .prepare(
+                &cx,
+                "MATCH (n) RETURN n,$value AS value ORDER BY n DESC",
+                &parameters,
+            )
             .unwrap();
         assert!(matches!(
             session.stream(&cx, &projected, &parameters),

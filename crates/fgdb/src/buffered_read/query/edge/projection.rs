@@ -1,4 +1,4 @@
-//! Local ownership of computed single-edge rows and their endpoint fields.
+//! Local ownership of computed edge and fixed-hop rows and their endpoint fields.
 //! The native cursor alone owns orientation, order, projection and pagination.
 
 use super::*;
@@ -7,7 +7,10 @@ use crate::buffered_read::query::projection::{
     BufferedProjectionError, BufferedProjectionOutputGuard, BufferedProjectionRow,
     reserve_evaluation, retain_evaluation,
 };
-use fgdb_gql::edge_stream::{AsyncEdgeProjectionCursor, AsyncEdgeProjectionPlan, EdgeScanState};
+use fgdb_gql::edge_stream::{
+    AsyncEdgeJoinProjectionCursor, AsyncEdgeJoinProjectionPlan, AsyncEdgeProjectionCursor,
+    AsyncEdgeProjectionPlan, EdgeScanState,
+};
 use fgdb_gql::scan_stream::ScanError;
 use fgdb_gql::{GlaExecutionStats, GqlExecutionStats};
 use std::sync::{Arc, Mutex};
@@ -44,6 +47,48 @@ impl<V: Vfs + Clone> Cursor<'_, '_, V> {
             .next()
             .await
             .map(|result| result.map(|output| BufferedQueryRow::from_parts(output.into_parts())))
+    }
+}
+
+// Fixed joins already own an independent output charge. Use the existing
+// local source directly; only its native result is placed in the public owner.
+pub(in crate::buffered_read::query) struct JoinCursor<'view, 'q, V: Vfs + Clone> {
+    inner: AsyncEdgeJoinProjectionCursor<Source<'view, 'q, V>, Checkpoint<'q>>,
+}
+
+impl<V: Vfs + Clone> JoinCursor<'_, '_, V> {
+    pub(in crate::buffered_read::query) fn snapshot_seq(&self) -> CommitSeq {
+        self.inner.snapshot_seq()
+    }
+
+    pub(in crate::buffered_read::query) fn state(&self) -> EdgeScanState {
+        self.inner.state()
+    }
+
+    pub(in crate::buffered_read::query) fn row_stats(&self) -> GqlExecutionStats {
+        self.inner.row_stats()
+    }
+
+    pub(in crate::buffered_read::query) fn evaluator_stats(&self) -> GlaExecutionStats {
+        self.inner.evaluator_stats()
+    }
+
+    pub(in crate::buffered_read::query) fn close(&mut self) {
+        self.inner.close();
+    }
+
+    pub(in crate::buffered_read::query) async fn next(
+        &mut self,
+    ) -> Option<Result<BufferedProjectionRow, BufferedProjectionError>> {
+        self.inner.next().await.map(|result| {
+            result.map(|output| {
+                let (row, charge) = output.into_parts();
+                BufferedQueryRow::from_parts((
+                    row,
+                    BufferedProjectionOutputGuard::independent(charge),
+                ))
+            })
+        })
     }
 }
 
@@ -130,6 +175,24 @@ impl<V: Vfs + Clone> AsyncEdgeScanSource for ProjectionSource<'_, '_, V> {
 }
 
 impl<V: Vfs + Clone> BufferedReadView<V> {
+    pub(in crate::buffered_read::query) fn open_edge_join_projection<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncEdgeJoinProjectionPlan,
+        at: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<JoinCursor<'view, 'q, V>, BufferedProjectionError> {
+        let (mut source, checkpoint) = self
+            .edge_input_source(cx, at, plan.root_relation())
+            .map_err(|error| error.map_source(ScanError::Edge))?;
+        // The complete finite union applies to every root and nested incidence
+        // read. The new kernel grows this source's independent join output guard.
+        source.property_demand = Some(plan.selected_property_demand());
+        Ok(JoinCursor {
+            inner: AsyncEdgeJoinProjectionCursor::new(source, plan, policy, checkpoint),
+        })
+    }
+
     pub(in crate::buffered_read::query) fn open_edge_projection<'view, 'q>(
         &'view mut self,
         cx: &'q QueryCx,

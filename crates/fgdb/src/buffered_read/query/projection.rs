@@ -4,7 +4,7 @@
 
 use super::*;
 use fgdb_gql::PreparedGraphSet;
-use fgdb_gql::edge_stream::{AsyncEdgeProjectionPlan, EdgeScanState};
+use fgdb_gql::edge_stream::{AsyncEdgeJoinProjectionPlan, AsyncEdgeProjectionPlan, EdgeScanState};
 use fgdb_gql::scan_stream::ScanError;
 use fgdb_gql::stream::{AsyncVertexProjectionCursor, AsyncVertexProjectionPlan};
 use std::sync::{Arc, Mutex};
@@ -17,14 +17,23 @@ pub type BufferedProjectionError = GqlQueryError<ScanError<BufferedReadError>, C
 /// The reservation grows before the VM allocates and survives its source record.
 pub struct BufferedProjectionOutputGuard {
     _copy: MemoryCharge,
-    _evaluation: Arc<Mutex<MemoryCharge>>,
+    _evaluation: Option<Arc<Mutex<MemoryCharge>>>,
 }
 
 impl BufferedProjectionOutputGuard {
     pub(super) fn new(copy: MemoryCharge, evaluation: Arc<Mutex<MemoryCharge>>) -> Self {
         Self {
             _copy: copy,
-            _evaluation: evaluation,
+            _evaluation: Some(evaluation),
+        }
+    }
+
+    // The native join kernel grows this independent output reservation before
+    // its VM allocates. No record-shared owner or additional allocation is needed.
+    pub(super) fn independent(charge: MemoryCharge) -> Self {
+        Self {
+            _copy: charge,
+            _evaluation: None,
         }
     }
 }
@@ -63,9 +72,9 @@ impl core::fmt::Debug for BufferedProjectionOutputGuard {
 /// One computed row whose reservation lasts through the application's last use.
 pub type BufferedProjectionRow = BufferedQueryRow<GraphValueRow, BufferedProjectionOutputGuard>;
 
-/// A fixed-cut computed vertex or single-edge stream with the same bounded property source
-/// and cumulative native meters as ordinary buffered reads. Every matching
-/// occurrence is evaluated before final pagination, including the suffix after
+/// A fixed-cut computed vertex, single-edge or fixed-hop join stream with the
+/// same bounded property source and cumulative native meters as ordinary reads.
+/// Every matching occurrence is evaluated before final pagination, including the suffix after
 /// LIMIT and a LIMIT 0 query. Successful completion requires Exhausted.
 ///
 /// Returned rows may outlive this cursor and the view. Their guards retain all
@@ -82,6 +91,7 @@ enum NativeProjection<'view, 'q, V: Vfs + Clone> {
         _metadata: MemoryCharge,
     },
     Edge(super::edge::projection::Cursor<'view, 'q, V>),
+    Join(super::edge::projection::JoinCursor<'view, 'q, V>),
 }
 
 impl<V: Vfs + Clone> core::fmt::Debug for BufferedProjectionCursor<'_, '_, V> {
@@ -95,6 +105,7 @@ impl<V: Vfs + Clone> BufferedProjectionCursor<'_, '_, V> {
         match &self.inner {
             NativeProjection::Vertex { cursor, .. } => cursor.snapshot_seq(),
             NativeProjection::Edge(cursor) => cursor.snapshot_seq(),
+            NativeProjection::Join(cursor) => cursor.snapshot_seq(),
         }
     }
 
@@ -107,6 +118,12 @@ impl<V: Vfs + Clone> BufferedProjectionCursor<'_, '_, V> {
                 EdgeScanState::Closed => VertexScanState::Closed,
                 EdgeScanState::Failed => VertexScanState::Failed,
             },
+            NativeProjection::Join(cursor) => match cursor.state() {
+                EdgeScanState::Open => VertexScanState::Open,
+                EdgeScanState::Exhausted => VertexScanState::Exhausted,
+                EdgeScanState::Closed => VertexScanState::Closed,
+                EdgeScanState::Failed => VertexScanState::Failed,
+            },
         }
     }
 
@@ -114,6 +131,7 @@ impl<V: Vfs + Clone> BufferedProjectionCursor<'_, '_, V> {
         match &self.inner {
             NativeProjection::Vertex { cursor, .. } => cursor.row_stats(),
             NativeProjection::Edge(cursor) => cursor.row_stats(),
+            NativeProjection::Join(cursor) => cursor.row_stats(),
         }
     }
 
@@ -121,6 +139,7 @@ impl<V: Vfs + Clone> BufferedProjectionCursor<'_, '_, V> {
         match &self.inner {
             NativeProjection::Vertex { cursor, .. } => cursor.evaluator_stats(),
             NativeProjection::Edge(cursor) => cursor.evaluator_stats(),
+            NativeProjection::Join(cursor) => cursor.evaluator_stats(),
         }
     }
 
@@ -129,6 +148,7 @@ impl<V: Vfs + Clone> BufferedProjectionCursor<'_, '_, V> {
         match &mut self.inner {
             NativeProjection::Vertex { cursor, .. } => cursor.close(),
             NativeProjection::Edge(cursor) => cursor.close(),
+            NativeProjection::Join(cursor) => cursor.close(),
         }
     }
 
@@ -143,6 +163,12 @@ impl<V: Vfs + Clone> BufferedProjectionCursor<'_, '_, V> {
                     result.map(|output| BufferedQueryRow::from_parts(output.into_parts()))
                 }),
             NativeProjection::Edge(cursor) => {
+                self.cx
+                    .with_restriction_async(cursor.next())
+                    .erase_send()
+                    .await
+            }
+            NativeProjection::Join(cursor) => {
                 self.cx
                     .with_restriction_async(cursor.next())
                     .erase_send()
@@ -237,18 +263,20 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for ProjectionSource<'_, '_, V> {
 }
 
 impl<V: Vfs + Clone> BufferedReadView<V> {
-    /// Stream a fully bound row-local vertex or single-edge projection through
-    /// the extent cache. The compiled source must already have increasing
-    /// unique identity order (including the source VId for undirected edges);
+    /// Stream a fully bound row-local vertex, single-edge or fixed-hop
+    /// projection through the extent cache. The source must already have increasing
+    /// unique identity order, with every traversal edge and any required
+    /// oriented source VId present in the complete ordering key;
     /// the final projection may compute scalar/list/map values,
     /// hide its identity ranking key, and apply a final SKIP/LIMIT.
     ///
-    /// Every property receiver must be the current vertex, edge or an endpoint,
-    /// with bounded key demands proved before opening storage. Both undirected
+    /// Every property receiver must be a vertex or edge in the current binding
+    /// frame, with bounded key demands proved before opening storage. Both undirected
     /// orientations share one admitted record; self-loops produce one occurrence.
     /// DISTINCT, alternate ordering,
-    /// property-first source order, graph reads and multi-stage relational
-    /// queries refuse before any candidate is read. This owner-level API does
+    /// property-first source order, additional graph reads, native collection sources,
+    /// OPTIONAL and multi-stage relational queries refuse before any candidate
+    /// is read. This owner-level API does
     /// not grant or apply Warden session authority.
     pub fn stream_graph_projection_governed<'view, 'q>(
         &'view mut self,
@@ -274,14 +302,21 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         let plan = match AsyncVertexProjectionPlan::compile(query) {
             Ok(plan) => plan,
             Err(error) => {
-                // Both are complete physical-definition proofs. Selection
+                // These are complete physical-definition proofs. Selection
                 // ends before opening one source; no runtime fallback exists.
-                let plan = AsyncEdgeProjectionPlan::compile(query).map_err(|_| {
+                if let Ok(plan) = AsyncEdgeProjectionPlan::compile(query) {
+                    let cursor = self.open_edge_projection(cx, plan, at, policy)?;
+                    return Ok(BufferedProjectionCursor {
+                        inner: NativeProjection::Edge(cursor),
+                        cx,
+                    });
+                }
+                let plan = AsyncEdgeJoinProjectionPlan::compile(query).map_err(|_| {
                     GqlQueryError::Source(ScanError::Vertex(VertexScanError::Plan(error)))
                 })?;
-                let cursor = self.open_edge_projection(cx, plan, at, policy)?;
+                let cursor = self.open_edge_join_projection(cx, plan, at, policy)?;
                 return Ok(BufferedProjectionCursor {
-                    inner: NativeProjection::Edge(cursor),
+                    inner: NativeProjection::Join(cursor),
                     cx,
                 });
             }

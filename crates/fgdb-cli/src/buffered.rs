@@ -11,9 +11,9 @@ use fgdb::{
 };
 use fgdb_gql::algebra::{GlaOperator, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{
-    AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
-    AsyncEdgeProjectionPlan, AsyncEdgeScanCursor, AsyncEdgeScanOutput, AsyncEdgeScanPlan,
-    AsyncEdgeScanSource, AsyncGraphWalkSource, EdgeScanError,
+    AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinProjectionPlan,
+    AsyncEdgeJoinSource, AsyncEdgeProjectionPlan, AsyncEdgeScanCursor, AsyncEdgeScanOutput,
+    AsyncEdgeScanPlan, AsyncEdgeScanSource, AsyncGraphWalkSource, EdgeScanError,
 };
 use fgdb_gql::stream::{
     AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexProjectionPlan, AsyncVertexScanOutput,
@@ -268,7 +268,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         }
         _ => {
             return Err(Failure::query(
-                "this buffered stream requires a supported native graph pattern or row-local vertex or single-edge projection; use --spill-dir for supported aggregate and set queries",
+                "this buffered stream requires a supported native graph pattern or row-local vertex, single-edge or fixed-hop projection; use --spill-dir for supported aggregate and set queries",
             ));
         }
     };
@@ -313,8 +313,10 @@ fn prepare_projection(
 ) -> Result<Prepared, Failure> {
     // Prove the complete definition, including private keys and the property
     // demand of every lazy branch, before opening or faulting any cold source.
-    if let Err(error) = AsyncVertexProjectionPlan::compile(&query) {
-        AsyncEdgeProjectionPlan::compile(&query).map_err(|_| execution_failure(error))?;
+    if let Err(error) = AsyncVertexProjectionPlan::compile(&query)
+        && AsyncEdgeProjectionPlan::compile(&query).is_err()
+    {
+        AsyncEdgeJoinProjectionPlan::compile(&query).map_err(|_| execution_failure(error))?;
     }
     Ok(Prepared {
         as_of,

@@ -124,7 +124,7 @@ fn local_computed_streams_refuse_unsupported_plans_and_never_complete_failed_suf
             "MATCH (n) RETURN n.p+1 AS value ORDER BY n LIMIT 0",
             "MATCH (n) RETURN n AS id,n.p+1 AS value ORDER BY id DESC LIMIT 0",
             "MATCH (n) RETURN DISTINCT n AS id,n.p+1 AS value ORDER BY id LIMIT 0",
-            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS id,s AS next_id,r.p+1 AS value ORDER BY id,next_id LIMIT 0",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS id,s AS next_id,r.p+1 AS value ORDER BY next_id,id LIMIT 0",
         ] {
             assert!(prepare(&options(&[text])).is_err(), "{text}");
         }

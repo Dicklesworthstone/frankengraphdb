@@ -4,6 +4,8 @@ use super::*;
 
 #[path = "computed_edge.rs"]
 mod edge;
+#[path = "computed_join.rs"]
+mod join;
 use fgdb_gql::scan_stream::ScanError;
 use fgdb_gql::{GqlExecutionBudget, PreparedGraphSet, PreparedGraphSetText};
 use fgdb_types::context::SimulationCheckpointProbe;
@@ -126,7 +128,7 @@ fn computed_buffered_admission_refuses_before_faults_and_final_pages_do_not_hide
             "MATCH (n) RETURN n.p+1 AS shifted ORDER BY n LIMIT 0",
             "MATCH (n) RETURN n AS id,n.p+1 AS shifted ORDER BY id DESC LIMIT 0",
             "MATCH (n) RETURN DISTINCT n AS id,n.p+1 AS shifted ORDER BY id LIMIT 0",
-            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS id,s AS next_id,r.p+1 AS shifted ORDER BY id,next_id LIMIT 0",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS id,s AS next_id,r.p+1 AS shifted ORDER BY next_id,id LIMIT 0",
         ] {
             let prepared = projection(text, &args);
             assert!(

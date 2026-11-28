@@ -36,8 +36,8 @@ Keep `fgdb-w5-executor-olp` and `fgdb-qualify-integrated-nov22-maz0p` open.
 ### Local computed buffered projections — qualification pending
 
 Embedded `BufferedReadView::stream_graph_projection_governed[_at]` and local
-`query --buffered` now admit the same proved computed vertex and single-edge
-subsets as the authorized cold server path. Bound Set/TemporalSet reads reuse
+`query --buffered` now admit the same proved computed vertex, single-edge and
+fixed-hop join subsets as the authorized cold server path. Bound Set/TemporalSet reads reuse
 the native projection compiler, asynchronous sources and row VM. Visible identity
 columns or compiler-private keys establish the existing ascending source order;
 the complete bounded property demand is checked before graph open. Historical
@@ -48,14 +48,22 @@ admission and the shared VM reservation. Projected values stay charged after
 their source record or cursor is dropped, including through CLI row encoding
 and flush. The single-edge adapter reads bounded endpoint fields and retains
 one shared growing reservation through both undirected orientations; self-loops
-remain single occurrences. Existing ordinary buffered cursor APIs keep their return types.
+remain single occurrences. The fixed-join route directly reuses the existing
+local incidence source and its independent output MemoryCharge, without an
+extra source adapter or shared allocation owner. Each joined row retains its
+own payload charges after backtracking and after cursor/view destruction.
+Existing ordinary buffered cursor APIs keep their return types.
 Unsupported computed shapes refuse before source construction; no spill or
 resident evaluation fallback was added. Regression sources cover the embedded
 memory lifetime, historical and parameterized pages, suffix errors and local
 CLI delivery/refusal behavior. Seven additional edge regressions cover
 orientation and parallel/self-loop multiplicity, exact endpoint histories,
 private keys and branch markers, retained expanded payloads, cumulative
-budgets, memory refusal, interruption and output/source reuse.
+budgets, memory refusal, interruption and output/source reuse. Local fixed-join
+regressions cover exact history, hidden complete identity keys, independently
+retained sibling outputs, cumulative limits, incomplete/reordered key refusal
+and CLI delivery failure. All local profiles keep the same public cursor API
+and exact branch-marker routing.
 Compilation and runtime qualification remain
 open: a fresh single-job, metadata-only build on 2026-11-27 again ended with
 SIGKILL inside pinned `asupersync`, before first-party diagnostics. No passing

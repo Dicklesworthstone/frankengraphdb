@@ -4,6 +4,8 @@ use super::*;
 mod computed;
 #[path = "tests/computed_edge.rs"]
 mod computed_edge;
+#[path = "tests/computed_join.rs"]
+mod computed_join;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, EmbeddedReadView, MemVfs, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};

@@ -145,7 +145,7 @@ fn local_computed_edge_refusals_precede_faults_and_final_pages_validate_every_or
             "MATCH (a)-[r:R]->(b) RETURN r AS id,r.p+1 AS cost ORDER BY id DESC LIMIT 0",
             "MATCH (a)-[r:R]-(b) RETURN r AS id,r.p+1 AS cost ORDER BY id LIMIT 0",
             "MATCH (a)-[r:R]-(b) RETURN r AS id,a AS origin,r.p+1 AS cost ORDER BY origin,id LIMIT 0",
-            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS id,s AS next_id,r.p+s.p AS cost ORDER BY id,next_id LIMIT 0",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS id,s AS next_id,r.p+s.p AS cost ORDER BY next_id,id LIMIT 0",
         ] {
             let prepared = projection(text, &args);
             assert!(
