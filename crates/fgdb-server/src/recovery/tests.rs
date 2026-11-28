@@ -1242,7 +1242,8 @@ fn mounted_donor_reopens_the_served_generation_after_scrub_finds_a_lost_capsule(
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let donor = std::env::temp_dir().join(format!("fgdb-server-donor-{}", std::process::id()));
         let (server, _, path) = served_with_config(&root, "mounted-donor", |config| {
-            config.capsule_donor = Some(donor.clone());
+            config.capsule_donor = Some(donor.join("unavailable-primary"));
+            config.capsule_donor_fallbacks.push(donor.clone());
         })
         .await;
         let db = &server.databases["test"];

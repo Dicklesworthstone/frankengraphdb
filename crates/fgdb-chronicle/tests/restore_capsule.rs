@@ -246,6 +246,57 @@ fn mounted_donor_reuses_verified_local_objects_and_streams_only_damaged_evidence
             0
         );
         assert_eq!(std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap(), log);
+
+        // Neither archive can satisfy the local history alone. The primary
+        // has the second capsule, but its first is genuine foreign-namespace
+        // ciphertext. A matching fallback can supply that exact object.
+        let fallback = directory();
+        std::fs::create_dir(fallback.join(CAPSULE_DIR)).unwrap();
+        std::fs::rename(
+            capsule_path(&donor, missing),
+            capsule_path(&fallback, missing),
+        )
+        .unwrap();
+        let foreign = CapsuleKeys::new(
+            KEY,
+            DatabaseSecurityNamespaceId([0x12; 32]),
+            LOCAL_DEK,
+            KIND,
+            CapsuleProfile::balanced(),
+        );
+        std::fs::write(
+            capsule_path(&donor, missing),
+            encode_container(&foreign.seal(&[2; 2048]).unwrap()),
+        )
+        .unwrap();
+        std::fs::write(capsule_path(&dir, missing), b"lost one").unwrap();
+        std::fs::write(capsule_path(&dir, damaged), b"lost two").unwrap();
+        let alternatives = [fallback];
+        let sources =
+            fgdb_chronicle::commit::donor::CapsuleDonors::with_fallbacks(&donor, &alternatives)
+                .unwrap();
+        assert_eq!(
+            reopened
+                .restore_lost_from_donors(&cx, &repl, sources, cap, &mut events)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            reopened
+                .read_capsule(&cx, missing, &mut events)
+                .await
+                .unwrap(),
+            [2; 2048]
+        );
+        assert_eq!(
+            reopened
+                .read_capsule(&cx, damaged, &mut events)
+                .await
+                .unwrap(),
+            [4; 2048]
+        );
+        assert_eq!(std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap(), log);
     });
 }
 

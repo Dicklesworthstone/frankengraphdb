@@ -225,6 +225,26 @@ impl Database<asupersync::fs::UnixVfs> {
         keys: crate::DatabaseKeys,
         donor: &std::path::Path,
     ) -> Result<Self, CapsuleRecoveryError> {
+        Self::open_with_capsule_donors(
+            cx,
+            repl,
+            path,
+            keys,
+            fgdb_chronicle::commit::donor::CapsuleDonors::new(donor),
+        )
+        .await
+    }
+
+    /// Open from an ordered, bounded set of native donor replicas or archives.
+    /// Each lost local object is recovered independently, including the key
+    /// witness required by legacy roots after a complete directory loss.
+    pub async fn open_with_capsule_donors(
+        cx: &CommitCx,
+        repl: &fgdb_types::ReplCx,
+        path: &std::path::Path,
+        keys: crate::DatabaseKeys,
+        donors: fgdb_chronicle::commit::donor::CapsuleDonors<'_>,
+    ) -> Result<Self, CapsuleRecoveryError> {
         let vfs = asupersync::fs::UnixVfs::new();
         let ceiling =
             std::num::NonZeroUsize::new(fgdb_chronicle::capsule::MAX_CAPSULE_CONTAINER_BYTES_V1)
@@ -287,19 +307,19 @@ impl Database<asupersync::fs::UnixVfs> {
                         capsule_ref: object_id,
                         ..
                     } = first.marker.effect_source;
-                    fgdb_chronicle::commit::donor::read_capsule(
-                        repl,
-                        donor,
-                        &keys.capsule_keys(),
-                        object_id,
-                        ceiling,
-                        &mut verification,
-                    )
-                    .await
-                    .map_err(|source| CapsuleRecoveryError::Capsule {
-                        object_id,
-                        source: source.into(),
-                    })?;
+                    donors
+                        .read(
+                            repl,
+                            &keys.capsule_keys(),
+                            object_id,
+                            ceiling,
+                            &mut verification,
+                        )
+                        .await
+                        .map_err(|source| CapsuleRecoveryError::Capsule {
+                            object_id,
+                            source: source.into(),
+                        })?;
                 }
             }
             Err(error) => return Err(error.into()),
@@ -322,7 +342,7 @@ impl Database<asupersync::fs::UnixVfs> {
             })?;
         use fgdb_chronicle::commit::donor::DonorRepairError;
         coordinator
-            .restore_lost_from_donor(cx, repl, donor, ceiling, &mut verification)
+            .restore_lost_from_donors(cx, repl, donors, ceiling, &mut verification)
             .await
             .map_err(|error| match error {
                 DonorRepairError::Coordinator(error) => CapsuleRecoveryError::Open(error.into()),
@@ -343,6 +363,21 @@ impl Database<asupersync::fs::UnixVfs> {
         repl: &fgdb_types::ReplCx,
         donor: &std::path::Path,
     ) -> Result<Self, CapsuleRecoveryError> {
+        self.recover_with_capsule_donors(
+            cx,
+            repl,
+            fgdb_chronicle::commit::donor::CapsuleDonors::new(donor),
+        )
+        .await
+    }
+
+    /// Resume a fenced writer using the same authorized sources as its startup.
+    pub async fn recover_with_capsule_donors(
+        self,
+        cx: &CommitCx,
+        repl: &fgdb_types::ReplCx,
+        donors: fgdb_chronicle::commit::donor::CapsuleDonors<'_>,
+    ) -> Result<Self, CapsuleRecoveryError> {
         if matches!(self.state(), crate::DatabaseState::Healthy { .. }) {
             return Ok(self);
         }
@@ -351,7 +386,7 @@ impl Database<asupersync::fs::UnixVfs> {
         let read_caches = std::sync::Arc::clone(&self.snapshot.read_caches);
         let statement_clock = self.statement_clock.clone();
         drop(self);
-        let mut database = Self::open_with_capsule_donor(cx, repl, &path, keys, donor).await?;
+        let mut database = Self::open_with_capsule_donors(cx, repl, &path, keys, donors).await?;
         std::sync::Arc::make_mut(&mut database.snapshot).read_caches = read_caches;
         database.statement_clock = statement_clock;
         Ok(database)

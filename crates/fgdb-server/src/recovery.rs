@@ -174,7 +174,7 @@ struct Shared {
     gate: Arc<Gate>,
     subscriptions: Arc<AtomicUsize>,
     beacon_definitions: Vec<crate::BeaconIndexConfig>,
-    capsule_donor: Option<std::path::PathBuf>,
+    capsule_donors: Option<(std::path::PathBuf, Vec<std::path::PathBuf>)>,
 }
 
 impl Shared {
@@ -275,7 +275,7 @@ impl DatabaseSlot {
         signal: Arc<CommitSignal>,
         subscriptions: Arc<AtomicUsize>,
         beacon: crate::beacon::ConfiguredIndexes,
-        capsule_donor: Option<std::path::PathBuf>,
+        capsule_donors: Option<(std::path::PathBuf, Vec<std::path::PathBuf>)>,
     ) -> Result<Self, crate::ServerError> {
         let published = database
             .pinned_read_view()
@@ -299,7 +299,7 @@ impl DatabaseSlot {
             }),
             subscriptions,
             beacon_definitions: beacon.definitions,
-            capsule_donor,
+            capsule_donors,
         });
         let task_shared = Arc::clone(&shared);
         // Construct this before spawn, not on the child's first poll: a
@@ -753,10 +753,14 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
         };
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let rebuild_indexes = !matches!(candidate.state(), DatabaseState::Healthy { .. });
-        let recovery = match shared.capsule_donor.as_deref() {
-            Some(donor) => {
+        let recovery = match shared.capsule_donors.as_ref() {
+            Some((primary, fallbacks)) => {
+                let sources = fgdb_chronicle::commit::donor::CapsuleDonors::with_fallbacks(
+                    primary, fallbacks,
+                )
+                .expect("served donor configuration was validated at startup");
                 candidate
-                    .recover_with_capsule_donor(&contexts.commit(), &contexts.repl(), donor)
+                    .recover_with_capsule_donors(&contexts.commit(), &contexts.repl(), sources)
                     .await
             }
             None => candidate

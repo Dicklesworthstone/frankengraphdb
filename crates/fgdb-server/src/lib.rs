@@ -255,6 +255,9 @@ pub struct DatabaseConfig {
     /// lost objects during startup and supervised recovery. Only the local
     /// verified marker history selects objects. Request bodies cannot set it.
     pub capsule_donor: Option<std::path::PathBuf>,
+    /// Additional operator-selected directories to try per missing capsule,
+    /// in order. The complete list admits at most eight distinct directories.
+    pub capsule_donor_fallbacks: Vec<std::path::PathBuf>,
     /// Operator-declared, commit-maintained text/vector indexes. Definitions
     /// are restored from authenticated checkpoints with bounded delta catch-up,
     /// or rebuilt before startup and authoritative recovery admit readers.
@@ -313,6 +316,7 @@ impl DatabaseConfig {
             ordered_reads: None,
             buffered_reads: None,
             capsule_donor: None,
+            capsule_donor_fallbacks: Vec::new(),
         }
     }
 
@@ -370,6 +374,7 @@ pub enum ServerError {
     InvalidDatabaseName,
     Open(fgdb::OpenError),
     CapsuleRecovery(fgdb::CapsuleRecoveryError),
+    CapsuleDonorList(fgdb_chronicle::commit::donor::DonorListError),
     Catalog(fgdb::ReadError),
     Symbols(SymbolConflict),
     BufferedSymbols,
@@ -401,6 +406,7 @@ impl core::fmt::Display for ServerError {
             }
             Self::Open(error) => write!(f, "cannot open database: {error}"),
             Self::CapsuleRecovery(error) => write!(f, "cannot recover served database: {error}"),
+            Self::CapsuleDonorList(error) => write!(f, "invalid capsule donors: {error}"),
             Self::Catalog(error) => write!(f, "cannot read database symbol catalog: {error}"),
             Self::Symbols(error) => write!(f, "cannot configure database symbols: {error}"),
             Self::BufferedSymbols => f.write_str(
@@ -610,13 +616,24 @@ impl Server {
             .transpose()?;
         let namespace = config.keys.namespace.0;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let mut db = match config.capsule_donor.as_deref() {
-            Some(donor) => Database::open_with_capsule_donor(
+        use fgdb_chronicle::commit::donor::{CapsuleDonors, DonorListError};
+        let donor_configuration = match config.capsule_donor {
+            Some(primary) => Some((primary, config.capsule_donor_fallbacks)),
+            None if config.capsule_donor_fallbacks.is_empty() => None,
+            None => {
+                return Err(ServerError::CapsuleDonorList(
+                    DonorListError::MissingPrimary,
+                ));
+            }
+        };
+        let mut db = match donor_configuration.as_ref() {
+            Some((primary, fallbacks)) => Database::open_with_capsule_donors(
                 &contexts.commit(),
                 &contexts.repl(),
                 path,
                 config.keys,
-                donor,
+                CapsuleDonors::with_fallbacks(primary, fallbacks)
+                    .map_err(ServerError::CapsuleDonorList)?,
             )
             .await
             .map_err(ServerError::CapsuleRecovery)?,
@@ -674,7 +691,7 @@ impl Server {
             Arc::clone(&commits),
             Arc::clone(&subscriptions),
             beacon,
-            config.capsule_donor,
+            donor_configuration,
         )?;
         self.databases.insert(
             config.name,

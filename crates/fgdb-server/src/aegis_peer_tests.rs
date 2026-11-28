@@ -214,9 +214,14 @@ fn lagging_member_installs_the_compacted_cut_and_recovers_its_suffix() {
         ));
         assert_eq!(download.published_count(), objects.len());
 
-        let mut source = CapsuleDirectorySource::new(
+        let absent = directory.join("unavailable-primary");
+        let alternatives = [directory.clone()];
+        let donors =
+            fgdb_chronicle::commit::donor::CapsuleDonors::with_fallbacks(&absent, &alternatives)
+                .unwrap();
+        let mut source = CapsuleDirectorySource::from_donors(
             &cx,
-            &directory,
+            donors,
             &keys,
             NonZeroUsize::new(container.len()).unwrap(),
             &mut verification,

@@ -42,6 +42,7 @@ USAGE:
                   [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
                   [--compact-interval-seconds <n>] [--scrub-interval-seconds <n>]
                   [--capsule-donor <native-database-directory>]
+                  [--capsule-donor-fallback <native-database-directory>]...
                   [--beacon-checkpoint-interval-seconds <n>]
                   [--subscription-coalesce-ticks <n>]
                   [--label <name>=<u64>]... [--relation <name>=<u64>]... [--property <name>=<u64>]...
@@ -149,6 +150,11 @@ reads a mounted native donor only for lost objects named in the local history.
 The donor must retain those objects with compatible keys. A missing or invalid
 required donor capsule keeps the database unavailable. Verified repairs made
 before a failure remain on disk and are reused on restart.
+Add --capsule-donor-fallback after the primary to recover from incomplete
+replicas or archives. Up to eight distinct directories are tried in the
+configured order for each missing local object. Every candidate is verified
+against that object's local identity. Denied access and cancellation stop
+the attempt; damaged or unavailable donor capsules permit a fallback.
 
 --tls-cert-file and --tls-key-file must be supplied together. They enable
 TLS 1.3 on EVERY configured listener, with no plaintext fallback. Supply a
@@ -304,6 +310,7 @@ struct DatabaseOptions {
     issuer_key_file: Option<PathBuf>,
     query_scratch_dir: Option<PathBuf>,
     capsule_donor: Option<PathBuf>,
+    capsule_donor_fallbacks: Vec<PathBuf>,
     buffered_reads_memory_bytes: Option<NonZeroUsize>,
     policy_epoch: u64,
     write_relation: u64,
@@ -611,6 +618,7 @@ impl ServeOptions {
                         issuer_key_file: None,
                         query_scratch_dir: None,
                         capsule_donor: None,
+                        capsule_donor_fallbacks: Vec::new(),
                         buffered_reads_memory_bytes: None,
                         policy_epoch: 1,
                         write_relation: 1,
@@ -647,6 +655,20 @@ impl ServeOptions {
                         }
                         "--capsule-donor" if db.capsule_donor.is_none() => {
                             db.capsule_donor = Some(PathBuf::from(value(args, &mut at, flag)?));
+                        }
+                        "--capsule-donor-fallback" => {
+                            let primary = db.capsule_donor.as_deref().ok_or_else(|| {
+                                Failure::usage(
+                                    "--capsule-donor-fallback requires --capsule-donor first",
+                                )
+                            })?;
+                            db.capsule_donor_fallbacks
+                                .push(PathBuf::from(value(args, &mut at, flag)?));
+                            fgdb_chronicle::commit::donor::CapsuleDonors::with_fallbacks(
+                                primary,
+                                &db.capsule_donor_fallbacks,
+                            )
+                            .map_err(Failure::usage)?;
                         }
                         "--buffered-reads-memory-bytes"
                             if db.buffered_reads_memory_bytes.is_none() =>
@@ -915,6 +937,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         config.symbols = db.symbols;
         config.ordered_reads = db.query_scratch_dir.map(OrderedReadConfig::new);
         config.capsule_donor = db.capsule_donor;
+        config.capsule_donor_fallbacks = db.capsule_donor_fallbacks;
         config.buffered_reads = db
             .buffered_reads_memory_bytes
             .map(|bytes| BufferedReadConfig::new(bytes.get()));
@@ -2336,6 +2359,8 @@ mod tests {
         let configured = parse(&[
             "--capsule-donor",
             "replica-backup",
+            "--capsule-donor-fallback",
+            "cold-archive",
             "--compact-interval-seconds",
             "300",
             "--scrub-interval-seconds",
@@ -2357,6 +2382,13 @@ mod tests {
             Some(std::path::Path::new("replica-backup"))
         );
         assert!(configured.databases[1].capsule_donor.is_none());
+        assert_eq!(
+            configured.databases[0].capsule_donor_fallbacks,
+            [std::path::PathBuf::from("cold-archive")]
+        );
+        assert!(configured.databases[1].capsule_donor_fallbacks.is_empty());
+        assert!(parse(&["--capsule-donor-fallback", "archive"]).is_err());
+        assert!(parse(&["--capsule-donor", "a", "--capsule-donor-fallback", "a"]).is_err());
         assert!(parse(&["--capsule-donor"]).is_err());
         assert!(parse(&["--capsule-donor", "a", "--capsule-donor", "b"]).is_err());
         assert_eq!(
