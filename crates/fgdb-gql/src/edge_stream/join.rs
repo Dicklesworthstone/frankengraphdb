@@ -9,8 +9,8 @@ use crate::algebra::{MAX_PATTERN_BINDINGS, MAX_PATTERN_EDGES};
 
 mod asynchronous;
 pub use asynchronous::{
-    AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
-    AsyncIncidentCandidateResult,
+    AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinProjectionCursor,
+    AsyncEdgeJoinProjectionPlan, AsyncEdgeJoinSource, AsyncIncidentCandidateResult,
 };
 
 mod probe;

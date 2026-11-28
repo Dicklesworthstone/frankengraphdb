@@ -5,6 +5,9 @@ use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
 #[path = "buffered_edge_projection.rs"]
 mod buffered_edge_projection;
 
+#[path = "buffered_join_projection.rs"]
+mod buffered_join_projection;
+
 async fn start_buffered(
     cx: &Cx,
     name: &str,

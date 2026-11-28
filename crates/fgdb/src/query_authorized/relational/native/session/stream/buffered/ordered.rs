@@ -585,6 +585,12 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> SpoolInput for Input<'_, V, C> {
                 cursor.row_stats(),
                 cursor.evaluator_stats(),
             ),
+            Native::ProjectedJoin(cursor) => (
+                cursor.snapshot_seq(),
+                ScanKind::Edge,
+                cursor.row_stats(),
+                cursor.evaluator_stats(),
+            ),
         }
     }
 }

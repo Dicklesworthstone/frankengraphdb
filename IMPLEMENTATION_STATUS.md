@@ -76,7 +76,7 @@ rows keep their guards after cursor destruction. Only final selected rows
 spend result-row allowance. Skipped and suffix rows still evaluate before
 successful EOF, including LIMIT 0. Cancellation and projection failures fuse
 the source and release the existing session/source owner. Computed cold
-single-edge support is described below; joins, indirect element lookups and
+single-edge and fixed-join support are described below; indirect element lookups and
 unsupported physical sources still refuse.
 
 Regression sources cover public direct/prepared FGP, duplicate occurrences,
@@ -108,8 +108,8 @@ only final selected rows consume result-row allowance. Skipped/suffix
 expressions still execute, including LIMIT 0, and failure or cancellation
 fuses and releases the source owner. Directed, incoming and undirected roots,
 any-relation authority filtering, private ranking keys and prepared historical
-pages use this route. Fixed joins and indirect element property reads remain
-outside the computed cold profile.
+pages use this route. Fixed-join support is described below; indirect element
+property reads remain outside the computed cold profile.
 
 Eight new regression sources cover native demand/ordering/ownership, retained
 host payload charges and memory refusal, direct/prepared FGP, orientation,
@@ -118,6 +118,36 @@ and suffix errors. Independent production/test source review and scoped pinned
 formatting completed. Rust compilation and runtime remain unqualified: the
 fresh metadata build was SIGKILLed in exact pinned `asupersync` before any
 first-party diagnostic. No passing runtime result is claimed.
+
+### Computed cold fixed-hop joins — qualification pending
+
+Authorized buffered Set/TemporalSet reads now route proved fixed-hop
+projections through `AsyncEdgeJoinProjectionPlan` and
+`AsyncEdgeJoinProjectionCursor`. The complete native join compiler and source
+identity proof remain intact. Finite edge/endpoint demand combines every held
+binding's native requirements with every outer expression before capability
+masking. Directed, incoming and undirected chains, branches, cycles, relation
+selectors and native edge-reuse rules retain their occurrence semantics.
+
+The unchanged asynchronous join kernel yields while its full active frame is
+still retained. The ordinary row VM borrows those exact admitted bindings
+before traversal resumes. Every property clone and VM allocation grows the
+independent returned join guard, so backtracking or source/session destruction
+cannot refund a delivered row's payloads. Original cumulative meters cover
+source and expression work; only final selected rows spend result-row credit.
+Full skipped and suffix evaluation, exact historical rebinding, private keys
+and fused cancellation retain the existing completion contract. No extra
+history lookup, evaluator, sort or collected answer was introduced. Terminal
+optional expansions, indirect element reads and unsupported native collection
+sources still refuse at compilation.
+
+Native, host-memory and public FGP regressions cover complete identity keys,
+field bounds, retained frames and returned payloads, all supported join shapes,
+masked fields, exact cuts, cancellation, cumulative budgets and late failures
+after selected pages. Independent source review and scoped pinned formatting
+completed; native typechecking and runtime qualification remain open after
+the exact-pinned foundation metadata SIGKILL. No passing runtime result is
+claimed.
 
 ### Native FGP over WebSocket — qualification pending
 

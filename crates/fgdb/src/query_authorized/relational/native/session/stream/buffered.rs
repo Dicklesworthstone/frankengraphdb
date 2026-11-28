@@ -11,7 +11,8 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::PropertySelection;
 use fgdb_delta_types::catalog::SymbolCatalog;
 use fgdb_gql::edge_stream::{
-    AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeProjectionCursor, AsyncEdgeProjectionPlan,
+    AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeJoinProjectionCursor,
+    AsyncEdgeJoinProjectionPlan, AsyncEdgeProjectionCursor, AsyncEdgeProjectionPlan,
     AsyncEdgeScanCursor, AsyncEdgeScanPlan, AsyncGraphWalkCursor, AsyncGraphWalkPlan,
     EdgeScanPropertySelection, EdgeScanState,
 };
@@ -368,6 +369,8 @@ type ProjectedEdgeCursor<'q, V, C> =
     AsyncEdgeProjectionCursor<Source<'q, V, C, BufferedEdgeScanState>, Checkpoint<'q>>;
 type JoinCursor<'q, V, C> =
     AsyncEdgeJoinCursor<Source<'q, V, C, BufferedEdgeJoinScanState>, Checkpoint<'q>>;
+type ProjectedJoinCursor<'q, V, C> =
+    AsyncEdgeJoinProjectionCursor<Source<'q, V, C, BufferedEdgeJoinScanState>, Checkpoint<'q>>;
 type VertexProbeCursor<'q, V, C> = AsyncVertexProbeCursor<
     Source<'q, V, C, BufferedEdgeJoinScanState>,
     Checkpoint<'q>,
@@ -382,6 +385,7 @@ enum Native<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> {
     Edge(Box<EdgeCursor<'q, V, C>>),
     ProjectedEdge(Box<ProjectedEdgeCursor<'q, V, C>>),
     Join(Box<JoinCursor<'q, V, C>>),
+    ProjectedJoin(Box<ProjectedJoinCursor<'q, V, C>>),
     VertexProbe(Box<VertexProbeCursor<'q, V, C>>),
     // Walks are private input for the external ordering owner. Their DFS/BFS
     // occurrence order must never be exposed as an ordinary ordered stream.
@@ -413,6 +417,12 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
                 EdgeScanState::Failed => VertexScanState::Failed,
             },
             Self::Join(cursor) => match cursor.state() {
+                EdgeScanState::Open => VertexScanState::Open,
+                EdgeScanState::Exhausted => VertexScanState::Exhausted,
+                EdgeScanState::Closed => VertexScanState::Closed,
+                EdgeScanState::Failed => VertexScanState::Failed,
+            },
+            Self::ProjectedJoin(cursor) => match cursor.state() {
                 EdgeScanState::Open => VertexScanState::Open,
                 EdgeScanState::Exhausted => VertexScanState::Exhausted,
                 EdgeScanState::Closed => VertexScanState::Closed,
@@ -459,6 +469,11 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
                 result
                     .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
                     .map_err(source::edge_error)
+            }),
+            Self::ProjectedJoin(cursor) => cursor.next().await.map(|result| {
+                result
+                    .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
+                    .map_err(source::projection_error)
             }),
         }
     }
@@ -574,6 +589,7 @@ enum Scan {
     Edge(AsyncEdgeScanPlan),
     ProjectedEdge(AsyncEdgeProjectionPlan),
     Join(AsyncEdgeJoinPlan),
+    ProjectedJoin(AsyncEdgeJoinProjectionPlan),
     VertexProbe(AsyncVertexProbePlan<GraphValueRow>),
     Walk(AsyncGraphWalkPlan),
 }
@@ -625,6 +641,17 @@ impl Plan {
         }
     }
 
+    fn projected_join(
+        plan: AsyncEdgeJoinProjectionPlan,
+        selection: EdgeScanPropertySelection,
+    ) -> Self {
+        Self {
+            scan: Scan::ProjectedJoin(plan),
+            keys: selection.edge,
+            endpoint_keys: selection.endpoints,
+        }
+    }
+
     fn vertex_probe(
         plan: AsyncVertexProbePlan<GraphValueRow>,
         selection: EdgeScanPropertySelection,
@@ -662,6 +689,7 @@ impl Plan {
             Scan::Edge(_) => size_of::<EdgeCursor<'q, V, C>>(),
             Scan::ProjectedEdge(_) => size_of::<ProjectedEdgeCursor<'q, V, C>>(),
             Scan::Join(_) => size_of::<JoinCursor<'q, V, C>>(),
+            Scan::ProjectedJoin(_) => size_of::<ProjectedJoinCursor<'q, V, C>>(),
             Scan::VertexProbe(_) => size_of::<VertexProbeCursor<'q, V, C>>(),
             Scan::Walk(_) => size_of::<WalkCursor<'q, V, C>>(),
         };
@@ -787,6 +815,32 @@ impl Plan {
                     execution.clone(),
                 );
                 Native::Join(Box::new(AsyncEdgeJoinCursor::new(
+                    source, plan, policy, checkpoint,
+                )))
+            }
+            Scan::ProjectedJoin(plan) => {
+                let relation = plan.root_relation();
+                let position =
+                    if excludes_all_relations(relation, execution.borrow().permit.predicates()) {
+                        None
+                    } else {
+                        let partition = backend.view.partition_mut();
+                        let scan = match relation.one() {
+                            Some(relation) => partition.edge_scan_relation(cx, at, relation),
+                            None => partition.edge_scan(cx, at),
+                        }?;
+                        Some(scan.into_join_scan().into_state())
+                    };
+                let source = Source::new(
+                    slot.take().expect("admitted backend"),
+                    returned.clone(),
+                    position,
+                    self.keys,
+                    self.endpoint_keys,
+                    cx,
+                    execution.clone(),
+                );
+                Native::ProjectedJoin(Box::new(AsyncEdgeJoinProjectionCursor::new(
                     source, plan, policy, checkpoint,
                 )))
             }
@@ -930,12 +984,18 @@ fn compile_projection(
         };
         return Ok((Plan::projected_vertex(plan, keys), query.columns().to_vec()));
     }
-    let plan = AsyncEdgeProjectionPlan::compile(query)
+    if let Ok(plan) = AsyncEdgeProjectionPlan::compile(query) {
+        let mut keys = plan.selected_property_demand();
+        keys.edge = select_properties(keys.edge, scope);
+        keys.endpoints = select_properties(keys.endpoints, scope);
+        return Ok((Plan::projected_edge(plan, keys), query.columns().to_vec()));
+    }
+    let plan = AsyncEdgeJoinProjectionPlan::compile(query)
         .map_err(|_| QueryError::StreamingUnsupported { facade })?;
     let mut keys = plan.selected_property_demand();
     keys.edge = select_properties(keys.edge, scope);
     keys.endpoints = select_properties(keys.endpoints, scope);
-    Ok((Plan::projected_edge(plan, keys), query.columns().to_vec()))
+    Ok((Plan::projected_join(plan, keys), query.columns().to_vec()))
 }
 
 fn bind(

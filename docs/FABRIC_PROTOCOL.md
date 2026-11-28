@@ -1274,13 +1274,13 @@ application output is admitted.
   incomplete identity orders, DISTINCT for this computed profile, arbitrary
   relational barriers, metadata reads and random draws still refuse.
 
-  Configured cold/buffered sources also admit computed vertex and single-edge
-  profiles, including prepared historical reads and private identity keys.
+  Configured cold/buffered sources also admit computed vertex, single-edge and
+  fixed-hop join profiles, including prepared historical reads and private identity keys.
   Every element property read must target a direct column for the current root
-  vertex, captured edge or one of that edge's endpoints. The
+  vertex, a currently bound edge or one of its endpoints. The
   complete bounded field demand includes native predicates, the source
   projection and every outer expression, before capability masking and source
-  construction. The existing asynchronous vertex or edge compiler still admits
+  construction. The existing asynchronous vertex, edge or join compiler still admits
   the entire physical source. Evaluation borrows the admitted record, charges
   copied payloads before allocation, and retains the output's memory guard
   independently of the cursor. One cumulative native/signed allowance covers
@@ -1289,8 +1289,15 @@ application output is admitted.
   Both undirected orientations share one admitted edge record and its growing
   VM charge; neither projection performs another history lookup or endpoint
   admission. The complete edge/source identity prefix remains required for
-  undirected output. Computed cold joins, indirect element reads, probes and collections
-  outside that asynchronous source profile refuse before source construction.
+  undirected output. Fixed-hop joins retain the complete active binding frame
+  until the VM finishes, before backtracking can remove a child. Property
+  copies and VM allocations grow the independent returned join guard, so a
+  delivered computed row stays charged after its source records disappear.
+  Chains, branches, cycles and native edge-reuse rules retain their occurrence
+  semantics and complete traversal identity prefix. Computed lists and maps
+  use this same VM; terminal optional expansions, indirect element reads and
+  native collection/probe sources outside the admitted asynchronous profile
+  refuse before source construction.
 
   Vertex and fixed-edge aggregates also use the native cursor:
   the first credited demand consumes the complete authorized input and later

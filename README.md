@@ -1104,15 +1104,22 @@ the source vertex, and fixed joins retain every traversal identity. Expressions 
 same scoped readers and cumulative allowance as the source. Every reached
 expression, including the unselected suffix, is checked before successful
 exhaustion. Bare property-only queries still require canonical value ordering,
-and configured cold/buffered source streams admit vertex and single-edge forms
-when property reads target the current vertex, captured edge or its endpoints.
+and configured cold/buffered source streams admit vertex, single-edge and
+fixed-hop join forms when property reads target the current vertex, a captured
+edge or its endpoints.
 For example, `MATCH (a)-[r:KNOWS]->(b) RETURN r AS id,a.age+1 AS from_age,r.age+1 AS weight ORDER BY id`
 computes endpoint and edge fields without opening another graph read. The cold
 source admits the complete predicate and projection field demand before
 capability masking and source construction. A non-self undirected edge retains
 one admitted record for both orientations; their computed values and output
-guards share that record's growing memory reservation. Computed cold joins,
-indirect element lookups and other unsupported source shapes still refuse.
+guards share that record's growing memory reservation. Fixed-hop joins keep
+their full active binding frame until the projection finishes, then retain
+computed payloads in an independent output guard while traversal continues.
+For example, `MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) RETURN r AS first,s AS second,r.age+s.age AS cost ORDER BY first,second`
+streams computed two-hop occurrences. Undirected roots also require the root
+source vertex immediately after the first edge identity. Indirect element
+lookups, terminal optional expansions and other unsupported source shapes
+still refuse.
 These new source projections have qualification pending.
 
 Enable external ordered reads by adding `--query-scratch-dir /existing/private/scratch` to the database's `fgdbd serve` options, after its `--database` argument. This is an operator path; clients cannot choose files or physical limits. Defaults bound the database's shared tracked spill buffers to 64 MiB and concurrent ordered sessions to four, with three private files of at most 512 MiB each per session and at most 100,000 input rows. The complete sort-work ceiling is reserved from the same signed allowance that pays for source work and final delivery. The server announces the stream before sorting, handles controls while setup or sort I/O is pending, and streams only the completed final rows under credit. Aggregate inputs and completed-group expressions finish even when `LIMIT 0` suppresses output; only delivered groups spend the signed result-row allowance. Each collection must fit the per-value memory and encoded-row limits. On Unix, scratch files are exclusive and unlinked before query data is written. The source graph remains resident. [Ordered stream details and limits](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) describe the supported profile and ownership boundaries.

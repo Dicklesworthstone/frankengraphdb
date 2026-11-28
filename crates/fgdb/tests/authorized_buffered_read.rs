@@ -45,6 +45,8 @@ const U: RelationId = RelationId(10);
 
 #[path = "authorized_buffered_read/computed_edge_projection.rs"]
 mod computed_edge_projection;
+#[path = "authorized_buffered_read/computed_join_projection.rs"]
+mod computed_join_projection;
 #[path = "authorized_buffered_read/computed_projection.rs"]
 mod computed_projection;
 #[path = "authorized_buffered_read/vertex_probes.rs"]
