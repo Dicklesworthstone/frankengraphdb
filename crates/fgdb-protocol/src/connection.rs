@@ -138,6 +138,7 @@ impl Connection {
             | FrameKind::ExecuteReadStatements
             | FrameKind::ExecutePreparedReadBatch
             | FrameKind::BeginTransaction
+            | FrameKind::BeginHeadTransaction
             | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction
@@ -146,6 +147,8 @@ impl Connection {
             | FrameKind::ExecutePreparedBatch
             | FrameKind::ExecuteDiff
             | FrameKind::ExecutePreparedDiff
+            | FrameKind::GetBranchHead
+            | FrameKind::ExecuteHeadWrite
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::ReleasePrepared => self.phase == Phase::Ready,
             FrameKind::QueryCancel

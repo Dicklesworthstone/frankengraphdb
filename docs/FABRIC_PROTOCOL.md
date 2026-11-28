@@ -72,6 +72,9 @@ these values; callers cannot authenticate merely by constructing the structs.
 | ROLLBACK_TRANSACTION / TRANSACTION_ROLLED_BACK | 0x0033 / 0x0034 | client / server |
 | TRANSACTION_RESULT_CHUNK / TRANSACTION_RESULT_END | 0x0035 / 0x0036 | server |
 | BEGIN_READ_TRANSACTION | 0x0037 | client |
+| EXECUTE_HEAD_WRITE | 0x0038 | client |
+| GET_BRANCH_HEAD / BRANCH_HEAD | 0x0039 / 0x003a | client / server |
+| BEGIN_HEAD_TRANSACTION | 0x003b | client |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -937,6 +940,34 @@ options. Argument-file batches and prepared JSONL input cannot use this flag.
 Output remains the ordinary versioned write contract; a conflict is a query
 refusal with robot code `conflict` and exit status 3. The caller can read the new
 state and decide whether to issue a new conditional request.
+
+`fgdb remote ... branch-head` (Rust `current_branch_head(cx)`) reads the
+branch-wide write precondition. Discovery requires unattenuated graph
+visibility and write permission. The client sends an empty GET_BRANCH_HEAD
+body on the selected control stream and receives one BRANCH_HEAD tagged
+value. The token is `empty` or `<positive-sequence>@<64 hex digits>` in
+human CLI output. Pass it to `fgdb remote ... write --if-head "$head" <gql>`.
+Both the success reply and the branch mutation are fenced by database
+generation and live credentials. Legacy unrecorded history refuses discovery.
+
+A write transaction can also begin with `BEGIN_HEAD_TRANSACTION` carrying
+one tagged BRANCH_HEAD. The server compares it under the writer before
+creating the native workspace and compares it again under the final COMMIT
+writer. Even an unrelated intervening commit makes completion return Conflict
+and discards every staged effect. Rows already delivered remain provisional.
+The transaction can also be rolled back explicitly. Use
+`fgdb remote ... --statements-file steps.json transaction --if-head "$head"`
+or the Rust client's `begin_transaction_if_head`.
+
+For a marker-bound precondition, the Rust client accepts
+`execute_write_if_head(cx, expected, text, parameters)`. The
+`EXECUTE_HEAD_WRITE` body starts with an empty tag (0) or a recorded tag
+(1, followed by a positive big-endian u64 sequence and the 32 Chronicle
+chain-hash bytes). The ordinary statement text and parameter map follow.
+The server compares both fields while holding the same exclusive writer
+through completion. A nonempty legacy frontier without a recorded head
+refuses even the empty guard. A conflict reveals neither the actual marker
+nor the statement result. The client never downgrades to a sequence check.
 
 For both conditional and unconditional text writes, the remote CLI reports
 `kind: "written"` and the terminal's `outcome`. A published write reports

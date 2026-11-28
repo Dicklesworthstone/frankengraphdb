@@ -98,28 +98,29 @@ impl<V: Vfs> CommitCoordinator<V> {
         template_digest: fn(&[u8]) -> Digest,
     ) -> Result<Digest, HistoryVerificationError> {
         let dir = database_dir.as_ref();
-        Self::walk_capsules_through(
-            cx,
-            vfs,
-            dir,
-            through,
-            async |commit_seq, capsule_ref, logical_delta_template_digest| {
-                let bytes = Self::read_capsule_from(vfs, dir, keys, capsule_ref, &mut Vec::new())
+        cx.with_restriction_async(async {
+            let mut frames = HistoryFrames::open(cx, vfs, dir, through).await?;
+            loop {
+                let frame = frames.next(cx).await?;
+                let bytes = Self::read_capsule_from(vfs, dir, keys, frame.capsule, &mut Vec::new())
                     .await
                     .map_err(|source| HistoryVerificationError::Capsule {
-                        commit_seq,
-                        object_id: capsule_ref,
+                        commit_seq: frame.seq,
+                        object_id: frame.capsule,
                         source,
                     })?;
-                if template_digest(&bytes) != logical_delta_template_digest {
+                if template_digest(&bytes) != frame.template_digest {
                     return Err(HistoryVerificationError::TemplateDigestMismatch {
-                        commit_seq,
-                        object_id: capsule_ref,
+                        commit_seq: frame.seq,
+                        object_id: frame.capsule,
                     });
                 }
-                Ok(())
-            },
-        )
+                scan_checkpoint(cx)?;
+                if frame.seq.0 == through.get() {
+                    return Ok(frame.chain_hash);
+                }
+            }
+        })
         .await
     }
 
@@ -137,78 +138,127 @@ impl<V: Vfs> CommitCoordinator<V> {
         through: NonZeroU64,
         mut visit: impl FnMut(CommitSeq, ObjectId) -> std::io::Result<()>,
     ) -> Result<Digest, HistoryVerificationError> {
-        Self::walk_capsules_through(
-            cx,
-            vfs,
-            database_dir.as_ref(),
-            through,
-            async |seq, id, _| {
-                visit(seq, id).map_err(CommitError::Io)?;
-                Ok(())
-            },
-        )
-        .await
-    }
-
-    async fn walk_capsules_through(
-        cx: &CommitCx,
-        vfs: &V,
-        dir: &Path,
-        through: NonZeroU64,
-        mut visit: impl AsyncFnMut(CommitSeq, ObjectId, Digest) -> Result<(), HistoryVerificationError>,
-    ) -> Result<Digest, HistoryVerificationError> {
-        let requested = CommitSeq(through.get());
+        let dir = database_dir.as_ref();
         cx.with_restriction_async(async {
-            scan_checkpoint(cx)?;
-            let file = match vfs.open_read(&dir.join(COMMIT_LOG_NAME)).await {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(HistoryVerificationError::Unreached {
-                        requested,
-                        verified: CommitSeq::ORIGIN,
-                    });
-                }
-                Err(error) => return Err(CommitError::Io(error).into()),
-            };
-            let extent = file.metadata().await.map_err(CommitError::Io)?.len();
-            let mut reader = file.take(extent);
-            let mut prefix = MarkerPrefix::default();
-            let mut entry = Vec::new();
+            let mut frames = HistoryFrames::open(cx, vfs, dir, through).await?;
             loop {
+                let frame = frames.next(cx).await?;
+                visit(frame.seq, frame.capsule).map_err(CommitError::Io)?;
                 scan_checkpoint(cx)?;
-                let decoded = Self::read_next_entry(&mut reader, &mut entry, prefix.chain_value())
-                    .await
-                    .map_err(CommitError::Io)?;
-                let (marker, hash, _) = match decoded {
-                    Some(Ok(frame)) => frame,
-                    None | Some(Err(EntryDefect::Truncated)) => {
-                        return Err(HistoryVerificationError::Unreached {
-                            requested,
-                            verified: prefix.frontier(),
-                        });
-                    }
-                    Some(Err(EntryDefect::Corrupt)) => {
-                        return Err(CommitError::CorruptLogEntry {
-                            commit_seq: prefix.next_commit_seq().map_err(CommitError::from)?.0,
-                        }
-                        .into());
-                    }
-                };
-                let EffectSource::Local {
-                    capsule_ref,
-                    logical_delta_template_digest,
-                } = marker.effect_source;
-                prefix
-                    .recover(marker, hash)
-                    .map_err(recovered_marker_error)?;
-                let commit_seq = prefix.frontier();
-                visit(commit_seq, capsule_ref, logical_delta_template_digest).await?;
-                scan_checkpoint(cx)?;
-                if commit_seq == requested {
-                    return Ok(hash);
+                if frame.seq.0 == through.get() {
+                    return Ok(frame.chain_hash);
                 }
             }
         })
         .await
+    }
+}
+
+/// One acquired log extent and its verified prefix. All consumers read the
+/// same frames, including the archive writer that must preserve the exact bytes.
+pub(super) struct HistoryFrames<V: Vfs> {
+    reader: asupersync::io::Take<V::File>,
+    prefix: MarkerPrefix,
+    bytes: Vec<u8>,
+    requested: CommitSeq,
+}
+
+pub(super) struct HistoryFrame<'a> {
+    pub(super) bytes: &'a [u8],
+    pub(super) seq: CommitSeq,
+    pub(super) capsule: ObjectId,
+    pub(super) template_digest: Digest,
+    pub(super) chain_hash: Digest,
+}
+
+impl<V: Vfs> HistoryFrames<V> {
+    pub(super) async fn open(
+        cx: &CommitCx,
+        vfs: &V,
+        dir: &Path,
+        through: NonZeroU64,
+    ) -> Result<Self, HistoryVerificationError> {
+        scan_checkpoint(cx)?;
+        let requested = CommitSeq(through.get());
+        let missing_or_io = |error: std::io::Error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                HistoryVerificationError::Unreached {
+                    requested,
+                    verified: CommitSeq::ORIGIN,
+                }
+            } else {
+                CommitError::Io(error).into()
+            }
+        };
+        let invalid = || {
+            CommitError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "history journal is not a regular file",
+            ))
+        };
+        let path = dir.join(COMMIT_LOG_NAME);
+        if !vfs
+            .symlink_metadata(&path)
+            .await
+            .map_err(missing_or_io)?
+            .file_type()
+            .is_file()
+        {
+            return Err(invalid().into());
+        }
+        let file = vfs.open_read(&path).await.map_err(missing_or_io)?;
+        let meta = file.metadata().await.map_err(CommitError::Io)?;
+        if !meta.file_type().is_file() {
+            return Err(invalid().into());
+        }
+        Ok(Self {
+            reader: file.take(meta.len()),
+            prefix: MarkerPrefix::default(),
+            bytes: Vec::new(),
+            requested,
+        })
+    }
+
+    pub(super) async fn next(
+        &mut self,
+        cx: &CommitCx,
+    ) -> Result<HistoryFrame<'_>, HistoryVerificationError> {
+        scan_checkpoint(cx)?;
+        let decoded = CommitCoordinator::<V>::read_next_entry(
+            &mut self.reader,
+            &mut self.bytes,
+            self.prefix.chain_value(),
+        )
+        .await
+        .map_err(CommitError::Io)?;
+        let (marker, hash, _) = match decoded {
+            Some(Ok(frame)) => frame,
+            None | Some(Err(EntryDefect::Truncated)) => {
+                return Err(HistoryVerificationError::Unreached {
+                    requested: self.requested,
+                    verified: self.prefix.frontier(),
+                });
+            }
+            Some(Err(EntryDefect::Corrupt)) => {
+                return Err(CommitError::CorruptLogEntry {
+                    commit_seq: self.prefix.next_commit_seq().map_err(CommitError::from)?.0,
+                }
+                .into());
+            }
+        };
+        let EffectSource::Local {
+            capsule_ref,
+            logical_delta_template_digest,
+        } = marker.effect_source;
+        self.prefix
+            .recover(marker, hash)
+            .map_err(recovered_marker_error)?;
+        Ok(HistoryFrame {
+            bytes: &self.bytes,
+            seq: self.prefix.frontier(),
+            capsule: capsule_ref,
+            template_digest: logical_delta_template_digest,
+            chain_hash: hash,
+        })
     }
 }

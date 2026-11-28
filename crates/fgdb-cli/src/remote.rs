@@ -24,7 +24,7 @@ use asupersync::tls::{Certificate, TlsConnector, TlsConnectorBuilder};
 use core::future::{Future, poll_fn};
 use core::pin::pin;
 use core::task::Poll;
-use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireValue};
+use fgdb_protocol::body::{BranchHead, ErrorCode, ExecuteMode, Outcome, WireValue};
 use fgdb_protocol::client::{Client, ClientError, WebSocketTarget};
 use fgdb_protocol::json::{argument, cell};
 use std::io::Write;
@@ -35,6 +35,12 @@ const MAX_TOKEN_FILE_BYTES: u64 = 65_536;
 const MAX_TLS_CA_BYTES: usize = 1 << 20;
 const MAX_JSON_VALUES: usize = 65_536;
 const MAX_JSON_TOKEN_BYTES: usize = 65_536;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteCondition {
+    Frontier(u64),
+    Head(BranchHead),
+}
 
 struct RemoteOptions {
     addr: SocketAddr,
@@ -75,7 +81,8 @@ struct RemoteOptions {
     /// A finite after-minus-before comparison at two explicit revisions.
     difference: Option<diff::Options>,
     /// A single text write may require the selected database's current cut.
-    expected_seq: Option<u64>,
+    condition: Option<WriteCondition>,
+    branch_head: bool,
 }
 
 struct RemoteTls {
@@ -108,7 +115,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut before = None;
     let mut after = None;
     let mut stream = false;
-    let mut expected_seq = None;
+    let mut condition = None;
     let mut at = 0;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -133,8 +140,20 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--before" if before.is_none() => before = Some(diff::parse_cut(&value()?, flag)?),
             "--after" if after.is_none() => after = Some(diff::parse_cut(&value()?, flag)?),
             "--stream" if !stream => stream = true,
-            "--if-current" if expected_seq.is_none() => {
-                expected_seq = Some(diff::parse_cut(&value()?, flag)?);
+            "--if-current" if condition.is_none() => {
+                condition = Some(WriteCondition::Frontier(diff::parse_cut(&value()?, flag)?));
+            }
+            "--if-head" if condition.is_none() => {
+                let expected = match super::history::BranchGuard::parse(&value()?)? {
+                    super::history::BranchGuard::Empty => BranchHead::Empty,
+                    super::history::BranchGuard::At(marker) => BranchHead::Recorded {
+                        seq: core::num::NonZeroU64::new(marker.commit_seq.0).ok_or_else(|| {
+                            Failure::usage("branch-head sequence must be positive")
+                        })?,
+                        chain_hash: marker.marker_oid.0,
+                    },
+                };
+                condition = Some(WriteCondition::Head(expected));
             }
             "--rows-file" if rows_file.is_none() => rows_file = Some(PathBuf::from(value()?)),
             "--statements-file" if statements_file.is_none() => {
@@ -210,27 +229,29 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         at += 1;
     }
     let (verb, statement) = match positional.as_slice() {
-        [verb] if matches!(verb.as_str(), "query-batch" | "transaction") => {
+        [verb] if matches!(verb.as_str(), "query-batch" | "transaction" | "branch-head") => {
             (verb.as_str(), String::new())
         }
-        [verb, statement] if !matches!(verb.as_str(), "query-batch" | "transaction") => {
+        [verb, statement]
+            if !matches!(verb.as_str(), "query-batch" | "transaction" | "branch-head") =>
+        {
             (verb.as_str(), statement.clone())
         }
         _ => {
             return Err(Failure::usage(
-                "remote needs query|write|subscribe|diff and one statement, or query-batch|transaction --statements-file",
+                "remote needs query|write|subscribe|diff and one statement, query-batch|transaction --statements-file, or branch-head",
             ));
         }
     };
     let mode = match verb {
         "query" => read_mode.unwrap_or(ExecuteMode::Read),
-        "query-batch" => ExecuteMode::Read,
+        "query-batch" | "branch-head" => ExecuteMode::Read,
         "write" | "transaction" => ExecuteMode::Write,
         "subscribe" => ExecuteMode::Subscribe,
         "diff" => ExecuteMode::Read,
         _ => {
             return Err(Failure::usage(
-                "remote needs query, query-batch, transaction, write, subscribe or diff",
+                "remote needs query, query-batch, transaction, write, subscribe, diff or branch-head",
             ));
         }
     };
@@ -327,11 +348,20 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--write-mode requires remote write --prepared-jsonl",
         ));
     }
-    if expected_seq.is_some()
+    if verb == "branch-head" && (!parameters.is_empty() || !param_files.is_empty()) {
+        return Err(Failure::usage(
+            "remote branch-head does not take statement parameters",
+        ));
+    }
+    let guarded_transaction = verb == "transaction"
+        && !read_only_transaction
+        && matches!(condition, Some(WriteCondition::Head(_)));
+    if condition.is_some()
+        && !guarded_transaction
         && (verb != "write" || rows_file.is_some() || prepared_jsonl.is_some())
     {
         return Err(Failure::usage(
-            "--if-current applies only to a single text write, without --rows-file or --prepared-jsonl",
+            "choose a single text write, or use --if-head with a write transaction",
         ));
     }
     let tls = match (tls_server_name, tls_ca_file) {
@@ -397,7 +427,8 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         prepared_jsonl,
         write_mode: write_mode.unwrap_or_default(),
         difference,
-        expected_seq,
+        condition,
+        branch_head: verb == "branch-head",
     })
 }
 
@@ -638,12 +669,17 @@ async fn execute_statement(
     cx: &asupersync::Cx,
     client: &mut Client,
     mode: ExecuteMode,
-    expected_seq: Option<u64>,
+    condition: Option<WriteCondition>,
     statement: &str,
     parameters: Vec<(String, WireValue)>,
 ) -> Result<fgdb_protocol::client::Answer, ClientError> {
-    match expected_seq {
-        Some(expected) if mode == ExecuteMode::Write => {
+    match condition {
+        Some(WriteCondition::Head(expected)) if mode == ExecuteMode::Write => {
+            client
+                .execute_write_if_head(cx, expected, statement, parameters)
+                .await
+        }
+        Some(WriteCondition::Frontier(expected)) if mode == ExecuteMode::Write => {
             client
                 .execute_write_if_current(cx, expected, statement, parameters)
                 .await
@@ -676,6 +712,28 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
             .collect::<Result<Vec<_>, Failure>>()?;
         options.parameters.extend(decoded);
     }
+    if options.branch_head {
+        let head = runtime.block_on(async {
+            let mut client = connect(&cx, &options).await?;
+            client
+                .select(&cx, &options.database)
+                .await
+                .map_err(failure)?;
+            let head = client.current_branch_head(&cx).await.map_err(failure)?;
+            let _ = client.close(&cx).await;
+            Ok::<_, Failure>(head)
+        })?;
+        let published = match head {
+            BranchHead::Empty => fgdb::PublishedBranchHead::Empty,
+            BranchHead::Recorded { seq, chain_hash } => {
+                fgdb::PublishedBranchHead::Recorded(fgdb_types::MarkerRef {
+                    commit_seq: fgdb_types::CommitSeq(seq.get()),
+                    marker_oid: fgdb_types::ObjectId(chain_hash),
+                })
+            }
+        };
+        return super::history::head::render(published, robot, out);
+    }
     if let Some(path) = &options.prepared_jsonl {
         return runtime.block_on(async {
             // Invalid or empty first input cannot read credentials or connect.
@@ -707,6 +765,9 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 transaction::TransactionScript::read(&cx, path, options.read_only_transaction)
                     .await?;
             script.rollback = options.rollback_transaction;
+            if let Some(WriteCondition::Head(expected)) = options.condition {
+                script.expected_head = Some(expected);
+            }
             let mut client = connect(&cx, &options).await?;
             client
                 .select(&cx, &options.database)
@@ -828,7 +889,7 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
             &cx,
             &mut client,
             options.mode,
-            options.expected_seq,
+            options.condition,
             &options.statement,
             options.parameters,
         )

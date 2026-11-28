@@ -36,7 +36,7 @@ pub use read_batch::{ReadBatchAnswer, ReadBatchResult};
 #[path = "client/transaction.rs"]
 mod transaction;
 pub use transaction::{
-    MAX_TRANSACTION_BATCH_STATEMENTS, TransactionAnswer, TransactionBatchAnswer,
+    MAX_TRANSACTION_BATCH_STATEMENTS, TransactionAccess, TransactionAnswer, TransactionBatchAnswer,
     TransactionBatchEnd, TransactionBatchResult, TransactionBatchRollback,
 };
 mod websocket;
@@ -1337,7 +1337,8 @@ fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError
         FrameKind::HelloAck | FrameKind::AuthOk => header.binding() == Binding::Transport,
         FrameKind::Ready => matches!(expected, Binding::Session(_)) && header.binding() == expected,
         FrameKind::Error => header.binding() == expected,
-        FrameKind::Prepared
+        FrameKind::BranchHead
+        | FrameKind::Prepared
         | FrameKind::PreparedReleased
         | FrameKind::TransactionBegun
         | FrameKind::TransactionCommitted
@@ -2756,6 +2757,89 @@ mod tests {
                     .iter()
                     .any(|f| f.header().kind() == FrameKind::Execute)
             );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn branch_head_reply_requires_selected_control_binding_and_yields_usable_write_guard() {
+        use crate::body::{BranchHead, ExecuteHeadWrite};
+        let ((), report) = run_async_under_lab(0x1cf0_7532, |root| async move {
+            let expected = BranchHead::Recorded {
+                seq: core::num::NonZeroU64::MAX,
+                chain_hash: [0xc2; 32],
+            };
+            let returned = rpc(FrameKind::BranchHead, 4, StreamId::CONTROL, &expected);
+            assert!(server_header(returned.header(), Binding::Session(session())).is_err());
+            let child = rpc(FrameKind::BranchHead, 4, StreamId([1; 16]), &expected);
+            assert!(
+                server_header(child.header(), Binding::Ready(ready().binding(session()))).is_err()
+            );
+            let error = rpc(
+                FrameKind::Error,
+                5,
+                StreamId([2; 16]),
+                &ErrorBody {
+                    code: ErrorCode::Conflict,
+                    message: "stale".into(),
+                },
+            );
+            let io = script(vec![returned, error]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let current = client.current_branch_head(&root).await.unwrap();
+            assert_eq!(current, expected);
+            let refused = client
+                .execute_write_if_head(&root, current, "CREATE ()", vec![])
+                .await;
+            assert!(matches!(
+                refused,
+                Err(ClientError::Server {
+                    code: ErrorCode::Conflict,
+                    ..
+                })
+            ));
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(frames.len(), 5);
+            assert_eq!(frames[3].header().kind(), FrameKind::GetBranchHead);
+            assert_eq!(frames[4].header().kind(), FrameKind::ExecuteHeadWrite);
+            let write = ExecuteHeadWrite::decode(frames[4].payload()).unwrap();
+            assert_eq!(write.expected, expected);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn guarded_transaction_rejects_mismatched_begin_basis_before_sending_steps() {
+        let ((), report) = run_async_under_lab(0x1ad0_7533, |root| async move {
+            let begun = rpc(
+                FrameKind::TransactionBegun,
+                4,
+                StreamId::CONTROL,
+                &crate::body::TransactionBegun {
+                    basis: 1,
+                    handle: crate::body::TransactionHandle([4; 16]),
+                },
+            );
+            let io = script(vec![begun]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let result = client
+                .begin_transaction_if_head(&root, crate::body::BranchHead::Empty)
+                .await;
+            assert!(matches!(
+                result,
+                Err(ClientError::Protocol(
+                    "guarded transaction returned a different basis"
+                ))
+            ));
+            requires_reconnect(client.ping(&root, 1).await);
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(frames.len(), 4);
+            assert_eq!(frames[3].header().kind(), FrameKind::BeginHeadTransaction);
+            assert_eq!(frames[3].payload(), [0]);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

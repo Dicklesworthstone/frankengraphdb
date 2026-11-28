@@ -16,7 +16,7 @@ use fgdb_gql::{
     PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate, PreparedGraphSetText,
     PreparedGraphTransactionControl, PreparedGraphWriteChainText, ReverseSymbolCatalog,
 };
-use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteMode, Outcome};
+use fgdb_protocol::body::{Body, BranchHead, ErrorCode, Execute, ExecuteMode, Outcome};
 use fgdb_types::{CommitSeq, EmbeddedTxnCompletion, PurposeContexts};
 use fgdb_warden::CapabilityToken;
 use std::cell::{Cell, RefCell};
@@ -80,6 +80,7 @@ type WriteOwner<'s> = AuthorizedWriteTransaction<'s, fn() -> u64>;
 pub(crate) struct NativeWriteTransaction<'s> {
     db: &'s Served,
     token: CapabilityToken,
+    expected_head: Option<BranchHead>,
     owner: Option<Box<WriteOwner<'s>>>,
     generation: Generation,
     basis: CommitSeq,
@@ -92,6 +93,15 @@ impl<'s> NativeWriteTransaction<'s> {
         db: &'s Served,
         token: &CapabilityToken,
     ) -> Result<Self, Refusal> {
+        Self::begin_with_head(cx, db, token, None).await
+    }
+
+    pub(crate) async fn begin_with_head(
+        cx: &Cx,
+        db: &'s Served,
+        token: &CapabilityToken,
+        expected_head: Option<BranchHead>,
+    ) -> Result<Self, Refusal> {
         authorize_write(db, token)?;
         let generation = db.db.generation().map_err(Refusal::from)?;
         let _operation = generation.enter().map_err(Refusal::from)?;
@@ -99,6 +109,9 @@ impl<'s> NativeWriteTransaction<'s> {
         let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
         generation.check().map_err(Refusal::from)?;
         authorize_write(db, token)?;
+        if let Some(head) = expected_head {
+            super::conditional::check_write_head(&guard, head)?;
+        }
         let owner = guard
             .begin_authorized_write(
                 &contexts.txn(),
@@ -118,6 +131,7 @@ impl<'s> NativeWriteTransaction<'s> {
         Ok(Self {
             db,
             token: token.clone(),
+            expected_head,
             owner: Some(Box::new(owner)),
             generation,
             basis,
@@ -297,6 +311,12 @@ impl<'s> NativeWriteTransaction<'s> {
         let mut guard = self.db.db.write(cx).await.map_err(Refusal::from)?;
         generation.check().map_err(Refusal::from)?;
         authorize_write(self.db, &self.token)?;
+        // BEGIN released the writer while the private workspace was idle.
+        // An intervening disjoint commit must also invalidate this full-branch
+        // precondition, even for a read-only/no-effect completion.
+        if let Some(head) = self.expected_head {
+            super::conditional::check_write_head(&guard, head)?;
+        }
         let completion = (*owner)
             .commit(&mut guard)
             .await
@@ -734,6 +754,78 @@ mod tests {
     async fn state(cx: &Cx, db: &Served) -> (CommitSeq, usize) {
         let guard = db.db.read(cx).await.unwrap();
         (guard.frontier().unwrap(), guard.vertices().unwrap().len())
+    }
+
+    #[test]
+    fn exact_head_guards_begin_and_final_publish_including_disjoint_writes() {
+        let ((), report) = run_async_under_lab(0x2026_2231, |cx| async move {
+            let (server, token, _) = served(&cx, "exact-head-transaction-commit").await;
+            let db = &server.databases["test"];
+            let mut first = accepted(
+                NativeWriteTransaction::begin_with_head(&cx, db, &token, Some(BranchHead::Empty))
+                    .await,
+            );
+            let mut loser = accepted(
+                NativeWriteTransaction::begin_with_head(&cx, db, &token, Some(BranchHead::Empty))
+                    .await,
+            );
+            let mut no_effect = accepted(
+                NativeWriteTransaction::begin_with_head(&cx, db, &token, Some(BranchHead::Empty))
+                    .await,
+            );
+            let reads = request(ExecuteMode::Read, "MATCH (n) RETURN 1 AS value");
+            accepted(no_effect.execute_framed(&cx, &reads, 4096).await);
+            let create = request(ExecuteMode::Write, "CREATE (n) RETURN 7 AS value");
+            for _ in 0..2 {
+                let staged = accepted(loser.execute_framed(&cx, &create, 4096).await);
+                assert_eq!(staged.rows, [vec![WireValue::Int(7)]]);
+            }
+            accepted(first.execute_framed(&cx, &create, 4096).await);
+            accepted(first.commit(&cx).await);
+            assert_eq!(
+                loser.commit(&cx).await.err().unwrap().code,
+                ErrorCode::Conflict
+            );
+            assert_eq!(
+                no_effect.commit(&cx).await.err().unwrap().code,
+                ErrorCode::Conflict
+            );
+            assert_eq!(state(&cx, db).await, (CommitSeq(1), 1));
+            let (head, _) = accepted(super::super::current_write_head(&cx, db, &token).await);
+            let BranchHead::Recorded {
+                seq,
+                mut chain_hash,
+            } = head
+            else {
+                panic!("missing head")
+            };
+            chain_hash[15] ^= 1;
+            let wrong = BranchHead::Recorded { seq, chain_hash };
+            assert_eq!(
+                NativeWriteTransaction::begin_with_head(&cx, db, &token, Some(wrong))
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                ErrorCode::Conflict
+            );
+            let mut success = accepted(
+                NativeWriteTransaction::begin_with_head(&cx, db, &token, Some(head)).await,
+            );
+            accepted(success.execute_framed(&cx, &create, 4096).await);
+            accepted(success.execute_framed(&cx, &create, 4096).await);
+            let committed = accepted(success.commit(&cx).await);
+            assert_eq!(
+                committed.outcome,
+                Outcome::WriteCommitted {
+                    seq: 2,
+                    statements: 2
+                }
+            );
+            assert_eq!(state(&cx, db).await, (CommitSeq(2), 3));
+            server.join_database_workers(&cx).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

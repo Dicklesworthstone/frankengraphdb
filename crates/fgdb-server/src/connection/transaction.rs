@@ -141,8 +141,15 @@ impl Lane {
         let binding = self.conn.binding();
         self.send_generation = None;
         match frame.header().kind() {
-            FrameKind::BeginTransaction | FrameKind::BeginReadTransaction => {
-                if Empty::decode(frame.payload()).is_err() {
+            FrameKind::BeginTransaction
+            | FrameKind::BeginReadTransaction
+            | FrameKind::BeginHeadTransaction => {
+                let expected = if frame.header().kind() == FrameKind::BeginHeadTransaction {
+                    fgdb_protocol::body::BranchHead::decode(frame.payload()).map(Some)
+                } else {
+                    Empty::decode(frame.payload()).map(|_| None)
+                };
+                let Ok(expected) = expected else {
                     self.fatal(
                         cx,
                         request,
@@ -151,13 +158,13 @@ impl Lane {
                     )
                     .await;
                     return Err(Stop::Transport);
-                }
+                };
                 let begun = if frame.header().kind() == FrameKind::BeginReadTransaction {
                     NativeReadTransaction::begin(cx, db, token)
                         .await
                         .map(NativeTransaction::Read)
                 } else {
-                    NativeWriteTransaction::begin(cx, db, token)
+                    NativeWriteTransaction::begin_with_head(cx, db, token, expected)
                         .await
                         .map(NativeTransaction::Write)
                 };

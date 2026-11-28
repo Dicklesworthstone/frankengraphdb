@@ -99,8 +99,27 @@ fn scrub_imports_a_committed_backup_capsule_across_process_opens() {
         .split('"')
         .next()
         .unwrap();
-    fs::rename(&live, root.join("backup.capsule")).unwrap();
-    fs::rename(&second, root.join("second.capsule")).unwrap();
+    let backed_up = success(
+        &root,
+        "backup-history",
+        &[
+            "--through",
+            "3",
+            "--expect-chain",
+            anchor,
+            "--output",
+            "donor",
+        ],
+    );
+    assert!(
+        String::from_utf8(backed_up)
+            .unwrap()
+            .contains(r#""kind":"history_backup""#)
+    );
+    assert_eq!(fs::read(root.join("donor/commits.log")).unwrap(), history);
+    let first_backup = format!("donor/capsules/{oid}.capsule");
+    let second_backup = format!("donor/capsules/{oid2}.capsule");
+    fs::rename(&live, root.join("lost-original.capsule")).unwrap();
     fs::write(&second, b"damaged").unwrap();
     assert!(!invoke(&root, "scrub", &[]).status.success());
 
@@ -149,10 +168,10 @@ fn scrub_imports_a_committed_backup_capsule_across_process_opens() {
     let invalid = [
         "--restore-capsule",
         oid,
-        "backup.capsule",
+        &first_backup,
         "--restore-capsule",
         oid2,
-        "backup.capsule",
+        &first_backup,
     ];
     let rejected = invoke(&root, "scrub", &invalid);
     assert_eq!(rejected.status.code(), Some(4));
@@ -163,10 +182,10 @@ fn scrub_imports_a_committed_backup_capsule_across_process_opens() {
     let restore = [
         "--restore-capsule",
         oid,
-        "backup.capsule",
+        &first_backup,
         "--restore-capsule",
         oid2,
-        "second.capsule",
+        &second_backup,
     ];
     for _ in 0..2 {
         let report = String::from_utf8(success(&root, "scrub", &restore)).unwrap();

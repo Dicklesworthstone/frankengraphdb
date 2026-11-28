@@ -30,6 +30,146 @@ fn keys() -> DatabaseKeys {
     DatabaseKeys::new(K_OID, NAMESPACE, [0xd3; 32])
 }
 
+#[test]
+fn mounted_capsule_donor_recovers_only_lost_local_history_across_reopens() {
+    use std::fs;
+    let ((), report) = run_async_under_lab(0xd322_a471, |root| async move {
+        let purpose = PurposeContexts::narrow_runtime_root(&root);
+        let cx = purpose.commit();
+        let repl = purpose.repl();
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp =
+            std::env::temp_dir().join(format!("fgdb-mounted-donor-{}-{epoch}", std::process::id()));
+        fs::create_dir(&temp).unwrap();
+        let path = temp.join("graph");
+        let donor = temp.join("donor");
+        fs::create_dir_all(donor.join(CAPSULE_DIR)).unwrap();
+        let mut db = Database::create(&cx, &path, keys()).await.unwrap();
+        for n in 1..=3 {
+            let mut batch = WriteBatch::new(R);
+            batch.create_vertex(VId(n), vec![], vec![]);
+            db.write(&cx, batch).await.unwrap();
+        }
+        let vertices = db.vertices().unwrap();
+        let chain = fs::read(path.join(COMMIT_LOG_NAME)).unwrap();
+        let mut live: Vec<_> = fs::read_dir(path.join(CAPSULE_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "capsule"))
+            .collect();
+        live.sort();
+        assert_eq!(live.len(), 3);
+        let copies: Vec<_> = live
+            .iter()
+            .map(|p| donor.join(CAPSULE_DIR).join(p.file_name().unwrap()))
+            .collect();
+        for i in [0, 1] {
+            fs::copy(&live[i], &copies[i]).unwrap();
+        }
+        // The intact third object is deliberately absent from the donor.
+        let reserved = temp.join("displaced");
+        fs::rename(&live[0], &reserved).unwrap();
+        fs::write(&live[1], b"lost").unwrap();
+        assert!(
+            Database::open_with_capsule_donor(&cx, &repl, &path, keys(), &donor)
+                .await
+                .is_err()
+        );
+        let summary = db.scrub(&cx).await.unwrap();
+        assert_eq!(summary.lost.len(), 2);
+        assert!(db.frontier().is_err());
+        // A genuine container for the wrong requested identity cannot release the fence.
+        let original = fs::read(&copies[1]).unwrap();
+        fs::copy(&copies[0], &copies[1]).unwrap();
+        assert!(
+            db.recover_with_capsule_donor(&cx, &repl, &donor)
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read(path.join(COMMIT_LOG_NAME)).unwrap(), chain);
+        fs::write(&copies[1], original).unwrap();
+        let recovered = Database::open_with_capsule_donor(&cx, &repl, &path, keys(), &donor)
+            .await
+            .unwrap();
+        assert_eq!(recovered.vertices().unwrap(), vertices);
+        assert_eq!(recovered.frontier().unwrap(), CommitSeq(3));
+        assert_eq!(recovered.vertices_at(CommitSeq(1)).unwrap().len(), 1);
+        drop(recovered);
+        let retry =
+            Database::open_with_capsule_donor(&cx, &repl, &path, keys(), &temp.join("absent"))
+                .await
+                .unwrap();
+        assert_eq!(retry.vertices().unwrap(), vertices);
+        drop(retry);
+        // A complete capsule-directory loss has the same recovery authority:
+        // the remaining local journal and its published, keyed root.
+        let full_backup = temp.join("whole");
+        fs::create_dir(&full_backup).unwrap();
+        fs::rename(path.join(CAPSULE_DIR), full_backup.join(CAPSULE_DIR)).unwrap();
+        let wrong_keys = DatabaseKeys::new(K_OID, NAMESPACE, [0xdd; 32]);
+        assert!(
+            Database::open_with_capsule_donor(&cx, &repl, &path, wrong_keys, &full_backup)
+                .await
+                .is_err()
+        );
+        assert!(!path.join(CAPSULE_DIR).exists());
+        let wrong_identity = DatabaseKeys::new([0xdc; 32], NAMESPACE, [0xd3; 32]);
+        assert!(
+            Database::open_with_capsule_donor(&cx, &repl, &path, wrong_identity, &full_backup)
+                .await
+                .is_err()
+        );
+        assert!(!path.join(CAPSULE_DIR).exists());
+        // A legacy opener carries no DEK commitment. Authenticating an exact
+        // donor object supplies that evidence before recreating the directory.
+        let slot_file = path.join("manifest.root");
+        let mut slots = fs::read(&slot_file).unwrap();
+        for frame in slots.chunks_exact_mut(fgdb_chronicle::root::SLOT_LEN) {
+            if let Ok(mut slot) = fgdb_chronicle::RootSlot::parse(frame) {
+                slot.format_minor = 0;
+                slot.bootstrap.opener_payload_len = 2;
+                slot.bootstrap.opener_payload[2..36].fill(0);
+                frame.copy_from_slice(&slot.serialize());
+            }
+        }
+        fs::write(slot_file, slots).unwrap();
+        let wrong_legacy = DatabaseKeys::new(K_OID, NAMESPACE, [0xdd; 32]);
+        assert!(
+            Database::open_with_capsule_donor(&cx, &repl, &path, wrong_legacy, &full_backup)
+                .await
+                .is_err()
+        );
+        assert!(!path.join(CAPSULE_DIR).exists());
+        let whole = Database::open_with_capsule_donor(&cx, &repl, &path, keys(), &full_backup)
+            .await
+            .unwrap();
+        assert_eq!(whole.vertices().unwrap(), vertices);
+        drop(whole);
+        let unrelated = temp.join("unrelated");
+        fs::create_dir(&unrelated).unwrap();
+        fs::write(unrelated.join(COMMIT_LOG_NAME), &chain).unwrap();
+        assert!(
+            Database::open_with_capsule_donor(&cx, &repl, &unrelated, keys(), &full_backup)
+                .await
+                .is_err()
+        );
+        assert!(!unrelated.join(CAPSULE_DIR).exists());
+        assert_eq!(
+            Database::open_rebuilding(&cx, &path, keys())
+                .await
+                .unwrap()
+                .vertices()
+                .unwrap(),
+            vertices
+        );
+        assert_eq!(fs::read(path.join(COMMIT_LOG_NAME)).unwrap(), chain);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 async fn fixture(
     cx: &CommitCx,
     vfs: &MemVfs,

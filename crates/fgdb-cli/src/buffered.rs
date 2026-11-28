@@ -158,13 +158,12 @@ impl BufferedOptions {
             self.memory.unwrap_or(DEFAULT_MEMORY),
             "--buffer-memory-bytes",
         )?;
-        let default_root_share = BufferedReadLimits::root_bytes_for_pool(memory);
         let root = if self.memory.is_some_and(|bytes| bytes > DEFAULT_MEMORY) {
-            // A larger explicit pool can devote half to root decode. Unused
-            // allowance is refunded once the authenticated metadata is retained.
-            default_root_share * 2
+            // This is a cumulative transfer limit. The decoder separately
+            // reserves the authenticated frame, columns and transient growth.
+            memory / 2
         } else {
-            default_root_share
+            BufferedReadLimits::root_bytes_for_pool(memory)
         };
         let source = size(
             self.source.unwrap_or(DEFAULT_SOURCE),

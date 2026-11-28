@@ -12,6 +12,7 @@ use crate::execute::run_prepared;
 use crate::execute::{
     Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared_batch,
     run_prepared_framed, subscribe, write_batch, write_framed, write_if_current_framed,
+    write_if_head_framed,
 };
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
@@ -22,11 +23,11 @@ use core::pin::Pin;
 use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
-    Execute, ExecuteBatch, ExecuteConditionalWrite, ExecuteDiff, ExecuteMode, ExecutePrepared,
-    ExecutePreparedBatch, ExecutePreparedDiff, ExecutePreparedReadBatch, ExecuteReadStatements,
-    Hello, HelloAck, MAX_ROWS_PER_CHUNK, MAX_VALUE_NODES, Outcome, Ping, Prepare, Prepared,
-    PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd,
-    SelectDatabase, WindowUpdate, WireValue,
+    Execute, ExecuteBatch, ExecuteConditionalWrite, ExecuteDiff, ExecuteHeadWrite, ExecuteMode,
+    ExecutePrepared, ExecutePreparedBatch, ExecutePreparedDiff, ExecutePreparedReadBatch,
+    ExecuteReadStatements, Hello, HelloAck, MAX_ROWS_PER_CHUNK, MAX_VALUE_NODES, Outcome, Ping,
+    Prepare, Prepared, PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared, ResultChunk,
+    ResultEnd, SelectDatabase, WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
     AbandonedSend, DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -143,6 +144,7 @@ enum Statement {
     ReadBatch(ExecuteBatch),
     ReadStatements(ExecuteReadStatements),
     ConditionalWrite(ExecuteConditionalWrite),
+    HeadWrite(ExecuteHeadWrite),
     Difference(ExecuteDiff),
     PreparedDifference {
         definition: Result<Arc<PreparedDefinition>, Refusal>,
@@ -623,6 +625,7 @@ pub(crate) async fn run_inner(
                 establishment.complete();
             }
             FrameKind::BeginTransaction
+            | FrameKind::BeginHeadTransaction
             | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction
@@ -739,11 +742,70 @@ pub(crate) async fn run_inner(
                     return;
                 }
             }
-            FrameKind::ExecuteConditionalWrite => {
+            FrameKind::GetBranchHead => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
                 };
-                let Ok(statement) = ExecuteConditionalWrite::decode(frame.payload()) else {
+                if Empty::decode(frame.payload()).is_err() {
+                    return lane
+                        .fatal(
+                            cx,
+                            request,
+                            ErrorCode::Protocol,
+                            "malformed GET_BRANCH_HEAD",
+                        )
+                        .await;
+                }
+                let binding = lane.conn.binding();
+                match crate::execute::current_write_head(cx, db, token).await {
+                    Ok((head, generation)) => {
+                        let Ok(payload) = head.encode() else { return };
+                        let Ok(reply) = Frame::new(
+                            FrameKind::BranchHead,
+                            request,
+                            StreamId::CONTROL,
+                            binding,
+                            payload,
+                            lane.send_limits,
+                        ) else {
+                            return;
+                        };
+                        lane.send_generation = Some(generation);
+                        let sent = lane.send_generation_frame(cx, &reply).await;
+                        lane.send_generation = None;
+                        if sent.is_err() {
+                            return;
+                        }
+                    }
+                    Err(refusal) => {
+                        if lane
+                            .refuse(
+                                cx,
+                                request,
+                                StreamId::CONTROL,
+                                binding,
+                                refusal.code,
+                                &refusal.message,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            FrameKind::ExecuteConditionalWrite | FrameKind::ExecuteHeadWrite => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                let statement = if frame.header().kind() == FrameKind::ExecuteHeadWrite {
+                    ExecuteHeadWrite::decode(frame.payload()).map(Statement::HeadWrite)
+                } else {
+                    ExecuteConditionalWrite::decode(frame.payload())
+                        .map(Statement::ConditionalWrite)
+                };
+                let Ok(statement) = statement else {
                     return lane
                         .fatal(
                             cx,
@@ -754,14 +816,7 @@ pub(crate) async fn run_inner(
                         .await;
                 };
                 match lane
-                    .execute_statement(
-                        cx,
-                        &waiter,
-                        db,
-                        token,
-                        request,
-                        Statement::ConditionalWrite(statement),
-                    )
+                    .execute_statement(cx, &waiter, db, token, request, statement)
                     .await
                 {
                     Ok(()) | Err(Stop::Cancelled) => {}
@@ -1518,6 +1573,9 @@ impl Lane {
             | Statement::PreparedReadBatch { .. } => {
                 unreachable!("read batch dispatched above")
             }
+            Statement::HeadWrite(statement) => {
+                write_if_head_framed(cx, db, token, &statement, frame_budget).await
+            }
             Statement::ConditionalWrite(statement) => {
                 write_if_current_framed(cx, db, token, &statement, frame_budget).await
             }
@@ -2008,6 +2066,7 @@ impl Lane {
                 }
             }
             FrameKind::BeginTransaction
+            | FrameKind::BeginHeadTransaction
             | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction
@@ -2017,6 +2076,8 @@ impl Lane {
             | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteReadStatements
             | FrameKind::ExecutePreparedReadBatch
+            | FrameKind::GetBranchHead
+            | FrameKind::ExecuteHeadWrite
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
@@ -2447,6 +2508,7 @@ impl Lane {
                 Err(Stop::Drain)
             }
             FrameKind::BeginTransaction
+            | FrameKind::BeginHeadTransaction
             | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction
@@ -2456,6 +2518,8 @@ impl Lane {
             | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteReadStatements
             | FrameKind::ExecutePreparedReadBatch
+            | FrameKind::GetBranchHead
+            | FrameKind::ExecuteHeadWrite
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared

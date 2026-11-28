@@ -10,6 +10,42 @@ use super::{BlockProps, BlockStore, StoreError};
 use asupersync::fs::Vfs;
 use fgdb_types::{CommitSeq, QueryCx, StorageReadCx};
 
+/// A V6 frame fixes the class and byte length of every index and leaf.
+/// Only commit the final-sized columns if the whole declared shape can
+/// actually fit the caller's remaining source limit. A truncated budget
+/// keeps the incremental reader and its original point of refusal.
+fn described_children_fit(blocks: usize, patches: usize, remaining: u64) -> bool {
+    use crate::root_segment::{
+        INDEX_BYTES, INDEX_REFS, SEGMENT_REFS, SegmentClass, described_segment_bytes,
+    };
+    [
+        (blocks, SegmentClass::Blocks),
+        (patches, SegmentClass::VertexPatches),
+    ]
+    .into_iter()
+    .try_fold(0u64, |total, (rows, class)| {
+        let leaves = (rows / SEGMENT_REFS) as u64;
+        let indexes = leaves / INDEX_REFS as u64;
+        total
+            .checked_add(leaves.checked_mul(described_segment_bytes(class) as u64)?)?
+            .checked_add(indexes.checked_mul(INDEX_BYTES as u64)?)
+    })
+    .is_some_and(|required| required <= remaining)
+}
+
+fn root_column<T>(capacity: usize) -> Result<Vec<T>, StoreError> {
+    let mut column = Vec::new();
+    column.try_reserve_exact(capacity).map_err(|error| {
+        StoreError::Io(std::io::Error::new(std::io::ErrorKind::OutOfMemory, error))
+    })?;
+    if column.capacity() > capacity {
+        return Err(StoreError::Extent(super::ExtentError::Memory(
+            crate::tiered::memory::MemoryError::SizeOverflow,
+        )));
+    }
+    Ok(column)
+}
+
 /// Append one authenticated segment. The frame supplies the eventual length,
 /// but allocation starts only after a segment has been read. Geometric growth
 /// stops at that length so a short final tail cannot double the retained pool
@@ -373,6 +409,7 @@ impl<V: Vfs> BlockStore<V> {
                     limits.max_root_bytes,
                     limits.max_blocks,
                     limits.max_vertex_patches,
+                    None,
                 )
                 .await?;
             resolved.push((record, root));
@@ -402,7 +439,7 @@ impl<V: Vfs> BlockStore<V> {
         id: crate::PartitionRootVersion,
         maximum: usize,
     ) -> Result<(crate::root::PartitionRoot, crate::root::SegmentCache), StoreError> {
-        self.get_root_and_segments_limited(cx, id, maximum, usize::MAX, usize::MAX)
+        self.get_root_and_segments_limited(cx, id, maximum, usize::MAX, usize::MAX, None)
             .await
     }
 
@@ -413,6 +450,7 @@ impl<V: Vfs> BlockStore<V> {
         maximum: usize,
         max_blocks: usize,
         max_patches: usize,
+        metadata: Option<&mut crate::tiered::memory::MemoryCharge>,
     ) -> Result<(crate::root::PartitionRoot, crate::root::SegmentCache), StoreError> {
         let check = |resource, requested, limit| {
             if requested > limit {
@@ -432,8 +470,9 @@ impl<V: Vfs> BlockStore<V> {
                 + tail
         };
         let maximum = maximum.min(crate::root::MAX_ROOT_READ_BYTES) as u64;
-        let bytes = self
-            .read_object_proven(
+        let pool = metadata.as_ref().map(|charge| charge.pool());
+        let (size, decoded, _frame_charge) = self
+            .read_object_selected_owned(
                 cx,
                 super::StoredObjectKind::Root,
                 id.0,
@@ -448,18 +487,24 @@ impl<V: Vfs> BlockStore<V> {
                             },
                         ));
                     }
-                    Ok(bytes)
+                    let charge = super::buffered_read::reserve_frame_decode(cx, pool, bytes.len())?;
+                    let decoded = crate::root::decode_root_frame(&bytes)
+                        .map_err(StoreError::MalformedRoot)?;
+                    self.note_root_run_presence(
+                        id,
+                        crate::root::runs::is_run_root_format(u16::from_be_bytes([
+                            bytes[4], bytes[5],
+                        ])),
+                    );
+                    Ok((bytes.len(), decoded, charge))
                 },
+                |_| true,
+                pool,
             )
             .await?;
         // A segmented root's index segments and segments share the caller's
         // byte ceiling with the root itself.
-        let mut remaining = maximum.saturating_sub(bytes.len() as u64);
-        let decoded = crate::root::decode_root_frame(&bytes).map_err(StoreError::MalformedRoot)?;
-        self.note_root_run_presence(
-            id,
-            crate::root::runs::is_run_root_format(u16::from_be_bytes([bytes[4], bytes[5]])),
-        );
+        let mut remaining = maximum.saturating_sub(size as u64);
         let (decoded, tails) = match decoded {
             crate::root::RootFrame::V6(frame) => (
                 crate::root::RootFrame::V5(frame.membership),
@@ -467,52 +512,44 @@ impl<V: Vfs> BlockStore<V> {
             ),
             frame => (frame, None),
         };
+        let (blocks, patches) = match &decoded {
+            crate::root::RootFrame::V6(_) => unreachable!("V6 membership normalized to V5"),
+            crate::root::RootFrame::V3(root) => (root.blocks.len(), root.vertex_patches.len()),
+            crate::root::RootFrame::V4(frame) => (
+                declared(0, frame.block_segments.len(), frame.tail_blocks.len()),
+                declared(0, frame.patch_segments.len(), frame.tail_patches.len()),
+            ),
+            crate::root::RootFrame::V5(frame) => (
+                declared(
+                    frame.block_index.len(),
+                    frame.block_segments.len(),
+                    frame.tail_blocks.len(),
+                ),
+                declared(
+                    frame.patch_index.len(),
+                    frame.patch_segments.len(),
+                    frame.tail_patches.len(),
+                ),
+            ),
+        };
+        check("root blocks", blocks, max_blocks)?;
+        check("root vertex patches", patches, max_patches)?;
+        let exact = metadata.is_some()
+            && tails.is_some()
+            && described_children_fit(blocks, patches, remaining);
+        if let Some(metadata) = metadata {
+            super::buffered_read::reserve_root_columns(cx, metadata, blocks, patches, exact)?;
+        }
         let (frame, block_index, patch_index) = match decoded {
             crate::root::RootFrame::V6(_) => unreachable!("V6 membership normalized to V5"),
             crate::root::RootFrame::V3(root) => {
-                check("root blocks", root.blocks.len(), max_blocks)?;
-                check(
-                    "root vertex patches",
-                    root.vertex_patches.len(),
-                    max_patches,
-                )?;
                 return Ok((root, crate::root::SegmentCache::default()));
             }
             // Full segments and full index segments have fixed
             // cardinalities; refuse each list's declared total before
             // loading any of them or allocating the flattened lists.
-            crate::root::RootFrame::V4(frame) => {
-                check(
-                    "root blocks",
-                    declared(0, frame.block_segments.len(), frame.tail_blocks.len()),
-                    max_blocks,
-                )?;
-                check(
-                    "root vertex patches",
-                    declared(0, frame.patch_segments.len(), frame.tail_patches.len()),
-                    max_patches,
-                )?;
-                (frame, Vec::new(), Vec::new())
-            }
+            crate::root::RootFrame::V4(frame) => (frame, Vec::new(), Vec::new()),
             crate::root::RootFrame::V5(frame) => {
-                check(
-                    "root blocks",
-                    declared(
-                        frame.block_index.len(),
-                        frame.block_segments.len(),
-                        frame.tail_blocks.len(),
-                    ),
-                    max_blocks,
-                )?;
-                check(
-                    "root vertex patches",
-                    declared(
-                        frame.patch_index.len(),
-                        frame.patch_segments.len(),
-                        frame.tail_patches.len(),
-                    ),
-                    max_patches,
-                )?;
                 // Each index segment is proven to be the one the frame
                 // names before any segment it names is read.
                 let coordinate = frame.coordinate();
@@ -568,12 +605,20 @@ impl<V: Vfs> BlockStore<V> {
             }
         };
         let mut segments = crate::root::SegmentCache::of_frame(&frame, block_index, patch_index);
-        let mut descriptors = crate::root::descriptor::RootDescriptors::default();
         let coordinate = frame.coordinate();
         let block_count = declared(0, frame.block_segments.len(), frame.tail_blocks.len());
         let patch_count = declared(0, frame.patch_segments.len(), frame.tail_patches.len());
-        let mut blocks = Vec::new();
-        let mut patches = Vec::new();
+        let (block_slots, patch_slots) = if exact {
+            (block_count, patch_count)
+        } else {
+            (0, 0)
+        };
+        let mut blocks = root_column(block_slots)?;
+        let mut patches = root_column(patch_slots)?;
+        let mut descriptors = crate::root::descriptor::RootDescriptors {
+            blocks: root_column(block_slots)?,
+            patches: root_column(patch_slots)?,
+        };
         // Move the proved membership directly into its final publication-order
         // list. Only the current segment and the final columns coexist.
         for (class, named) in [

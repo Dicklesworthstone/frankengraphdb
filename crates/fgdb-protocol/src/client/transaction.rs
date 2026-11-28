@@ -14,6 +14,24 @@ pub(super) struct TransactionState {
     read_only: bool,
 }
 
+/// Admission of a finite native transaction script.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransactionAccess {
+    ReadOnly,
+    Write,
+    WriteIfHead(crate::body::BranchHead),
+}
+
+impl TransactionAccess {
+    fn from_read_only(read_only: bool) -> Self {
+        if read_only {
+            Self::ReadOnly
+        } else {
+            Self::Write
+        }
+    }
+}
+
 /// A completely delivered statement result inside a private transaction.
 /// This value does not claim that any write has committed.
 #[derive(Clone, Debug, PartialEq)]
@@ -156,10 +174,10 @@ impl Client {
         let mut columns = Vec::new();
         let mut rows: Vec<Vec<Vec<WireValue>>> = Vec::new();
         let end = self
-            .execute_transaction_batch_mode(
+            .execute_transaction_batch_with_access(
                 cx,
                 statements,
-                read_only,
+                TransactionAccess::from_read_only(read_only),
                 |_, _, names| {
                     columns.push(names.to_vec());
                     Ok(())
@@ -212,10 +230,10 @@ impl Client {
         on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
         on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
     ) -> Result<TransactionBatchEnd, ClientError> {
-        self.execute_transaction_batch_mode(
+        self.execute_transaction_batch_with_access(
             cx,
             statements,
-            false,
+            TransactionAccess::Write,
             on_columns,
             on_row,
             on_result_end,
@@ -240,8 +258,15 @@ impl Client {
         on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
         on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
     ) -> Result<TransactionBatchEnd, ClientError> {
-        self.execute_transaction_batch_mode(cx, statements, true, on_columns, on_row, on_result_end)
-            .await
+        self.execute_transaction_batch_with_access(
+            cx,
+            statements,
+            TransactionAccess::ReadOnly,
+            on_columns,
+            on_row,
+            on_result_end,
+        )
+        .await
     }
 
     /// Execute a script, stream its provisional rows and discard the complete
@@ -257,8 +282,29 @@ impl Client {
         on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
         on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
     ) -> Result<TransactionBatchRollback, ClientError> {
+        self.preview_transaction_batch_with_access(
+            cx,
+            statements,
+            TransactionAccess::from_read_only(read_only),
+            on_columns,
+            on_row,
+            on_result_end,
+        )
+        .await
+    }
+
+    /// Run the fully admitted script on a selected basis and discard the workspace.
+    pub async fn preview_transaction_batch_with_access(
+        &mut self,
+        cx: &Cx,
+        statements: Vec<Execute>,
+        access: TransactionAccess,
+        on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
+        on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
+    ) -> Result<TransactionBatchRollback, ClientError> {
         let batch = self
-            .run_transaction_batch(cx, statements, read_only, on_columns, on_row, on_result_end)
+            .run_transaction_batch(cx, statements, access, on_columns, on_row, on_result_end)
             .await?;
         batch
             .owner
@@ -272,17 +318,19 @@ impl Client {
         })
     }
 
-    async fn execute_transaction_batch_mode(
+    /// Admit all statements before BEGIN and stream provisional results. With
+    /// WriteIfHead the server verifies the same marker at BEGIN and COMMIT.
+    pub async fn execute_transaction_batch_with_access(
         &mut self,
         cx: &Cx,
         statements: Vec<Execute>,
-        read_only: bool,
+        access: TransactionAccess,
         on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
         on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
         on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
     ) -> Result<TransactionBatchEnd, ClientError> {
         let batch = self
-            .run_transaction_batch(cx, statements, read_only, on_columns, on_row, on_result_end)
+            .run_transaction_batch(cx, statements, access, on_columns, on_row, on_result_end)
             .await?;
         let outcome = batch
             .owner
@@ -301,7 +349,7 @@ impl Client {
         &'a mut self,
         cx: &Cx,
         mut statements: Vec<Execute>,
-        read_only: bool,
+        access: TransactionAccess,
         mut on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
         mut on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
         mut on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
@@ -312,7 +360,7 @@ impl Client {
             ));
         }
         for statement in &mut statements {
-            if read_only && statement.mode != ExecuteMode::Read {
+            if access == TransactionAccess::ReadOnly && statement.mode != ExecuteMode::Read {
                 return Err(ClientError::Protocol(
                     "a read-only transaction batch accepts only Read statements",
                 ));
@@ -342,10 +390,12 @@ impl Client {
             .map_err(|_| ClientError::Protocol("request exceeds the negotiated frame limit"))?;
         }
         let count = statements.len() as u32;
-        let begun = if read_only {
-            self.begin_read_transaction(cx).await?
-        } else {
-            self.begin_transaction(cx).await?
+        let begun = match access {
+            TransactionAccess::ReadOnly => self.begin_read_transaction(cx).await?,
+            TransactionAccess::Write => self.begin_transaction(cx).await?,
+            TransactionAccess::WriteIfHead(head) => {
+                self.begin_transaction_if_head(cx, head).await?
+            }
         };
         let mut owner = TransactionBatchGuard { client: self };
         let mut rows = 0_u64;
@@ -392,7 +442,7 @@ impl Client {
     /// commit or rollback. Disconnect abandons unpublished effects. This is
     /// not a durable transaction lease and cannot be reattached or resumed.
     pub async fn begin_transaction(&mut self, cx: &Cx) -> Result<TransactionBegun, ClientError> {
-        self.begin_transaction_kind(cx, FrameKind::BeginTransaction, false)
+        self.begin_transaction_kind(cx, TransactionAccess::Write)
             .await
     }
 
@@ -404,27 +454,71 @@ impl Client {
         &mut self,
         cx: &Cx,
     ) -> Result<TransactionBegun, ClientError> {
-        self.begin_transaction_kind(cx, FrameKind::BeginReadTransaction, true)
+        self.begin_transaction_kind(cx, TransactionAccess::ReadOnly)
+            .await
+    }
+
+    /// Open a write workspace only at the exact observed branch marker. Any
+    /// intervening commit also causes COMMIT to discard the staged workspace.
+    pub async fn begin_transaction_if_head(
+        &mut self,
+        cx: &Cx,
+        head: crate::body::BranchHead,
+    ) -> Result<TransactionBegun, ClientError> {
+        self.begin_transaction_kind(cx, TransactionAccess::WriteIfHead(head))
             .await
     }
 
     async fn begin_transaction_kind(
         &mut self,
         cx: &Cx,
-        kind: FrameKind,
-        read_only: bool,
+        access: TransactionAccess,
     ) -> Result<TransactionBegun, ClientError> {
         if self.selected.is_none() {
             return Err(ClientError::Protocol("select a database first"));
         }
-        let request = self.send(cx, kind, StreamId::CONTROL, &Empty).await?;
+        let request = match access {
+            TransactionAccess::Write => {
+                self.send(cx, FrameKind::BeginTransaction, StreamId::CONTROL, &Empty)
+                    .await?
+            }
+            TransactionAccess::ReadOnly => {
+                self.send(
+                    cx,
+                    FrameKind::BeginReadTransaction,
+                    StreamId::CONTROL,
+                    &Empty,
+                )
+                .await?
+            }
+            TransactionAccess::WriteIfHead(head) => {
+                self.send(
+                    cx,
+                    FrameKind::BeginHeadTransaction,
+                    StreamId::CONTROL,
+                    &head,
+                )
+                .await?
+            }
+        };
         let frame = self.reply(cx, request).await?;
         let begun: TransactionBegun = expect(&frame, FrameKind::TransactionBegun)?;
+        if let TransactionAccess::WriteIfHead(head) = access {
+            let expected_basis = match head {
+                crate::body::BranchHead::Empty => 0,
+                crate::body::BranchHead::Recorded { seq, .. } => seq.get(),
+            };
+            if begun.basis != expected_basis {
+                return Err(ClientError::Protocol(
+                    "guarded transaction returned a different basis",
+                ));
+            }
+        }
         self.finish_request(request)?;
         self.transaction = Some(TransactionState {
             begun,
             statements: 0,
-            read_only,
+            read_only: access == TransactionAccess::ReadOnly,
         });
         Ok(begun)
     }

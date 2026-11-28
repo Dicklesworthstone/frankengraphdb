@@ -669,7 +669,7 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                         exact_fields(event, &["v", "event", "kind", "seq"]);
                         assert_eq!(index, 1);
                     }
-                    "verified_history" | "capsule_inventory" | "branch_head" => {
+                    "verified_history" | "history_backup" | "capsule_inventory" | "branch_head" => {
                         exact_fields(event, &["v", "event", "kind", "seq", "chain_hash"]);
                         let seq = event.get("seq").unsigned();
                         assert!(seq > 0);

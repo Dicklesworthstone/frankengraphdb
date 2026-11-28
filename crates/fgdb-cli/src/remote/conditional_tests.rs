@@ -9,7 +9,7 @@ fn remote_conditional_write_requires_an_exact_revision_and_one_text_write() {
     for (raw, expected) in [("0", 0), ("18446744073709551615", u64::MAX)] {
         let parsed = options("write", &["--if-current", raw, "--param", "value=int:42"])
             .unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(parsed.expected_seq, Some(expected));
+        assert_eq!(parsed.condition, Some(WriteCondition::Frontier(expected)));
         assert_eq!(parsed.mode, ExecuteMode::Write);
         assert_eq!(parsed.parameters, [("value".into(), WireValue::Int(42))]);
     }
@@ -44,7 +44,7 @@ fn remote_conditional_write_requires_an_exact_revision_and_one_text_write() {
         assert_eq!(options(verb, &flags).err().unwrap().code, 2);
     }
     let parsed = options("write", &[]).unwrap_or_else(|error| panic!("{}", error.message));
-    assert_eq!(parsed.expected_seq, None);
+    assert_eq!(parsed.condition, None);
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn remote_conditional_write_preserves_return_rows_and_full_width_revision() {
                     &root,
                     &mut client,
                     ExecuteMode::Write,
-                    conditional.then_some(expected),
+                    conditional.then_some(WriteCondition::Frontier(expected)),
                     statement,
                     vec![("value".into(), WireValue::Int(42))],
                 )
@@ -178,7 +178,7 @@ fn remote_conditional_write_conflicts_and_unknown_outcomes_never_retry() {
                 &root,
                 &mut client,
                 ExecuteMode::Write,
-                Some(0),
+                Some(WriteCondition::Frontier(0)),
                 "CREATE (:Person)",
                 vec![],
             )
@@ -225,6 +225,105 @@ fn remote_conditional_write_conflicts_and_unknown_outcomes_never_retry() {
                 ExecuteMode::Read
             );
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn head_flag_and_discovery_have_unambiguous_cli_and_wire_contracts() {
+    let hash = "ab".repeat(32);
+    let raw = format!("{}@{hash}", u64::MAX);
+    let head = BranchHead::Recorded {
+        seq: core::num::NonZeroU64::MAX,
+        chain_hash: [0xab; 32],
+    };
+    for (raw, expected) in [("empty", BranchHead::Empty), (raw.as_str(), head)] {
+        let parsed = options("write", &["--if-head", raw])
+            .unwrap_or_else(|failure| panic!("{}", failure.message));
+        assert_eq!(parsed.condition, Some(WriteCondition::Head(expected)));
+    }
+    for flags in [
+        vec!["--if-head", "1@bad"],
+        vec!["--if-head", "empty", "--if-current", "0"],
+        vec!["--if-current", "0", "--if-head", "empty"],
+        vec!["--if-head", "empty", "--rows-file", "args.json"],
+        vec!["--if-head", "empty", "--prepared-jsonl", "args.jsonl"],
+    ] {
+        assert_eq!(options("write", &flags).err().unwrap().code, 2);
+    }
+    assert_eq!(
+        options("query", &["--if-head", "empty"])
+            .err()
+            .unwrap()
+            .code,
+        2
+    );
+    let base = [
+        "--addr",
+        "127.0.0.1:7688",
+        "--token-file",
+        "token",
+        "--database",
+        "social",
+        "branch-head",
+    ]
+    .map(str::to_owned);
+    assert!(
+        parse(&base)
+            .unwrap_or_else(|failure| panic!("{}", failure.message))
+            .branch_head
+    );
+    for additional in [
+        vec!["statement"],
+        vec!["--param", "x=int:1"],
+        vec!["--if-head", "empty"],
+    ] {
+        let mut invalid = base.to_vec();
+        invalid.extend(additional.into_iter().map(str::to_owned));
+        assert_eq!(parse(&invalid).err().unwrap().code, 2);
+    }
+    let ((), report) = run_async_under_lab(0x2b10_5501, |root| async move {
+        let reply = frame(
+            FrameKind::BranchHead,
+            4,
+            StreamId::CONTROL,
+            Binding::Ready(ready().binding(session())),
+            &head,
+        );
+        let io = script(
+            vec![(reply, 0), (refusal(5, ErrorCode::Conflict), 0)],
+            Arc::default(),
+        );
+        let written = Arc::clone(&io.written);
+        let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+        client.select(&root, "social").await.unwrap();
+        let observed = client.current_branch_head(&root).await.unwrap();
+        assert_eq!(observed, head);
+        let error = execute_statement(
+            &root,
+            &mut client,
+            ExecuteMode::Write,
+            Some(WriteCondition::Head(observed)),
+            "CREATE ()",
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Server {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+        let frames = sent_frames(&written.lock().unwrap());
+        assert_eq!(frames.len(), 5);
+        assert_eq!(frames[3].header().kind(), FrameKind::GetBranchHead);
+        assert!(frames[3].payload().is_empty());
+        assert_eq!(frames[4].header().kind(), FrameKind::ExecuteHeadWrite);
+        let write = fgdb_protocol::body::ExecuteHeadWrite::decode(frames[4].payload()).unwrap();
+        assert_eq!(write.expected, head);
+        assert_eq!(write.statement, "CREATE ()");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

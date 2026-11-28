@@ -40,7 +40,7 @@ impl core::error::Error for CapsuleSourceError {
 /// foreign files are retryable source failures, never destination receipts.
 pub struct CapsuleDirectorySource<'a> {
     cx: &'a ReplCx,
-    directory: &'a Path,
+    donors: donor::CapsuleDonors<'a>,
     keys: &'a CapsuleKeys,
     maximum_container_bytes: NonZeroUsize,
     verification: &'a mut dyn CryptoVerificationSink,
@@ -54,9 +54,28 @@ impl<'a> CapsuleDirectorySource<'a> {
         maximum_container_bytes: NonZeroUsize,
         verification: &'a mut dyn CryptoVerificationSink,
     ) -> Self {
+        Self::from_donors(
+            cx,
+            donor::CapsuleDonors::new(directory),
+            keys,
+            maximum_container_bytes,
+            verification,
+        )
+    }
+
+    /// Seed a replica whose verified inventory is distributed across several
+    /// mounted native donors. A missing or unusable object on the primary can
+    /// be supplied by a later donor under the same key and inventory checks.
+    pub fn from_donors(
+        cx: &'a ReplCx,
+        donors: donor::CapsuleDonors<'a>,
+        keys: &'a CapsuleKeys,
+        maximum_container_bytes: NonZeroUsize,
+        verification: &'a mut dyn CryptoVerificationSink,
+    ) -> Self {
         Self {
             cx,
-            directory,
+            donors,
             keys,
             maximum_container_bytes,
             verification,
@@ -71,16 +90,17 @@ impl SeedObjectSource for CapsuleDirectorySource<'_> {
         if object.object_kind != self.keys.object_kind() {
             return Err(CapsuleSourceError::InventoryMismatch);
         }
-        let recovered = donor::read_capsule(
-            self.cx,
-            self.directory,
-            self.keys,
-            object.object_id,
-            self.maximum_container_bytes,
-            self.verification,
-        )
-        .await
-        .map_err(CapsuleSourceError::Capsule)?;
+        let recovered = self
+            .donors
+            .read(
+                self.cx,
+                self.keys,
+                object.object_id,
+                self.maximum_container_bytes,
+                self.verification,
+            )
+            .await
+            .map_err(CapsuleSourceError::Capsule)?;
         if recovered.encoding().cipher_descriptor().compressed_len != object.compressed_len {
             return Err(CapsuleSourceError::InventoryMismatch);
         }
