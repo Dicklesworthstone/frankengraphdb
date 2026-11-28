@@ -1,9 +1,10 @@
-//! Host ownership for computed vertex rows over the buffered native source.
+//! Host ownership for computed rows over the buffered native sources.
 //! Preparation, property demand, evaluation and pagination belong to GQL;
 //! this host only retains the source and output reservations across each pull.
 
 use super::*;
 use fgdb_gql::PreparedGraphSet;
+use fgdb_gql::edge_stream::{AsyncEdgeProjectionPlan, EdgeScanState};
 use fgdb_gql::scan_stream::ScanError;
 use fgdb_gql::stream::{AsyncVertexProjectionCursor, AsyncVertexProjectionPlan};
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,40 @@ pub struct BufferedProjectionOutputGuard {
     _evaluation: Arc<Mutex<MemoryCharge>>,
 }
 
+impl BufferedProjectionOutputGuard {
+    pub(super) fn new(copy: MemoryCharge, evaluation: Arc<Mutex<MemoryCharge>>) -> Self {
+        Self {
+            _copy: copy,
+            _evaluation: evaluation,
+        }
+    }
+}
+
+pub(super) fn retain_evaluation(
+    cx: &QueryCx,
+    mut charge: MemoryCharge,
+) -> Result<Arc<Mutex<MemoryCharge>>, BufferedReadError> {
+    // Admit the shared owner before allocating it. The two reference counts
+    // plus alignment slack are bounded. Existing image charges stay attached.
+    charge.grow(
+        cx,
+        size_of::<Mutex<MemoryCharge>>() + 4 * size_of::<usize>(),
+    )?;
+    Ok(Arc::new(Mutex::new(charge)))
+}
+
+pub(super) fn reserve_evaluation(
+    cx: &QueryCx,
+    charge: &Arc<Mutex<MemoryCharge>>,
+) -> Result<(), BufferedReadError> {
+    let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+    charge
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .grow(cx, bytes)?;
+    Ok(())
+}
+
 impl core::fmt::Debug for BufferedProjectionOutputGuard {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("BufferedProjectionOutputGuard([REDACTED])")
@@ -28,7 +63,7 @@ impl core::fmt::Debug for BufferedProjectionOutputGuard {
 /// One computed row whose reservation lasts through the application's last use.
 pub type BufferedProjectionRow = BufferedQueryRow<GraphValueRow, BufferedProjectionOutputGuard>;
 
-/// A fixed-cut computed vertex stream with the same bounded property source
+/// A fixed-cut computed vertex or single-edge stream with the same bounded property source
 /// and cumulative native meters as ordinary buffered reads. Every matching
 /// occurrence is evaluated before final pagination, including the suffix after
 /// LIMIT and a LIMIT 0 query. Successful completion requires Exhausted.
@@ -37,9 +72,16 @@ pub type BufferedProjectionRow = BufferedQueryRow<GraphValueRow, BufferedProject
 /// VM reservations. Native preparation and caller-owned parameter/catalog
 /// objects remain outside the view's pool, as for BufferedQueryCursor.
 pub struct BufferedProjectionCursor<'view, 'q, V: Vfs + Clone> {
-    inner: AsyncVertexProjectionCursor<ProjectionSource<'view, 'q, V>, Checkpoint<'q>>,
+    inner: NativeProjection<'view, 'q, V>,
     cx: &'q QueryCx,
-    _metadata: MemoryCharge,
+}
+
+enum NativeProjection<'view, 'q, V: Vfs + Clone> {
+    Vertex {
+        cursor: AsyncVertexProjectionCursor<ProjectionSource<'view, 'q, V>, Checkpoint<'q>>,
+        _metadata: MemoryCharge,
+    },
+    Edge(super::edge::projection::Cursor<'view, 'q, V>),
 }
 
 impl<V: Vfs + Clone> core::fmt::Debug for BufferedProjectionCursor<'_, '_, V> {
@@ -50,32 +92,63 @@ impl<V: Vfs + Clone> core::fmt::Debug for BufferedProjectionCursor<'_, '_, V> {
 
 impl<V: Vfs + Clone> BufferedProjectionCursor<'_, '_, V> {
     pub fn snapshot_seq(&self) -> CommitSeq {
-        self.inner.snapshot_seq()
+        match &self.inner {
+            NativeProjection::Vertex { cursor, .. } => cursor.snapshot_seq(),
+            NativeProjection::Edge(cursor) => cursor.snapshot_seq(),
+        }
     }
 
     pub fn state(&self) -> VertexScanState {
-        self.inner.state()
+        match &self.inner {
+            NativeProjection::Vertex { cursor, .. } => cursor.state(),
+            NativeProjection::Edge(cursor) => match cursor.state() {
+                EdgeScanState::Open => VertexScanState::Open,
+                EdgeScanState::Exhausted => VertexScanState::Exhausted,
+                EdgeScanState::Closed => VertexScanState::Closed,
+                EdgeScanState::Failed => VertexScanState::Failed,
+            },
+        }
     }
 
     pub fn row_stats(&self) -> GqlExecutionStats {
-        self.inner.row_stats()
+        match &self.inner {
+            NativeProjection::Vertex { cursor, .. } => cursor.row_stats(),
+            NativeProjection::Edge(cursor) => cursor.row_stats(),
+        }
     }
 
     pub fn evaluator_stats(&self) -> GlaExecutionStats {
-        self.inner.evaluator_stats()
+        match &self.inner {
+            NativeProjection::Vertex { cursor, .. } => cursor.evaluator_stats(),
+            NativeProjection::Edge(cursor) => cursor.evaluator_stats(),
+        }
     }
 
     /// Release the unread suffix without claiming successful completion.
     pub fn close(&mut self) {
-        self.inner.close();
+        match &mut self.inner {
+            NativeProjection::Vertex { cursor, .. } => cursor.close(),
+            NativeProjection::Edge(cursor) => cursor.close(),
+        }
     }
 
     pub async fn next(&mut self) -> Option<Result<BufferedProjectionRow, BufferedProjectionError>> {
-        self.cx
-            .with_restriction_async(self.inner.next())
-            .erase_send()
-            .await
-            .map(|result| result.map(|output| BufferedQueryRow::from_parts(output.into_parts())))
+        match &mut self.inner {
+            NativeProjection::Vertex { cursor, .. } => self
+                .cx
+                .with_restriction_async(cursor.next())
+                .erase_send()
+                .await
+                .map(|result| {
+                    result.map(|output| BufferedQueryRow::from_parts(output.into_parts()))
+                }),
+            NativeProjection::Edge(cursor) => {
+                self.cx
+                    .with_restriction_async(cursor.next())
+                    .erase_send()
+                    .await
+            }
+        }
     }
 }
 
@@ -118,17 +191,11 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for ProjectionSource<'_, '_, V> {
                 let record = candidate
                     .record
                     .map(|record| {
-                        let mut scratch = record.scratch.into_inner();
-                        // Admit the shared owner before allocating it. The two
-                        // reference counts plus alignment slack are bounded.
-                        let owner_bytes = size_of::<Mutex<MemoryCharge>>() + 4 * size_of::<usize>();
-                        scratch
-                            .grow(self.inner.cx, owner_bytes)
-                            .map_err(BufferedReadError::Memory)
+                        let scratch = retain_evaluation(self.inner.cx, record.scratch.into_inner())
                             .map_err(VertexScanSourceError::Source)?;
                         Ok::<_, VertexScanSourceError<Self::Error, C>>(ProjectionRecord {
                             fields: record.fields,
-                            scratch: Arc::new(Mutex::new(scratch)),
+                            scratch,
                         })
                     })
                     .transpose()?;
@@ -148,12 +215,7 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for ProjectionSource<'_, '_, V> {
         if event == VertexScanEvent::ScratchEntry {
             // Same conservative native payload/cell quantum as the ordinary
             // buffered source; the final output keeps this growing charge.
-            let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
-            record
-                .scratch
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .grow(self.inner.cx, bytes)?;
+            reserve_evaluation(self.inner.cx, &record.scratch)?;
         }
         Ok(())
     }
@@ -167,21 +229,24 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for ProjectionSource<'_, '_, V> {
         let copy = self
             .inner
             .reserve_row_output(record.as_row(), columns, control)?;
-        Ok(BufferedProjectionOutputGuard {
-            _copy: copy,
-            _evaluation: Arc::clone(&record.scratch),
-        })
+        Ok(BufferedProjectionOutputGuard::new(
+            copy,
+            Arc::clone(&record.scratch),
+        ))
     }
 }
 
 impl<V: Vfs + Clone> BufferedReadView<V> {
-    /// Stream a fully bound row-local vertex projection through the extent
-    /// cache. The compiled source must already have increasing unique vertex
-    /// identity order; the final projection may compute scalar/list/map values,
+    /// Stream a fully bound row-local vertex or single-edge projection through
+    /// the extent cache. The compiled source must already have increasing
+    /// unique identity order (including the source VId for undirected edges);
+    /// the final projection may compute scalar/list/map values,
     /// hide its identity ranking key, and apply a final SKIP/LIMIT.
     ///
-    /// Every property receiver must be the current root, with a bounded key
-    /// demand proved before opening storage. DISTINCT, alternate ordering,
+    /// Every property receiver must be the current vertex, edge or an endpoint,
+    /// with bounded key demands proved before opening storage. Both undirected
+    /// orientations share one admitted record; self-loops produce one occurrence.
+    /// DISTINCT, alternate ordering,
     /// property-first source order, graph reads and multi-stage relational
     /// queries refuse before any candidate is read. This owner-level API does
     /// not grant or apply Warden session authority.
@@ -206,22 +271,36 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         policy: GqlQueryPolicy,
     ) -> Result<BufferedProjectionCursor<'view, 'q, V>, BufferedProjectionError> {
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-        let plan = AsyncVertexProjectionPlan::compile(query).map_err(|error| {
-            GqlQueryError::Source(ScanError::Vertex(VertexScanError::Plan(error)))
-        })?;
+        let plan = match AsyncVertexProjectionPlan::compile(query) {
+            Ok(plan) => plan,
+            Err(error) => {
+                // Both are complete physical-definition proofs. Selection
+                // ends before opening one source; no runtime fallback exists.
+                let plan = AsyncEdgeProjectionPlan::compile(query).map_err(|_| {
+                    GqlQueryError::Source(ScanError::Vertex(VertexScanError::Plan(error)))
+                })?;
+                let cursor = self.open_edge_projection(cx, plan, at, policy)?;
+                return Ok(BufferedProjectionCursor {
+                    inner: NativeProjection::Edge(cursor),
+                    cx,
+                });
+            }
+        };
         let (source, metadata) = self
             .vertex_input_source(cx, at, plan.property_demand())
             .map_err(|error| error.map_source(ScanError::Vertex))?;
         let checkpoint: Checkpoint<'q> = Box::new(move || cx.with_restriction(|| cx.checkpoint()));
         Ok(BufferedProjectionCursor {
-            inner: AsyncVertexProjectionCursor::new(
-                ProjectionSource { inner: source },
-                plan,
-                policy,
-                checkpoint,
-            ),
+            inner: NativeProjection::Vertex {
+                cursor: AsyncVertexProjectionCursor::new(
+                    ProjectionSource { inner: source },
+                    plan,
+                    policy,
+                    checkpoint,
+                ),
+                _metadata: metadata,
+            },
             cx,
-            _metadata: metadata,
         })
     }
 }

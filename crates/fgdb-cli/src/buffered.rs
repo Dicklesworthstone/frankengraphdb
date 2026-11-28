@@ -12,8 +12,8 @@ use fgdb::{
 use fgdb_gql::algebra::{GlaOperator, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
-    AsyncEdgeScanCursor, AsyncEdgeScanOutput, AsyncEdgeScanPlan, AsyncEdgeScanSource,
-    AsyncGraphWalkSource, EdgeScanError,
+    AsyncEdgeProjectionPlan, AsyncEdgeScanCursor, AsyncEdgeScanOutput, AsyncEdgeScanPlan,
+    AsyncEdgeScanSource, AsyncGraphWalkSource, EdgeScanError,
 };
 use fgdb_gql::stream::{
     AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexProjectionPlan, AsyncVertexScanOutput,
@@ -201,7 +201,7 @@ enum StreamSource {
     VertexProbe(PreparedGraphPattern<GraphValueRow>),
     Edge(PreparedGraphPattern<GraphValueRow>),
     EdgeJoin(PreparedGraphPattern<GraphValueRow>),
-    VertexProjection(PreparedGraphSet),
+    Projection(PreparedGraphSet),
 }
 
 impl StreamSource {
@@ -211,7 +211,7 @@ impl StreamSource {
             | Self::VertexProbe(pattern)
             | Self::Edge(pattern)
             | Self::EdgeJoin(pattern) => pattern.columns(),
-            Self::VertexProjection(query) => query.columns(),
+            Self::Projection(query) => query.columns(),
         }
     }
 }
@@ -268,7 +268,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         }
         _ => {
             return Err(Failure::query(
-                "this buffered stream requires a supported native graph pattern or row-local vertex projection; use --spill-dir for supported aggregate and set queries",
+                "this buffered stream requires a supported native graph pattern or row-local vertex or single-edge projection; use --spill-dir for supported aggregate and set queries",
             ));
         }
     };
@@ -313,10 +313,12 @@ fn prepare_projection(
 ) -> Result<Prepared, Failure> {
     // Prove the complete definition, including private keys and the property
     // demand of every lazy branch, before opening or faulting any cold source.
-    AsyncVertexProjectionPlan::compile(&query).map_err(execution_failure)?;
+    if let Err(error) = AsyncVertexProjectionPlan::compile(&query) {
+        AsyncEdgeProjectionPlan::compile(&query).map_err(|_| execution_failure(error))?;
+    }
     Ok(Prepared {
         as_of,
-        source: StreamSource::VertexProjection(query),
+        source: StreamSource::Projection(query),
     })
 }
 
@@ -364,7 +366,7 @@ pub(super) async fn run<V: Vfs + Clone>(
                 .map_err(execution_failure)?;
             deliver(columns, seq.0, &mut cursor, robot, out, checkpoint).await
         }
-        StreamSource::VertexProjection(query) => {
+        StreamSource::Projection(query) => {
             let mut cursor = view
                 .stream_graph_projection_governed_at(cx, query, seq, policy)
                 .map_err(execution_failure)?;

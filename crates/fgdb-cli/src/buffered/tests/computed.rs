@@ -12,10 +12,7 @@ fn computed_revision_preflight_retains_the_exact_marker_cut_and_refuses_a_second
     ]);
     let prepared = okay(prepare(&options));
     assert_eq!(prepared.as_of, Some(CommitSeq(1)));
-    assert!(matches!(
-        &prepared.source,
-        StreamSource::VertexProjection(_)
-    ));
+    assert!(matches!(&prepared.source, StreamSource::Projection(_)));
     let temporal = super::options(&[
         "--at-revision",
         &marker,
@@ -72,10 +69,7 @@ fn local_computed_vertex_streams_match_eager_rows_and_bound_historical_cuts() {
                         .unwrap();
                 }
                 let prepared = okay(prepare(&options));
-                assert!(matches!(
-                    &prepared.source,
-                    StreamSource::VertexProjection(_)
-                ));
+                assert!(matches!(&prepared.source, StreamSource::Projection(_)));
                 let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
                 let mut view = Database::open_buffered_read_view_with_vfs(
                     &commit,
@@ -130,7 +124,7 @@ fn local_computed_streams_refuse_unsupported_plans_and_never_complete_failed_suf
             "MATCH (n) RETURN n.p+1 AS value ORDER BY n LIMIT 0",
             "MATCH (n) RETURN n AS id,n.p+1 AS value ORDER BY id DESC LIMIT 0",
             "MATCH (n) RETURN DISTINCT n AS id,n.p+1 AS value ORDER BY id LIMIT 0",
-            "MATCH (a)-[r:R]->(b) RETURN r AS id,r.p+1 AS value ORDER BY id LIMIT 0",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS id,s AS next_id,r.p+1 AS value ORDER BY id,next_id LIMIT 0",
         ] {
             assert!(prepare(&options(&[text])).is_err(), "{text}");
         }

@@ -36,9 +36,9 @@ Keep `fgdb-w5-executor-olp` and `fgdb-qualify-integrated-nov22-maz0p` open.
 ### Local computed buffered projections — qualification pending
 
 Embedded `BufferedReadView::stream_graph_projection_governed[_at]` and local
-`query --buffered` now admit the same proved computed vertex subset as the
-authorized cold server path. Bound Set/TemporalSet reads reuse the native
-projection compiler, asynchronous vertex source and row VM. Visible identity
+`query --buffered` now admit the same proved computed vertex and single-edge
+subsets as the authorized cold server path. Bound Set/TemporalSet reads reuse
+the native projection compiler, asynchronous sources and row VM. Visible identity
 columns or compiler-private keys establish the existing ascending source order;
 the complete bounded property demand is checked before graph open. Historical
 selection stays exact and final pages retain skipped and suffix evaluation.
@@ -46,11 +46,17 @@ selection stays exact and final pages retain skipped and suffix evaluation.
 The public computed cursor returns a row guard that owns both the native copy
 admission and the shared VM reservation. Projected values stay charged after
 their source record or cursor is dropped, including through CLI row encoding
-and flush. Existing ordinary buffered cursor APIs keep their return types.
+and flush. The single-edge adapter reads bounded endpoint fields and retains
+one shared growing reservation through both undirected orientations; self-loops
+remain single occurrences. Existing ordinary buffered cursor APIs keep their return types.
 Unsupported computed shapes refuse before source construction; no spill or
 resident evaluation fallback was added. Regression sources cover the embedded
 memory lifetime, historical and parameterized pages, suffix errors and local
-CLI delivery/refusal behavior. Compilation and runtime qualification remain
+CLI delivery/refusal behavior. Seven additional edge regressions cover
+orientation and parallel/self-loop multiplicity, exact endpoint histories,
+private keys and branch markers, retained expanded payloads, cumulative
+budgets, memory refusal, interruption and output/source reuse.
+Compilation and runtime qualification remain
 open: a fresh single-job, metadata-only build on 2026-11-27 again ended with
 SIGKILL inside pinned `asupersync`, before first-party diagnostics. No passing
 Rust runtime result is claimed.

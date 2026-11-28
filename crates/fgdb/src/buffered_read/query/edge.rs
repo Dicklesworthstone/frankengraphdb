@@ -3,6 +3,7 @@
 //! filtering, direction, capture, projection, ordering and pagination.
 
 mod join;
+pub(super) mod projection;
 mod walk;
 
 use super::{BufferedVertexSeeds, Cancel, Checkpoint};
@@ -88,7 +89,17 @@ fn projected_edge(edge: &BufferedEdgeProperties) -> EdgeScanRow<'_> {
 
 impl AsyncEdgeScanRecord for Record {
     fn edge(&self) -> EdgeScanRow<'_> {
-        match &self.image {
+        self.image.edge()
+    }
+
+    fn vertex(&self, vid: VId) -> Option<VertexScanRow<'_>> {
+        self.image.vertex(vid)
+    }
+}
+
+impl AsyncEdgeScanRecord for Image {
+    fn edge(&self) -> EdgeScanRow<'_> {
+        match self {
             Image::Complete(image) => {
                 let edge = image.edge();
                 EdgeScanRow {
@@ -116,7 +127,7 @@ impl AsyncEdgeScanRecord for Record {
         // Storage admits both endpoints at the same cut. A missing endpoint
         // remains a typed source failure, never a NULL cell. Self-loops borrow
         // the one source image rather than copying a target.
-        match &self.image {
+        match self {
             Image::Complete(image) => {
                 let row = if vid == image.edge().entry.src {
                     image.source_vertex()
@@ -347,6 +358,17 @@ impl<V: Vfs + Clone> AsyncEdgeScanSource for Source<'_, '_, V> {
         columns: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<MemoryCharge, EdgeScanSourceError<Self::Error, C>> {
+        self.reserve_row_output(record, columns, control)
+    }
+}
+
+impl<V: Vfs + Clone> Source<'_, '_, V> {
+    fn reserve_row_output<C>(
+        &self,
+        record: &impl AsyncEdgeScanRecord,
+        columns: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<MemoryCharge, EdgeScanSourceError<BufferedReadError, C>> {
         // The physical compiler admits only this edge, its endpoints, their
         // scalar properties and a single-edge path. Include all source payloads
         // and fixed path/row framing per column, even for repeated projections.

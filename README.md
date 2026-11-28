@@ -993,17 +993,22 @@ Historical native reads can continue directly from `FOR SYSTEM_TIME AS OF SEQ` i
 
 `query --buffered` streams vertex and edge scans, fixed-hop joins and correlated `EXISTS`/`NOT EXISTS` directly from the authenticated checkpoint. For example, `MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:KNOWS]->(b) } RETURN a` streams vertices with no outgoing `KNOWS` edge. Direct streams require a supported identity-leading projection and canonical order. They support local predicates, `SKIP`/`LIMIT`, parameters and historical cuts. The CLI checks the physical plan before streaming and retains each row’s graph-memory reservation through its output flush. Only the terminal result confirms complete delivery. Use `--spill-dir` for supported aggregation and alternate ordering.
 
-Local buffered reads also stream computed vertex projections when both the
-native input and final output have proved ascending vertex identity order.
+Local buffered reads also stream computed vertex and single-edge projections
+when both the native input and final output have proved ascending identity order.
 For example, `MATCH (n) RETURN n AS id,n.age+1 AS next_age ORDER BY id` and
 `MATCH (n) RETURN {node:n,next_age:n.age+1} AS doc ORDER BY n` need no spill
-directory. Every property read must target the scanned vertex. The complete
-property demand is checked before graph open, and the VM's memory reservation
+directory. A directed edge can use
+`MATCH (a)-[r:KNOWS]->(b) RETURN r AS id,a.age+1 AS start_age,r.age+1 AS weight ORDER BY id`;
+an undirected edge also needs its source vertex in the identity prefix.
+Every property read must target the current vertex, captured edge or its
+endpoints. The complete property demand is checked before graph open, and the VM's memory reservation
 stays with each row through output flush. Historical selectors, parameters and
 final pages retain their ordinary meanings; every matching expression is
 evaluated before successful completion, including the suffix after `LIMIT`
 and a `LIMIT 0` query. Embedded callers use
-`BufferedReadView::stream_graph_projection_governed[_at]`. Other computed
+`BufferedReadView::stream_graph_projection_governed[_at]`. Both undirected
+orientations share the admitted record and retain their computed payload
+charges through delivery. Other computed
 source shapes and unproved ordering retain their existing refusals.
 
 With implicit ordering, put the traversed edge identities first for a directed fixed-hop join, in traversal order. For example, `MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) RETURN r,s,a.team,b.team,c.team` streams each two-hop occurrence. For an undirected root, put its source vertex immediately after the first edge identity and before the remaining edge identities.
