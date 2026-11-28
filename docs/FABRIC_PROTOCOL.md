@@ -73,6 +73,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | TRANSACTION_RESULT_CHUNK / TRANSACTION_RESULT_END | 0x0035 / 0x0036 | server |
 | BEGIN_READ_TRANSACTION | 0x0037 | client |
 | EXECUTE_HEAD_WRITE | 0x0038 | client |
+| GET_BRANCH_HEAD / BRANCH_HEAD | 0x0039 / 0x003a | client / server |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -938,6 +939,15 @@ options. Argument-file batches and prepared JSONL input cannot use this flag.
 Output remains the ordinary versioned write contract; a conflict is a query
 refusal with robot code `conflict` and exit status 3. The caller can read the new
 state and decide whether to issue a new conditional request.
+
+`fgdb remote ... branch-head` (Rust `current_branch_head(cx)`) reads the
+branch-wide write precondition. Discovery requires unattenuated graph
+visibility and write permission. The client sends an empty GET_BRANCH_HEAD
+body on the selected control stream and receives one BRANCH_HEAD tagged
+value. The token is `empty` or `<positive-sequence>@<64 hex digits>` in
+human CLI output. Pass it to `fgdb remote ... write --if-head "$head" <gql>`.
+Both the success reply and the branch mutation are fenced by database
+generation and live credentials. Legacy unrecorded history refuses discovery.
 
 For a marker-bound precondition, the Rust client accepts
 `execute_write_if_head(cx, expected, text, parameters)`. The

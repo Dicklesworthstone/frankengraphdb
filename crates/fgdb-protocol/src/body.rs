@@ -1263,6 +1263,14 @@ impl BranchHead {
     }
 }
 
+body!(
+    BranchHead,
+    |s, out| {
+        s.put(&mut out);
+    },
+    |input| { BranchHead::get(&mut input)? }
+);
+
 /// Execute one native text write under a marker-bound branch-head precondition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecuteHeadWrite {

@@ -263,6 +263,21 @@ fn head_write_compares_marker_and_sequence_under_the_same_authorized_writer() {
             statement: text.into(),
             parameters: Vec::new(),
         };
+        assert_eq!(
+            accepted(current_write_head(&root, db, &token).await).0,
+            BranchHead::Empty
+        );
+        for restriction in [
+            fgdb_warden::Restriction::Rights(fgdb_warden::Rights::Read),
+            fgdb_warden::Restriction::Properties(fgdb_warden::Scope::Only(Default::default())),
+        ] {
+            let restricted = token.attenuate(restriction).unwrap();
+            let refusal = current_write_head(&root, db, &restricted)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(refusal.code, ErrorCode::PermissionDenied);
+        }
         let create = request(BranchHead::Empty, "CREATE ()");
         accepted(write_if_head_framed(&root, db, &token, &create, 4096).await);
         let marker = db
@@ -293,7 +308,9 @@ fn head_write_compares_marker_and_sequence_under_the_same_authorized_writer() {
             seq,
             chain_hash: marker.marker_oid.0,
         };
-        let next = request(correct, "CREATE (n) RETURN 7 AS value");
+        let observed = accepted(current_write_head(&root, db, &token).await).0;
+        assert_eq!(observed, correct);
+        let next = request(observed, "CREATE (n) RETURN 7 AS value");
         let answer = accepted(write_if_head_framed(&root, db, &token, &next, 4096).await);
         assert_eq!(answer.rows, [vec![WireValue::Int(7)]]);
         assert_eq!(state(&root, db).await, (CommitSeq(2), 2));

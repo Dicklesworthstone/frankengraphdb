@@ -45,6 +45,14 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
             .await
             .map_err(revision_open_failure)
     })?;
+    render(head, robot, out)
+}
+
+pub(crate) fn render(
+    head: PublishedBranchHead,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
     match head {
         PublishedBranchHead::Empty if robot => emit(
             out,

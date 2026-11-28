@@ -741,6 +741,59 @@ pub(crate) async fn run_inner(
                     return;
                 }
             }
+            FrameKind::GetBranchHead => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                if Empty::decode(frame.payload()).is_err() {
+                    return lane
+                        .fatal(
+                            cx,
+                            request,
+                            ErrorCode::Protocol,
+                            "malformed GET_BRANCH_HEAD",
+                        )
+                        .await;
+                }
+                let binding = lane.conn.binding();
+                match crate::execute::current_write_head(cx, db, token).await {
+                    Ok((head, generation)) => {
+                        let Ok(payload) = head.encode() else { return };
+                        let Ok(reply) = Frame::new(
+                            FrameKind::BranchHead,
+                            request,
+                            StreamId::CONTROL,
+                            binding,
+                            payload,
+                            lane.send_limits,
+                        ) else {
+                            return;
+                        };
+                        lane.send_generation = Some(generation);
+                        let sent = lane.send_generation_frame(cx, &reply).await;
+                        lane.send_generation = None;
+                        if sent.is_err() {
+                            return;
+                        }
+                    }
+                    Err(refusal) => {
+                        if lane
+                            .refuse(
+                                cx,
+                                request,
+                                StreamId::CONTROL,
+                                binding,
+                                refusal.code,
+                                &refusal.message,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
             FrameKind::ExecuteConditionalWrite | FrameKind::ExecuteHeadWrite => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
@@ -2021,6 +2074,7 @@ impl Lane {
             | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteReadStatements
             | FrameKind::ExecutePreparedReadBatch
+            | FrameKind::GetBranchHead
             | FrameKind::ExecuteHeadWrite
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
@@ -2461,6 +2515,7 @@ impl Lane {
             | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteReadStatements
             | FrameKind::ExecutePreparedReadBatch
+            | FrameKind::GetBranchHead
             | FrameKind::ExecuteHeadWrite
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare

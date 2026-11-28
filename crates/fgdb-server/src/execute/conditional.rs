@@ -20,6 +20,61 @@ pub(crate) fn authorize_write(db: &Served, token: &CapabilityToken) -> Result<()
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))
 }
 
+/// The commitment covers the complete branch, including writes outside a
+/// restricted graph projection. Discovery therefore requires a whole-branch
+/// write grant. Repeat the check after waiting on the database reader.
+pub(crate) async fn current_write_head(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+) -> Result<(BranchHead, Generation), Refusal> {
+    let authorize = || {
+        let now = unix_millis();
+        let capability = db
+            .authority
+            .verify_at(token, TRUNK, now)
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        capability
+            .begin_write_at(TRUNK, now)
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        if !capability.predicates().is_unrestricted_graph() {
+            return Err(Refusal::new(
+                ErrorCode::PermissionDenied,
+                "branch-head discovery requires whole-branch write authority",
+            ));
+        }
+        Ok(())
+    };
+    authorize()?;
+    let _operation = db.db.enter().map_err(Refusal::from)?;
+    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
+    authorize()?;
+    let marker = guard
+        .branch_head()
+        .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
+    let head = match marker {
+        Some(marker) => BranchHead::Recorded {
+            seq: core::num::NonZeroU64::new(marker.commit_seq.0).ok_or_else(|| {
+                Refusal::new(ErrorCode::Execution, "invalid zero marker sequence")
+            })?,
+            chain_hash: marker.marker_oid.0,
+        },
+        None => {
+            let frontier = guard
+                .frontier()
+                .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
+            if frontier != CommitSeq::ORIGIN {
+                return Err(Refusal::new(
+                    ErrorCode::Conflict,
+                    "current frontier has no recorded branch head",
+                ));
+            }
+            BranchHead::Empty
+        }
+    };
+    Ok((head, guard.generation()))
+}
+
 /// Execute once only if the current healthy frontier still equals the caller's
 /// observation. This is a precondition on ordinary current-state autocommit,
 /// not a historical transaction, saved snapshot, or automatic retry.

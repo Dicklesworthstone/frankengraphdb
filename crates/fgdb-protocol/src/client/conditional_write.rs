@@ -4,6 +4,22 @@ use super::*;
 use crate::body::{BranchHead, ExecuteConditionalWrite, ExecuteHeadWrite};
 
 impl Client {
+    /// Discover the exact precondition for a guarded write on the selected
+    /// database. Requires branch-wide write authority. A legacy unrecorded
+    /// frontier returns Conflict rather than an empty token.
+    pub async fn current_branch_head(&mut self, cx: &Cx) -> Result<BranchHead, ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        let request = self
+            .send(cx, FrameKind::GetBranchHead, StreamId::CONTROL, &Empty)
+            .await?;
+        let frame = self.reply(cx, request).await?;
+        let head = expect(&frame, FrameKind::BranchHead)?;
+        self.finish_request(request)?;
+        Ok(head)
+    }
+
     /// Execute one native text write only if the selected database still has
     /// the expected committed sequence. Both the condition and the write run
     /// under the server's exclusive writer ownership and fresh live authority.

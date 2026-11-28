@@ -16,7 +16,8 @@ mod read_batch;
 mod subscription;
 pub(crate) mod transaction;
 pub(crate) use conditional::{
-    authorize_write, write_if_current, write_if_current_framed, write_if_head_framed,
+    authorize_write, current_write_head, write_if_current, write_if_current_framed,
+    write_if_head_framed,
 };
 pub(crate) use difference::{DifferenceAnswer, read_difference, read_prepared_difference};
 pub(crate) use prepared::{
