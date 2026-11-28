@@ -119,6 +119,33 @@ pub struct VerifiedObject {
 }
 
 impl VerifiedObject {
+    /// Authenticate a V1 capsule copied from a backup under the supplied capsule
+    /// keys. The caller names the expected object independently of the container.
+    /// The destination must still verify ownership by its committed history.
+    pub fn from_capsule_container(
+        keys: &crate::capsule::CapsuleKeys,
+        expected: ObjectId,
+        bytes: &[u8],
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<Self, crate::capsule::CapsuleError> {
+        use crate::capsule::{CapsuleError, MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container};
+
+        if bytes.len() > MAX_CAPSULE_CONTAINER_BYTES_V1 {
+            return Err(CapsuleError::ContainerTooLarge {
+                observed_at_least: bytes.len(),
+                max: MAX_CAPSULE_CONTAINER_BYTES_V1,
+            });
+        }
+        let (descriptor, symbols) = decode_container(bytes)?;
+        let plaintext = keys.recover(&descriptor, &symbols, expected, verification)?;
+        let encoding = descriptor.validated_encoding(expected, verification)?;
+        Ok(Self {
+            namespace: keys.namespace(),
+            encoding,
+            plaintext,
+        })
+    }
+
     pub fn namespace(&self) -> DatabaseSecurityNamespaceId {
         self.namespace
     }

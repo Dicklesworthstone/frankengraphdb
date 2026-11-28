@@ -110,7 +110,7 @@ metadata is associated with these named columns. The node template returns
 identities. Arbitrary vertex/edge co-occurrence is **not** evidence of adjacency.
 A native path supplies traversal adjacency but not stored direction, so its edges
 have no invented arrows unless explicit endpoint columns also supply orientation.
-Graph elements nested in lists and maps are discovered too.
+A map nested in a list or another map can also carry this projection. For example, grouped rows can return a list of maps with `source`, `relationship`, and `target` fields. Studio draws each map’s relationships and resolves its metadata from fields in that same map. Independent maps can be inspected together without combining their endpoints.
 
 Identities remain decimal strings, including full-width u128 values. Typed integer,
 count, wide integer, decimal and exact-average cells are not converted through
@@ -202,7 +202,7 @@ Neither Playwright nor Python is needed to run Studio itself.
 Studio now runs genuine force integration in a WebAssembly worker: Barnes–Hut
 repulsion, spring attraction, collision separation, damping and cooling. Force,
 label-constellation and radial modes use the same physical kernel; the latter
-modes add target forces rather than substituting a static diagram. The simulation
+modes add target forces rather than substituting a static diagram. In **Radial hop rings**, vertices one, two, or more relationships away are drawn toward successively larger rings. Choose **Center hop rings** on a vertex to root its component there. Other components use their most connected vertex as the center. Distances follow the returned topology in either direction. Springs and pins can shift the final positions. The simulation
 settles and stops. Pause, reheat, repulsion, link-length and gravity controls work
 without a database request. Shift-drag, double-click, or P on a selected node pins
 it; neighboring nodes continue responding. Coordinate continuity is preserved
@@ -263,6 +263,25 @@ The agent-atlas sample has four explicitly illustrative cuts (101–104). They l
 you exercise additions, omitted edges and property changes without claiming to
 read a database. The classic 32-node sample remains available separately.
 
+### Compare query rows at two committed revisions
+
+In a connected workspace, put a read and its JSON parameters in the editor.
+Choose **Compare revisions** in the Chronicle strip. Enter the before and after
+sequences and select **Run historical comparison**. A pinned baseline and the
+current result prefill the fields when available. Both cuts are editable, and
+sequence zero, equal cuts and reverse order are supported. The statement should
+leave its time selector implicit because the request supplies both revisions.
+
+The native `query-diff` read evaluates the query at each cut under the connected
+capability. A net weight of `+3` means three additional occurrences of that
+tuple in the after result. A negative weight means fewer occurrences. The
+summary counts both distinct changed tuples and total occurrences. Each
+endpoint applies the query’s own filtering, ordering and pagination. An empty
+successful response means their result bags agreed. Read a page of changed
+tuples or export the complete admitted JSON, including the original type tags
+and exact signed weights. Closing the dialog discards the comparison. The graph
+workspace keeps the result and baseline you were exploring.
+
 ### Prism and Beacon: use native capabilities
 
 Query lenses include native PageRank and connected-components calls through
@@ -290,8 +309,7 @@ vertex ID even when it lies outside the pinned sample. Gray vertices have no
 returned assignment. Colors repeat after eight components, so the selector uses
 exact IDs and mapped counts. Table, JSON and CSV keep the original procedure rows.
 
-The inspector's Start trace / Trace here action follows only the returned
-subgraph. It honors known stored direction and treats direction-unknown path
+The inspector’s **Start trace / Trace here** follows the visible returned subgraph. In comparison mode, Studio independently searches the full returned topology at each revision and shows each route with its vertex and edge IDs. A route can be highlighted when the canvas includes every hop with its observed endpoints and direction. It honors known stored direction and treats direction-unknown path
 adjacency as undirected. It makes no HTTP request and is not presented as a
 Prism query over the whole database.
 

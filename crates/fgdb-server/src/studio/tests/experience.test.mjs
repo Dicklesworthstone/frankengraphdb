@@ -153,3 +153,52 @@ test('structured display-name properties remain inspectable across snapshots', (
   assert.equal(diff.nodes[0].change,'changed');
   assert.deepEqual(compareProperties(a,b,'node','3').map(d => d.name),['name','title']);
 });
+
+
+function traceFixture(edges, vertices = []) {
+  return {
+    v: 1, seq: '1', columns: ['source', 'relationship', 'target', 'vertices'],
+    rows: [
+      [c('null', null), c('null', null), c('null', null), c('vertices', vertices)],
+      ...edges.map(([source, edge, target]) =>
+        [c('vertex', source), c('edge', edge), c('vertex', target), c('null', null)]),
+    ],
+  };
+}
+
+test('comparison trace refuses paths assembled across two returned results', () => {
+  const ids = ['1', '2', '3'];
+  const a = traceFixture([['1', '10', '2']], ids);
+  const b = traceFixture([['2', '11', '3']], ids);
+  const diff = compareResults(a, b);
+  assert.deepEqual(tracePath(diff, '1', '3').edges, ['10', '11']);
+  assert.deepEqual(diff.trace('1', '3', diff), { before: null, after: null });
+  assert.deepEqual(diff.trace('1', '2', diff), {
+    before: { nodes: ['1', '2'], edges: ['10'], drawable: true }, after: null,
+  });
+});
+
+test('comparison trace keeps separate routes and checks displayed orientation and endpoints', () => {
+  const a = traceFixture([['1', '10', '2'], ['2', '11', '3']]);
+  const b = traceFixture([['2', '10', '1'], ['1', '12', '3']]);
+  const diff = compareResults(a, b);
+  assert.deepEqual(diff.trace('1', '3', diff), {
+    before: { nodes: ['1', '2', '3'], edges: ['10', '11'], drawable: false },
+    after: { nodes: ['1', '3'], edges: ['12'], drawable: true },
+  });
+  const visible = { nodes: diff.nodes, edges: diff.edges.filter(e => e.id !== '12') };
+  assert.equal(diff.trace('1', '3', visible).after.drawable, false);
+  const rewired = compareResults(a, traceFixture([['1', '10', '3']]));
+  assert.equal(rewired.trace('1', '2', rewired).before.drawable, false);
+});
+
+test('comparison trace retains route evidence beyond the canvas budget', () => {
+  const ids = Array.from({ length: LIMITS.nodes + 1 }, (_, i) => String(i));
+  const last = ids.at(-1);
+  const baseline = traceFixture([['0', '900', last], [last, '901', '1']], ids);
+  const diff = compareResults(baseline, traceFixture([], ['0', '1']));
+  assert.equal(diff.nodes.length, LIMITS.nodes);
+  assert.deepEqual(diff.trace('0', '1', diff), {
+    before: { nodes: ['0', last, '1'], edges: ['900', '901'], drawable: false }, after: null,
+  });
+});

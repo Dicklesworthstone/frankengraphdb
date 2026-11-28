@@ -6,6 +6,7 @@
 //! durable format, transport, executor, or membership authority is introduced.
 
 pub mod bonded;
+pub mod directory;
 
 use std::future::Future;
 

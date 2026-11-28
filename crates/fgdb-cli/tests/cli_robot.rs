@@ -528,6 +528,7 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
     let mut rows = 0;
     let mut terminals = 0;
     let mut repaired = 0;
+    let mut capsule_refs = 0u64;
     for (index, event) in events.iter().enumerate() {
         assert_eq!(event.get("v").unsigned(), 1);
         let name = event.get("event").string();
@@ -577,8 +578,15 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                 assert_eq!(index, 1);
                 assert_eq!(event, &schema);
             }
+            "capsule_ref" => {
+                exact_fields(event, &["v", "event", "seq", "object"]);
+                capsule_refs += 1;
+                assert_eq!(event.get("seq").unsigned(), capsule_refs);
+                assert_eq!(event.get("object").string().len(), 64);
+                check_hex(event.get("object"));
+            }
             "scrub" => {
-                // One record per damaged object; `reason` exactly when lost.
+                // Explicitly supplied backups can also appear in a healthy sweep.
                 let object = event.get("object").string();
                 assert!(object.len() == 64 && object.bytes().all(|b| b.is_ascii_hexdigit()));
                 assert!(matches!(
@@ -594,6 +602,10 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                             "only capsules have repairable redundancy"
                         );
                         repaired += 1;
+                    }
+                    "backup_verified" => {
+                        exact_fields(event, &["v", "event", "object", "kind", "state"]);
+                        assert_eq!(event.get("kind").string(), "capsule");
                     }
                     "lost" => {
                         exact_fields(event, &["v", "event", "object", "kind", "state", "reason"]);
@@ -653,10 +665,20 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                         assert_eq!(index, 1);
                         event.get("seq").unsigned();
                     }
-                    "verified_history" => {
-                        exact_fields(event, &["v", "event", "kind", "seq", "chain_hash"]);
+                    "branch_head" if event.get("seq").unsigned() == 0 => {
+                        exact_fields(event, &["v", "event", "kind", "seq"]);
                         assert_eq!(index, 1);
-                        assert!(event.get("seq").unsigned() > 0);
+                    }
+                    "verified_history" | "capsule_inventory" | "branch_head" => {
+                        exact_fields(event, &["v", "event", "kind", "seq", "chain_hash"]);
+                        let seq = event.get("seq").unsigned();
+                        assert!(seq > 0);
+                        if event.get("kind").string() == "capsule_inventory" {
+                            assert_eq!(capsule_refs, seq);
+                            assert_eq!(index as u64 - 1, seq);
+                        } else {
+                            assert_eq!(index, 1);
+                        }
                         let hash = event.get("chain_hash").string();
                         assert_eq!(hash.len(), 64);
                         assert!(
@@ -4324,6 +4346,8 @@ fn seal_publishes_for_cold_reads_without_advancing_or_rewriting_history() {
 fn verify_history_proves_exact_cuts_and_checks_a_trusted_chain_commitment() {
     let db = TestDb::new("verify-history");
     assert_eq!(db.create(), 0);
+    let empty = db.command("branch-head", &[]);
+    assert_eq!(empty.sequence("branch_head"), 0);
     db.command("verify-history", &["--through", "0"])
         .failure(2, "usage");
     db.command("verify-history", &["--through", "1"])
@@ -4332,6 +4356,52 @@ fn verify_history_proves_exact_cuts_and_checks_a_trusted_chain_commitment() {
     let first = db.command("verify-history", &["--through", "1"]);
     assert_eq!(first.sequence("verified_history"), 1);
     let anchor = first.terminal().get("chain_hash").string();
+    let head = db.command("branch-head", &[]);
+    assert_eq!(head.sequence("branch_head"), 1);
+    assert_eq!(head.terminal().get("chain_hash").string(), anchor);
+    let bad_empty = head.stdout.replace(r#""seq":1"#, r#""seq":0"#);
+    let missing_digest = empty.stdout.replace(r#""seq":0"#, r#""seq":1"#);
+    for invalid in [&bad_empty, &missing_digest] {
+        assert!(std::panic::catch_unwind(|| check_events(invalid, 0)).is_err());
+    }
+    let listed = robot(&[
+        "list-capsules",
+        "--db",
+        &db.db,
+        "--through",
+        "1",
+        "--expect-chain",
+        anchor,
+    ]);
+    assert_eq!(listed.sequence("capsule_inventory"), 1);
+    let object = listed.events[1].get("object").string();
+    let donor = std::path::Path::new(&db.db)
+        .join("capsules")
+        .join(format!("{object}.capsule"));
+    let replayed = db.command(
+        "scrub",
+        &["--restore-capsule", object, donor.to_str().unwrap()],
+    );
+    replayed.success();
+    assert_eq!(replayed.events[1].get("state").string(), "backup_verified");
+    assert_eq!(replayed.terminal().get("repaired").unsigned(), 0);
+    for invalid in [
+        listed.stdout.replace(
+            r#""event":"capsule_ref","seq":1"#,
+            r#""event":"capsule_ref","seq":2"#,
+        ),
+        listed.stdout.replace(object, &object[..63]),
+        listed.stdout.replace(
+            r#""kind":"capsule_inventory","seq":1"#,
+            r#""kind":"capsule_inventory","seq":2"#,
+        ),
+        replayed.stdout.replace(
+            r#""kind":"capsule","state":"backup_verified""#,
+            r#""kind":"block","state":"backup_verified""#,
+        ),
+    ] {
+        assert!(std::panic::catch_unwind(|| check_events(&invalid, 0)).is_err());
+    }
     assert_eq!(anchor.len(), 64);
     assert!(
         anchor
@@ -6408,6 +6478,56 @@ fn buffered_query_dispatch_uses_cold_admission_and_preserves_native_stream_contr
         assert_eq!(actual.terminal().get("stream"), &Json::Bool(true));
         assert_eq!(actual.events[1].get("seq").unsigned(), seq);
     }
+    // The public option reaches the same selected graph before either streaming
+    // or external execution, including a repeated edge whose property changed.
+    let head = db.command("branch-head", &[]);
+    assert_eq!(head.sequence("branch_head"), latest);
+    let revision = format!("{latest}@{}", head.terminal().get("chain_hash").string());
+    let changed =
+        db.write(&["MATCH (a:Person {team:1})-[e:KNOWS]->(b:Person {team:2}) SET e.born=9"]);
+    let directory = scratch("history-counts-spill");
+    std::fs::create_dir(&directory).unwrap();
+    let spill = directory.to_str().unwrap();
+    for (flags, text, count, expected_seq) in [
+        (
+            &[][..],
+            "MATCH (a)-[r:KNOWS]->(b) RETURN r,a,b,r.born",
+            2,
+            changed,
+        ),
+        (
+            &["--spill-dir", spill][..],
+            "MATCH (a)-[r:KNOWS]->(b) RETURN a.team AS team ORDER BY team DESC",
+            2,
+            changed,
+        ),
+        (
+            &["--at-revision", revision.as_str()][..],
+            "MATCH (n) RETURN {node:n,next_team:n.team+1} AS doc ORDER BY n",
+            3,
+            latest,
+        ),
+    ] {
+        let run = |history: Option<&str>| {
+            let mut args = vec!["--buffered"];
+            args.extend_from_slice(flags);
+            if let Some(value) = history {
+                args.extend(["--buffer-history-bytes", value]);
+            }
+            args.push(text);
+            db.command("query", &args)
+        };
+        let baseline = run(None);
+        baseline.success();
+        assert_eq!(baseline.terminal().get("count").unsigned(), count);
+        assert_eq!(baseline.sequence("rows"), expected_seq);
+        for value in ["0", "32"] {
+            let counted = run(Some(value));
+            counted.success();
+            assert_eq!(counted.stdout, baseline.stdout);
+        }
+    }
+    assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
     for flag in [
         "--buffer-memory-bytes",
         "--buffer-source-bytes",

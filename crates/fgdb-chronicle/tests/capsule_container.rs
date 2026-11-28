@@ -81,6 +81,38 @@ fn a_capsule_round_trips_through_its_container() {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn offline_recovery_accepts_an_erasure_but_requires_the_committed_identity_and_keys() {
+    use fgdb_chronicle::capsule::CapsuleKeys;
+    use fgdb_chronicle::transfer::VerifiedObject;
+
+    let mut capsule = sealed();
+    // The intact repair symbols must reconstruct the damaged source symbol.
+    *capsule.symbols[0].last_mut().unwrap() ^= 1;
+    let backup = encode_container(&capsule);
+    let keys = CapsuleKeys::new(K_OID, NAMESPACE, DEK, KIND, profile());
+    let recover = |keys: &CapsuleKeys, id| {
+        VerifiedObject::from_capsule_container(keys, id, &backup, &mut Vec::new())
+    };
+    let verified = recover(&keys, capsule.object_id).unwrap();
+    assert_eq!(verified.namespace(), NAMESPACE);
+    assert_eq!(verified.object_id(), capsule.object_id);
+    assert_eq!(verified.plaintext(), plaintext());
+
+    assert!(recover(&keys, ObjectId([0; 32])).is_err());
+    let foreign = CapsuleKeys::new(
+        K_OID,
+        DatabaseSecurityNamespaceId([0; 32]),
+        DEK,
+        KIND,
+        profile(),
+    );
+    assert!(recover(&foreign, capsule.object_id).is_err());
+    let wrong_dek = CapsuleKeys::new(K_OID, NAMESPACE, [0; 32], KIND, profile());
+    assert!(recover(&wrong_dek, capsule.object_id).is_err());
+}
+
 /// Sealing the same plaintext twice must produce identical bytes, or a
 /// content-addressed store would hold two encodings of one object and
 /// deduplication could never fire.

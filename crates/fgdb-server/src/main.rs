@@ -15,7 +15,7 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GraphSymbol, GraphSymbolKind};
 use fgdb_server::{
     BeaconIndexConfig, BufferedReadConfig, DatabaseConfig, MaintenanceEvent, MaintenanceSchedule,
-    OrderedReadConfig, Server, ServerLimits, Symbols,
+    OrderedReadConfig, Server, ServerLimits, Symbols, WebSocketConfig,
 };
 use fgdb_warden::{Grant, QueryLimits, Restriction, Rights, Scope};
 use std::collections::BTreeSet;
@@ -27,11 +27,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const HELP: &str = "\
-fgdbd: the FrankenGraphDB server (FGP, HTTPS, and Bolt with optional TLS)
+fgdbd: the FrankenGraphDB server (FGP, HTTP, WebSocket, and Bolt with optional TLS)
 
 USAGE:
   fgdbd serve --listen <addr:port> [--http-listen <addr:port> [--http-allow-host <host>]...]
-      [--bolt-listen <addr:port>] [--tls-cert-file <path> --tls-key-file <path>] DATABASE...
+      [--bolt-listen <addr:port>] [--websocket-listen <addr:port>]
+      [--websocket-allow-host <host>]... [--websocket-allow-origin <origin>]...
+      [--tls-cert-file <path> --tls-key-file <path>] DATABASE...
       DATABASE := --database <name>=<path> --key-file <path> --issuer-key-file <path>
                   [--kek-passphrase-file <path>] [--strata-ecs]
                   [--policy-epoch <n>] [--write-relation <u64>] [--query-scratch-dir <path>]
@@ -147,7 +149,8 @@ The identity is validated before databases are opened or listeners are bound.
 Handshakes are bounded to 10 seconds and are cancelled during server drain;
 TLS early data is disabled. FGP clients require ALPN fgp/1; HTTPS uses
 http/1.1. Bolt clients use bolt+s:// or neo4j+s:// with normal certificate
-verification. Warden capability authentication still applies inside TLS.
+verification. WebSocket uses wss:// with http/1.1 ALPN. Warden capability
+authentication still applies inside TLS.
 
 --http-listen adds the HTTP/1.1 JSON adapter: POST /v1/databases/<name>/query,
 /write, /write-batch, or /query-batch with `Authorization: Bearer <hex token>` and a JSON
@@ -167,6 +170,24 @@ execution; maintenance uses the server's existing engine/recovery ownership.
 POST /v1/databases/<name>/seal uses the same Admin grant. Send a JSON object
 with numeric relation and optional retain_from (unsigned 64-bit integers).
 The response identifies the durable run and the unchanged graph sequence.
+
+--websocket-listen serves the native FGP byte stream at /v1/fgp using
+WebSocket binary messages and the required fgp.v1 subprotocol. It supports the
+same authentication, queries, prepared statements, explicit transactions and
+live subscriptions as the TCP listener. Each binary message may contain part
+of an FGP frame or several frames; text messages refuse and compression is
+not negotiated.
+The per-message limit equals the server's maximum FGP frame size.
+
+--websocket-allow-host replaces the default localhost/loopback/listen-IP Host
+allowlist (names have no port; IPv6 literals have brackets).
+Browser clients must supply an Origin matching an explicit
+--websocket-allow-origin, for example https://console.example or
+http://localhost:3000. Origins are exact, including port, without paths or
+wildcards. With no allowed origins, native clients without Origin can connect
+but browser upgrades refuse. Tokens are carried in FGP AUTH, never in the URL.
+The HTTP upgrade and FGP setup share one 30-second establishment deadline.
+Result delivery, cancellation and disconnect use the ordinary FGP contracts.
 
 --bolt-listen adds the bounded Bolt-compat adapter for Neo4j drivers:
 bolt:// or neo4j:// URIs, authenticated with the hex token as a bearer
@@ -487,6 +508,9 @@ struct ServeOptions {
     listen: String,
     http_listen: Option<String>,
     http_hosts: Vec<String>,
+    websocket_listen: Option<String>,
+    websocket_hosts: Vec<String>,
+    websocket_origins: Vec<String>,
     bolt_listen: Option<String>,
     tls_cert_file: Option<PathBuf>,
     tls_key_file: Option<PathBuf>,
@@ -524,6 +548,9 @@ impl ServeOptions {
         let mut listen = None;
         let mut http_listen = None;
         let mut http_hosts = Vec::new();
+        let mut websocket_listen = None;
+        let mut websocket_hosts = Vec::new();
+        let mut websocket_origins = Vec::new();
         let mut bolt_listen = None;
         let mut tls_cert_file = None;
         let mut tls_key_file = None;
@@ -540,6 +567,15 @@ impl ServeOptions {
                     http_listen = Some(value(args, &mut at, flag)?.to_owned());
                 }
                 "--http-allow-host" => http_hosts.push(value(args, &mut at, flag)?.to_owned()),
+                "--websocket-listen" if websocket_listen.is_none() => {
+                    websocket_listen = Some(value(args, &mut at, flag)?.to_owned());
+                }
+                "--websocket-allow-host" => {
+                    websocket_hosts.push(value(args, &mut at, flag)?.to_owned());
+                }
+                "--websocket-allow-origin" => {
+                    websocket_origins.push(value(args, &mut at, flag)?.to_owned());
+                }
                 "--bolt-listen" if bolt_listen.is_none() => {
                     bolt_listen = Some(value(args, &mut at, flag)?.to_owned());
                 }
@@ -700,6 +736,21 @@ impl ServeOptions {
         if databases.is_empty() {
             return Err(Failure::usage("serve needs at least one --database"));
         }
+        if websocket_listen.is_none()
+            && (!websocket_hosts.is_empty() || !websocket_origins.is_empty())
+        {
+            return Err(Failure::usage(
+                "WebSocket allowlists require --websocket-listen",
+            ));
+        }
+        if websocket_listen.is_some() {
+            let hosts = if websocket_hosts.is_empty() {
+                vec!["localhost".to_owned()]
+            } else {
+                websocket_hosts.clone()
+            };
+            WebSocketConfig::new(hosts, websocket_origins.clone()).map_err(Failure::usage)?;
+        }
         for db in &databases {
             for index in &db.beacon_indexes {
                 index.validate()?;
@@ -718,6 +769,9 @@ impl ServeOptions {
             listen,
             http_listen,
             http_hosts,
+            websocket_listen,
+            websocket_hosts,
+            websocket_origins,
             bolt_listen,
             tls_cert_file,
             tls_key_file,
@@ -878,6 +932,25 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
             Some((TcpListener::bind(addr).await.map_err(Failure::io)?, hosts))
         }
     };
+    let websocket = match &options.websocket_listen {
+        None => None,
+        Some(raw) => {
+            let addr: std::net::SocketAddr = raw
+                .parse()
+                .map_err(|_| Failure::usage("--websocket-listen needs <ip>:<port>"))?;
+            let mut hosts = options.websocket_hosts.clone();
+            if hosts.is_empty() {
+                hosts = vec!["localhost".into(), "127.0.0.1".into(), "[::1]".into()];
+                hosts.push(match addr.ip() {
+                    std::net::IpAddr::V4(ip) => ip.to_string(),
+                    std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+                });
+            }
+            let config = WebSocketConfig::new(hosts, options.websocket_origins.clone())
+                .map_err(Failure::usage)?;
+            Some((TcpListener::bind(addr).await.map_err(Failure::io)?, config))
+        }
+    };
     let bolt = match &options.bolt_listen {
         None => None,
         Some(raw) => {
@@ -900,6 +973,14 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
             writeln!(
                 stdout,
                 r#"{{"v":1,"event":"listening","protocol":"http","addr":"{bound}","tls":{tls_enabled}}}"#
+            )
+            .map_err(Failure::io)?;
+        }
+        if let Some((websocket, _)) = &websocket {
+            let bound = websocket.local_addr().map_err(Failure::io)?;
+            writeln!(
+                stdout,
+                r#"{{"v":1,"event":"listening","protocol":"websocket","addr":"{bound}","tls":{tls_enabled}}}"#
             )
             .map_err(Failure::io)?;
         }
@@ -939,6 +1020,18 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
                         .map_err(Failure::io)
                 })
                 .map_err(|_| Failure::io("cannot start the HTTP listener"))?,
+            );
+        }
+        if let Some((listener, config)) = websocket {
+            let server = Arc::clone(&server);
+            workers.push(
+                cx.spawn(move |child| async move {
+                    server
+                        .serve_websocket(&child, listener, config)
+                        .await
+                        .map_err(Failure::io)
+                })
+                .map_err(|_| Failure::io("cannot start the WebSocket listener"))?,
             );
         }
         if let Some(listener) = bolt {
@@ -2386,6 +2479,67 @@ mod tests {
             .map(|s| (*s).to_owned())
             .collect();
         assert!(ServeOptions::parse(&misplaced).is_err());
+    }
+
+    #[test]
+    fn websocket_listener_requires_explicit_valid_origin_and_host_policies() {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "social=test-db",
+            "--key-file",
+            "database.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let parse = |extra: &[&str]| {
+            let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+            ServeOptions::parse(&args)
+        };
+        let options = parse(&[
+            "--websocket-listen",
+            "127.0.0.1:8789",
+            "--websocket-allow-host",
+            "graph.example",
+            "--websocket-allow-origin",
+            "https://console.example",
+        ])
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(options.websocket_listen.as_deref(), Some("127.0.0.1:8789"));
+        assert_eq!(options.websocket_hosts, ["graph.example"]);
+        assert_eq!(options.websocket_origins, ["https://console.example"]);
+        let defaults = parse(&["--websocket-listen", "127.0.0.1:8789"])
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(defaults.websocket_origins.is_empty());
+        assert!(parse(&["--websocket-allow-origin", "https://console.example"]).is_err());
+        assert!(
+            parse(&[
+                "--websocket-listen",
+                "127.0.0.1:8789",
+                "--websocket-allow-origin",
+                "*",
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--websocket-listen",
+                "127.0.0.1:8789",
+                "--websocket-allow-host",
+                "host:80",
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--websocket-listen",
+                "127.0.0.1:8789",
+                "--websocket-listen",
+                "127.0.0.1:8790",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

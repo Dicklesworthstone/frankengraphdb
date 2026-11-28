@@ -29,7 +29,7 @@ use fgdb_protocol::body::{
     SelectDatabase, WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
-    DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
+    AbandonedSend, DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
 };
 use fgdb_protocol::{
     Binding, ChildKind, ChildTerminus, Connection, CreditUpdate, FlowWindow, Frame, FrameKind,
@@ -226,7 +226,7 @@ pub(crate) fn run<'a>(
     })
 }
 
-async fn run_inner(
+pub(crate) async fn run_inner(
     cx: &Cx,
     server: &Server,
     stream: Box<dyn DuplexIo>,
@@ -1133,12 +1133,12 @@ impl Lane {
                     progress.map(|result| result.map(|_| ()).map_err(|_| Stop::Transport))
                 }
                 Err(error) => {
-                    let unwritten = self.writer.accepted_bytes() == Some(0);
-                    let _ = self.writer.abandon(cx);
-                    Poll::Ready(Err(if unwritten {
-                        Stop::Recovery(error)
-                    } else {
-                        Stop::Transport
+                    // Framing/TLS may have emitted a prefix even when no
+                    // FGP payload bytes were acknowledged. Only the writer's
+                    // no-attempt verdict permits a recovery reply on this stream.
+                    Poll::Ready(Err(match self.writer.abandon(cx) {
+                        Ok(AbandonedSend::CancelledBeforeWrite) => Stop::Recovery(error),
+                        _ => Stop::Transport,
                     }))
                 }
             }

@@ -500,6 +500,10 @@ pub enum Event<C> {
     /// starts its initial interval; protected elections start it at election.
     LivenessTimeout,
     Heartbeat,
+    /// A local host explicitly enlarged this member's retained-log budget.
+    /// Does not resize peer limits or change the maximum append RPC. The new
+    /// limit must also be supplied on recovery if the retained suffix grew.
+    IncreaseLogCapacity(usize),
     /// Freeze new proposals while one existing voter catches up, then request
     /// its normal next-term election. Repeating the target retries without
     /// extending the deadline. Continue heartbeat, apply and liveness work.
@@ -661,6 +665,11 @@ pub struct Output<C> {
     /// Notification of the atomically published application/Raft snapshot cut.
     /// Compaction alone does not produce an application installation event.
     pub installed_snapshot: Option<SnapshotCut>,
+    /// A verified local snapshot through at least this index would make room
+    /// for the outstanding append or leader election fence. This is a local
+    /// capacity hint, never a verified
+    /// snapshot, an applied/visible cut, or permission to drop any entries.
+    pub requested_compaction_through: Option<u64>,
     /// A granted vote, campaign, or non-stale leader append resets the timer.
     pub reset_election_timer: bool,
     pub role: Role,
@@ -852,6 +861,7 @@ impl<C: Clone + Eq> Raft<C> {
             snapshot_transfers: Vec::new(),
             cancelled_snapshot_transfers: Vec::new(),
             installed_snapshot: None,
+            requested_compaction_through: None,
             reset_election_timer: false,
             role: self.role,
             leader: self.leader,
@@ -872,6 +882,7 @@ impl<C: Clone + Eq> Raft<C> {
             Event::AbortLeadershipTransfer(_) => self.handoff = None,
             Event::Heartbeat => {
                 if self.role == Role::Leader {
+                    self.append_election_barrier(&mut output);
                     self.broadcast(&mut output, true)?;
                     self.retry_quorum_probe(&mut output);
                 }
@@ -881,7 +892,18 @@ impl<C: Clone + Eq> Raft<C> {
             }
             Event::ProposeBatch(commands) => self.append_proposals(commands, &mut output)?,
             Event::Receive(envelope) => self.receive(envelope, &mut output)?,
-            Event::Compact(snapshot) => self.compact(snapshot),
+            Event::Compact(snapshot) => {
+                self.compact(snapshot);
+                if self.append_election_barrier(&mut output) {
+                    self.broadcast(&mut output, false)?;
+                }
+            }
+            Event::IncreaseLogCapacity(maximum) => {
+                self.limits.max_log_entries = maximum;
+                if self.append_election_barrier(&mut output) {
+                    self.broadcast(&mut output, false)?;
+                }
+            }
             Event::SnapshotReady(_) => self.install_snapshot(&mut output)?,
             Event::SnapshotFailed(_) => self.incoming_snapshot = None,
         }
@@ -959,6 +981,9 @@ impl<C: Clone + Eq> Raft<C> {
             Event::LivenessTimeout if self.role != Role::Leader && self.state.term == u64::MAX => {
                 return Err(Error::CounterExhausted);
             }
+            Event::IncreaseLogCapacity(maximum) if *maximum < self.limits.max_log_entries => {
+                return Err(Error::InvalidLimits);
+            }
             Event::Propose(_) => self.validate_proposal_count(1)?,
             Event::ProposeBatch(commands) => self.validate_proposal_count(commands.len())?,
             Event::Compact(snapshot) => {
@@ -1024,7 +1049,7 @@ impl<C: Clone + Eq> Raft<C> {
                         if (*prev_index == 0) != (*prev_term == 0) || prev_term > term {
                             return Err(Error::InvalidMessage);
                         }
-                        let last = prev_index
+                        prev_index
                             .checked_add(entries.len() as u64)
                             .filter(|last| *last < u64::MAX)
                             .ok_or(Error::InvalidMessage)?;
@@ -1039,9 +1064,6 @@ impl<C: Clone + Eq> Raft<C> {
                         // capacity error: it does not allocate the absent gap.
                         if *term >= self.state.term && self.term_at(*prev_index) == Some(*prev_term)
                         {
-                            if last - self.state.base_index() > self.limits.max_log_entries as u64 {
-                                return Err(Error::LogFull);
-                            }
                             for (offset, entry) in entries.iter().enumerate() {
                                 let index = *prev_index + offset as u64 + 1;
                                 if let Some(local) = self.entry_at(index) {
@@ -1290,21 +1312,37 @@ impl<C: Clone + Eq> Raft<C> {
                 );
             }
         }
-        // Only a current-term quorum commits inherited entries. At capacity or
-        // absolute-index exhaustion, never infer commitment from older terms.
-        if self.state.entries.len() < self.limits.max_log_entries && next < u64::MAX {
-            self.log_changed = true;
-            self.state.entries.push(Entry {
-                term: self.state.term,
-                command: None,
-            });
-        }
-        self.advance_commit();
+        self.append_election_barrier(output);
         self.broadcast(output, false)?;
         if self.liveness.enabled() {
             self.start_quorum_probe(output);
         }
         Ok(())
+    }
+
+    /// If election found a full inherited suffix, retry its current-term
+    /// no-op as soon as a verified compaction or host budget increase permits.
+    /// Every copy, including this retry, goes through ordinary log publication
+    /// and quorum commit. Never move the endpoint of a leadership handoff.
+    fn append_election_barrier(&mut self, output: &mut Output<C>) -> bool {
+        if self.role != Role::Leader
+            || self.handoff.is_some()
+            || self.last_term() == self.state.term
+            || self.last_index() == u64::MAX - 1
+        {
+            return false;
+        }
+        if self.state.entries.len() == self.limits.max_log_entries {
+            output.requested_compaction_through = Some(self.state.base_index() + 1);
+            return false;
+        }
+        self.log_changed = true;
+        self.state.entries.push(Entry {
+            term: self.state.term,
+            command: None,
+        });
+        self.advance_commit();
+        true
     }
 
     fn advance_commit(&mut self) -> bool {
@@ -1583,8 +1621,16 @@ impl<C: Clone + Eq> Raft<C> {
                     );
                     return Ok(());
                 }
-                let matched = prev_index + entries.len() as u64;
-                for (offset, entry) in entries.into_iter().enumerate() {
+                // A recovering follower may be behind on application/compaction.
+                // A full log still owes the higher-term transition and can learn
+                // the committed prefix that will let the host free capacity.
+                let base = self.state.base_index();
+                let offset = (prev_index - base) as usize;
+                let room = self.limits.max_log_entries - offset;
+                let count = entries.len().min(room);
+                let requested = prev_index + entries.len() as u64;
+                let matched = prev_index + count as u64;
+                for (offset, entry) in entries.into_iter().take(count).enumerate() {
                     let position = (prev_index - self.state.base_index()) as usize + offset;
                     if self
                         .state
@@ -1606,6 +1652,14 @@ impl<C: Clone + Eq> Raft<C> {
                     pending.transfer.snapshot.index <= self.state.commit_index
                 }) {
                     self.incoming_snapshot = None;
+                }
+                if matched < requested {
+                    // An Appended(success) identifies the ENTIRE request in
+                    // the leader's pipeline. Do not acknowledge a partial
+                    // prefix. Normal heartbeats retry the original flight.
+                    output.requested_compaction_through =
+                        Some(requested - self.limits.max_log_entries as u64);
+                    return Ok(());
                 }
                 self.emit(
                     from,

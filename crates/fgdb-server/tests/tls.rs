@@ -1,4 +1,4 @@
-//! Real TLS 1.3 transports exercise the ordinary FGP, HTTP and Bolt owners.
+//! Real TLS 1.3 transports exercise the ordinary FGP, HTTP, Bolt and WebSocket owners.
 //! These certificates and keys are public test fixtures, valid only for the
 //! local test names. They are never deployment identities.
 
@@ -11,8 +11,10 @@ use fgdb::{Database, DatabaseKeys};
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_gql::GraphSymbolKind;
 use fgdb_protocol::body::{ExecuteMode, Outcome, WireValue};
-use fgdb_protocol::client::Client;
-use fgdb_server::{DatabaseConfig, Server, ServerLimits, Symbols, TlsConfig, issue_token, issuer};
+use fgdb_protocol::client::{Client, WebSocketTarget};
+use fgdb_server::{
+    DatabaseConfig, Server, ServerLimits, Symbols, TlsConfig, WebSocketConfig, issue_token, issuer,
+};
 use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
 use std::net::SocketAddr;
@@ -199,14 +201,22 @@ async fn http_response(stream: &mut TlsStream<TcpStream>) -> String {
     }
 }
 
+async fn websocket(cx: &Cx, addr: SocketAddr) -> Client {
+    let stream = encrypted(addr, Some(b"http/1.1")).await;
+    let target = WebSocketTarget::new(format!("localhost:{}", addr.port())).unwrap();
+    Client::connect_websocket_stream(cx, &target, stream, token(true))
+        .await
+        .unwrap()
+}
+
 #[test]
-fn encrypted_fgp_http_and_bolt_share_authorized_execution_and_drain() {
+fn encrypted_fgp_http_bolt_and_websocket_share_authorized_execution_and_drain() {
     run(async |cx| {
         let server = Arc::new(server(cx, "all-transports").await);
         let shutdown = server.shutdown();
         let mut addresses = Vec::new();
         let mut tasks = Vec::new();
-        for protocol in 0..3 {
+        for protocol in 0..4 {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             addresses.push(listener.local_addr().unwrap());
             let server = Arc::clone(&server);
@@ -218,7 +228,19 @@ fn encrypted_fgp_http_and_bolt_share_authorized_execution_and_drain() {
                             .serve_http(&child, listener, vec!["localhost".into()])
                             .await
                             .unwrap(),
-                        _ => server.serve_bolt(&child, listener).await.unwrap(),
+                        2 => server.serve_bolt(&child, listener).await.unwrap(),
+                        _ => server
+                            .serve_websocket(
+                                &child,
+                                listener,
+                                WebSocketConfig::new(
+                                    vec!["localhost".into()],
+                                    vec!["https://console.example".into()],
+                                )
+                                .unwrap(),
+                            )
+                            .await
+                            .unwrap(),
                     }
                 })
                 .unwrap(),
@@ -261,6 +283,28 @@ fn encrypted_fgp_http_and_bolt_share_authorized_execution_and_drain() {
         // Three rows cross the two-row initial window and require another
         // encrypted control frame before the result stream can complete.
         reader.ping(cx, 1001).await.unwrap();
+
+        // WSS negotiates HTTP/1.1 before its HTTP upgrade, then carries exactly
+        // the same authenticated FGP execution and row-credit flow control.
+        assert!(
+            connector(Some(b"fgp/1"), 0x0304)
+                .connect("localhost", TcpStream::connect(addresses[3]).await.unwrap())
+                .await
+                .is_err()
+        );
+        let mut websocket_reader = websocket(cx, addresses[3]).await;
+        websocket_reader.select(cx, "social").await.unwrap();
+        let websocket_answer = websocket_reader
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (p) RETURN p.name AS name, p.secret AS secret ORDER BY name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(websocket_answer, answer);
+        websocket_reader.ping(cx, 1002).await.unwrap();
 
         let credential: String = token(true).iter().map(|b| format!("{b:02x}")).collect();
         let body =
@@ -318,6 +362,7 @@ fn encrypted_fgp_http_and_bolt_share_authorized_execution_and_drain() {
             fgdb_bolt::packstream::decode(&hello).unwrap(),
             Value::Struct { tag: 0x70, .. }
         ));
+        websocket_reader.close(cx).await.unwrap();
         reader.close(cx).await.unwrap();
         writer.close(cx).await.unwrap();
         drop(bolt);

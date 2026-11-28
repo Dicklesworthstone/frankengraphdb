@@ -65,3 +65,38 @@ test('empty graph settles, and changing controls reheats a settled graph', () =>
   const a=sim([node(1)]);for(let i=0;i<100;i++)a.sim.step(8);
   a.sim.configure({distance:200});assert.equal(a.engine.ticks(),0);assert.equal(a.engine.temperature(),1);
 });
+
+// Radial layout uses the admitted relationship set, not row order, stored
+// direction, or a degree count that may include hidden or duplicate edges.
+test('radial targets follow shortest hops from the selected exact identity', () => {
+  const root = '340282366920938463463374607431768211455';
+  const nodes = [node('a'), node(root), node('b'), node('c')];
+  const edges = [['a', root], ['b', 'a'], ['c', 'b'], ['a', 'b'], ['a', 'a']]
+    .map(([source, target]) => ({ source, target, directed: true }));
+  const points = createLayout(nodes, edges, 'radial', [], root).points;
+  const radii = new Map(points.map(p => [p.id, Math.hypot(p.tx, p.ty)]));
+  assert.equal(radii.get(root), 0);
+  assert.ok(radii.get('a') > 0 && radii.get('b') > radii.get('a') && radii.get('c') > radii.get('b'));
+  const reordered = createLayout([...nodes].reverse(), [...edges].reverse(), 'radial', [], root);
+  for (const p of reordered.points) {
+    const original = points.find(other => other.id === p.id);
+    assert.equal(p.tx, original.tx); assert.equal(p.ty, original.ty);
+  }
+});
+test('radial layout picks a hub, separates components, and preserves pins', () => {
+  const nodes = ['a', 'b', 'hub', 'isolated', 'x', 'y'].map(id => node(id));
+  const edges = [['hub', 'a'], ['hub', 'b'], ['x', 'y']].map(([source, target]) => ({ source, target }));
+  const pinned = [{ id:'a', x:1204, y:-175, pinned:true }];
+  const layout = createSimulation(fresh(), nodes, edges, 'radial', pinned, { focusId:'absent' });
+  const byId = new Map(layout.state.points.map(p => [p.id, p]));
+  const distance = (a, b) => Math.hypot(a.tx - b.tx, a.ty - b.ty);
+  assert.equal(distance(byId.get('hub'), { tx:0, ty:0 }), 0);
+  const ring = distance(byId.get('a'), byId.get('hub'));
+  assert.equal(distance(byId.get('b'), byId.get('hub')), ring);
+  for (const id of ['x', 'y', 'isolated']) assert.ok(distance(byId.get(id), byId.get('hub')) > ring);
+  assert.ok(distance(byId.get('x'), byId.get('y')) > 0);
+  layout.step(8);
+  const positions = layout.positions();
+  assert.deepEqual([...positions.slice(0, 2)], [1204, -175]);
+  assert.ok([...positions].every(Number.isFinite));
+});

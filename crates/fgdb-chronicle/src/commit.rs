@@ -27,6 +27,7 @@
 //! normal outcome of crashing, not corruption. A torn entry anywhere EARLIER
 //! is corruption, because entries before it were durable.
 
+pub mod donor;
 pub mod restore;
 pub mod verify;
 
@@ -51,7 +52,7 @@ use fgdb_crypto::Digest;
 use fgdb_types::StorageReadCx;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
-use fgdb_types::{CommitSeq, MarkerRef};
+use fgdb_types::{BranchId, CommitSeq, GraphId, MarkerRef};
 use std::collections::BTreeSet;
 use std::fs::TryLockError;
 use std::path::{Path, PathBuf};
@@ -167,6 +168,8 @@ impl ScanCollector for MarkerChain {
 
 struct PrefixScan {
     prefix: MarkerPrefix,
+    branch_probe: Option<(GraphId, BranchId, CommitSeq)>,
+    recorded_branch: Option<MarkerRef>,
     requested: CommitSeq,
     commitment: Option<Digest>,
 }
@@ -175,6 +178,8 @@ impl PrefixScan {
     fn new(requested: CommitSeq) -> Self {
         Self {
             prefix: MarkerPrefix::default(),
+            branch_probe: None,
+            recorded_branch: None,
             requested,
             commitment: (requested == CommitSeq::ORIGIN).then_some(CHAIN_ORIGIN),
         }
@@ -204,7 +209,22 @@ impl ScanCollector for PrefixScan {
         marker: CommitMarker,
         stored_hash: Digest,
     ) -> Result<(), ChainVerifyFailure> {
+        // A marker can update several heads or only the global stream. Its
+        // global identity alone does not establish coordinate membership.
+        let matched = self.branch_probe.is_some_and(|(graph, branch, at)| {
+            at.0 == marker.commit_seq
+                && marker
+                    .head_updates
+                    .binary_search_by_key(&(graph, branch), |update| (update.graph, update.branch))
+                    .is_ok()
+        });
         self.prefix.recover(marker, stored_hash)?;
+        if matched {
+            self.recorded_branch = Some(MarkerRef {
+                commit_seq: self.prefix.frontier(),
+                marker_oid: ObjectId(self.prefix.chain_value().0),
+            });
+        }
         if self.prefix.frontier() == self.requested {
             self.commitment = Some(self.prefix.chain_value());
         }
@@ -620,6 +640,52 @@ impl<V: Vfs> CommitCoordinator<V> {
         let mut scan = PrefixScan::new(requested);
         Self::scan_chain_into(cx, vfs, database_dir.as_ref(), false, &mut scan).await?;
         Ok(scan.finish())
+    }
+
+    /// Select a checkpoint commitment and authenticate an exact branch update
+    /// in the same captured log extent. The probe may precede the checkpoint.
+    /// A global-only marker, another coordinate, or the wrong digest misses.
+    /// Corruption anywhere in the captured complete prefix is an error even
+    /// after a match. No marker history is retained.
+    pub async fn scan_committed_branch_prefix(
+        cx: &CommitCx,
+        vfs: &V,
+        database_dir: impl AsRef<Path>,
+        checkpoint: CommitSeq,
+        graph: GraphId,
+        branch: BranchId,
+        at: MarkerRef,
+    ) -> Result<(CommitScanSummary, bool), CommitError> {
+        Self::scan_committed_branch_at(
+            cx,
+            vfs,
+            database_dir,
+            checkpoint,
+            graph,
+            branch,
+            at.commit_seq,
+        )
+        .await
+        .map(|(scan, marker)| (scan, marker == Some(at)))
+    }
+
+    /// Resolve the recorded coordinate update at one sequence while validating
+    /// the checkpoint against the same captured log. A global-only marker or
+    /// an unrelated coordinate returns no revision, even if an older head exists.
+    pub async fn scan_committed_branch_at(
+        cx: &CommitCx,
+        vfs: &V,
+        database_dir: impl AsRef<Path>,
+        checkpoint: CommitSeq,
+        graph: GraphId,
+        branch: BranchId,
+        sequence: CommitSeq,
+    ) -> Result<(CommitScanSummary, Option<MarkerRef>), CommitError> {
+        let mut scan = PrefixScan::new(checkpoint);
+        scan.branch_probe = Some((graph, branch, sequence));
+        Self::scan_chain_into(cx, vfs, database_dir.as_ref(), false, &mut scan).await?;
+        let marker = scan.recorded_branch;
+        Ok((scan.finish(), marker))
     }
 
     /// Install the steps-2–3 validator every subsequent commit is judged by.

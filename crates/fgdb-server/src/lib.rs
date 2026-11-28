@@ -22,6 +22,11 @@
 //!   transcript under a per-process server secret before AUTH_OK is encoded,
 //!   plus live credential rotation via `AUTH_REFRESH -> AUTH_REFRESHED`.
 //!   A nonexistent and an unauthorized database share one failure surface.
+//! - WebSocket binary transport at `/v1/fgp` with the `fgp.v1` subprotocol,
+//!   explicit Host and browser Origin allowlists, and the same FGP machine.
+//!   One 30-second establishment budget covers upgrade through READY; TLS
+//!   configuration applies with HTTP/1.1 ALPN. Fragmented and coalesced binary
+//!   messages preserve the FGP byte stream, while text messages refuse.
 //! - `EXECUTE` of one GQL read (`Read`, `ReadStream`, or `ReadOrdered` when
 //!   `--query-scratch-dir` is configured), one autocommit write program
 //!   (`Write`), or one live changefeed subscription (`Subscribe` delivering
@@ -69,9 +74,8 @@
 //!
 //! Not served, and refused with a typed error rather than approximated: the
 //! durable `PublishedResultStream` class with `RESULT_ACK`/`RESULT_RELEASE`,
-//! prepared writes with RETURN, durable transaction ownership/reattachment,
-//! durable or capability-masked subscriptions, and HTTP/2,
-//! gRPC and WebSocket adapters.
+//! durable transaction ownership/reattachment, durable subscriptions, and
+//! HTTP/2 and gRPC adapters.
 //! Results are ephemeral. Autocommit results follow native completion, while
 //! explicit transaction rows are provisional until `COMMIT`. Disconnect can
 //! lose undelivered rows and abandons an uncommitted explicit workspace; it
@@ -103,6 +107,7 @@ mod recovery;
 mod shutdown;
 mod symbols;
 mod tls;
+mod websocket;
 
 pub use aegis::{AegisReplicaCoordinator, SingleMemberPublisher};
 pub use beacon::{BeaconCheckpointReport, BeaconIndexConfig, BeaconIndexStatus};
@@ -120,6 +125,7 @@ pub use recovery::DatabaseStatus;
 pub use shutdown::Shutdown;
 pub use symbols::{SymbolConflict, Symbols};
 pub use tls::{TlsConfig, TlsConfigError};
+pub use websocket::{WebSocketConfig, WebSocketConfigError};
 
 use asupersync::Cx;
 use asupersync::http::h1::server::{HostPolicy, Http1Config, Http1Server};
@@ -554,7 +560,7 @@ impl Server {
 
     /// Require TLS 1.3 on every subsequently served listener, using this
     /// identity. Configure before sharing the Server or accepting connections.
-    /// FGP requires ALPN `fgp/1`; HTTPS requires `http/1.1`; Bolt keeps its
+    /// FGP requires ALPN `fgp/1`; HTTPS and WSS require `http/1.1`; Bolt keeps its
     /// ordinary encrypted magic/version negotiation without mandatory ALPN.
     pub fn enable_tls(&mut self, config: TlsConfig) {
         self.tls = Some(config);
@@ -863,6 +869,45 @@ impl Server {
         // Admission is closed. Every connection drains at its next receive
         // point (an admitted statement finishes first), so this join is
         // bounded by in-flight statements, never by an idle client.
+        self.shutdown.trigger();
+        let connections = match connections {
+            Ok(connections) => connections,
+            Err(error) => {
+                self.join_database_workers(cx).await;
+                return Err(error);
+            }
+        };
+        for mut handle in connections {
+            let _ = handle.join(cx).await;
+        }
+        self.join_database_workers(cx).await;
+        Ok(())
+    }
+
+    /// Serve native FGP at `/v1/fgp` over WebSocket binary messages using the
+    /// `fgp.v1` subprotocol. The same FGP authentication, execution, flow-credit
+    /// and drain owners serve TCP and WebSocket clients. The explicit Host and
+    /// Origin policy admits only the HTTP upgrade; it grants no database rights.
+    /// TLS-enabled servers require TLS 1.3 with HTTP/1.1 ALPN on this listener.
+    pub async fn serve_websocket(
+        self: Arc<Self>,
+        cx: &Cx,
+        listener: TcpListener,
+        config: WebSocketConfig,
+    ) -> Result<(), ServerError> {
+        let connections = self
+            .accept(
+                cx,
+                &listener,
+                tls::Protocol::Http,
+                move |server, child, stream, _local| {
+                    let config = config.clone();
+                    Box::pin(async move {
+                        websocket::run(&child, &server, stream, &config).await;
+                    })
+                },
+            )
+            .await;
         self.shutdown.trigger();
         let connections = match connections {
             Ok(connections) => connections,

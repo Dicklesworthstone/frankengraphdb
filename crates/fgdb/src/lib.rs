@@ -121,9 +121,11 @@
 
 mod buffered_read;
 pub use buffered_read::{
-    BufferLimits, BufferStats, BufferedEdge, BufferedOpenError, BufferedQueryCursor,
-    BufferedQueryError, BufferedQueryRow, BufferedReadError, BufferedReadLimits,
-    BufferedReadPublication, BufferedReadView, BufferedValue, MemoryError, MemoryPool,
+    BufferLimits, BufferStats, BufferedEdge, BufferedOpenError, BufferedProjectionCursor,
+    BufferedProjectionError, BufferedProjectionOutputGuard, BufferedProjectionRow,
+    BufferedQueryCursor, BufferedQueryError, BufferedQueryRow, BufferedReadError,
+    BufferedReadLimits, BufferedReadPublication, BufferedReadView, BufferedValue, MemoryError,
+    MemoryPool,
 };
 
 mod bulk_load;
@@ -786,6 +788,12 @@ pub enum DatabaseState {
 /// Why a write could not be committed.
 #[derive(Debug)]
 pub enum WriteError {
+    /// Earlier commits exist, but this coordinate has no explicit head. A
+    /// conditional writer cannot attest that the database is empty or name
+    /// an existing branch head until an ordinary write records one.
+    BranchHeadUnrecorded {
+        frontier: CommitSeq,
+    },
     /// A prepared template belongs to a different opened handle lifetime.
     /// Equal keys, paths or commit sequences cannot transfer its ownership.
     ForeignPreparedWrite,
@@ -1165,6 +1173,10 @@ impl core::fmt::Display for RebuildError {
 impl core::fmt::Display for WriteError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::BranchHeadUnrecorded { frontier } => write!(
+                f,
+                "the embedded branch has no recorded head at nonempty frontier {frontier:?}"
+            ),
             Self::ForeignPreparedWrite => {
                 f.write_str("prepared write belongs to a different database handle")
             }
@@ -2417,6 +2429,62 @@ pub struct EmbeddedReadView {
     statement_clock: Option<query::StatementClock>,
 }
 
+/// Owner-side historical graph reads at one explicitly recorded branch marker.
+/// The retained view owns the graph data, while the selected revision fixes
+/// both the execution sequence and the catalog used for name resolution.
+/// The marker can be passed to `Database::write_if_branch_head` even after
+/// the read handle's originating writer has advanced or reopened.
+pub struct BranchRevision {
+    marker: fgdb_types::MarkerRef,
+    view: EmbeddedReadView,
+    catalog: fgdb_delta_types::catalog::SymbolCatalog,
+}
+
+/// The branch write precondition a read-only observer can obtain from the
+/// current authenticated publication. An untracked nonempty frontier needs
+/// an ordinary write to establish its next recorded head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublishedBranchHead {
+    Empty,
+    Recorded(fgdb_types::MarkerRef),
+    Unrecorded { frontier: CommitSeq },
+}
+
+/// A lease-free revision open could not authenticate or serve the selected publication.
+#[derive(Debug)]
+pub enum BranchRevisionOpenError {
+    /// Chronicle, root selection, graph storage, or publication failed validation.
+    Open(OpenError),
+    /// The database has no published root yet, or the verified requested
+    /// marker lies beyond that root. A writer must finish publication.
+    Unpublished { published: Option<CommitSeq> },
+    /// The selected generation could not supply the marker's historical schema.
+    Catalog(SymbolCatalogError),
+}
+
+impl core::fmt::Display for BranchRevisionOpenError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Open(error) => error.fmt(f),
+            Self::Unpublished { published } => write!(
+                f,
+                "branch revision is not published (published frontier {published:?})"
+            ),
+            Self::Catalog(error) => error.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for BranchRevisionOpenError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Open(error) => Some(error),
+            Self::Catalog(error) => Some(error),
+            Self::Unpublished { .. } => None,
+        }
+    }
+}
+
 /// A non-owning reference to one authenticated embedded generation.
 ///
 /// Upgrading pins that exact generation, including its namespace and search
@@ -3263,13 +3331,11 @@ impl<V: Vfs + Clone> Database<V> {
     where
         V: 'a,
     {
-        Box::pin(Self::read_current_generation_inner(
-            cx,
-            vfs,
-            path,
-            keys,
-            root_limits,
-        ))
+        Box::pin(async move {
+            Self::read_current_generation_inner(cx, vfs, path, keys, root_limits, None)
+                .await
+                .map(|(generation, _)| generation)
+        })
     }
 
     async fn read_current_generation_inner(
@@ -3278,20 +3344,33 @@ impl<V: Vfs + Clone> Database<V> {
         path: &Path,
         keys: &DatabaseKeys,
         root_limits: Option<&fgdb_strata::store::RootReadLimits>,
-    ) -> Result<ReadGeneration<V>, OpenError> {
+        branch_sequence: Option<CommitSeq>,
+    ) -> Result<(ReadGeneration<V>, Option<fgdb_types::MarkerRef>), OpenError> {
         let Some(store) = open_block_store_for_read(cx, vfs, path, keys).await? else {
-            return Ok(ReadGeneration::Unselected);
+            return Ok((ReadGeneration::Unselected, None));
         };
         let probe = RootStore::with_vfs(vfs.clone(), path);
         let Some((claimed, resolved)) =
             read_slot_with_source_limits(cx, &store, &probe, keys, path, root_limits).await?
         else {
-            return Ok(ReadGeneration::Unselected);
+            return Ok((ReadGeneration::Unselected, None));
         };
         let requested = resolved
             .first()
             .map_or(CommitSeq::ORIGIN, |(_, root)| root.published_at);
-        let scan = CommitCoordinator::scan_committed_prefix(cx, vfs, path, requested).await?;
+        // Ordinary current reads select the checkpoint's own sequence, so a
+        // metadata-only observer can learn its exact branch write basis in
+        // this same scan. Historical revision opens request a separate cut.
+        let (scan, recorded) = CommitCoordinator::scan_committed_branch_at(
+            cx,
+            vfs,
+            path,
+            requested,
+            GRAPH,
+            BRANCH,
+            branch_sequence.unwrap_or(requested),
+        )
+        .await?;
         let checkpoint = checkpoint_from_manifest_commitment(
             |at| scan.checkpoint_commitment(at),
             claimed,
@@ -3305,11 +3384,12 @@ impl<V: Vfs + Clone> Database<V> {
             published_at: checkpoint.published_at,
             schema: checkpoint.schema,
         };
-        Ok(if scan.frontier() == checkpoint.published_at {
+        let generation = if scan.frontier() == checkpoint.published_at {
             ReadGeneration::Current(published)
         } else {
             ReadGeneration::Lagging(published)
-        })
+        };
+        Ok((generation, recorded))
     }
 
     /// Read a selected published root into a read view: the same verified
@@ -4907,6 +4987,15 @@ impl<V: Vfs + Clone> Database<V> {
             .counters();
         self.retain_preparation_anchor();
         let published_frontier = self.snapshot.frontier;
+        // The embedded writer serves one coordinate. Record its exact durable
+        // predecessor, including on the first write after reopening. Older
+        // embedded markers did not advance a head; the first explicit update
+        // starts its own chain without claiming any unrecorded predecessor.
+        let branch_update = HeadUpdate {
+            graph: GRAPH,
+            branch: BRANCH,
+            expected_previous: self.coordinator.chain().head(GRAPH, BRANCH),
+        };
         // `commit_with_crash` is cancellable at every VFS await. Chronicle
         // poisons its own coordinator immediately before marker append, but a
         // dropped OUTER future never executes the error arm below that copies
@@ -4920,7 +5009,7 @@ impl<V: Vfs + Clone> Database<V> {
                 cx,
                 &capsule.bytes,
                 |seq, oid| {
-                    let mut marker = marker_for_capsule(seq, oid, &capsule, Vec::new())
+                    let mut marker = marker_for_capsule(seq, oid, &capsule, vec![branch_update])
                         .with_identity_counters(identity_counters);
                     marker.authorization_decision_digest = authorization_decision_digest;
                     marker

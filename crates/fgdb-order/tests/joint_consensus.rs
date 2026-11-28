@@ -290,6 +290,29 @@ fn satisfying_both_groups_still_cannot_commit_an_old_term_without_a_barrier() {
         );
         assert_eq!(state.entries().len(), 1);
     }
+
+    // No committed cut exists, so the host must admit extra capacity. A
+    // majority of old voters alone still cannot commit the election barrier.
+    cluster.isolated.extend([MemberId(4), MemberId(5)]);
+    for member in 1..=5 {
+        cluster.step(MemberId(member), Event::IncreaseLogCapacity(2));
+    }
+    cluster.heartbeat(1);
+    assert_eq!(cluster.disk[&MemberId(1)].commit_index(), 0);
+    assert_eq!(
+        cluster.disk[&MemberId(1)].entries()[1],
+        Entry {
+            term: 2,
+            command: None
+        }
+    );
+    cluster.isolated.clear();
+    cluster.heartbeat(1);
+    for state in cluster.disk.values() {
+        assert_eq!(state.commit_index(), 2);
+        assert_eq!(state.entries()[0].command, Some(99));
+        assert_eq!(state.entries().len(), 2);
+    }
 }
 
 #[test]

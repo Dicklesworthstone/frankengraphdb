@@ -1,5 +1,5 @@
 // Result exploration only. Native parsing, snapshots and authorization stay on the server.
-import { graphQuery, extractGraph, LIMITS, PALETTE } from './model.mjs';
+import { graphQuery, extractGraph, projectionRecords, queryBody, validateResult, LIMITS, PALETTE } from './model.mjs';
 export function capabilityOrigin(origin){
   try{const url=new URL(origin);return url.protocol==='https:'||(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname));}catch{return false;}
 }
@@ -8,6 +8,39 @@ export function sequence(value) {
   if(!/^(0|[1-9]\d{0,19})$/.test(text)||BigInt(text)>(1n<<64n)-1n)throw new Error('Snapshot must be an exact unsigned 64-bit sequence.');
   return text;
 }
+
+/** Parameter literals and cut numbers must survive transport without Number coercion. */
+export function differenceBody(statement, parameters, before, after) {
+  const query = queryBody(statement, parameters);
+  return `{"before":${JSON.stringify(sequence(before))},"after":${JSON.stringify(sequence(after))},${query.slice(1)}`;
+}
+
+/** Verify the terminal envelope before presenting any changed tuples. */
+export function inspectDifference(data, before, after) {
+  if (data?.v !== 1 || data.before !== sequence(before) || data.after !== sequence(after)) {
+    throw new Error('The response does not match the requested revisions.');
+  }
+  if (!Array.isArray(data.changes) || data.changes.length > LIMITS.rows ||
+      data.changed_rows !== String(data.changes.length)) {
+    throw new Error('Incomplete or oversized historical difference.');
+  }
+  let added = 0n, removed = 0n;
+  const maxWeight = (1n << 127n) - 1n;
+  const rows = data.changes.map(change => {
+    const weight = change?.weight;
+    if (typeof weight !== 'string' || !/^-?[1-9]\d{0,38}$/.test(weight)) {
+      throw new Error('Invalid signed occurrence count.');
+    }
+    const count = BigInt(weight);
+    if (count < -maxWeight - 1n || count > maxWeight) throw new Error('Occurrence count exceeds signed 128-bit range.');
+    if (count > 0n) added += count;
+    else removed -= count;
+    return change.row;
+  });
+  validateResult({ v: 1, columns: data.columns, rows });
+  return { added, removed };
+}
+
 export function temporalQuery(value, options={}) {
   const seq=sequence(value), text=graphQuery(options), split=text.indexOf('\nRETURN');
   // This is our own generated template, never a rewrite of an arbitrary query.
@@ -23,9 +56,9 @@ export const RECIPES=Object.freeze([
 ]);
 function canonical(value){if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+canonical(value[key])).join(',')+'}';return JSON.stringify(value);}
 function signatures(result){
-  const index=new Map(result.columns.map((name,i)=>[name,i])), seen=new Map();
+  const seen=new Map();
   const add=(key,value)=>{if(!seen.has(key))seen.set(key,new Set());seen.get(key).add(canonical(value));};
-  for(const row of result.rows){const get=name=>row[index.get(name)];
+  for(const get of projectionRecords(result)){
     for(const prefix of ['node','source','target'])if(get(prefix)?.type==='vertex')add('n:'+get(prefix).value,[get(prefix+'_labels')??null,get(prefix+'_properties')??null]);
     if(get('relationship')?.type==='edge')add('e:'+get('relationship').value,[get('source')??null,get('target')??null,get('relationship_type')??null,get('relationship_properties')??null]);
   }
@@ -34,15 +67,14 @@ function signatures(result){
 // Track every distinct typed observation for the selected element. Joining rows
 // can return the same identity several times or with different projections.
 function propertyEvidence(result, kind, id) {
-  const columns = new Map(result.columns.map((name, i) => [name, i]));
   const aliases = kind === 'edge' ? ['relationship'] : ['node', 'source', 'target'];
   const fields = new Map();
   let maps = 0;
-  for (const row of result.rows) {
+  for (const get of projectionRecords(result)) {
     for (const alias of aliases) {
-      const entity = row[columns.get(alias)];
+      const entity = get(alias);
       if (entity?.type !== (kind === 'edge' ? 'edge' : 'vertex') || entity.value !== id) continue;
-      const properties = row[columns.get(alias + '_properties')];
+      const properties = get(alias + '_properties');
       if (properties?.type !== 'map') continue;
       maps++;
       for (const [name, cell] of Object.entries(properties.value)) {
@@ -119,17 +151,59 @@ export function compareResults(before,after){
       edges.length < b.identities.edges.size + counts.edges.removed) {
     warnings.push('Comparison canvas is capped. Counts include mapped identities throughout both received results.');
   }
-  return { nodes, edges, warnings, counts };
+  return { nodes, edges, warnings, counts, trace: comparisonTracer(a.identities, b.identities) };
 }
-export function tracePath(graph,start,end,{directed=true}={}){
-  const adjacency=new Map(graph.nodes.map(n=>[n.id,[]]));
-  if(!adjacency.has(start)||!adjacency.has(end))return null;
-  for(const e of graph.edges){adjacency.get(e.source)?.push([e.target,e.id]);if(!directed||!e.directed)adjacency.get(e.target)?.push([e.source,e.id]);}
-  const queue=[start],previous=new Map([[start,null]]);
-  for(let i=0;i<queue.length&&!previous.has(end);i++)for(const [next,edge]of adjacency.get(queue[i])||[])if(!previous.has(next)){previous.set(next,[queue[i],edge]);queue.push(next);}
-  if(!previous.has(end))return null;const nodes=[end],edges=[];
-  for(let at=end;at!==start;){const [prev,edge]=previous.get(at);nodes.push(prev);edges.push(edge);at=prev;}
-  return {nodes:nodes.reverse(),edges:edges.reverse()};
+
+function findPath(vertices, edges, start, end, directed) {
+  const adjacency = new Map();
+  for (const id of vertices) adjacency.set(id, []);
+  if (!adjacency.has(start) || !adjacency.has(end)) return null;
+  for (const [id, edge] of edges) {
+    adjacency.get(edge.source)?.push([edge.target, id]);
+    if (!directed || !edge.directed) adjacency.get(edge.target)?.push([edge.source, id]);
+  }
+  const queue = [start], previous = new Map([[start, null]]);
+  for (let i = 0; i < queue.length && !previous.has(end); i++) {
+    for (const [next, edge] of adjacency.get(queue[i]) || []) {
+      if (previous.has(next)) continue;
+      previous.set(next, [queue[i], edge]);
+      queue.push(next);
+    }
+  }
+  if (!previous.has(end)) return null;
+  const nodes = [end], pathEdges = [];
+  for (let at = end; at !== start;) {
+    const [prev, edge] = previous.get(at);
+    nodes.push(prev);
+    pathEdges.push(edge);
+    at = prev;
+  }
+  return { nodes: nodes.reverse(), edges: pathEdges.reverse() };
+}
+
+export function tracePath(graph, start, end, { directed = true } = {}) {
+  return findPath(graph.nodes.map(n => n.id), graph.edges.map(e => [e.id, e]), start, end, directed);
+}
+
+// Keep the complete returned topology of each result. The union can contain
+// routes that never existed in either result, and its canvas may be capped.
+function comparisonTracer(before, after) {
+  return (start, end, visible) => {
+    const displayedNodes = new Set(visible.nodes.map(n => n.id));
+    const displayedEdges = new Map(visible.edges.map(e => [e.id, e]));
+    function traceSide(index) {
+      const path = findPath(index.nodes, index.edges, start, end, true);
+      if (!path) return null;
+      const drawable = path.nodes.every(id => displayedNodes.has(id)) && path.edges.every(id => {
+        const edge = index.edges.get(id), drawn = displayedEdges.get(id);
+        if (!drawn || drawn.directed !== edge.directed) return false;
+        return (drawn.source === edge.source && drawn.target === edge.target)
+          || (!edge.directed && drawn.source === edge.target && drawn.target === edge.source);
+      });
+      return { ...path, drawable };
+    }
+    return { before: traceSide(before), after: traceSide(after) };
+  };
 }
 
 // Sequence equality is necessary, not a signed certificate or proof of completeness.

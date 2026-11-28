@@ -69,6 +69,30 @@ impl PatchDirectory {
         })
     }
 
+    /// Mark publication ordinals whose inclusive VID range intersects no other
+    /// patch. A sorted range overlaps an earlier one exactly when the greatest
+    /// earlier upper fence reaches its start. Its next neighbour has the
+    /// smallest start of all later ranges. Equal endpoints therefore overlap.
+    pub(super) fn isolated_patches(
+        &self,
+        count: usize,
+        cx: &impl BufferedReadCx,
+        pool: &MemoryPool,
+        control: &mut impl FnMut() -> Result<(), BufferedReadError>,
+    ) -> Result<super::BufferedValue<Vec<bool>>, BufferedReadError> {
+        let charge = pool.reserve(cx, count)?;
+        let mut isolated = Vec::new();
+        isolated
+            .try_reserve_exact(count)
+            .map_err(|_| MemoryError::AllocationFailed { requested: count })?;
+        if isolated.capacity() > count {
+            return Err(BufferedReadError::SizeOverflow);
+        }
+        isolated.resize(count, false);
+        mark_isolated(&self.ranges, &mut isolated, control)?;
+        Ok(super::BufferedValue::from_reserved(isolated, charge))
+    }
+
     pub(super) fn candidates(&self, vid: VId) -> Candidates {
         Candidates::new(self.ranges.len(), vid)
     }
@@ -80,6 +104,22 @@ impl PatchDirectory {
     ) -> Result<Option<usize>, E> {
         cursor.next(&self.ranges, control)
     }
+}
+
+fn mark_isolated<E>(
+    ranges: &[Range],
+    isolated: &mut [bool],
+    control: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    super::visit_isolated_ranges(
+        ranges.len(),
+        |at| {
+            let range = ranges[at];
+            (range.patch, range.first, range.last)
+        },
+        control,
+        |at, exclusive| isolated[at] = exclusive,
+    )
 }
 
 // Midpoint recursion has at most usize::BITS levels, including a full usize

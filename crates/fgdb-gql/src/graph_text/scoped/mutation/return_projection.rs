@@ -824,7 +824,8 @@ impl<'a> Parser<'a> {
         mut self,
         statement: &'a str,
     ) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
-        if self.is_word("UNWIND")
+        if self.is_word("FILTER")
+            || self.is_word("UNWIND")
             || self.is_word("CALL")
             || self.is_word("RETURN")
             || self.is_word("WITH")
@@ -838,7 +839,9 @@ impl<'a> Parser<'a> {
             // MATCH ... WHERE <over list values> is MATCH ... WITH * WHERE ...
             // (fgdb-1c29d): the row pipeline reads the predicate after an
             // implicit boundary that projects every visible binding.
-            if !self.syntax.scopes.is_empty() || !(self.is_word("RETURN") || self.is_word("WITH")) {
+            if !self.syntax.scopes.is_empty()
+                || !(self.is_word("RETURN") || self.is_word("WITH") || self.is_word("FILTER"))
+            {
                 return Err(GraphSetTextError {
                     offset: self.current.at,
                     kind: GraphSetTextErrorKind::Expected(
@@ -1064,7 +1067,10 @@ impl<'a> Parser<'a> {
         // for a statement that starts at MATCH: `n.p` there reads a graph
         // property. Later stages see only the projected row.
         let mut tail = None;
-        let (projection, pipeline) = if deferred.is_some() || self.is_word("WITH") {
+        let (projection, pipeline) = if deferred.is_some()
+            || self.is_word("WITH")
+            || self.is_word("FILTER")
+        {
             let (outputs, distinct, at) = if let Some((lexer, at_where)) = deferred {
                 // A WHERE the graph predicate refused reads the row after
                 // the implicit `WITH *` (unresolved_read_input).
@@ -1072,6 +1078,9 @@ impl<'a> Parser<'a> {
                 self.current = at_where;
                 let outputs = self.leading_star_outputs(&schema, width, &mut inputs)?;
                 (outputs, false, at_where.at)
+            } else if self.is_word("FILTER") {
+                let outputs = self.leading_star_outputs(&schema, width, &mut inputs)?;
+                (outputs, false, self.current.at)
             } else {
                 self.leading_with_head(&schema, width, &mut inputs)?
             };
@@ -1437,7 +1446,10 @@ impl<'a> Parser<'a> {
         if self.with_has_aggregate()? {
             return self.with_graph_head(&[], Vec::new(), false);
         }
-        if self.is_word("UNWIND") || self.implicit_withs.contains(&self.current.at) {
+        if self.is_word("FILTER")
+            || self.is_word("UNWIND")
+            || self.implicit_withs.contains(&self.current.at)
+        {
             return self.implicit_with_head();
         }
         let with = self.take_word("WITH")?;

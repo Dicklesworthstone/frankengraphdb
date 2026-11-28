@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-26 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-27 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,203 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Computed native source projections — qualification pending
+
+Native graph row pulls now prove explicit ascending order by the complete
+source identity prefix before admitting computed projections. Vertex, directed
+and undirected edge, and fixed-join expressions use the existing row VM and
+scoped property readers. Compiler-private ordering cells can be removed after
+every original expression and payload charge, without collecting an answer or
+changing canonical query definitions. Final SKIP/LIMIT retains full reached
+expression validation, including the unselected suffix before successful EOF.
+
+Resident local, Send, cooperative and ordinary FGP/prepared paths share this
+proof. Bare property-only canonical value order, descending/incomplete identity
+keys, DISTINCT in this computed profile and arbitrary relational barriers
+retain their refusals. Regression sources
+cover private keys, occurrence counts, every projection checkpoint, scope,
+prepared historical rebinding, flow credit, cancellation and suffix failures.
+Independent source/API reviews, scoped pinned formatting and whitespace checks
+completed. Native build/runtime, Clippy, UBS and exact-tree qualification remain
+pending after executor loss.
+Keep `fgdb-w5-executor-olp` and `fgdb-qualify-integrated-nov22-maz0p` open.
+
+### Local computed buffered projections — qualification pending
+
+Embedded `BufferedReadView::stream_graph_projection_governed[_at]` and local
+`query --buffered` now admit the same proved computed vertex, single-edge and
+fixed-hop join subsets as the authorized cold server path. Bound Set/TemporalSet reads reuse
+the native projection compiler, asynchronous sources and row VM. Visible identity
+columns or compiler-private keys establish the existing ascending source order;
+the complete bounded property demand is checked before graph open. Historical
+selection stays exact and final pages retain skipped and suffix evaluation.
+
+The public computed cursor returns a row guard that owns both the native copy
+admission and the shared VM reservation. Projected values stay charged after
+their source record or cursor is dropped, including through CLI row encoding
+and flush. The single-edge adapter reads bounded endpoint fields and retains
+one shared growing reservation through both undirected orientations; self-loops
+remain single occurrences. The fixed-join route directly reuses the existing
+local incidence source and its independent output MemoryCharge, without an
+extra source adapter or shared allocation owner. Each joined row retains its
+own payload charges after backtracking and after cursor/view destruction.
+Existing ordinary buffered cursor APIs keep their return types.
+Unsupported computed shapes refuse before source construction; no spill or
+resident evaluation fallback was added. Regression sources cover the embedded
+memory lifetime, historical and parameterized pages, suffix errors and local
+CLI delivery/refusal behavior. Seven additional edge regressions cover
+orientation and parallel/self-loop multiplicity, exact endpoint histories,
+private keys and branch markers, retained expanded payloads, cumulative
+budgets, memory refusal, interruption and output/source reuse. Local fixed-join
+regressions cover exact history, hidden complete identity keys, independently
+retained sibling outputs, cumulative limits, incomplete/reordered key refusal
+and CLI delivery failure. All local profiles keep the same public cursor API
+and exact branch-marker routing.
+Compilation and runtime qualification remain
+open: a fresh single-job, metadata-only build on 2026-11-27 again ended with
+SIGKILL inside pinned `asupersync`, before first-party diagnostics. No passing
+Rust runtime result is claimed.
+
+### Computed cold vertex source projections — qualification pending
+
+The authorized buffered source path now binds the proved vertex subset of
+Set/TemporalSet reads. It reuses the native projection VM and asynchronous
+vertex kernel, including exact historical cuts and compiler-private ordering
+keys. A bounded effect walk admits only property reads from direct root-vertex
+columns and combines every outer expression's field demand with the source's
+predicates and projection before capability masking and physical admission.
+
+Each scoped record stays alive through evaluation. Property copies and VM
+allocations use the original meter and retained memory reservation; delivered
+rows keep their guards after cursor destruction. Only final selected rows
+spend result-row allowance. Skipped and suffix rows still evaluate before
+successful EOF, including LIMIT 0. Cancellation and projection failures fuse
+the source and release the existing session/source owner. Computed cold
+single-edge and fixed-join support are described below; indirect element lookups and
+unsupported physical sources still refuse.
+
+Regression sources cover public direct/prepared FGP, duplicate occurrences,
+private map projections, masked properties, temporal rebinding, full suffix
+validation, cumulative budgets and cancellation/reuse with one admitted source.
+Additional native and host regressions cover lazy property-demand bounds,
+matched-row failure ordinals, pending-future cancellation, retained output
+reservations and refusal before a projected payload exceeds the real host pool.
+Independent source/API review, scoped pinned formatting and whitespace checks
+completed. Native build/runtime and exact-tree qualification remain pending;
+no passing runtime result is claimed. Keep `fgdb-w5-executor-olp` and
+`fgdb-qualify-integrated-nov22-maz0p` open.
+
+### Computed cold edge source projections — qualification pending
+
+Authorized buffered Set/TemporalSet reads now dispatch proved single-edge
+projections through `AsyncEdgeProjectionPlan` and `AsyncEdgeProjectionCursor`.
+The complete native edge compiler establishes directed or undirected identity
+order. One exhaustive expression-effect walk combines bounded captured-edge
+and endpoint field demand with native predicate/projection demand before scope
+masking and source admission. Computations use the existing row VM and only
+the admitted current edge or its endpoints; no additional graph lookup or
+candidate charge is introduced.
+
+The source keeps the current record through projection and parks it for the
+second undirected orientation when needed. Both returned guards retain its
+growing VM reservation. Original work/scratch meters cover the full source;
+only final selected rows consume result-row allowance. Skipped/suffix
+expressions still execute, including LIMIT 0, and failure or cancellation
+fuses and releases the source owner. Directed, incoming and undirected roots,
+any-relation authority filtering, private ranking keys and prepared historical
+pages use this route. Fixed-join support is described below; indirect element
+property reads remain outside the computed cold profile.
+
+Eight new regression sources cover native demand/ordering/ownership, retained
+host payload charges and memory refusal, direct/prepared FGP, orientation,
+scope masking, exact history, flow credit, cumulative budgets, cancellation
+and suffix errors. Independent production/test source review and scoped pinned
+formatting completed. Rust compilation and runtime remain unqualified: the
+fresh metadata build was SIGKILLed in exact pinned `asupersync` before any
+first-party diagnostic. No passing runtime result is claimed.
+
+### Computed cold fixed-hop joins — qualification pending
+
+Authorized buffered Set/TemporalSet reads now route proved fixed-hop
+projections through `AsyncEdgeJoinProjectionPlan` and
+`AsyncEdgeJoinProjectionCursor`. The complete native join compiler and source
+identity proof remain intact. Finite edge/endpoint demand combines every held
+binding's native requirements with every outer expression before capability
+masking. Directed, incoming and undirected chains, branches, cycles, relation
+selectors and native edge-reuse rules retain their occurrence semantics.
+
+The unchanged asynchronous join kernel yields while its full active frame is
+still retained. The ordinary row VM borrows those exact admitted bindings
+before traversal resumes. Every property clone and VM allocation grows the
+independent returned join guard, so backtracking or source/session destruction
+cannot refund a delivered row's payloads. Original cumulative meters cover
+source and expression work; only final selected rows spend result-row credit.
+Full skipped and suffix evaluation, exact historical rebinding, private keys
+and fused cancellation retain the existing completion contract. No extra
+history lookup, evaluator, sort or collected answer was introduced. Terminal
+optional expansions, indirect element reads and unsupported native collection
+sources still refuse at compilation.
+
+Native, host-memory and public FGP regressions cover complete identity keys,
+field bounds, retained frames and returned payloads, all supported join shapes,
+masked fields, exact cuts, cancellation, cumulative budgets and late failures
+after selected pages. Independent source review and scoped pinned formatting
+completed; native typechecking and runtime qualification remain open after
+the exact-pinned foundation metadata SIGKILL. No passing runtime result is
+claimed.
+
+### Native FGP over WebSocket — qualification pending
+
+A dedicated `--websocket-listen` / `Server::serve_websocket` listener now
+upgrades `/v1/fgp` with the required `fgp.v1` subprotocol and delegates to
+the existing FGP connection machine. Reads, writes, explicit transactions,
+prepared execution, source/ordered streams and live subscriptions retain
+their existing authorization, budgets, flow credit and completion owners.
+
+`Client::connect_websocket` and `connect_websocket_stream` now own native
+upgrade establishment, and `fgdb remote --websocket` uses them for every remote
+operation. Targets are bounded HTTP authorities; the client validates a strict
+101 response and exact `fgp.v1` negotiation before any FGP byte or credential.
+Foundation context entropy supplies each nonce. Read-ahead remains attached to
+the carrier, and one context-clock deadline/cancellation owner covers setup
+through AUTH_OK. WSS uses the existing verified TLS path with HTTP/1.1 ALPN.
+Native callers send no Origin header; browser Origin admission is unchanged.
+Regression sources cover rejected upgrades with no credential output, fresh
+nonces, fragmented/read-ahead authentication, absolute deadlines and blocked
+setup cancellation. Existing real-socket transaction and WSS fixtures now use
+the public SDK connection methods; CLI parsing rejects ambiguous targets
+before credential access.
+
+The upgrade has explicit Host and browser Origin policies, a 16 KiB header
+bound and strict no-body HTTP/1.1 framing. The existing absolute establishment
+timer covers upgrade through READY. TLS configuration also protects this
+listener, using HTTP/1.1 ALPN. The foundation owns WebSocket parsing, masks,
+control validation and accept keys; the adapter owns bounded binary-message
+reassembly, partial-write retention and the byte-stream mapping.
+
+Application output returns through the ordinary send guard before each lower
+write or flush. Read-side controls cannot flush dirty application bytes.
+FrameWriter abandonment now treats any attempted lower write as potentially
+partial, including a header-only or buffered-TLS attempt that acknowledged no
+FGP payload. No durable result ownership, resume guarantee or new transaction
+semantics are claimed.
+
+Regression sources cover carrier framing and cancellation, strict upgrade
+policy, real-socket FGP transactions compared with a TCP observer, scoped
+prepared streams crossing flow windows, cancellation followed by reuse, and
+TLS-protected WebSocket execution. Source/API reviews completed against the
+pinned foundation. Scoped pinned rustfmt and whitespace checks passed after
+the execution host recovered. Locked targeted compilation reached dependency
+builds, but rustc was killed by SIGKILL inside zerocopy before product
+compilation; a resource-bounded retry lost its executor without a verdict.
+The subsequent SDK test build reached the pinned asupersync dependency and
+was also killed by SIGKILL before protocol compilation. Native runtime tests,
+Clippy, UBS and exact-tree qualification remain UNRUN. Scoped pinned formatting
+and whitespace checks passed for the SDK, CLI and integration sources.
+The earlier whole-workspace
+format check failed in the pre-existing SIMD sorted-set source. Keep
+`fgdb-w10-adapters-b1f` and `fgdb-qualify-integrated-nov22-maz0p` open.
 
 ### Compact path-list comparisons — qualification pending
 

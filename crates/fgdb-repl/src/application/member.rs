@@ -15,7 +15,7 @@ mod read_probe;
 pub mod write;
 
 use fgdb_chronicle::seed::SeedPlan;
-use fgdb_order::{Event, MemberId, Output, PersistentState, Role, SnapshotTransfer};
+use fgdb_order::{Envelope, Event, MemberId, Output, PersistentState, Role, SnapshotTransfer};
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 
 use super::{
@@ -225,6 +225,21 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
             .map_err(ApplicationStateError::Raft)
     }
 
+    /// Deliver traffic on a channel authenticated as `peer`. The claimed sender
+    /// is checked before any Raft transition or application observation.
+    pub async fn receive(
+        &mut self,
+        peer: MemberId,
+        envelope: Envelope<C>,
+    ) -> Result<AppliedReplicaOutput<C>, MemberError<<A as RaftPublisher<C>>::Error>> {
+        if envelope.from != peer {
+            return Err(MemberError::Replica(ReplicaError::Raft(
+                fgdb_order::Error::InvalidMessage,
+            )));
+        }
+        self.step(Event::Receive(envelope)).await
+    }
+
     pub async fn step(
         &mut self,
         event: Event<C>,
@@ -424,6 +439,14 @@ impl<C: Clone + Eq, A: ReadApplication<C> + RaftPublisher<C>> AppliedReplica<C, 
             || ready.configuration() != state.configuration().identity()
         {
             return Err(ApplicationStateError::LeadershipLost.into());
+        }
+        // Quorum confirmation can precede a handoff while this read waits
+        // for application or audit visibility. Recheck before acquiring a pin.
+        if self.leadership_transfer()?.is_some() {
+            return Err(ApplicationStateError::Raft(
+                fgdb_order::Error::LeadershipTransferInProgress,
+            )
+            .into());
         }
         let basis = self.application.progress;
         let required = ready.index();

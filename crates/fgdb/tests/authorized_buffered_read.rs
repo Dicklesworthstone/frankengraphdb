@@ -43,6 +43,12 @@ const S: RelationId = RelationId(8);
 const T: RelationId = RelationId(9);
 const U: RelationId = RelationId(10);
 
+#[path = "authorized_buffered_read/computed_edge_projection.rs"]
+mod computed_edge_projection;
+#[path = "authorized_buffered_read/computed_join_projection.rs"]
+mod computed_join_projection;
+#[path = "authorized_buffered_read/computed_projection.rs"]
+mod computed_projection;
 #[path = "authorized_buffered_read/vertex_probes.rs"]
 mod vertex_probes;
 
@@ -1430,14 +1436,20 @@ fn catalog_and_graph_stay_on_one_cut_and_profile_refusal_precedes_payloads() {
             "MATCH (n) RETURN n,n.score ORDER BY n.score",
             "MATCH (a)-[r*1..2]->(b) RETURN r",
             "MATCH (a)-[r:R]->(b) RETURN r,properties(a)",
-            "MATCH (n) RETURN n,42 AS value",
+            // Computed constants are supported; reversed identity order must
+            // still refuse before any physical read, including parameter cells.
+            "MATCH (n) RETURN n,42 AS value ORDER BY n DESC",
         ] {
             let prepared = session.prepare(&cx, text, &args).unwrap();
             assert!(session.stream(&cx, &prepared, &args).is_err(), "{text}");
         }
         let parameters = GqlParameters::new().with_int64("value", 42).unwrap();
         let projected = session
-            .prepare(&cx, "MATCH (n) RETURN n,$value AS value", &parameters)
+            .prepare(
+                &cx,
+                "MATCH (n) RETURN n,$value AS value ORDER BY n DESC",
+                &parameters,
+            )
             .unwrap();
         assert!(matches!(
             session.stream(&cx, &projected, &parameters),

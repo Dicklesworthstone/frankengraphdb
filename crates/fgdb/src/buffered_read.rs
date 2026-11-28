@@ -13,7 +13,10 @@ use fgdb_types::{CanonicalPropertyValue, QueryCx};
 
 mod query;
 pub(crate) use query::BufferedVertexSeeds;
-pub use query::{BufferedQueryCursor, BufferedQueryError, BufferedQueryRow};
+pub use query::{
+    BufferedProjectionCursor, BufferedProjectionError, BufferedProjectionOutputGuard,
+    BufferedProjectionRow, BufferedQueryCursor, BufferedQueryError, BufferedQueryRow,
+};
 
 #[path = "query_prism/buffered.rs"]
 mod prism;
@@ -148,14 +151,32 @@ impl<V: Vfs + Clone> BufferedReadPublication<V> {
         self,
         cx: &CommitCx,
     ) -> Result<BufferedReadView<V>, BufferedOpenError> {
+        self.into_read_view_with_history_counts(cx, 0).await
+    }
+
+    /// Admit this same publication with a bounded EId counting prepass for
+    /// overlapping V6 block ranges. Zero uses ordinary cold admission. A
+    /// positive allowance of at least 32 bytes is drawn from the source pool.
+    /// Every extra block visit spends the same source-byte and work budgets.
+    pub async fn into_read_view_with_history_counts(
+        self,
+        cx: &CommitCx,
+        bytes: usize,
+    ) -> Result<BufferedReadView<V>, BufferedOpenError> {
         let published = self.published;
         let admission: crate::SendFuture<'_, _> = match self.source {
-            BufferedReadSource::Selected(selection) => Box::pin(selection.into_partition(cx)),
-            BufferedReadSource::Deferred { pool, limits } => Box::pin(
-                published
-                    .store
-                    .open_buffered_root(cx, published.root_id, pool, limits),
-            ),
+            BufferedReadSource::Selected(selection) => {
+                Box::pin(selection.into_partition_with_history_counts(cx, bytes))
+            }
+            BufferedReadSource::Deferred { pool, limits } => {
+                Box::pin(published.store.open_buffered_root_with_history_counts(
+                    cx,
+                    published.root_id,
+                    pool,
+                    limits,
+                    bytes,
+                ))
+            }
         };
         Ok(BufferedReadView {
             partition: admission.await?,
@@ -622,7 +643,47 @@ impl<V: Vfs + Clone> Database<V> {
         pool: MemoryPool,
         limits: BufferedReadLimits,
     ) -> Result<BufferedReadPublication<V>, BufferedOpenError> {
-        let path = path.as_ref();
+        Self::select_buffered_publication(cx, vfs, path.as_ref(), keys, pool, limits, None)
+            .await
+            .map(|(publication, _)| publication)
+    }
+
+    /// Select one bounded current publication and prove it contains a specific
+    /// historical branch marker. Returns `None` if the complete verified chain
+    /// has no such coordinate update. The returned publication has its own
+    /// current frontier; use `marker.commit_seq` for both catalog and reads.
+    /// A lagging checkpoint or a damaged captured suffix still refuses.
+    pub async fn open_buffered_publication_containing_revision(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+        marker: fgdb_types::MarkerRef,
+    ) -> Result<Option<BufferedReadPublication<V>>, BufferedOpenError> {
+        let (publication, matched) = Self::select_buffered_publication(
+            cx,
+            vfs,
+            path.as_ref(),
+            keys,
+            pool,
+            limits,
+            Some(marker),
+        )
+        .await?;
+        Ok(matched.then_some(publication))
+    }
+
+    async fn select_buffered_publication(
+        cx: &CommitCx,
+        vfs: V,
+        path: &Path,
+        keys: DatabaseKeys,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+        marker: Option<fgdb_types::MarkerRef>,
+    ) -> Result<(BufferedReadPublication<V>, bool), BufferedOpenError> {
         require_database_dir(cx, &vfs, path).await?;
         // Like the resident read view's fast path, this takes no writer lease
         // and writes nothing (fgdb-xxxnb): the committed chain is scanned
@@ -657,9 +718,24 @@ impl<V: Vfs + Clone> Database<V> {
             .map_or(CommitSeq::ORIGIN, |(_, selection)| {
                 selection.root().published_at
             });
-        let scan = CommitCoordinator::scan_committed_prefix(cx, &vfs, path, requested)
-            .await
-            .map_err(OpenError::Commit)?;
+        let (scan, matched) = match marker {
+            Some(at) => {
+                CommitCoordinator::scan_committed_branch_prefix(
+                    cx,
+                    &vfs,
+                    path,
+                    requested,
+                    crate::GRAPH,
+                    crate::BRANCH,
+                    at,
+                )
+                .await
+            }
+            None => CommitCoordinator::scan_committed_prefix(cx, &vfs, path, requested)
+                .await
+                .map(|scan| (scan, false)),
+        }
+        .map_err(OpenError::Commit)?;
         let (record, selection) = resolved.ok_or_else(|| OpenError::SlotDisagreesWithStream {
             path: path.to_path_buf(),
             slot_manifest: manifest.0,
@@ -682,16 +758,19 @@ impl<V: Vfs + Clone> Database<V> {
         } else {
             BufferedReadSource::Selected(Box::new(selection))
         };
-        Ok(BufferedReadPublication {
-            namespace: keys.namespace,
-            published: PublishedRead {
-                store,
-                root_id: checkpoint.root_id,
-                manifest,
-                published_at: checkpoint.published_at,
-                schema: checkpoint.schema,
+        Ok((
+            BufferedReadPublication {
+                namespace: keys.namespace,
+                published: PublishedRead {
+                    store,
+                    root_id: checkpoint.root_id,
+                    manifest,
+                    published_at: checkpoint.published_at,
+                    schema: checkpoint.schema,
+                },
+                source,
             },
-            source,
-        })
+            matched,
+        ))
     }
 }

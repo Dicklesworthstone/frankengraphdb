@@ -4,7 +4,8 @@
 //! A live opaque receipt for the exact admitted root permits metadata-only
 //! source construction. Every cold open, including V6, still walks payloads
 //! and proves history: a keyed root or raw slot publication is not admission.
-//! Vertex admission retains charged lifecycle metadata and birth
+//! Disjoint V6 patch ranges can prove vertex history within a single decoded
+//! patch. Overlapping and legacy patch histories retain charged lifecycle metadata and birth
 //! locators; restatements refault their authenticated birth patch for exact
 //! payload comparison. Resident admission therefore depends on version count,
 //! not the sum of vertex property bytes. A metadata-heavy history may still
@@ -13,12 +14,14 @@
 
 mod admission;
 mod block_directory;
+mod edge_admission;
+mod edge_counts;
 mod patch_directory;
 mod scan_access;
 
 pub(crate) use scan_access::native_runs::{NativeRunRow, NativeRunSuffix};
 
-use super::{BlockStore, ExtentError, RootReadEvent, RootWalk, StoreError};
+use super::{BlockStore, ExtentError, RootReadEvent, StoreError};
 use crate::edge_props::{BlockProps, EdgePropertyRow};
 use crate::root::PartitionRoot;
 use crate::root::descriptor::{BlockDescriptor, BlockSummary, PatchDescriptor, RootDescriptors};
@@ -626,6 +629,27 @@ fn limit(
     }
 }
 
+/// Visit ranges sorted by lower fence. Earlier ranges can intersect exactly
+/// when their greatest high fence reaches this low fence. Only the next low
+/// fence is needed to rule out every later range. Equality is an overlap.
+fn visit_isolated_ranges<K: Ord + Copy, E>(
+    count: usize,
+    range: impl Fn(usize) -> (usize, K, K),
+    control: &mut impl FnMut() -> Result<(), E>,
+    mut visit: impl FnMut(usize, bool),
+) -> Result<(), E> {
+    let mut previous_maximum = None;
+    for at in 0..count {
+        control()?;
+        let (object, first, last) = range(at);
+        let isolated = previous_maximum.is_none_or(|upper| upper < first)
+            && (at + 1 == count || last < range(at + 1).1);
+        visit(object, isolated);
+        previous_maximum = Some(previous_maximum.map_or(last, |upper: K| upper.max(last)));
+    }
+    Ok(())
+}
+
 fn advance(work: &mut usize, amount: usize, maximum: usize) -> Result<(), BufferedReadError> {
     let next = work
         .checked_add(amount)
@@ -655,6 +679,13 @@ pub struct BufferedRootSelection<V: Vfs> {
     decoded: DecodedBufferedRoot,
 }
 
+#[derive(Default)]
+struct RootOpenOptions<'a> {
+    receipts: Option<&'a super::PublishReceipts>,
+    selected: Option<DecodedBufferedRoot>,
+    history_count_bytes: usize,
+}
+
 impl<V: Vfs + Clone> BufferedRootSelection<V> {
     pub fn root(&self) -> &PartitionRoot {
         &self.decoded.root
@@ -664,9 +695,29 @@ impl<V: Vfs + Clone> BufferedRootSelection<V> {
         self,
         cx: &impl BufferedReadCx,
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
+        self.into_partition_with_history_counts(cx, 0).await
+    }
+
+    /// Admit the selected root with an optional bounded edge-identity prepass.
+    /// See [`BlockStore::open_buffered_root_with_history_counts`].
+    pub async fn into_partition_with_history_counts(
+        self,
+        cx: &impl BufferedReadCx,
+        bytes: usize,
+    ) -> Result<BufferedPartition<V>, BufferedReadError> {
         let pool = self.decoded.metadata.pool().clone();
         self.store
-            .open_buffered_root_inner(cx, self.id, pool, self.limits, None, Some(self.decoded))
+            .open_buffered_root_inner(
+                cx,
+                self.id,
+                pool,
+                self.limits,
+                RootOpenOptions {
+                    selected: Some(self.decoded),
+                    history_count_bytes: bytes,
+                    ..Default::default()
+                },
+            )
             .await
     }
 }
@@ -745,9 +796,38 @@ impl<V: Vfs + Clone> BlockStore<V> {
         pool: MemoryPool,
         limits: BufferedReadLimits,
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
+        self.open_buffered_root_with_history_counts(cx, id, pool, limits, 0)
+            .await
+    }
+
+    /// Spend up to `bytes` of the same pool to count EId occurrences in
+    /// overlapping V6 block ranges before cross-block history admission.
+    /// The prepass authenticates each input against its immutable ObjectId.
+    /// Its block bytes and rows count again toward the source and work limits.
+    /// A proved singleton needs no history entry. Repeated IDs and ambiguous
+    /// counts take the ordinary exact validation path. The filter is released
+    /// before admitting vertex history. Zero disables the prepass; nonzero
+    /// allowances must be at least 32 bytes. Legacy roots use ordinary admission.
+    pub async fn open_buffered_root_with_history_counts(
+        &self,
+        cx: &impl BufferedReadCx,
+        id: PartitionRootVersion,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+        bytes: usize,
+    ) -> Result<BufferedPartition<V>, BufferedReadError> {
         self.clone()
             .with_buffered_reads(pool.clone())
-            .open_buffered_root_inner(cx, id, pool, limits, None, None)
+            .open_buffered_root_inner(
+                cx,
+                id,
+                pool,
+                limits,
+                RootOpenOptions {
+                    history_count_bytes: bytes,
+                    ..Default::default()
+                },
+            )
             .await
     }
 
@@ -770,7 +850,16 @@ impl<V: Vfs + Clone> BlockStore<V> {
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
         self.clone()
             .with_buffered_reads(pool.clone())
-            .open_buffered_root_inner(cx, id, pool, limits, Some(receipts), None)
+            .open_buffered_root_inner(
+                cx,
+                id,
+                pool,
+                limits,
+                RootOpenOptions {
+                    receipts: Some(receipts),
+                    ..Default::default()
+                },
+            )
             .await
     }
 
@@ -797,15 +886,69 @@ impl<V: Vfs + Clone> BlockStore<V> {
         })
     }
 
+    async fn count_overlapping_edges(
+        &self,
+        cx: &impl BufferedReadCx,
+        root: &PartitionRoot,
+        hints: &[block_directory::HistoryHint],
+        pool: &MemoryPool,
+        bytes: usize,
+        observe: &mut impl FnMut(RootReadEvent) -> Result<(), BufferedReadError>,
+    ) -> Result<Option<edge_counts::EdgeCounts>, BufferedReadError> {
+        let mut counts = None;
+        for (at, (reference, hint)) in root.blocks.iter().zip(hints).enumerate() {
+            cx.buffered_checkpoint()
+                .map_err(BufferedReadError::Interrupted)?;
+            if hint.isolated {
+                continue;
+            }
+            let counters = match &mut counts {
+                Some(counters) => counters,
+                None => counts.insert(edge_counts::EdgeCounts::new(cx, pool, bytes)?),
+            };
+            let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
+            observe(RootReadEvent::ObjectStart)?;
+            let encoded = self
+                .get_bytes(cx, crate::DeltaBlockVersion(reference.block_id))
+                .await?;
+            observe(RootReadEvent::SourceBytes(encoded.len()))?;
+            let rows = crate::read_block(
+                self.k_oid.expose(),
+                self.namespace,
+                &encoded,
+                reference.block_id,
+            )
+            .map_err(|error| {
+                StoreError::MalformedRoot(crate::root::RootError::Block { at, error })
+            })?;
+            observe(RootReadEvent::Incidences(rows.len()))?;
+            for row in rows {
+                counters.note(row.eid);
+            }
+        }
+        Ok(counts)
+    }
+
     async fn open_buffered_root_inner(
         &self,
         cx: &impl BufferedReadCx,
         id: PartitionRootVersion,
         pool: MemoryPool,
         limits: BufferedReadLimits,
-        receipts: Option<&super::PublishReceipts>,
-        selected: Option<DecodedBufferedRoot>,
+        options: RootOpenOptions<'_>,
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
+        let RootOpenOptions {
+            receipts,
+            selected,
+            history_count_bytes,
+        } = options;
+        if (1..edge_counts::MIN_BYTES).contains(&history_count_bytes) {
+            return Err(BufferedReadError::Limit {
+                resource: "edge history counter capacity",
+                requested: edge_counts::MIN_BYTES,
+                limit: history_count_bytes,
+            });
+        }
         cx.buffered_checkpoint()
             .map_err(BufferedReadError::Interrupted)?;
         let buffer = ExtentBuffer::new(pool.clone(), limits.buffer)?;
@@ -875,25 +1018,32 @@ impl<V: Vfs + Clone> BlockStore<V> {
         // Incoming and refaulted objects keep their independent reservations.
         limits.retain_root_charge(&mut metadata, &root, blocks.capacity(), patches.capacity())?;
         let mut work = 0;
+        let mut early_blocks = None;
+        let mut early_patches = None;
         if !certified {
             let mut descriptors_match = !verify_published
                 || (blocks.len() == root.blocks.len()
                     && patches.len() == root.vertex_patches.len());
-            // This charge outlives the validator. A block is charged at its
-            // worst case before the walk updates any chain or allocates.
-            let mut edge_history_charge = pool.reserve(
-                cx,
-                if root.blocks.is_empty() {
-                    0
-                } else {
-                    INITIAL_EDGE_HISTORY_BYTES
-                },
-            )?;
-            let mut walk = RootWalk::default();
-            let mut vertex_history =
-                admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
+            let mut hints = None;
+            if verify_published
+                && blocks.len() == root.blocks.len()
+                && (history_count_bytes != 0
+                    || edge_admission::may_exhaust_edge_history(blocks.len(), &pool))
+            {
+                let mut control = || {
+                    cx.buffered_checkpoint()
+                        .map_err(BufferedReadError::Interrupted)?;
+                    advance(&mut work, 1, limits.max_work)
+                };
+                let directory =
+                    block_directory::BlockDirectory::new(&blocks, cx, &pool, &mut control)?;
+                hints = Some(directory.history_hints(&blocks, cx, &pool, &mut control)?);
+                early_blocks = Some(directory);
+            }
+            let mut edge_history =
+                edge_admission::EdgeAdmission::new(cx, &pool, !root.blocks.is_empty())?;
             let mut source_bytes = 0usize;
-            let mut observe = |event| {
+            let mut observe = |work: &mut usize, event| {
                 cx.buffered_checkpoint()
                     .map_err(BufferedReadError::Interrupted)?;
                 match event {
@@ -903,7 +1053,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
                             source_bytes.saturating_add(1),
                             limits.max_source_bytes,
                         )?;
-                        advance(&mut work, 1, limits.max_work)
+                        advance(work, 1, limits.max_work)
                     }
                     RootReadEvent::SourceBytes(bytes) => {
                         source_bytes = source_bytes
@@ -916,13 +1066,28 @@ impl<V: Vfs + Clone> BlockStore<V> {
                         )
                     }
                     RootReadEvent::Incidences(rows) | RootReadEvent::VertexVersions(rows) => {
-                        advance(&mut work, rows, limits.max_work)
+                        advance(work, rows, limits.max_work)
                     }
                 }
             };
+            let counts = if history_count_bytes != 0
+                && let Some(hints) = &hints
+            {
+                self.count_overlapping_edges(
+                    cx,
+                    &root,
+                    hints,
+                    &pool,
+                    history_count_bytes,
+                    &mut |event| observe(&mut work, event),
+                )
+                .await?
+            } else {
+                None
+            };
             for (at, reference) in root.blocks.iter().enumerate() {
                 let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
-                observe(RootReadEvent::ObjectStart)?;
+                observe(&mut work, RootReadEvent::ObjectStart)?;
                 // Keep decoding in this future: the ordinary open's optional
                 // blocking-pool decode could outlive a dropped admission future
                 // and thus outlive this affine workspace charge. For the same
@@ -938,49 +1103,27 @@ impl<V: Vfs + Clone> BlockStore<V> {
                         root.partition,
                         reference,
                         Ok(((bytes, decoded), None)),
-                        &mut observe,
+                        &mut |event| observe(&mut work, event),
                     )
                     .await?;
                 let (entries, _, predecessor) = &read.resolved;
-                edge_history_charge.grow(
-                    cx,
-                    entries
-                        .len()
-                        .checked_add(1)
-                        .and_then(|rows| rows.checked_mul(HISTORY_ENTRY_BYTES))
-                        .ok_or(BufferedReadError::SizeOverflow)?,
-                )?;
-                if let Some(first) = entries.first() {
-                    let family = (first.src, first.relation);
-                    let expected = walk.chain_heads.get(&family).copied();
-                    if predecessor.map(|link| link.0) != expected {
-                        return Err(StoreError::MalformedRoot(
-                            crate::root::RootError::BlockChainMismatch {
-                                at,
-                                declared: predecessor.map(|link| link.0),
-                                expected,
-                            },
-                        )
-                        .into());
+                let routed = hints.as_ref().and_then(|hints| hints.get(at)).map(|hint| {
+                    edge_admission::RoutedFamily {
+                        descriptors: &blocks,
+                        expected: (hint.previous != at)
+                            .then(|| root.blocks[hint.previous].block_id),
+                        isolated: hint.isolated,
+                        counts: counts.as_ref(),
                     }
-                    walk.chain_heads.insert(family, reference.block_id);
-                }
-                let retained_before = walk.history.statement_count();
-                walk.history
-                    .observe_block(at, entries)
-                    .map_err(StoreError::MalformedRoot)?;
-                let retained = walk.history.statement_count() - retained_before;
-                // A verified restatement overwrites a slot without retaining
-                // another row. Keep the per-block head allowance and refund
-                // only the rows that the canonical walk proved redundant.
-                let redundant = (entries.len() - retained) * HISTORY_ENTRY_BYTES;
-                if redundant != 0 {
-                    drop(
-                        edge_history_charge
-                            .split_off(redundant)
-                            .expect("the incoming block already reserved every row"),
-                    );
-                }
+                });
+                edge_history.observe_block(
+                    cx,
+                    at,
+                    reference.block_id,
+                    entries,
+                    *predecessor,
+                    routed,
+                )?;
                 let actual = BlockDescriptor {
                     block: descriptor(reference.block_id, &read.bytes)?,
                     properties: read
@@ -999,16 +1142,46 @@ impl<V: Vfs + Clone> BlockStore<V> {
             }
             // Vertex history reads only vertex patches. Release the completed
             // edge validator, then its reservations, before this second walk.
-            drop(walk);
-            drop(edge_history_charge);
+            drop(edge_history);
+            drop(counts);
+            drop(hints);
+            // A root descriptor covers at most MAX_PATCH_ROWS. If even that
+            // population fits beside a decoded object, keep the original
+            // admission and avoid building a second index during the walk.
+            let mut isolated = None;
+            if verify_published && admission::may_exhaust_vertex_history(patches.len(), &pool) {
+                let mut control = || {
+                    cx.buffered_checkpoint()
+                        .map_err(BufferedReadError::Interrupted)?;
+                    advance(&mut work, 1, limits.max_work)
+                };
+                let directory =
+                    patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut control)?;
+                isolated =
+                    Some(directory.isolated_patches(patches.len(), cx, &pool, &mut control)?);
+                early_patches = Some(directory);
+            }
+            let mut vertex_history =
+                admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
             for (at, reference) in root.vertex_patches.iter().enumerate() {
                 let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
                 let (rows, bytes) = self
-                    .resolve_root_patch_observed(cx, at, reference, &mut observe)
+                    .resolve_root_patch_observed(cx, at, reference, &mut |event| {
+                        observe(&mut work, event)
+                    })
                     .await?;
-                vertex_history
-                    .observe_patch(cx, at, &rows, &mut observe)
-                    .await?;
+                // The canonical decoder already proved ordering, birth ordinals
+                // and contiguous lifetimes inside this patch. The disjointness
+                // proof becomes authoritative only after *every* descriptor has
+                // matched its decoded payload below.
+                if !isolated
+                    .as_ref()
+                    .is_some_and(|fences| fences.get(at) == Some(&true))
+                {
+                    vertex_history
+                        .observe_patch(cx, at, &rows, &mut |event| observe(&mut work, event))
+                        .await?;
+                }
                 let actual = PatchDescriptor {
                     extent: descriptor(reference.patch_id, &bytes)?,
                     first: rows.first().map(|row| (row.vid, row.created_at)),
@@ -1035,20 +1208,24 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 advance(&mut work, 1, limits.max_work)?;
             }
         }
-        let patch_directory =
-            patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut || {
+        let patch_directory = match early_patches {
+            Some(directory) => directory,
+            None => patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut || {
                 cx.buffered_checkpoint()
                     .map_err(BufferedReadError::Interrupted)?;
                 advance(&mut work, 1, limits.max_work)
-            })?;
+            })?,
+        };
         // Publication (V6), or this open's complete legacy walk, authenticated
         // descriptor topology before these fences may exclude payloads.
-        let block_directory =
-            block_directory::BlockDirectory::new(&blocks, cx, &pool, &mut || {
+        let block_directory = match early_blocks {
+            Some(directory) => directory,
+            None => block_directory::BlockDirectory::new(&blocks, cx, &pool, &mut || {
                 cx.buffered_checkpoint()
                     .map_err(BufferedReadError::Interrupted)?;
                 advance(&mut work, 1, limits.max_work)
-            })?;
+            })?,
+        };
         cx.buffered_checkpoint()
             .map_err(BufferedReadError::Interrupted)?;
         Ok(BufferedPartition {
@@ -1734,9 +1911,11 @@ impl<V: Vfs> BufferedPartition<V> {
     ) -> Result<Option<EdgePointWinner>, C> {
         let mut result: Option<EdgePointWinner> = None;
         let mut candidates = self.block_directory.edge_candidates(eid);
-        while let Some(at) = self
-            .block_directory
-            .next_edge(&mut candidates, &mut || control(PointReadEvent::Directory))?
+        while let Some(at) =
+            self.block_directory
+                .next_edge(&self.blocks, &mut candidates, &mut || {
+                    control(PointReadEvent::Directory)
+                })?
         {
             let descriptor = self.blocks[at];
             if self.root.blocks[at].first_seq.0 > as_of.0
@@ -1902,10 +2081,13 @@ impl<V: Vfs> BufferedPartition<V> {
             crate::tiered::edge_scan::BufferedEdgeDirection::Outgoing
         };
         let mut blocks = self.block_directory.candidates(vertex, relation, direction);
-        while let Some(at) = self.block_directory.next(&mut blocks, &mut || {
-            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, self.limits.max_work)
-        })? {
+        while let Some(at) = self
+            .block_directory
+            .next(&self.blocks, &mut blocks, &mut || {
+                cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+                advance(&mut work, 1, self.limits.max_work)
+            })?
+        {
             let descriptor = self.blocks[at];
             if self.root.blocks[at].first_seq.0 > as_of.0
                 || descriptor.summary.is_none_or(|summary| {

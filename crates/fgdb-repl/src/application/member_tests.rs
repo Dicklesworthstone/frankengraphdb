@@ -408,6 +408,29 @@ fn a_ready_read_pins_visible_history_not_the_hidden_applied_tail() {
 }
 
 #[test]
+fn confirmed_read_waits_for_handoff_abort_before_pinning() {
+    let (mut nodes, models) = cluster(3, 1);
+    elect(&mut nodes);
+    let read = confirm_read(&mut nodes);
+    apply_all(&mut nodes[0]);
+    immediate(nodes[0].step(Event::TransferLeadership(MemberId(2)))).unwrap();
+    let transfer = nodes[0].leadership_transfer().unwrap().unwrap().id();
+    assert!(matches!(
+        immediate(nodes[0].try_read(&read)),
+        Err(ApplicationError::State(ApplicationStateError::Raft(
+            fgdb_order::Error::LeadershipTransferInProgress
+        )))
+    ));
+    assert_eq!(models[0].1.borrow().pin_calls, 0);
+    immediate(nodes[0].step(Event::AbortLeadershipTransfer(transfer))).unwrap();
+    assert!(matches!(
+        immediate(nodes[0].try_read(&read)).unwrap(),
+        ReadState::Ready(_)
+    ));
+    assert_eq!(models[0].1.borrow().pin_calls, 1);
+}
+
+#[test]
 fn losing_leadership_cancels_even_already_confirmed_unpinned_reads() {
     let (mut nodes, _) = cluster(3, 16);
     elect(&mut nodes);

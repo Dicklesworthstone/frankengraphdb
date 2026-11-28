@@ -10,6 +10,28 @@ use super::{BlockProps, BlockStore, StoreError};
 use asupersync::fs::Vfs;
 use fgdb_types::{CommitSeq, QueryCx, StorageReadCx};
 
+/// Append one authenticated segment. The frame supplies the eventual length,
+/// but allocation starts only after a segment has been read. Geometric growth
+/// stops at that length so a short final tail cannot double the retained pool
+/// charge. Both membership and V6 descriptors use these same bounds.
+fn extend_root_list<T>(
+    list: &mut Vec<T>,
+    rows: impl ExactSizeIterator<Item = T>,
+    total: usize,
+) -> Result<(), StoreError> {
+    let needed = list.len() + rows.len();
+    debug_assert!(needed <= total);
+    if needed > list.capacity() {
+        let capacity = needed.max(list.capacity().saturating_mul(2).min(total));
+        list.try_reserve_exact(capacity - list.len())
+            .map_err(|error| {
+                StoreError::Io(std::io::Error::new(std::io::ErrorKind::OutOfMemory, error))
+            })?;
+    }
+    list.extend(rows);
+    Ok(())
+}
+
 /// Limits on the SOURCE of a root traversal, not on its compacted output.
 /// Repeated references/versions are charged on every actual visit. Counts bound
 /// the existing history validators as well as retained rows; they are not an
@@ -548,8 +570,13 @@ impl<V: Vfs> BlockStore<V> {
         let mut segments = crate::root::SegmentCache::of_frame(&frame, block_index, patch_index);
         let mut descriptors = crate::root::descriptor::RootDescriptors::default();
         let coordinate = frame.coordinate();
-        let mut lists = [Vec::new(), Vec::new()];
-        for ((class, named), list) in [
+        let block_count = declared(0, frame.block_segments.len(), frame.tail_blocks.len());
+        let patch_count = declared(0, frame.patch_segments.len(), frame.tail_patches.len());
+        let mut blocks = Vec::new();
+        let mut patches = Vec::new();
+        // Move the proved membership directly into its final publication-order
+        // list. Only the current segment and the final columns coexist.
+        for (class, named) in [
             (
                 crate::root_segment::SegmentClass::Blocks,
                 &frame.block_segments,
@@ -558,10 +585,7 @@ impl<V: Vfs> BlockStore<V> {
                 crate::root_segment::SegmentClass::VertexPatches,
                 &frame.patch_segments,
             ),
-        ]
-        .into_iter()
-        .zip(&mut lists)
-        {
+        ] {
             for (at, reference) in named.iter().enumerate() {
                 let limit = remaining.min(crate::root_segment::MAX_SEGMENT_BYTES as u64);
                 let (size, (references, admitted)) = self
@@ -588,7 +612,22 @@ impl<V: Vfs> BlockStore<V> {
                     )
                     .await?;
                 remaining = remaining.saturating_sub(size as u64);
-                list.push(references);
+                match class {
+                    crate::root_segment::SegmentClass::Blocks => {
+                        extend_root_list(
+                            &mut blocks,
+                            references.into_iter().map(crate::root::BlockRef::from),
+                            block_count,
+                        )?;
+                    }
+                    crate::root_segment::SegmentClass::VertexPatches => {
+                        extend_root_list(
+                            &mut patches,
+                            references.into_iter().map(crate::root::PatchRef::from),
+                            patch_count,
+                        )?;
+                    }
+                }
                 if tails.is_some() {
                     // V6 requires V2 descriptors. A successfully decoded
                     // segment without them is an authenticated V1 segment.
@@ -599,15 +638,41 @@ impl<V: Vfs> BlockStore<V> {
                             },
                         ),
                     ))?;
-                    descriptors.append(admitted);
+                    extend_root_list(
+                        &mut descriptors.blocks,
+                        admitted.blocks.into_iter(),
+                        block_count,
+                    )?;
+                    extend_root_list(
+                        &mut descriptors.patches,
+                        admitted.patches.into_iter(),
+                        patch_count,
+                    )?;
                 }
             }
         }
-        let [blocks, patches] = lists;
-        let root = crate::root::assemble_root(frame, blocks, patches)
-            .map_err(StoreError::MalformedRoot)?;
+        extend_root_list(&mut blocks, frame.tail_blocks.into_iter(), block_count)?;
+        extend_root_list(&mut patches, frame.tail_patches.into_iter(), patch_count)?;
+        let root = crate::root::PartitionRoot {
+            graph: frame.graph,
+            branch: frame.branch,
+            partition: frame.partition,
+            published_at: frame.published_at,
+            blocks,
+            vertex_patches: patches,
+        };
+        crate::root::validate_root(&root).map_err(StoreError::MalformedRoot)?;
         if let Some(tails) = tails {
-            descriptors.append(tails);
+            extend_root_list(
+                &mut descriptors.blocks,
+                tails.blocks.into_iter(),
+                block_count,
+            )?;
+            extend_root_list(
+                &mut descriptors.patches,
+                tails.patches.into_iter(),
+                patch_count,
+            )?;
             if !descriptors.matches_suffix(&root.blocks, &root.vertex_patches, (0, 0)) {
                 return Err(StoreError::MalformedRoot(
                     crate::root::RootError::InvalidDescriptor,

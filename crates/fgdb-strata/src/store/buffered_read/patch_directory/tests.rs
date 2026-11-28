@@ -213,3 +213,27 @@ fn directory_allocation_is_admitted_and_all_construction_refusals_refund() {
     });
     assert!(report.invariant_violations.is_empty(), "{report:?}");
 }
+
+#[test]
+fn isolation_matches_all_pairs_in_publication_order_including_touching_fences() {
+    let choices = [(0, 0), (0, 2), (1, 1), (2, 3), (4, 4), (4, u128::MAX)];
+    for mut code in 0..choices.len().pow(5) {
+        let bounds = std::array::from_fn::<_, 5, _>(|_| {
+            let bound = choices[code % choices.len()];
+            code /= choices.len();
+            bound
+        });
+        let mut isolated = [false; 5];
+        mark_isolated(&ranges(&bounds), &mut isolated, &mut || Ok::<_, ()>(())).unwrap();
+        for (at, &(first, last)) in bounds.iter().enumerate() {
+            assert_eq!(
+                isolated[at],
+                bounds
+                    .iter()
+                    .enumerate()
+                    .all(|(other, &(lo, hi))| at == other || hi < first || last < lo),
+                "{bounds:?}, patch {at}"
+            );
+        }
+    }
+}

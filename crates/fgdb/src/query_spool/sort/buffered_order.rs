@@ -220,6 +220,21 @@ impl PreparedNativeRead {
 }
 
 impl PreparedBufferedOrder {
+    /// Pin a physical definition with no temporal selector to a host-selected
+    /// revision. Every child stage shares this cut; a statement that already
+    /// specifies a temporal cut cannot be rebound by the host.
+    pub fn at_snapshot(mut self, at: CommitSeq) -> Result<Self> {
+        if self.as_of.is_some() {
+            return Err(NativeSpoolError::Prepare(Box::new(
+                QueryError::Unsupported {
+                    diagnostics: vec!["the physical plan already selects an exact snapshot".into()],
+                },
+            )));
+        }
+        self.as_of = Some(at);
+        Ok(self)
+    }
+
     pub fn from_prepared_relation(
         query: &fgdb_gql::PreparedGraphSet,
         as_of: Option<CommitSeq>,

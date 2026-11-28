@@ -1712,10 +1712,11 @@ pub(crate) fn union_column_order(left: &[String], right: &[String]) -> Result<Ve
 }
 
 /// Whether the token at `at` opens a read pipeline: MATCH, OPTIONAL MATCH,
-/// UNWIND, CALL, RETURN or WITH.
+/// UNWIND, CALL, FILTER, RETURN or WITH.
 fn opens_pipeline(tokens: &[TextToken<'_>], at: usize) -> bool {
     tokens.get(at).is_some_and(|token| {
         token.word("MATCH")
+            || token.word("FILTER")
             || token.word("UNWIND")
             || token.word("CALL")
             || token.word("RETURN")

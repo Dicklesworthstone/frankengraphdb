@@ -807,6 +807,7 @@ dependencies = [
  "fgdb",
  "fgdb-beacon",
  "fgdb-bolt",
+ "fgdb-chronicle",
  "fgdb-crypto",
  "fgdb-delta-types",
  "fgdb-gql",

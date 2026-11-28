@@ -1741,8 +1741,10 @@ impl PreparedGraphSet {
     /// A property-aware projection over an ordered vertex-rooted graph cursor.
     ///
     /// The native vertex compiler owns every predicate and fixed-edge Collect
-    /// scope. Both the source and final projection retain the root identity as
-    /// their leading cell, so canonical order needs no sort or seen set.
+    /// scope. A canonical projection retains the leading root identity.
+    /// An explicit ascending root-identity order may place it anywhere,
+    /// including a private ranking cell removed after projection. The native
+    /// compiler proves source order, so neither profile needs a sort or seen set.
     /// Dynamic properties must be read through that cursor's admitted source;
     /// metadata, randomness and relational barriers remain outside this
     /// profile. The final window selects completed projections, including
@@ -1751,24 +1753,8 @@ impl PreparedGraphSet {
     /// that have not supplied an element reader.
     #[must_use]
     pub fn vertex_graph_row_pull(&self) -> Option<GraphSetRowPull> {
-        if !self.order.is_empty() {
-            return None;
-        }
-        let SetNode::Project {
-            input,
-            projection,
-            quantifier: GraphSetQuantifier::All,
-            preserve_order: false,
-        } = &self.node
-        else {
-            return None;
-        };
-        if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
-            return None;
-        }
-        let SetNode::Pattern(pattern) = &input.node else {
-            return None;
-        };
+        let parts = self.identity_row_projection()?;
+        let pattern = parts.pattern;
         let operators = pattern.plan().operators();
         if pattern.plan().visible_columns.is_some()
             || !matches!(
@@ -1782,63 +1768,45 @@ impl PreparedGraphSet {
                     count: None,
                 })
             )
-            || !projection
+            || !parts
+                .projection
                 .iter()
                 .all(|cell| cell.value().is_element_scan_local())
         {
             return None;
         }
         crate::stream::VertexScanPlan::compile(pattern.plan()).ok()?;
-        let GraphSetValue::Column(column) = *projection.first()?.value() else {
-            return None;
-        };
-        if !matches!(
-            pattern.value_columns().get(column),
-            Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0
-        ) {
+        if !parts.preserves_identity_order(1, |_, column| {
+            matches!(
+                pattern.value_columns().get(column),
+                Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0
+            )
+        }) {
             return None;
         }
-        Some(GraphSetRowPull {
-            pattern: pattern.clone(),
-            projection: projection.clone(),
-            offset: self.offset,
-            count: self.count,
-        })
+        Some(parts.into_pull())
     }
 
     /// A property-aware projection over an ordered fixed-edge cursor.
     ///
-    /// The source and final output both retain their complete unique traversal
-    /// identity prefix. Their canonical row orders therefore agree without a
-    /// sort or seen-set, including both orientations of an undirected root.
+    /// The source retains its complete unique traversal identity prefix.
+    /// Final canonical output keeps that prefix; an explicit ascending order
+    /// may address it elsewhere, including compiler-private ranking cells.
+    /// Both cases prove the exact source order without a sort or seen-set,
+    /// including both orientations of an undirected root.
     /// Every expression uses the existing row VM and the source's admitted
     /// property readers; catalog metadata and random draws remain unavailable.
     /// The final window selects completed projections; neither SKIP nor LIMIT
-    /// can hide an expression failure in the consumed input. No order,
-    /// DISTINCT, hidden key, or relational barrier is elided.
+    /// can hide an expression failure in the consumed input. DISTINCT and
+    /// unproved relational barriers refuse. Private keys remain charged until
+    /// the completed projection removes their suffix.
     ///
     /// This is a separate profile: the vertex-only contracts of row_pull and
     /// ordered_row_pull remain unchanged for their existing host adapters.
     #[must_use]
     pub fn edge_row_pull(&self) -> Option<GraphSetRowPull> {
-        if !self.order.is_empty() {
-            return None;
-        }
-        let SetNode::Project {
-            input,
-            projection,
-            quantifier: GraphSetQuantifier::All,
-            preserve_order: false,
-        } = &self.node
-        else {
-            return None;
-        };
-        if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
-            return None;
-        }
-        let SetNode::Pattern(pattern) = &input.node else {
-            return None;
-        };
+        let parts = self.identity_row_projection()?;
+        let pattern = parts.pattern;
         let operators = pattern.plan().operators();
         if pattern.plan().visible_columns.is_some()
             || !matches!(
@@ -1852,7 +1820,8 @@ impl PreparedGraphSet {
                     count: None,
                 })
             )
-            || !projection
+            || !parts
+                .projection
                 .iter()
                 .all(|cell| cell.value().is_element_scan_local())
         {
@@ -1860,18 +1829,91 @@ impl PreparedGraphSet {
         }
         let source = crate::edge_stream::EdgeScanPlan::compile(pattern.plan()).ok()?;
         let prefix = source.canonical_identity_prefix_width();
-        if projection.len() < prefix
-            || !projection.iter().take(prefix).enumerate().all(|(index, cell)| {
-                matches!(cell.value(), GraphSetValue::Column(column) if *column == index)
-            })
+        if !parts.preserves_identity_order(prefix, |index, column| column == index) {
+            return None;
+        }
+        Some(parts.into_pull())
+    }
+
+    /// Recognize the native projection and, when present, the compiler's
+    /// private ORDER BY output removal. The source is still exactly one
+    /// unpaged pattern; this never flattens an arbitrary relational stage.
+    ///
+    /// A page with a hidden key lowers to an all-column identity projection
+    /// followed by a prefix projection that preserves its selected order.
+    /// Neither copy evaluates an expression, changes multiplicity, or reads
+    /// an element. The complete original expression projection is retained
+    /// and metered before removing its private suffix.
+    fn identity_row_projection(&self) -> Option<IdentityRowProjection<'_>> {
+        let (ordered, visible_columns) = match &self.node {
+            SetNode::Project {
+                input,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+                preserve_order: true,
+            } => {
+                if !self.order.is_empty()
+                    || self.offset != 0
+                    || self.count.is_some()
+                    || projection.is_empty()
+                    || projection.len() > input.columns.len()
+                    || !projection.iter().enumerate().all(|(index, column)| {
+                        matches!(column.value(), GraphSetValue::Column(source) if *source == index)
+                    })
+                    || input.order.is_empty()
+                {
+                    return None;
+                }
+                (input.as_ref(), Some(projection.len()))
+            }
+            _ => (self, None),
+        };
+        let expression = match &ordered.node {
+            SetNode::Project {
+                input,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+                preserve_order: false,
+            } if !ordered.order.is_empty()
+                && matches!(&input.node, SetNode::Project { .. })
+                && projection.len() == input.columns.len()
+                && projection.iter().enumerate().all(|(index, column)| {
+                    matches!(column.value(), GraphSetValue::Column(source) if *source == index)
+                }) =>
+            {
+                if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
+                    return None;
+                }
+                input.as_ref()
+            }
+            _ => ordered,
+        };
+        let SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            preserve_order: false,
+        } = &expression.node
+        else {
+            return None;
+        };
+        if !input.order.is_empty()
+            || input.offset != 0
+            || input.count.is_some()
+            || visible_columns.is_some_and(|width| width > projection.len())
         {
             return None;
         }
-        Some(GraphSetRowPull {
-            pattern: pattern.clone(),
-            projection: projection.clone(),
-            offset: self.offset,
-            count: self.count,
+        let SetNode::Pattern(pattern) = &input.node else {
+            return None;
+        };
+        Some(IdentityRowProjection {
+            pattern,
+            projection,
+            order: &ordered.order,
+            offset: ordered.offset,
+            count: ordered.count,
+            visible_columns,
         })
     }
 
@@ -1986,6 +2028,7 @@ impl PreparedGraphSet {
                 projection: projection.clone(),
                 offset: 0,
                 count: None,
+                visible_columns: None,
             },
             tail,
         ))
@@ -2052,9 +2095,60 @@ impl PreparedGraphSet {
                 projection: projection.clone(),
                 offset: 0,
                 count: None,
+                visible_columns: None,
             },
             *quantifier,
         ))
+    }
+}
+
+/// Borrowed proof inputs for an identity-ordered, one-pattern row projection.
+struct IdentityRowProjection<'a> {
+    pattern: &'a PreparedGraphPattern<GraphValueRow>,
+    projection: &'a [GraphSetProjection],
+    order: &'a [GraphValueOrder],
+    offset: u64,
+    count: Option<u64>,
+    visible_columns: Option<usize>,
+}
+
+impl IdentityRowProjection<'_> {
+    fn preserves_identity_order(
+        &self,
+        width: usize,
+        mut is_identity: impl FnMut(usize, usize) -> bool,
+    ) -> bool {
+        if width == 0 {
+            return false;
+        }
+        if self.order.is_empty() {
+            // Canonical whole-row order is source order only when the actual
+            // output starts with the complete unique traversal identity.
+            return self.projection.len() >= width
+                && self.projection.iter().take(width).enumerate().all(|(index, cell)| {
+                    matches!(cell.value(), GraphSetValue::Column(column) if is_identity(index, *column))
+                });
+        }
+        // Once these nonnullable, unique keys agree, no two source rows tie.
+        // Additional keys and NULL placement cannot change the result order.
+        // Identity keys may be private, but every projected cell still runs.
+        self.order.len() >= width
+            && self.order.iter().take(width).enumerate().all(|(index, key)| {
+                !key.descending
+                    && self.projection.get(key.column).is_some_and(|cell| {
+                        matches!(cell.value(), GraphSetValue::Column(column) if is_identity(index, *column))
+                    })
+            })
+    }
+
+    fn into_pull(self) -> GraphSetRowPull {
+        GraphSetRowPull {
+            pattern: self.pattern.clone(),
+            projection: self.projection.to_vec(),
+            offset: self.offset,
+            count: self.count,
+            visible_columns: self.visible_columns,
+        }
     }
 }
 
@@ -2062,12 +2156,17 @@ impl PreparedGraphSet {
 /// projection each of its rows takes, followed by its final output window.
 /// The accessor selects a row-local or property-aware graph profile; it does
 /// not grant source capabilities. A window never moves before projection.
+/// Explicit identity ordering may retain compiler-private ranking cells;
+/// they are evaluated with the public cells and removed only afterwards.
 #[derive(Clone)]
 pub struct GraphSetRowPull {
     pattern: PreparedGraphPattern<GraphValueRow>,
     projection: Vec<GraphSetProjection>,
     offset: u64,
     count: Option<u64>,
+    // Only the compiler-private prefix removal after a proved identity order.
+    // All cells are evaluated and charged before this suffix is released.
+    visible_columns: Option<usize>,
 }
 
 impl core::fmt::Debug for GraphSetRowPull {
@@ -2080,6 +2179,163 @@ impl core::fmt::Debug for GraphSetRowPull {
 }
 
 impl GraphSetRowPull {
+    /// Collect every possible VM field lookup before opening the source.
+    /// Only direct columns containing this pattern's root vertex may read
+    /// graph properties; lazy operands and private ranking cells participate.
+    pub(crate) fn vertex_projection_properties(
+        &self,
+    ) -> Option<fgdb_delta_types::PropertySelection> {
+        let mut keys = fgdb_delta_types::PropertySelection::EMPTY;
+        self.projection_properties(|column, key| {
+            if !matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() == 0) {
+                return None;
+            }
+            keys.insert(key).ok()
+        })?;
+        Some(keys)
+    }
+
+    /// Edge and endpoint fields of direct bound element columns. The complete
+    /// edge compiler still proves that those bindings belong to its source;
+    /// lists, map lookups and other indirect receivers cannot request fields.
+    pub(crate) fn edge_projection_properties(
+        &self,
+    ) -> Option<crate::edge_stream::EdgeScanPropertySelection> {
+        let mut selected = crate::edge_stream::EdgeScanPropertySelection {
+            edge: fgdb_delta_types::PropertySelection::EMPTY,
+            endpoints: fgdb_delta_types::PropertySelection::EMPTY,
+        };
+        self.projection_properties(|column, key| match column {
+            ValueProjection::Vertex { .. } => selected.endpoints.insert(key).ok(),
+            ValueProjection::Path {
+                function: crate::algebra::GraphPathFunction::Edge,
+                ..
+            } => selected.edge.insert(key).ok(),
+            _ => None,
+        })?;
+        Some(selected)
+    }
+
+    // One exhaustive effect walk for both source profiles, including every
+    // lazy operand and compiler-private cell. Each profile owns its receiver
+    // and bounded-key admission; this walk never evaluates an expression.
+    fn projection_properties(
+        &self,
+        mut keys: impl FnMut(&ValueProjection, fgdb_delta_types::PropertyKeyId) -> Option<()>,
+    ) -> Option<()> {
+        fn include(
+            value: &GraphSetValue,
+            columns: &[ValueProjection],
+            keys: &mut impl FnMut(&ValueProjection, fgdb_delta_types::PropertyKeyId) -> Option<()>,
+        ) -> Option<()> {
+            use GraphSetValue as V;
+            match value {
+                V::Column(_)
+                | V::Literal(_)
+                | V::TypedNull(_)
+                | V::Integer(_)
+                | V::Value(_)
+                | V::Local(_) => {}
+                V::ElementMetadata { .. } | V::Random { .. } => return None,
+                V::MapGet { map, property, .. } => {
+                    if let crate::GraphElementKey::Property(key) = property {
+                        let V::Column(column) = map.as_ref() else {
+                            return None;
+                        };
+                        keys(columns.get(*column)?, *key)?;
+                    }
+                    include(map, columns, keys)?;
+                }
+                V::List(values) => {
+                    for value in values {
+                        include(value, columns, keys)?;
+                    }
+                }
+                V::Size(value)
+                | V::Keys(value)
+                | V::Temporal {
+                    argument: value, ..
+                }
+                | V::Function {
+                    argument: value, ..
+                } => include(value, columns, keys)?,
+                V::Index { list, index } => {
+                    include(list, columns, keys)?;
+                    include(index, columns, keys)?;
+                }
+                V::In { value, list } => {
+                    include(value, columns, keys)?;
+                    include(list, columns, keys)?;
+                }
+                V::Equal { left, right } | V::Ordered { left, right, .. } => {
+                    include(left, columns, keys)?;
+                    include(right, columns, keys)?;
+                }
+                V::Comprehension { list, filter, map } => {
+                    include(list, columns, keys)?;
+                    for value in [filter.as_deref(), map.as_deref()].into_iter().flatten() {
+                        include(value, columns, keys)?;
+                    }
+                }
+                V::Quantifier {
+                    list, predicate, ..
+                } => {
+                    include(list, columns, keys)?;
+                    include(predicate, columns, keys)?;
+                }
+                V::Slice { list, from, to } => {
+                    include(list, columns, keys)?;
+                    for value in [from.as_deref(), to.as_deref()].into_iter().flatten() {
+                        include(value, columns, keys)?;
+                    }
+                }
+                V::Range { start, end, step } => {
+                    include(start, columns, keys)?;
+                    include(end, columns, keys)?;
+                    if let Some(step) = step {
+                        include(step, columns, keys)?;
+                    }
+                }
+                V::Reduce { init, list, expr } => {
+                    include(init, columns, keys)?;
+                    include(list, columns, keys)?;
+                    include(expr, columns, keys)?;
+                }
+                V::MapLiteral { values, guard, .. } => {
+                    for value in values {
+                        include(value, columns, keys)?;
+                    }
+                    if let Some(guard) = guard {
+                        include(guard, columns, keys)?;
+                    }
+                }
+                V::MapOverlay { base, values, .. } | V::Let { body: base, values } => {
+                    include(base, columns, keys)?;
+                    for value in values {
+                        include(value, columns, keys)?;
+                    }
+                }
+                V::Case { arms, otherwise } => {
+                    for (condition, value) in arms {
+                        include(condition, columns, keys)?;
+                        include(value, columns, keys)?;
+                    }
+                    if let Some(value) = otherwise {
+                        include(value, columns, keys)?;
+                    }
+                }
+            }
+            Some(())
+        }
+        for cell in &self.projection {
+            if !cell.value().is_element_scan_local() {
+                return None;
+            }
+            include(cell.value(), self.pattern.value_columns(), &mut keys)?;
+        }
+        Some(())
+    }
+
     /// The source pattern whose native cursor supplies the input rows.
     #[must_use]
     pub fn pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
@@ -2110,14 +2366,18 @@ impl GraphSetRowPull {
         control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
         arithmetic: impl FnOnce(usize, crate::GraphIntegerError) -> E,
     ) -> Result<GraphValueRow, E> {
-        GraphSetProjection::evaluate_numbered_row_with_control(
+        let projected = GraphSetProjection::evaluate_numbered_row_with_control(
             row,
             ordinal,
             &self.projection,
             control,
             &mut projection::no_element_reads,
             arithmetic,
-        )
+        )?;
+        Ok(match self.visible_columns {
+            Some(width) => projected.into_prefix(width),
+            None => projected,
+        })
     }
 
     /// Project one source row with property reads at that source's admitted cut.
@@ -2135,14 +2395,18 @@ impl GraphSetRowPull {
         ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
         arithmetic: impl FnOnce(usize, crate::GraphIntegerError) -> E,
     ) -> Result<GraphValueRow, E> {
-        GraphSetProjection::evaluate_numbered_row_with_control(
+        let projected = GraphSetProjection::evaluate_numbered_row_with_control(
             row,
             ordinal,
             &self.projection,
             control,
             &mut |element, key| Some(read(element, key)),
             arithmetic,
-        )
+        )?;
+        Ok(match self.visible_columns {
+            Some(width) => projected.into_prefix(width),
+            None => projected,
+        })
     }
 }
 
@@ -2204,10 +2468,244 @@ mod pulled_projection_tests {
             "MATCH (a)-[r:R]->(b) RETURN a,r,b,r.p + 1 AS cost",
             "MATCH (a)-[r:R]-(b) RETURN r,r.p + 1 AS cost",
             "MATCH (a)-[r:R]->(b) RETURN DISTINCT r,a,b,r.p + 1 AS cost",
-            "MATCH (a)-[r:R]->(b) RETURN r,a,b,r.p + 1 AS cost ORDER BY r",
+            "MATCH (a)-[r:R]->(b) RETURN r,a,b,r.p + 1 AS cost ORDER BY r DESC",
             "MATCH (a)-[r:R]->(b) RETURN r,a,b,rand() AS draw",
         ] {
             assert!(prepare(text).edge_row_pull().is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn explicit_identity_order_pulls_native_computed_values_and_keeps_complete_keys() {
+        let prepare = |text: &str| {
+            crate::PreparedGraphSetText::prepare(text, |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => {
+                    Some(GraphSymbol::Relation(fgdb_delta_types::RelationId(1)))
+                }
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                _ => None,
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+        };
+        for text in [
+            "MATCH (n) RETURN n AS id,n.p+1 AS value ORDER BY id",
+            "MATCH (n) RETURN n AS id,[n.p, n.p+1] AS values ORDER BY id NULLS FIRST",
+            "MATCH (a)-[r:R]->(b) RETURN r AS id,r.p+1 AS cost ORDER BY id",
+            "MATCH (a)-[r:R]-(b) RETURN r AS id,a AS origin,r.p+1 AS cost ORDER BY id,origin",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS id,s AS next_id,r.p+s.p AS cost ORDER BY id,next_id",
+        ] {
+            for page in ["", " SKIP 1 LIMIT 2", " LIMIT 0"] {
+                let statement = format!("{text}{page}");
+                let query = prepare(&statement);
+                let canonical = query.canonical_bytes();
+                let pull = query
+                    .vertex_graph_row_pull()
+                    .or_else(|| query.edge_row_pull())
+                    .expect(&statement);
+                assert_eq!(query.canonical_bytes(), canonical);
+                assert_eq!(pull.selects_row(0), page.is_empty());
+                if page == " SKIP 1 LIMIT 2" {
+                    assert!(pull.selects_row(1));
+                    assert!(pull.selects_row(2));
+                    assert!(!pull.selects_row(3));
+                }
+            }
+        }
+        for text in [
+            "MATCH (n) RETURN n AS id,n.p+1 AS value ORDER BY id DESC",
+            "MATCH (n) RETURN n AS id,n.p+1 AS value ORDER BY value,id",
+            "MATCH (n) RETURN DISTINCT n AS id,n.p+1 AS value ORDER BY id",
+            "MATCH (n) RETURN n.p+1 AS value",
+            "MATCH (a)-[r:R]-(b) RETURN r AS id,a AS origin,r.p+1 AS cost ORDER BY id",
+            "MATCH (a)-[r:R]-(b) RETURN r AS id,a AS origin,r.p+1 AS cost ORDER BY origin,id",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS id,s AS next_id,r.p+s.p AS cost ORDER BY id",
+        ] {
+            let query = prepare(text);
+            assert!(query.vertex_graph_row_pull().is_none(), "{text}");
+            assert!(query.edge_row_pull().is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn computed_map_text_retains_a_private_identity_order_without_exposing_its_key() {
+        let query = crate::PreparedGraphSetText::prepare(
+            "MATCH (n) RETURN {node:n,value:n.p+1} AS doc ORDER BY n SKIP 1 LIMIT 2",
+            |kind, name: &str| {
+                (kind == GraphSymbolKind::Property && name == "p")
+                    .then_some(GraphSymbol::Property(PropertyKeyId(1)))
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let canonical = query.canonical_bytes();
+        let pull = query.vertex_graph_row_pull().unwrap();
+        let row = GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(VId(7)),
+            GraphValue::Scalar(CanonicalScalar::Int(2)),
+        ]);
+        let projected = pull
+            .project(
+                &row,
+                1,
+                &mut |_| Ok::<_, &'static str>(()),
+                |_, _| "expression",
+            )
+            .unwrap();
+        assert_eq!(query.columns(), &["doc"]);
+        assert_eq!(
+            projected.values(),
+            &[GraphValue::map(vec![
+                ("node".into(), GraphValue::Vertex(VId(7))),
+                ("value".into(), GraphValue::Scalar(CanonicalScalar::Int(3))),
+            ])
+            .unwrap()]
+        );
+        assert!(!pull.selects_row(0));
+        assert!(pull.selects_row(1));
+        assert!(pull.selects_row(2));
+        assert!(!pull.selects_row(3));
+        assert_eq!(query.canonical_bytes(), canonical);
+    }
+
+    fn hidden_identity_projection(extra_key: Option<GraphSetValue>) -> PreparedGraphSet {
+        let mut projection = vec![
+            GraphSetProjection::new(
+                "values",
+                GraphSetValue::List(vec![GraphSetValue::Column(1)]),
+            ),
+            GraphSetProjection::new("private_identity", GraphSetValue::Column(0)),
+        ];
+        if let Some(value) = extra_key {
+            projection.push(GraphSetProjection::new("private_expression", value));
+        }
+        let expression = input("MATCH (n) RETURN ALL n AS id,n.p AS p")
+            .project(projection, GraphSetQuantifier::All)
+            .unwrap();
+        // Exactly the native page lowering: a column-only evaluation copy,
+        // then ORDER BY and its page, then visible-prefix output removal.
+        let copy = expression
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                GraphSetProjection::new(name.clone(), GraphSetValue::Column(index))
+            })
+            .collect();
+        let ordered = expression
+            .project(copy, GraphSetQuantifier::All)
+            .unwrap()
+            .with_order_by(&[GraphValueOrder::ascending(1)])
+            .unwrap()
+            .with_page(1, Some(1));
+        ordered
+            .project_ordered_output(vec![GraphSetProjection::new(
+                "values",
+                GraphSetValue::Column(0),
+            )])
+            .unwrap()
+    }
+
+    #[test]
+    fn private_identity_keys_do_not_escape_or_deduplicate_computed_results() {
+        let query = hidden_identity_projection(None);
+        let canonical = query.canonical_bytes();
+        let pull = query.vertex_graph_row_pull().unwrap();
+        assert_eq!(query.columns(), &["values"]);
+        let mut complete = Vec::new();
+        let mut selected = Vec::new();
+        for (ordinal, (id, value)) in [(1, 7), (2, 7), (3, -4)].into_iter().enumerate() {
+            let row = GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(value)),
+            ]);
+            let projected = pull
+                .project(
+                    &row,
+                    ordinal as u64,
+                    &mut |_| Ok::<_, &'static str>(()),
+                    |_, _| "expression",
+                )
+                .unwrap();
+            assert_eq!(projected.values().len(), 1);
+            if pull.selects_row(ordinal as u64) {
+                selected.push(projected.clone());
+            }
+            complete.push(projected);
+        }
+        let value = |number| {
+            GraphValueRow::from_owned_values(vec![GraphValue::List(
+                vec![GraphValue::Scalar(CanonicalScalar::Int(number))].into_boxed_slice(),
+            )])
+        };
+        assert_eq!(complete, [value(7), value(7), value(-4)]);
+        assert_eq!(selected, [value(7)]);
+        assert_eq!(query.canonical_bytes(), canonical);
+    }
+
+    #[test]
+    fn private_expressions_are_metered_and_cannot_hide_errors_outside_the_page() {
+        let division = crate::GraphIntegerExpression::prepare_scalar(&[
+            crate::GraphIntegerOp::Literal(Some(10)),
+            crate::GraphIntegerOp::ScalarColumn(1),
+            crate::GraphIntegerOp::Binary(crate::GraphIntegerBinary::Divide),
+        ])
+        .unwrap();
+        let query = hidden_identity_projection(Some(GraphSetValue::Integer(division)));
+        let pull = query.vertex_graph_row_pull().unwrap();
+        let row = |value| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(7)),
+                GraphValue::Scalar(CanonicalScalar::Int(value)),
+            ])
+        };
+        // Both an earlier skipped row and the suffix after the selected page
+        // retain the private expression's exact failure.
+        for ordinal in [0, 2] {
+            assert!(!pull.selects_row(ordinal));
+            assert!(matches!(
+                pull.project(
+                    &row(0),
+                    ordinal,
+                    &mut |_| Ok::<_, crate::GraphIntegerError>(()),
+                    |_, error| error,
+                ),
+                Err(error) if error.kind == crate::GraphIntegerErrorKind::DivisionByZero
+            ));
+        }
+        let mut events = 0;
+        pull.project(
+            &row(2),
+            1,
+            &mut |_| {
+                events += 1;
+                Ok::<_, &'static str>(())
+            },
+            |_, _| "expression",
+        )
+        .unwrap();
+        assert!(events > 0);
+        for stop in 1..=events {
+            let mut visited = 0;
+            assert_eq!(
+                pull.project(
+                    &row(2),
+                    1,
+                    &mut |_| {
+                        visited += 1;
+                        if visited == stop {
+                            Err("stopped")
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_, _| "expression",
+                ),
+                Err("stopped")
+            );
+            assert_eq!(visited, stop);
         }
     }
 

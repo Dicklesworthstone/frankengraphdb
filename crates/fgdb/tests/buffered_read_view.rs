@@ -5,6 +5,8 @@
 // limit when this crate proves one Send (see fgdb-strata's lib.rs).
 #![recursion_limit = "256"]
 
+#[path = "buffered_read_view/computed_projection.rs"]
+mod computed_projection;
 #[path = "buffered_read_view/edge_query.rs"]
 mod edge_query;
 #[path = "buffered_read_view/property_free.rs"]

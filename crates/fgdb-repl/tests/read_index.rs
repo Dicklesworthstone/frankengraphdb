@@ -188,6 +188,26 @@ fn quiescent_majority_confirms_one_read_without_a_log_entry_or_publication() {
 }
 
 #[test]
+fn handoff_blocks_append_read_confirmation_until_an_aborted_transfer_is_retried() {
+    let mut nodes = nodes(&stable(3, 0));
+    elect(&mut nodes, &[1, 2, 3]);
+    let (read, probe) = nodes[0].read();
+    let delayed = reply(&mut nodes, request_to(&probe, 2));
+    nodes[0].step(Event::TransferLeadership(MemberId(3)));
+    let transfer = nodes[0].member.leadership_transfer().unwrap().unwrap().id();
+
+    assert!(nodes[0].step(Event::Receive(delayed)).reads.is_empty());
+    assert_eq!(nodes[0].member.pending_reads(), 1);
+    assert!(nodes[0].member.read_index_probes(&read).is_err());
+
+    nodes[0].step(Event::AbortLeadershipTransfer(transfer));
+    let retry = nodes[0].step(Event::Heartbeat);
+    let ready = only_ready(pump(&mut nodes, retry.consensus.messages, &[1, 2]));
+    assert_eq!(ready.id(), &read);
+    assert_eq!(nodes[0].member.pending_reads(), 0);
+}
+
+#[test]
 fn delayed_pre_read_reply_cannot_authorize_a_retransmitted_probe() {
     let mut nodes = nodes(&stable(3, 0));
     elect(&mut nodes, &[1, 2]);

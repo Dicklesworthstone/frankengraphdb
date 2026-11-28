@@ -20,3 +20,14 @@ footer{display:flex;align-items:center;gap:20px;justify-content:space-between;pa
 @media(max-width:760px){.analytics-toggle{font-size:0;width:25px;padding:5px;margin:0}.analytics-toggle svg{width:14px}.result-counts{margin-left:auto}}
 .drawer-close{display:none}.history-entry code,#toast{overflow-wrap:anywhere}.label-button>span:first-child{min-width:0;overflow:hidden;white-space:nowrap}.label-button code{flex-shrink:0}
 @media(max-width:1020px){.drawer-close{display:inline-flex}.inspector-header .badge{margin-left:auto;margin-right:7px}}
+
+#difference-dialog { width: min(780px, calc(100vw - 28px)); }
+#difference-statement { max-height: 6.5em; overflow: auto; background: var(--panel2); padding: 10px; }
+.difference-cuts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+#difference-dialog .table-scroll { max-height: 36vh; }
+#difference-table th { padding: 8px 12px; }
+#difference-table .diff-added { color: var(--mint); }
+#difference-table .diff-removed { color: var(--danger); }
+.live-timeline { flex-wrap: wrap; }
+@media (max-width: 700px) { .live-timeline { width: 100%; } }
+#difference-download { margin-top: 12px; }

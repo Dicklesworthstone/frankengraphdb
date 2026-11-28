@@ -49,6 +49,11 @@ def mount(page):
         if (fixture.mode === '403') return new Response('<html>Forbidden</html>', {status:403});
         if (fixture.mode === '401-oversize') return new Response('denied', {status:401,headers:{'content-length':'9000000'}});
         if (fixture.mode === 'network') throw new TypeError('Fixture connection lost');
+        if (url.endsWith('/query-diff')) {
+          const {before, after} = JSON.parse(options.body);
+          const changes = Array.from({length:26}, (_,i) => ({weight:i ? '1' : '-9007199254740993',row:[{type:'text',value:'row '+i}]}));
+          return new Response(JSON.stringify({v:1, before, after, columns:['x'], changes, changed_rows:'26'}));
+        }
         if (fixture.mode === 'components') {
           const vertex = id => ({type:'vertex',value:id});
           return new Response(JSON.stringify({v:1,seq:'18446744073709551615',columns:['vertex','component'],
@@ -286,6 +291,41 @@ class ClientState(unittest.TestCase):
         self.execute('403')
         self.assertIn('No baseline',self.page.locator('#baseline-status').inner_text())
         self.assertTrue(self.page.locator('#comparison-banner').is_hidden())
+
+    def test_historical_difference_preserves_parameters_and_pages_signed_results(self):
+        self.page.fill('#query-editor', 'RETURN $large AS x')
+        self.page.click('#parameters-toggle')
+        self.page.fill('#query-parameters', '{"large":9007199254740993}')
+        self.connect()
+        self.page.click('#difference-open')
+        self.page.fill('#difference-before', '0')
+        self.page.click('#difference-run')
+        self.page.wait_for_selector('#difference-download')
+        self.assertIn('9007199254740993 removed occurrences', self.page.inner_text('#difference-status'))
+        self.assertIn('25 added occurrences', self.page.inner_text('#difference-status'))
+        body = self.page.evaluate("fixture.requests.at(-1).body")
+        self.assertIn('"large":9007199254740993', body)
+        self.assertIn('"after":"18446744073709551615"', body)
+        self.assertEqual(self.page.locator('#difference-table tbody tr').count(), 25)
+        self.page.click('#difference-next')
+        self.assertIn('row 25', self.page.inner_text('#difference-table'))
+        self.page.click('[data-close="difference-dialog"]')
+        self.assertEqual(self.page.inner_text('#metric-nodes'), '1')
+        self.assertEqual(self.page.locator('#difference-table tr').count(), 0)
+
+    def test_historical_difference_close_fences_late_responses(self):
+        self.connect()
+        self.page.click('#difference-open')
+        self.page.fill('#difference-before', '0')
+        self.page.evaluate("fixture.mode='delay'")
+        self.page.click('#difference-run')
+        self.page.wait_for_function("fixture.pending.length === 1")
+        self.page.click('[data-close="difference-dialog"]')
+        self.release()
+        self.assertEqual(self.page.locator('#difference-table tr').count(), 0)
+        self.assertTrue(self.page.locator('#difference-download').is_hidden())
+        self.assertTrue(self.page.locator('#difference-open').is_enabled())
+        self.assertEqual(self.page.inner_text('#metric-nodes'), '1')
 
     def test_temporal_sequence_is_exact_and_loading_never_executes(self):
         self.connect()

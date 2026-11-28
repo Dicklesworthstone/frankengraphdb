@@ -524,8 +524,9 @@ fn large_absolute_indices_use_bounded_append_and_commit_offsets() {
         vec![base + 1, base + 2]
     );
     let saved = node.durable_state().unwrap().clone();
-    assert_eq!(
-        node.step(message(
+    let pressure = publish(
+        &mut node,
+        message(
             1,
             2,
             Message::Append {
@@ -535,14 +536,15 @@ fn large_absolute_indices_use_bounded_append_and_commit_offsets() {
                 prev_term: 4,
                 entries: vec![Entry {
                     term: 4,
-                    command: Some(30)
+                    command: Some(30),
                 }],
                 leader_commit: base + 3,
-            }
-        ))
-        .err(),
-        Some(Error::LogFull)
+            },
+        ),
     );
+    assert_eq!(pressure.requested_compaction_through, Some(base + 1));
+    assert!(pressure.messages.is_empty());
+    assert!(pressure.committed.is_empty());
     assert_eq!(node.durable_state().unwrap(), &saved);
 }
 
@@ -621,4 +623,273 @@ fn three_member_catchup_survives_lost_install_ack_and_restart() {
         );
         assert_eq!(state.entries()[5].command, Some(14));
     }
+}
+
+#[test]
+fn capacity_limited_follower_publishes_only_matching_prefix_then_retries_after_restart() {
+    let limits = Limits {
+        max_log_entries: 2,
+        max_append_entries: 2,
+    };
+    let before = PersistentState::from_authenticated_parts(
+        config(),
+        1,
+        Some(MemberId(2)),
+        0,
+        vec![Entry {
+            term: 1,
+            command: Some(11),
+        }],
+    );
+    let mut node = Raft::recover(MemberId(2), before, limits).unwrap();
+    let append = || {
+        message(
+            1,
+            2,
+            Message::Append {
+                term: 2,
+                request: 70,
+                prev_index: 1,
+                prev_term: 1,
+                entries: vec![
+                    Entry {
+                        term: 2,
+                        command: Some(22),
+                    },
+                    Entry {
+                        term: 2,
+                        command: Some(33),
+                    },
+                ],
+                leader_commit: 3,
+            },
+        )
+    };
+
+    let pending = node.step(append()).unwrap();
+    assert!(pending.requires_write());
+    let saved = pending.state().clone();
+    assert_eq!(
+        (saved.term(), saved.voted_for(), saved.commit_index()),
+        (2, None, 2)
+    );
+    assert_eq!(saved.entries().len(), 2);
+    let token = pending.id();
+    let first = node.persisted(token).unwrap();
+    assert_eq!(first.requested_compaction_through, Some(1));
+    assert!(first.messages.is_empty());
+    assert_eq!(
+        first
+            .committed
+            .iter()
+            .map(|c| c.entry.command)
+            .collect::<Vec<_>>(),
+        [Some(11), Some(22)]
+    );
+
+    // Reopen exactly the state the operation could have durably published
+    // before a crash. Retrying a full request never produces a false ack.
+    let mut node = Raft::recover(MemberId(2), saved, limits).unwrap();
+    let retry = node.step(append()).unwrap();
+    assert!(!retry.requires_write());
+    let token = retry.id();
+    let retry = node.persisted(token).unwrap();
+    assert_eq!(retry.requested_compaction_through, Some(1));
+    assert!(retry.messages.is_empty());
+    assert!(retry.committed.is_empty());
+
+    publish(&mut node, Event::Compact(cut(1, 1)));
+    let complete = publish(&mut node, append());
+    assert_eq!(complete.requested_compaction_through, None);
+    assert_eq!(complete.committed.len(), 1);
+    assert_eq!(
+        (
+            complete.committed[0].index,
+            complete.committed[0].entry.command
+        ),
+        (3, Some(33))
+    );
+    assert!(matches!(
+        complete.messages.as_slice(),
+        [Envelope {
+            message: Message::Appended {
+                term: 2,
+                request: 70,
+                success: true,
+                ..
+            },
+            ..
+        }]
+    ));
+    assert_eq!(node.durable_state().unwrap().entries().len(), 2);
+}
+
+#[test]
+fn higher_term_append_demotes_a_full_leader_before_it_can_serve_again() {
+    let limits = Limits {
+        max_log_entries: 1,
+        max_append_entries: 1,
+    };
+    let mut node = Raft::<u64>::new(MemberId(2), config(), limits).unwrap();
+    publish(&mut node, Event::ElectionTimeout);
+    let election = publish(
+        &mut node,
+        message(
+            1,
+            2,
+            Message::Vote {
+                term: 1,
+                granted: true,
+            },
+        ),
+    );
+    assert_eq!(election.role, fgdb_order::Role::Leader);
+
+    let incoming = message(
+        1,
+        2,
+        Message::Append {
+            term: 2,
+            request: 100,
+            prev_index: 1,
+            prev_term: 1,
+            entries: vec![Entry {
+                term: 2,
+                command: Some(123),
+            }],
+            leader_commit: 2,
+        },
+    );
+    let pending = node.step(incoming).unwrap();
+    assert!(pending.requires_write());
+    assert_eq!(pending.state().term(), 2);
+    assert_eq!(pending.state().commit_index(), 1);
+    let token = pending.id();
+    let outcome = node.persisted(token).unwrap();
+    assert_eq!(outcome.role, fgdb_order::Role::Follower);
+    assert_eq!(outcome.leader, Some(MemberId(1)));
+    assert!(outcome.reset_election_timer);
+    assert_eq!(outcome.requested_compaction_through, Some(1));
+    assert!(outcome.messages.is_empty());
+    assert!(matches!(
+        node.step(Event::Propose(1)),
+        Err(Error::NotLeader)
+    ));
+}
+
+#[test]
+fn verified_compaction_after_election_unblocks_reads_without_a_client_write() {
+    let configuration = Configuration::stable(Domain([1; 32]), [2; 32], [MemberId(1)], []).unwrap();
+    let limits = Limits {
+        max_log_entries: 2,
+        max_append_entries: 1,
+    };
+    let state = PersistentState::from_authenticated_parts(
+        configuration.clone(),
+        1,
+        None,
+        1,
+        vec![
+            Entry {
+                term: 1,
+                command: Some(11),
+            },
+            Entry {
+                term: 1,
+                command: Some(22),
+            },
+        ],
+    );
+    let mut node = Raft::recover(MemberId(1), state, limits).unwrap();
+    let election = publish(&mut node, Event::ElectionTimeout);
+    assert_eq!(election.requested_compaction_through, Some(1));
+    assert!(matches!(
+        node.begin_read_index(),
+        Err(fgdb_order::ReadIndexError::CurrentTermNotCommitted)
+    ));
+    assert!(matches!(
+        node.step(Event::IncreaseLogCapacity(1)),
+        Err(Error::InvalidLimits)
+    ));
+    let snapshot = cut_for(&configuration, 1, 1);
+    let pending = node.step(Event::Compact(snapshot.clone())).unwrap();
+    assert!(pending.requires_write());
+    let token = pending.id();
+    let committed = node.persisted(token).unwrap();
+    assert_eq!(
+        committed
+            .committed
+            .iter()
+            .map(|entry| (entry.index, entry.entry.command))
+            .collect::<Vec<_>>(),
+        [(2, Some(22)), (3, None)]
+    );
+    let mut round = node.begin_read_index().unwrap();
+    assert_eq!(round.try_complete(&node).unwrap().unwrap().index(), 3);
+    // Replayed admin calls and the normal heartbeat never append another fence.
+    for event in [
+        Event::Compact(snapshot),
+        Event::IncreaseLogCapacity(2),
+        Event::Heartbeat,
+    ] {
+        let pending = node.step(event).unwrap();
+        assert!(!pending.requires_write());
+        let token = pending.id();
+        assert!(node.persisted(token).unwrap().committed.is_empty());
+    }
+}
+
+#[test]
+fn growing_a_full_leader_during_handoff_keeps_the_frozen_log_endpoint() {
+    let state = PersistentState::from_authenticated_parts(
+        config(),
+        1,
+        None,
+        0,
+        vec![Entry {
+            term: 1,
+            command: Some(17),
+        }],
+    );
+    let limits = Limits {
+        max_log_entries: 1,
+        max_append_entries: 1,
+    };
+    let mut node = Raft::recover(MemberId(1), state, limits).unwrap();
+    publish(&mut node, Event::ElectionTimeout);
+    publish(
+        &mut node,
+        message(
+            2,
+            1,
+            Message::Vote {
+                term: 2,
+                granted: true,
+            },
+        ),
+    );
+    publish(&mut node, Event::TransferLeadership(MemberId(2)));
+    let handoff = node.leadership_transfer().unwrap().unwrap().id();
+    publish(&mut node, Event::IncreaseLogCapacity(2));
+    publish(&mut node, Event::Heartbeat);
+    assert_eq!(node.durable_state().unwrap().entries().len(), 1);
+    publish(&mut node, Event::AbortLeadershipTransfer(handoff));
+    let append = node.step(Event::Heartbeat).unwrap();
+    assert!(append.requires_write());
+    assert_eq!(
+        append.state().entries(),
+        [
+            Entry {
+                term: 1,
+                command: Some(17)
+            },
+            Entry {
+                term: 2,
+                command: None
+            }
+        ]
+    );
+    assert_eq!(append.state().commit_index(), 0);
+    let token = append.id();
+    node.persisted(token).unwrap();
 }

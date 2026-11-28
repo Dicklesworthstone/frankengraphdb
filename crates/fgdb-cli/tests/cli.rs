@@ -2361,6 +2361,290 @@ fn embedded_write_and_transaction_if_current_guard_durable_frontier() {
     assert!(!stdout.contains("\"value\":\"88\""), "{stdout}");
 }
 
+fn verified_head(fixture: &Fixture, seq: u64) -> String {
+    let history = fixture.discovered("verify-history", &["--through", &seq.to_string()]);
+    assert_eq!(succeeded(&history, "verified_history"), seq);
+    let result = terminal(&history);
+    let hash = result
+        .split("\"chain_hash\":\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    format!("{seq}@{hash}")
+}
+
+#[test]
+fn revision_read_opens_beside_writer_and_reuses_the_historical_catalog() {
+    let fixture = Fixture::new("branch-read");
+    assert_eq!(
+        succeeded(&fixture.robot("create", &["--persist-bindings"]), "created"),
+        1
+    );
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &["CREATE (:Person {id:10})"]),
+            "written"
+        ),
+        2
+    );
+    let at = verified_head(&fixture, 2);
+    assert_eq!(
+        succeeded(&fixture.discovered("schema", &["--label", "Later"]), "rows"),
+        3
+    );
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &["CREATE (:Person {id:20})"]),
+            "written"
+        ),
+        4
+    );
+    let current = verified_head(&fixture, 4);
+    let query = "MATCH (n:Person) RETURN n.id ORDER BY n.id";
+
+    // Keep the real OS writer lock across all reader processes.
+    let runtime = fgdb::runtime_builder().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let cx = PurposeContexts::narrow_runtime_root(&root).commit();
+    let writer = runtime
+        .block_on(Database::open(&cx, fixture.db(), keys()))
+        .unwrap();
+    let before = directory_bytes(&fixture.db());
+    let read =
+        |marker: &str, text: &str| fixture.discovered("query", &["--at-revision", marker, text]);
+    let old_rows = read(&at, query);
+    assert_eq!(succeeded(&old_rows, "rows"), 2);
+    assert_eq!(rows(&old_rows).len(), 1);
+    assert!(rows(&old_rows)[0].contains(r#""value":"10""#));
+    let latest = read(&current, query);
+    assert_eq!(succeeded(&latest, "rows"), 4);
+    assert_eq!(rows(&latest).len(), 2);
+    refused(&read(&at, "MATCH (n:Later) RETURN n"), 3, "query");
+    assert_eq!(
+        succeeded(&read(&current, "MATCH (n:Later) RETURN n"), "rows"),
+        4
+    );
+    let (_, wrong_digest) = current.split_once('@').unwrap();
+    let forged = read(&format!("2@{wrong_digest}"), query);
+    refused(&forged, 3, "query");
+    assert!(terminal(&forged).contains(r#""code":"not_found""#));
+    refused(&read("empty", query), 2, "usage");
+    refused(
+        &read(&at, "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 4 RETURN n"),
+        3,
+        "query",
+    );
+    refused(
+        &fixture.discovered("query", &["--at-revision", &at, "--stream", query]),
+        2,
+        "usage",
+    );
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    drop(writer);
+}
+
+#[test]
+fn buffered_revision_keeps_one_cut_for_stream_sort_set_and_aggregate() {
+    let fixture = Fixture::new("buffered-branch-read");
+    assert_eq!(
+        succeeded(&fixture.robot("create", &["--persist-bindings"]), "created"),
+        1
+    );
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &["CREATE (:Person {id:10})"]),
+            "written"
+        ),
+        2
+    );
+    let revision = verified_head(&fixture, 2);
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &["CREATE (:Person {id:20})"]),
+            "written"
+        ),
+        3
+    );
+    assert_eq!(
+        succeeded(&fixture.discovered("schema", &["--label", "Later"]), "rows"),
+        4
+    );
+    let current = verified_head(&fixture, 4);
+    let scratch = fixture.dir.join("spill");
+    std::fs::create_dir(&scratch).unwrap();
+    let before = directory_bytes(&fixture.db());
+    for (text, spill) in [
+        ("MATCH (v:Person) RETURN v, v.id", false),
+        ("MATCH (v:Person) RETURN v.id AS x ORDER BY x DESC", true),
+        (
+            "MATCH (v:Person) RETURN v.id AS x UNION ALL MATCH (w:Person) RETURN w.id AS x",
+            true,
+        ),
+        ("MATCH (v:Person) RETURN count(v) AS total", true),
+    ] {
+        for (marker, seq) in [(&revision, 2), (&current, 4)] {
+            let resident = fixture.discovered("query", &["--at-revision", marker, text]);
+            assert_eq!(succeeded(&resident, "rows"), seq);
+            let mut args = vec!["--buffered", "--at-revision", marker.as_str()];
+            if spill {
+                args.extend(["--spill-dir", scratch.to_str().unwrap()]);
+            }
+            args.push(text);
+            let cold = fixture.discovered("query", &args);
+            assert_eq!(succeeded(&cold, "rows"), seq);
+            assert_eq!(rows(&cold), rows(&resident));
+            assert!(std::fs::read_dir(&scratch).unwrap().next().is_none());
+        }
+    }
+    for text in [
+        "MATCH (v:Later) RETURN v",
+        "MATCH (v) FOR SYSTEM_TIME AS OF SEQ 4 RETURN v",
+    ] {
+        refused(
+            &fixture.discovered("query", &["--at-revision", &revision, "--buffered", text]),
+            3,
+            "query",
+        );
+    }
+    let forged = format!("2@{}", current.split_once('@').unwrap().1);
+    let miss = fixture.discovered(
+        "query",
+        &["--buffered", "--at-revision", &forged, "MATCH (n) RETURN n"],
+    );
+    refused(&miss, 3, "query");
+    assert!(terminal(&miss).contains(r#""code":"not_found""#));
+    let capped = fixture.discovered(
+        "query",
+        &[
+            "--buffered",
+            "--buffer-memory-bytes",
+            "1",
+            "--at-revision",
+            &revision,
+            "MATCH (n) RETURN n",
+        ],
+    );
+    assert!(!capped.status.success());
+    assert!(rows(&capped).is_empty());
+    assert_eq!(directory_bytes(&fixture.db()), before);
+}
+
+#[test]
+fn published_branch_head_is_copyable_while_writer_owns_the_store() {
+    let fixture = Fixture::new("discover-branch-head");
+    let human_head = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+            .current_dir(&fixture.dir)
+            .args(["branch-head", "--db", "db", "--key-file", "keys"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end()
+            .to_owned()
+    };
+    succeeded(&fixture.robot("create", &[]), "created");
+    let empty = fixture.discovered("branch-head", &[]);
+    assert_eq!(succeeded(&empty, "branch_head"), 0);
+    assert!(!terminal(&empty).contains("chain_hash"));
+    assert_eq!(human_head(), "empty");
+    let statement = "CREATE (:Person {id: 8})";
+    let guarded = |head: &str| fixture.robot("write", &["--if-head", head, statement]);
+    assert_eq!(succeeded(&guarded(&human_head()), "written"), 1);
+    let expected = verified_head(&fixture, 1);
+    let runtime = fgdb::runtime_builder().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let cx = PurposeContexts::narrow_runtime_root(&root).commit();
+    let writer = runtime
+        .block_on(Database::open(&cx, fixture.db(), keys()))
+        .unwrap();
+    let before = directory_bytes(&fixture.db());
+    assert_eq!(human_head(), expected);
+    let result = fixture.discovered("branch-head", &[]);
+    assert_eq!(succeeded(&result, "branch_head"), 1);
+    assert!(terminal(&result).contains(expected.split_once('@').unwrap().1));
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    drop(writer);
+    assert_eq!(succeeded(&guarded(&expected), "written"), 2);
+    refused(&guarded(&expected), 3, "query");
+    let current = verified_head(&fixture, 2);
+    // Head discovery authenticates the journal and selected manifest, so it can
+    // report the write basis while a missing source capsule awaits restoration.
+    let capsule = std::fs::read_dir(fixture.db().join("capsules"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "capsule"))
+        .unwrap();
+    std::fs::rename(&capsule, fixture.dir.join("saved.capsule")).unwrap();
+    let damaged = directory_bytes(&fixture.db());
+    assert_eq!(human_head(), current);
+    assert!(
+        !fixture
+            .discovered("verify-history", &["--through", "2"])
+            .status
+            .success()
+    );
+    assert_eq!(directory_bytes(&fixture.db()), damaged);
+}
+
+#[test]
+fn local_writes_and_transactions_check_the_exact_verified_marker() {
+    let fixture = Fixture::new("branch-head");
+    assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
+    let statement = "CREATE (:Person {id: 10})";
+    let write = |guard: &str| fixture.robot("write", &["--if-head", guard, statement]);
+    assert_eq!(succeeded(&write("empty"), "written"), 1);
+    let head = verified_head(&fixture, 1);
+    let (_, hash) = head.split_once('@').unwrap();
+    let padding = "00".repeat(32);
+    for invalid in ["1@123", &format!("0@{padding}"), &format!("+1@{padding}")] {
+        refused(&write(invalid), 2, "usage");
+    }
+    for stale in ["empty", &format!("1@{padding}"), &format!("2@{hash}")] {
+        let refused_write = write(stale);
+        refused(&refused_write, 3, "query");
+        assert!(terminal(&refused_write).contains("\"code\":\"conflict\""));
+    }
+    let txn = || fixture.robot("transaction", &["--if-head", &head, "--write", statement]);
+    assert_eq!(succeeded(&txn(), "committed"), 2);
+    let stale = txn();
+    refused(&stale, 3, "query");
+    assert!(terminal(&stale).contains("\"code\":\"conflict\""));
+    let read = fixture.robot("query", &["MATCH (n:Person) RETURN n.id"]);
+    assert_eq!(succeeded(&read, "rows"), 2);
+    assert_eq!(
+        String::from_utf8(read.stdout).unwrap().matches("\"event\":\"row\"").count(),
+        2
+    );
+}
+
+#[test]
+fn schema_registration_checks_the_branch_marker_before_allocating_names() {
+    let fixture = Fixture::new("schema-branch-head");
+    assert_eq!(succeeded(&fixture.discovered("create", &[]), "created"), 0);
+    let schema = |args: &[&str]| fixture.discovered("schema", args);
+    assert_eq!(succeeded(&schema(&["--if-head", "empty", "--label", "Person"]), "rows"), 1);
+    let head = verified_head(&fixture, 1);
+    let forged = format!("1@{}", "00".repeat(32));
+    let before = directory_bytes(&fixture.db());
+    for guard in ["empty", forged.as_str()] {
+        let stale = schema(&["--if-head", guard, "--property", "never"]);
+        refused(&stale, 3, "query");
+        assert!(terminal(&stale).contains("\"code\":\"conflict\""));
+        assert_eq!(directory_bytes(&fixture.db()), before);
+    }
+    let registered = schema(&["--if-head", &head, "--property", "score"]);
+    assert_eq!(succeeded(&registered, "rows"), 2);
+    let output = String::from_utf8(registered.stdout).unwrap();
+    assert!(output.contains("\"value\":\"score\""));
+    assert!(!output.contains("\"value\":\"never\""));
+    refused(&schema(&["--if-head", &head]), 2, "usage");
+    refused(&schema(&["--if-head", &head, "--as-of", "1"]), 2, "usage");
+}
+
 #[test]
 fn schema_allocates_names_without_reinterpreting_legacy_numeric_data() {
     let fixture = Fixture::new("schema-auto-names");

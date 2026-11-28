@@ -1166,9 +1166,15 @@ impl<'a> Parser<'a> {
         };
         let mut parser = parser.with_zones(zones.cloned());
         parser.defer_where = true;
+        // A standalone FILTER after the complete graph WHERE also produces
+        // a row table for the next MATCH. The graph parser establishes this
+        // boundary even when the preceding predicate ends in a value and
+        // FILTER omits WHERE. A variable or property named filter is already
+        // consumed as part of that predicate.
         parser.parse_match_prefix().is_ok()
-            && parser.deferred_where.is_some()
-            && (parser.is_word("MATCH") || parser.is_word("OPTIONAL"))
+            && (parser.is_word("FILTER")
+                || (parser.deferred_where.is_some()
+                    && (parser.is_word("MATCH") || parser.is_word("OPTIONAL"))))
     }
 
     /// Step past a deferred WHERE and its predicate, to the next clause.

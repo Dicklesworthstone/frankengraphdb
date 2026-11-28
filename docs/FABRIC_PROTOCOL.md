@@ -991,15 +991,91 @@ asupersync TCP or TLS 1.3. The `fgdbd` binary serves one or more databases; `fgd
 token` mints capability tokens and `fgdbd keygen` writes owner-only key files.
 The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
 
+### WebSocket FGP
+
+`fgdbd serve --websocket-listen <ip>:<port>` adds a dedicated HTTP/1.1 upgrade
+listener at exactly `/v1/fgp`, with required WebSocket subprotocol `fgp.v1`.
+Rust hosts call `Server::serve_websocket(cx, listener, WebSocketConfig)`.
+The upgrade then enters the ordinary FGP connection machine; it does not
+select a database, accept a token, execute a query, or create a second result
+ownership model.
+
+`WebSocketConfig::new(hosts, origins)` requires explicit hosts without ports
+(bracketed IPv6 literals are accepted). The CLI defaults to localhost,
+127.0.0.1, [::1] and the listen IP; `--websocket-allow-host` replaces that
+list. A request Host may append a valid numeric port. A present Origin must
+exactly match one `--websocket-allow-origin`, including scheme and port.
+Origins have no path or wildcard. An absent Origin is allowed for native
+clients, which still authenticate through FGP. With no allowed origins,
+browser upgrades refuse. URL credentials and query strings are rejected.
+
+Upgrade headers are bounded to 16 KiB and 128 fields. The endpoint requires
+an exact GET/HTTP/1.1 request, refuses duplicate or malformed headers and
+Content-Length/Transfer-Encoding, and requires an offered `fgp.v1` token.
+The foundation validates RFC 6455 keys and upgrade fields and generates the
+accept response. Compression is not negotiated. Policy and malformed-header
+refusals share an HTTP 400 response without database information. One absolute
+30-second establishment allowance covers both the HTTP upgrade and FGP setup
+through the final READY flush; TLS has its separate existing 10-second limit.
+Server drain and cancellation wake unfinished setup.
+
+Binary WebSocket messages form one byte stream: an FGP frame may span messages
+and multiple FGP frames may share a message. RFC fragmentation is admitted
+under a cumulative message-size limit equal to the server's maximum FGP frame
+size. Text messages refuse. The foundation frame codec validates masks,
+control frames, reserved bits and frame lengths. Output is chunked into bounded
+binary messages. Native FGP frame limits, flow credits and signed query budgets
+remain active independently of the WebSocket carrier.
+
+The adapter retains partial framing across Pending polls and records exact
+payload progress. A fresh FGP output check precedes each application write or
+flush attempt; reads never flush dirty application output. Ping/Pong and Close
+cannot interleave into a partially written application frame or drain protected
+TLS bytes. Cancelling after any lower write attempt fails closed because a
+header or ciphertext prefix may already have escaped even when zero FGP bytes
+were acknowledged.
+
+When TLS is enabled this listener uses `wss://` with `http/1.1` ALPN and the
+same TLS 1.3 identity and admission path as HTTPS. The native Rust client opens
+this transport using `WebSocketTarget::new(authority)` and
+`Client::connect_websocket(cx, target, address, credential)`. For WSS, complete
+certificate/name verification and HTTP/1.1 negotiation before passing the
+transport to `Client::connect_websocket_stream(cx, target, stream, credential)`.
+Targets contain only a validated HTTP authority; path, credentials, query
+strings and redirects are unavailable. Native clients send no Origin header.
+
+The client uses the foundation's context-entropy handshake and verifies the
+exact accept transcript and `fgp.v1` response before sending HELLO or AUTH.
+It rejects extensions, duplicate/malformed headers and body framing, bounds
+headers to 16 KiB/128 fields, and retains co-read binary bytes. One absolute
+30-second context-clock deadline covers its setup through AUTH_OK, including
+TCP establishment for `connect_websocket`; cancellation wakes blocked setup.
+The server's independent establishment deadline still runs through READY.
+
+`fgdb remote --websocket` uses this path for every operation. Host defaults to
+`--addr`; `--websocket-host host[:port]` overrides it and requires `--websocket`.
+The existing paired TLS flags select verified WSS with HTTP/1.1 ALPN. Direct
+FGP retains its `fgp/1` ALPN. No failed upgrade or TLS handshake retries through
+another transport. Browser clients select `fgp.v1`, use binary messages, and
+implement the same FGP handshake and frame contract.
+
+Regression sources cover framing, fragmentation, masks, bounded allocation,
+partial writes, control replies, cancellation, HTTP policy refusals, real FGP
+transactions and scoped flow-controlled reads, and encrypted WSS delivery.
+These sources have independent review and scoped pinned formatting checks.
+Native compilation and execution qualification are recorded in
+`IMPLEMENTATION_STATUS.md`; the adapter and integration qualification beads
+remain open (`fgdb-w10-adapters-b1f`, `fgdb-qualify-integrated-nov22-maz0p`).
+
 TLS is configured with the paired `fgdbd serve --tls-cert-file <chain.pem>
 --tls-key-file <key.pem>` options, or the embedded host's
 `TlsConfig::from_pem_files` and `Server::enable_tls`. The identity is validated
 at startup; key files must be owner-only on Unix. The setting protects every
-configured FGP, HTTP and Bolt listener, with no plaintext retry after a failed
+configured FGP, HTTP, WebSocket and Bolt listener, with no plaintext retry after a failed
 handshake. The foundation owns TLS 1.3, certificate parsing, record protection
 and verification; early data is disabled, handshakes have a ten-second limit,
 and server drain cancels unfinished handshakes. FGP requires ALPN `fgp/1`,
-HTTPS requires `http/1.1`, and Bolt retains its driver-compatible encrypted
+HTTPS and WSS require `http/1.1`, and Bolt retains its driver-compatible encrypted
 magic/version exchange without mandatory ALPN. TLS does not replace Warden.
 
 The CLI pairs `--tls-server-name <name>` and `--tls-ca-file <ca.pem>` on
@@ -1187,7 +1263,43 @@ application output is admitted.
   connected fixed joins. An undirected root also requires its root-source
   vertex immediately after the root edge to distinguish orientations. Admitted masked scalar columns and
   native existence probes, DISTINCT and SKIP/LIMIT retain their normal cursor
-  semantics. Vertex and fixed-edge aggregates also use the native cursor:
+  semantics. Computed projections can instead explicitly order by the
+  complete ascending source identity prefix, provided the native input also
+  proves that identity order. The bound projection may move
+  these keys or keep compiler-private keys outside visible output; it evaluates
+  every original expression under the same meter and admitted property readers
+  before trimming private cells. Resident sources admit vertex, directed/undirected edge
+  and fixed-join computations without a sort or collected answer. The final
+  page does not suppress skipped or suffix expression failures. Descending or
+  incomplete identity orders, DISTINCT for this computed profile, arbitrary
+  relational barriers, metadata reads and random draws still refuse.
+
+  Configured cold/buffered sources also admit computed vertex, single-edge and
+  fixed-hop join profiles, including prepared historical reads and private identity keys.
+  Every element property read must target a direct column for the current root
+  vertex, a currently bound edge or one of its endpoints. The
+  complete bounded field demand includes native predicates, the source
+  projection and every outer expression, before capability masking and source
+  construction. The existing asynchronous vertex, edge or join compiler still admits
+  the entire physical source. Evaluation borrows the admitted record, charges
+  copied payloads before allocation, and retains the output's memory guard
+  independently of the cursor. One cumulative native/signed allowance covers
+  source and VM work; only selected delivered rows spend result-row credit.
+  SKIP/LIMIT does not hide projection failures in the skipped or suffix rows.
+  Both undirected orientations share one admitted edge record and its growing
+  VM charge; neither projection performs another history lookup or endpoint
+  admission. The complete edge/source identity prefix remains required for
+  undirected output. Fixed-hop joins retain the complete active binding frame
+  until the VM finishes, before backtracking can remove a child. Property
+  copies and VM allocations grow the independent returned join guard, so a
+  delivered computed row stays charged after its source records disappear.
+  Chains, branches, cycles and native edge-reuse rules retain their occurrence
+  semantics and complete traversal identity prefix. Computed lists and maps
+  use this same VM; terminal optional expansions, indirect element reads and
+  native collection/probe sources outside the admitted asynchronous profile
+  refuse before source construction.
+
+  Vertex and fixed-edge aggregates also use the native cursor:
   the first credited demand consumes the complete authorized input and later
   demands move completed groups out. Grouping, HAVING, aggregate expressions,
   DISTINCT, ordering, paging and admitted historical reads retain their native
@@ -1568,7 +1680,7 @@ durable transaction preparation,
 transaction leases with durable ownership and reattachment,
 durable subscriptions with resume across reconnects, the full
 `BoltCompatProfileV2` contract, and the
-HTTP/2, gRPC and WebSocket adapters. Because results are ephemeral, a disconnect can lose undelivered
+HTTP/2 and gRPC adapters. Because results are ephemeral, a disconnect can lose undelivered
 rows but never a commit: a write's outcome is decided before its first frame.
 
 Witnesses: `cargo test -p fgdb-protocol --all-features` (body round trips,

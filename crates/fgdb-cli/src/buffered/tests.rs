@@ -1,4 +1,11 @@
 use super::*;
+
+#[path = "tests/computed.rs"]
+mod computed;
+#[path = "tests/computed_edge.rs"]
+mod computed_edge;
+#[path = "tests/computed_join.rs"]
+mod computed_join;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, EmbeddedReadView, MemVfs, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -162,8 +169,8 @@ fn buffered_vertex_edge_and_temporal_cli_delivery_matches_native_rows() {
             let mut options = options(&[text]);
             let prepared = okay(prepare(&options));
             if matches!(
-                prepared.source,
-                StreamSource::VertexProbe | StreamSource::EdgeJoin
+                &prepared.source,
+                StreamSource::VertexProbe(_) | StreamSource::EdgeJoin(_)
             ) {
                 options.buffered.memory = Some(32 * 1024 * 1024);
             }
@@ -285,8 +292,8 @@ fn unsupported_definitions_and_open_budgets_refuse_before_delivery_while_late_er
             let mut options = options(&[text]);
             let prepared = okay(prepare(&options));
             if matches!(
-                prepared.source,
-                StreamSource::VertexProbe | StreamSource::EdgeJoin
+                &prepared.source,
+                StreamSource::VertexProbe(_) | StreamSource::EdgeJoin(_)
             ) {
                 options.buffered.memory = Some(32 * 1024 * 1024);
             }
@@ -380,6 +387,42 @@ fn buffered_flags_are_query_only_unique_and_do_not_change_ordinary_streaming() {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert!(crate::parse(&args, command).is_err());
+    }
+    for flags in [
+        vec!["--buffer-history-bytes", "32"],
+        vec!["--buffered", "--buffer-history-bytes", "1"],
+        vec!["--buffered", "--buffer-history-bytes", "31"],
+        vec![
+            "--buffered",
+            "--buffer-history-bytes",
+            "0",
+            "--buffer-history-bytes",
+            "32",
+        ],
+    ] {
+        let args = base
+            .into_iter()
+            .chain(flags)
+            .chain(["MATCH (n) RETURN n"])
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert!(crate::parse(&args, "query").is_err());
+    }
+    for (value, bytes) in [("0", 0), ("32", 32), ("97", 97)] {
+        let args = base
+            .into_iter()
+            .chain([
+                "--buffered",
+                "--buffer-history-bytes",
+                value,
+                "MATCH (n) RETURN n",
+            ])
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            okay(crate::parse(&args, "query")).buffered.history_bytes(),
+            bytes
+        );
     }
     for flag in BufferedOptions::FLAGS {
         for value in ["", "-1", "+1", "1.5", " 1", "18446744073709551616"] {

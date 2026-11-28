@@ -18,6 +18,12 @@ publish = false
 # inheritance rule; any other crate that omits this table fails with
 # `member_does_not_inherit_forbid`.
 
+[features]
+# Stable builds use the scalar sorted-set specification; opt into portable SIMD
+# explicitly on nightly without changing the public dispatch API.
+default = []
+nightly-simd = []
+
 [dev-dependencies]
 # Test-only, and deliberately so: the island's runtime dependency set is empty.
 # `fgdb-collections` owns the semantic boundary this kernel must implement

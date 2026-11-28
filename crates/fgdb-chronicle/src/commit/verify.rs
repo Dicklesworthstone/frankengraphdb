@@ -98,6 +98,65 @@ impl<V: Vfs> CommitCoordinator<V> {
         template_digest: fn(&[u8]) -> Digest,
     ) -> Result<Digest, HistoryVerificationError> {
         let dir = database_dir.as_ref();
+        Self::walk_capsules_through(
+            cx,
+            vfs,
+            dir,
+            through,
+            async |commit_seq, capsule_ref, logical_delta_template_digest| {
+                let bytes = Self::read_capsule_from(vfs, dir, keys, capsule_ref, &mut Vec::new())
+                    .await
+                    .map_err(|source| HistoryVerificationError::Capsule {
+                        commit_seq,
+                        object_id: capsule_ref,
+                        source,
+                    })?;
+                if template_digest(&bytes) != logical_delta_template_digest {
+                    return Err(HistoryVerificationError::TemplateDigestMismatch {
+                        commit_seq,
+                        object_id: capsule_ref,
+                    });
+                }
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Visit the capsule named by each structurally verified marker through an
+    /// exact cut, in commit order, even if the capsule itself is missing. No
+    /// capsule, key file, writer lease or root is opened. The returned chain
+    /// hash can be compared with an independently retained commitment.
+    ///
+    /// The visitor receives one record at a time. Earlier records may have
+    /// been delivered on error. Only a successful return covers the whole cut.
+    pub async fn visit_capsule_refs_through(
+        cx: &CommitCx,
+        vfs: &V,
+        database_dir: impl AsRef<Path>,
+        through: NonZeroU64,
+        mut visit: impl FnMut(CommitSeq, ObjectId) -> std::io::Result<()>,
+    ) -> Result<Digest, HistoryVerificationError> {
+        Self::walk_capsules_through(
+            cx,
+            vfs,
+            database_dir.as_ref(),
+            through,
+            async |seq, id, _| {
+                visit(seq, id).map_err(CommitError::Io)?;
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    async fn walk_capsules_through(
+        cx: &CommitCx,
+        vfs: &V,
+        dir: &Path,
+        through: NonZeroU64,
+        mut visit: impl AsyncFnMut(CommitSeq, ObjectId, Digest) -> Result<(), HistoryVerificationError>,
+    ) -> Result<Digest, HistoryVerificationError> {
         let requested = CommitSeq(through.get());
         cx.with_restriction_async(async {
             scan_checkpoint(cx)?;
@@ -143,19 +202,7 @@ impl<V: Vfs> CommitCoordinator<V> {
                     .recover(marker, hash)
                     .map_err(recovered_marker_error)?;
                 let commit_seq = prefix.frontier();
-                let bytes = Self::read_capsule_from(vfs, dir, keys, capsule_ref, &mut Vec::new())
-                    .await
-                    .map_err(|source| HistoryVerificationError::Capsule {
-                        commit_seq,
-                        object_id: capsule_ref,
-                        source,
-                    })?;
-                if template_digest(&bytes) != logical_delta_template_digest {
-                    return Err(HistoryVerificationError::TemplateDigestMismatch {
-                        commit_seq,
-                        object_id: capsule_ref,
-                    });
-                }
+                visit(commit_seq, capsule_ref, logical_delta_template_digest).await?;
                 scan_checkpoint(cx)?;
                 if commit_seq == requested {
                     return Ok(hash);

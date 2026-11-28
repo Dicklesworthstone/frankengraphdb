@@ -5,14 +5,21 @@
 //! authenticated peer delivery, election and heartbeat timers, an exclusive
 //! member fence, and the publisher that owns the persistent state.
 
+mod recovery;
+
+use fgdb_chronicle::seed::SeedPlan;
 use fgdb_order::{
-    Committed, Configuration, Domain, Envelope, Error as OrderError, Event, Limits, MemberId,
-    PersistentState, ReadIndexAck, ReadIndexError, ReadIndexProbe, Role,
+    Committed, Configuration, Domain, Envelope, Error as OrderError, Event, LeadershipTransfer,
+    LeadershipTransferId, Limits, MemberId, PersistentState, ReadIndexAck, ReadIndexError,
+    ReadIndexProbe, Role, SnapshotCut, SnapshotTransfer,
 };
-use fgdb_repl::driver::RaftPublisher;
+use fgdb_repl::CatchupError;
+use fgdb_repl::download::SnapshotDownload;
+use fgdb_repl::driver::{RaftPublisher, SeedDriveError, SeedPublisher};
 use fgdb_repl::replica::{
     ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput,
 };
+use fgdb_types::DatabaseSecurityNamespaceId;
 
 /// In-process durability publisher retaining the latest published [`PersistentState`]
 /// for hosts that sequence single-member or embedded replica transitions.
@@ -131,6 +138,89 @@ impl<C: Clone + Eq> AegisReplicaCoordinator<C> {
             return Err(ReplicaError::Raft(OrderError::InvalidMessage));
         }
         self.replica.step(publisher, Event::Receive(envelope)).await
+    }
+
+    /// Retire the committed log prefix covered by a locally applied, visible
+    /// and authenticated snapshot. The host pins its closure for peer transfer.
+    pub async fn compact<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        snapshot: SnapshotCut,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica.step(publisher, Event::Compact(snapshot)).await
+    }
+
+    /// Increase the local retained-log allowance after host resource admission.
+    /// An elected leader blocked on an inherited log can resume its ordinary
+    /// current-term commit even if no verified cut can yet release space.
+    /// Followers retry the outstanding append on the next leader heartbeat.
+    /// Configure the same allowance when restarting this member.
+    pub async fn increase_log_capacity<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        maximum: usize,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica
+            .step(publisher, Event::IncreaseLogCapacity(maximum))
+            .await
+    }
+
+    /// Bind a persisted peer offer to the verifier's complete seed inventory.
+    /// The owned download allows normal peer traffic while objects are staged.
+    /// The host keeps source retention pins alive and cancels transfers named
+    /// by subsequent consensus output.
+    pub fn begin_snapshot_download(
+        &self,
+        namespace: DatabaseSecurityNamespaceId,
+        transfer: SnapshotTransfer,
+        plan: SeedPlan,
+    ) -> Result<SnapshotDownload, CatchupError> {
+        self.replica
+            .begin_snapshot_download(namespace, transfer, plan)
+    }
+
+    /// Revalidate the offer and publish the seed and consensus cut atomically.
+    /// The host owns the exclusive destination fence. Installation releases
+    /// the peer acknowledgement only after the publisher returns root evidence.
+    pub async fn install_download<P: SeedPublisher<C>>(
+        &mut self,
+        download: SnapshotDownload,
+        publisher: &mut P,
+    ) -> Result<ReplicaOutput<C>, SeedDriveError<core::convert::Infallible, P::Error>> {
+        self.replica.install_download(download, publisher).await
+    }
+
+    /// Drain the current leader and ask one voter to campaign once it has
+    /// acknowledged the frozen log endpoint. Route the resulting messages and
+    /// continue heartbeats and liveness checks while the target catches up.
+    /// Retrying the same target continues the current attempt.
+    pub async fn transfer_leadership<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        target: MemberId,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica
+            .step(publisher, Event::TransferLeadership(target))
+            .await
+    }
+
+    /// Inspect this leader's active drain, including its cancellation ID.
+    /// Confirm the successor by observing its fresh election and committed term.
+    pub fn leadership_transfer(&self) -> Result<Option<&LeadershipTransfer>, OrderError> {
+        self.replica.leadership_transfer()
+    }
+
+    /// End the specific drain captured by the host's deadline. A stale deadline
+    /// cannot end a later attempt. An election request already delivered to a
+    /// voter can still cause a term change after this call.
+    pub async fn abort_leadership_transfer<P: RaftPublisher<C>>(
+        &mut self,
+        publisher: &mut P,
+        id: LeadershipTransferId,
+    ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
+        self.replica
+            .step(publisher, Event::AbortLeadershipTransfer(id))
+            .await
     }
 
     /// Drive the host's election interval on voters, including the current leader.

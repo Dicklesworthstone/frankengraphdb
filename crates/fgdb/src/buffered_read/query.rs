@@ -3,6 +3,12 @@
 //! projections, ordering, pagination, and cumulative logical budgets.
 
 mod edge;
+mod projection;
+
+pub use projection::{
+    BufferedProjectionCursor, BufferedProjectionError, BufferedProjectionOutputGuard,
+    BufferedProjectionRow,
+};
 
 use super::{BufferedReadError, BufferedReadView, BufferedValue, MemoryPool};
 use crate::VertexRow;
@@ -161,7 +167,13 @@ struct BufferedVertexQueryRecord {
 
 impl AsyncVertexScanRecord for BufferedVertexQueryRecord {
     fn as_row(&self) -> VertexScanRow<'_> {
-        match &self.fields {
+        self.fields.as_row()
+    }
+}
+
+impl BufferedVertexFields {
+    fn as_row(&self) -> VertexScanRow<'_> {
+        match self {
             BufferedVertexFields::Complete(row) => VertexScanRow {
                 labels: &row.labels,
                 properties: &row.props,
@@ -546,11 +558,22 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for BufferedVertexQuerySource<'_, '_,
         columns: usize,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Self::OutputGuard, VertexScanSourceError<Self::Error, C>> {
+        self.reserve_row_output(record.as_row(), columns, control)
+    }
+}
+
+impl<V: Vfs + Clone> BufferedVertexQuerySource<'_, '_, V> {
+    fn reserve_row_output<C>(
+        &self,
+        row: VertexScanRow<'_>,
+        columns: usize,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<MemoryCharge, VertexScanSourceError<BufferedReadError, C>> {
         // The sealed profile can copy only identity cells and properties from
         // this one row. A conservative row-local bound permits sources larger
         // than RAM; it never reserves max_source_bytes for an individual row.
         let mut bytes = 1024usize;
-        for (_, value) in record.as_row().properties {
+        for (_, value) in row.properties {
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
             let payload = value
                 .canonical_encoded_len()

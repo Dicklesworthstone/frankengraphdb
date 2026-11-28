@@ -8,6 +8,8 @@ mod aggregate;
 pub use aggregate::{AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan};
 mod probe;
 pub use probe::{AsyncVertexProbeCursor, AsyncVertexProbePlan};
+mod projection;
+pub use projection::{AsyncVertexProjectionCursor, AsyncVertexProjectionPlan};
 
 /// One owned, admitted vertex record. A host can keep its byte reservation in
 /// this object while the ordinary GLA evaluator borrows its canonical fields.
@@ -52,6 +54,9 @@ pub enum AsyncVertexScanEvent {
 /// record, including row/vector overhead and repeated property payloads. It
 /// runs after predicates and the query window admit the row, before projection
 /// copies any fields. Its guard survives with the returned result. A host that
+/// accounts bytes must also keep this record's growing evaluation reservation
+/// in that guard: later evaluation_event calls can enlarge the delivered row.
+/// A host that
 /// does not provide byte accounting can explicitly use (), but then this seam
 /// alone establishes no physical memory bound. Caller collection is independent.
 pub trait AsyncVertexScanSource: Send {
@@ -324,6 +329,23 @@ impl<S: AsyncVertexScanSource, F, Row: VertexScanOutput> AsyncVertexScanCursor<S
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
     {
+        Ok(self
+            .advance_record::<EMIT, C>(source)
+            .await?
+            .map(|(output, _, _)| output))
+    }
+
+    // Computed projections borrow the admitted record through their VM. Both
+    // profiles use this one candidate/predicate/projection kernel; ordinary
+    // scans still discard the record before returning their guarded output.
+    async fn advance_record<const EMIT: bool, C>(
+        &mut self,
+        source: &mut S,
+    ) -> ScanResult<Option<(AsyncVertexScanOutput<Row, S::OutputGuard>, S::Record, VId)>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
         let meter = &mut self.meter;
         if self.plan.inner.empty || self.plan.inner.count == Some(0) {
             // As the synchronous cursor (30b917aa): an empty page drives no
@@ -397,7 +419,11 @@ impl<S: AsyncVertexScanSource, F, Row: VertexScanOutput> AsyncVertexScanCursor<S
                     |event| source.evaluation_event(&record, event),
                 ),
             )? {
-                return Ok(Some(AsyncVertexScanOutput { row, guard }));
+                return Ok(Some((
+                    AsyncVertexScanOutput { row, guard },
+                    record,
+                    candidate.vid,
+                )));
             }
         }
     }

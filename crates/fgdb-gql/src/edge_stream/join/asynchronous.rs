@@ -9,6 +9,9 @@ use crate::edge_stream::aggregate::{EdgeAggregateError, lift, value_event};
 use crate::spill_aggregate::SpillAggregateDefinition;
 use crate::stream::VertexScanEvent;
 
+mod projection;
+pub use projection::{AsyncEdgeJoinProjectionCursor, AsyncEdgeJoinProjectionPlan};
+
 /// One nested incidence read: the next admitted candidate, or None at EOF.
 pub type AsyncIncidentCandidateResult<Record, Error, Control> =
     Result<Option<AsyncEdgeCandidate<Record>>, EdgeExpansionSourceError<Error, Control>>;

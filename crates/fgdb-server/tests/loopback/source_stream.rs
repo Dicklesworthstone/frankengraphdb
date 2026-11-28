@@ -1,6 +1,12 @@
 //! Native source streaming over actual flow-controlled loopback connections.
 use super::*;
 
+#[path = "source_projection.rs"]
+mod source_projection;
+
+#[path = "source_buffered_projection.rs"]
+mod source_buffered_projection;
+
 async fn seed(cx: &Cx, owner: &mut Client) {
     owner
         .execute_batch(
@@ -704,7 +710,7 @@ fn native_source_stream_cancellation_and_late_budget_keep_the_connection_usable(
     });
 }
 
-async fn prepared_source(
+pub(super) async fn prepared_source(
     cx: &Cx,
     client: &mut Client,
     handle: fgdb_protocol::body::PreparedHandle,

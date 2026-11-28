@@ -49,7 +49,7 @@
 //! change a result or a logical order, so [`control_group::prefetch_controls`]
 //! returns nothing and is a no-op wherever the hint does not exist.
 
-#![feature(portable_simd)]
+#![cfg_attr(feature = "nightly-simd", feature(portable_simd))]
 #![deny(unsafe_code)]
 
 pub mod control_group;

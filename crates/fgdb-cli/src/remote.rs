@@ -25,7 +25,7 @@ use core::future::{Future, poll_fn};
 use core::pin::pin;
 use core::task::Poll;
 use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireValue};
-use fgdb_protocol::client::{Client, ClientError};
+use fgdb_protocol::client::{Client, ClientError, WebSocketTarget};
 use fgdb_protocol::json::{argument, cell};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -47,6 +47,8 @@ struct RemoteOptions {
     /// `subscribe` stops after this many batches (default: until interrupted).
     max_batches: Option<u64>,
     tls: Option<RemoteTls>,
+    /// Upgrade the selected transport before sending any FGP frame.
+    websocket: Option<WebSocketTarget>,
     /// A complete typed argument file: one atomic write batch, or repeated
     /// prepared reads with one completed result block per argument set.
     rows_file: Option<PathBuf>,
@@ -92,6 +94,8 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut read_mode = None;
     let mut tls_server_name = None;
     let mut tls_ca_file = None;
+    let mut websocket = false;
+    let mut websocket_host = None;
     let mut rows_file = None;
     let mut statements_file = None;
     let mut read_only_transaction = false;
@@ -124,6 +128,8 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             }
             "--token-file" if token_file.is_none() => token_file = Some(PathBuf::from(value()?)),
             "--database" if database.is_none() => database = Some(value()?),
+            "--websocket" if !websocket => websocket = true,
+            "--websocket-host" if websocket_host.is_none() => websocket_host = Some(value()?),
             "--before" if before.is_none() => before = Some(diff::parse_cut(&value()?, flag)?),
             "--after" if after.is_none() => after = Some(diff::parse_cut(&value()?, flag)?),
             "--stream" if !stream => stream = true,
@@ -340,6 +346,20 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             ));
         }
     };
+    let addr = addr.ok_or_else(|| Failure::usage("remote needs --addr"))?;
+    if websocket_host.is_some() && !websocket {
+        return Err(Failure::usage("--websocket-host requires --websocket"));
+    }
+    let websocket = if websocket {
+        Some(
+            WebSocketTarget::new(websocket_host.unwrap_or_else(|| addr.to_string()))
+                .map_err(|_| {
+                    Failure::usage("--websocket-host needs a hostname or bracketed IPv6 address, optionally followed by a numeric port")
+                })?,
+        )
+    } else {
+        None
+    };
     // `subscribe` takes the read itself; the SUBSCRIBE TO header is optional.
     let statement = if mode == ExecuteMode::Subscribe
         && !statement
@@ -356,7 +376,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         parameters.iter().map(|(name, _)| name.as_str()),
     )?;
     Ok(RemoteOptions {
-        addr: addr.ok_or_else(|| Failure::usage("remote needs --addr"))?,
+        addr,
         token_file: token_file.ok_or_else(|| Failure::usage("remote needs --token-file"))?,
         database: database.ok_or_else(|| Failure::usage("remote needs --database"))?,
         mode,
@@ -365,6 +385,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         param_files,
         max_batches,
         tls,
+        websocket,
         rows_file,
         statements_file,
         transaction: verb == "transaction",
@@ -382,7 +403,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
 
 /// Use only the explicitly supplied trust roots. The foundation validates
 /// both the chain and peer name before the FGP client receives the stream.
-fn tls_connector(pem: &[u8]) -> Result<TlsConnector, Failure> {
+fn tls_connector(pem: &[u8], alpn: &[u8]) -> Result<TlsConnector, Failure> {
     if pem.len() > MAX_TLS_CA_BYTES {
         return Err(Failure::open("TLS CA file exceeds 1048576 bytes"));
     }
@@ -392,7 +413,7 @@ fn tls_connector(pem: &[u8]) -> Result<TlsConnector, Failure> {
         .add_root_certificates(roots)
         .min_protocol_version(0x0304_u16.into())
         .max_protocol_version(0x0304_u16.into())
-        .alpn_protocols_required(vec![b"fgp/1".to_vec()])
+        .alpn_protocols_required(vec![alpn.to_vec()])
         .enable_early_data(false)
         .handshake_timeout(std::time::Duration::from_secs(10))
         .build()
@@ -402,6 +423,7 @@ fn tls_connector(pem: &[u8]) -> Result<TlsConnector, Failure> {
 async fn read_tls_connector(
     cx: &asupersync::Cx,
     path: &std::path::Path,
+    alpn: &[u8],
 ) -> Result<TlsConnector, Failure> {
     cx.checkpoint()
         .map_err(|_| Failure::open("TLS setup cancelled"))?;
@@ -437,17 +459,24 @@ async fn read_tls_connector(
         }
         pem.extend_from_slice(&buffer[..count]);
     }
-    tls_connector(&pem)
+    tls_connector(&pem, alpn)
 }
 
 async fn connect(cx: &asupersync::Cx, options: &RemoteOptions) -> Result<Client, Failure> {
     let token = read_token(&options.token_file).await?;
     let Some(tls) = &options.tls else {
-        return Client::connect(cx, options.addr, token)
-            .await
-            .map_err(failure);
+        return match &options.websocket {
+            Some(target) => Client::connect_websocket(cx, target, options.addr, token).await,
+            None => Client::connect(cx, options.addr, token).await,
+        }
+        .map_err(failure);
     };
-    let connector = read_tls_connector(cx, &tls.ca_file).await?;
+    let alpn: &[u8] = if options.websocket.is_some() {
+        b"http/1.1"
+    } else {
+        b"fgp/1"
+    };
+    let connector = read_tls_connector(cx, &tls.ca_file, alpn).await?;
     let stream = TcpStream::connect(options.addr)
         .await
         .map_err(Failure::open)?;
@@ -464,9 +493,11 @@ async fn connect(cx: &asupersync::Cx, options: &RemoteOptions) -> Result<Client,
     .await?;
     // Cancellation or a TLS error drops the transport. In particular, there
     // is no retry that could send the credential or a write over plaintext.
-    Client::connect_stream(cx, stream, token)
-        .await
-        .map_err(failure)
+    match &options.websocket {
+        Some(target) => Client::connect_websocket_stream(cx, target, stream, token).await,
+        None => Client::connect_stream(cx, stream, token).await,
+    }
+    .map_err(failure)
 }
 
 /// The local CLI's parameter spellings, as wire values: `int:`, `uint:`, `float:`,
@@ -1558,6 +1589,66 @@ mod tests {
     }
 
     #[test]
+    fn websocket_transport_is_explicit_and_validates_host_before_credentials() {
+        for verb in ["query", "write", "subscribe"] {
+            assert!(options(verb, &[]).unwrap().websocket.is_none());
+            let native = options(verb, &["--websocket"]).unwrap();
+            assert_eq!(native.websocket.unwrap().authority(), "127.0.0.1:7688");
+            assert!(native.tls.is_none());
+            let encrypted = options(
+                verb,
+                &[
+                    "--websocket",
+                    "--websocket-host",
+                    "graph.example:8443",
+                    "--tls-server-name",
+                    "graph.example",
+                    "--tls-ca-file",
+                    "ca.pem",
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                encrypted.websocket.unwrap().authority(),
+                "graph.example:8443"
+            );
+            assert_eq!(encrypted.tls.unwrap().server_name, "graph.example");
+            for flags in [
+                vec!["--websocket", "--websocket"],
+                vec!["--websocket-host", "graph.example"],
+                vec!["--websocket", "--websocket-host", ""],
+                vec!["--websocket", "--websocket-host", "ws://graph.example"],
+                vec!["--websocket", "--websocket-host", "graph.example/v1/fgp"],
+                vec!["--websocket", "--websocket-host", "user@graph.example"],
+                vec!["--websocket", "--websocket-host", "graph.example?token=x"],
+                vec!["--websocket", "--websocket-host", "graph.example:65536"],
+                vec![
+                    "--websocket",
+                    "--websocket-host",
+                    "graph.example\r\nOrigin: bad",
+                ],
+                vec![
+                    "--websocket",
+                    "--websocket-host",
+                    "graph.example",
+                    "--websocket-host",
+                    "other.example",
+                ],
+            ] {
+                assert_eq!(
+                    options(verb, &flags)
+                        .err()
+                        .expect("invalid WebSocket options")
+                        .code,
+                    2
+                );
+            }
+        }
+        let ipv6 = options("query", &["--websocket", "--websocket-host", "[::1]:8789"]).unwrap();
+        assert_eq!(ipv6.websocket.unwrap().authority(), "[::1]:8789");
+    }
+
+    #[test]
     fn prepared_batches_require_one_buffered_query_argument_file() {
         for flags in [
             vec!["--prepared-batch", "--rows-file", "rows.json"],
@@ -1752,7 +1843,8 @@ mod tests {
             b"not a certificate".to_vec(),
             vec![b'x'; MAX_TLS_CA_BYTES + 1],
         ] {
-            let error = tls_connector(&pem).expect_err("untrusted configuration must refuse");
+            let error =
+                tls_connector(&pem, b"fgp/1").expect_err("untrusted configuration must refuse");
             assert_eq!(error.code, 4);
         }
     }

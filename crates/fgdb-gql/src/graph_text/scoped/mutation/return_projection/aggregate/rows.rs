@@ -138,7 +138,7 @@ pub(super) fn prefix<'a>(
         prefix?;
         let mut head = if let Some((lexer, at_where)) = parser.deferred_where.take() {
             if !parser.syntax.scopes.is_empty()
-                || !(parser.is_word("RETURN") || parser.is_word("WITH"))
+                || !(parser.is_word("RETURN") || parser.is_word("WITH") || parser.is_word("FILTER"))
             {
                 return Err(expected(
                     parser.current.at,
@@ -152,10 +152,10 @@ pub(super) fn prefix<'a>(
         } else if parser.is_word("RETURN") && return_gathers_comprehension(parser)? {
             parser.implicit_with_head()?
         } else {
-            if !parser.is_word("WITH") && !parser.is_word("UNWIND") {
+            if !parser.is_word("WITH") && !parser.is_word("UNWIND") && !parser.is_word("FILTER") {
                 return Err(expected(
                     parser.current.at,
-                    "WITH or UNWIND before a pipeline aggregate RETURN",
+                    "WITH, FILTER or UNWIND before a pipeline aggregate RETURN",
                 ));
             }
             parser.graph_projection_head()?
@@ -189,6 +189,7 @@ pub(super) fn prefix<'a>(
         ));
     }
     if leading.is_empty()
+        && !parser.is_word("FILTER")
         && !parser.is_word("WITH")
         && !parser.is_word("UNWIND")
         && !parser.is_word("RETURN")

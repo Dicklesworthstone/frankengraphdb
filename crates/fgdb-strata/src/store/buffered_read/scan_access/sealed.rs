@@ -91,10 +91,12 @@ impl<V: Vfs> BufferedPartition<V> {
         self.begin(cx, floor)?;
         let maximum = self.limits.max_work;
         let mut work = 0;
-        let selected = self.block_directory.relation_blocks(relation, &mut || {
-            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, maximum)
-        })?;
+        let selected = self
+            .block_directory
+            .relation_blocks(&self.blocks, relation, &mut || {
+                cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+                advance(&mut work, 1, maximum)
+            })?;
         let count = selected.len();
         let mut incidences = 0usize;
         let mut counting = selected;

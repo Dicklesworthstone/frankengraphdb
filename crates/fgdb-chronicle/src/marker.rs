@@ -34,6 +34,7 @@ use fgdb_crypto::Digest;
 use fgdb_types::{
     BranchId, CommitSeq, CommitSeqExhausted as CommitSeqExhaustion, GraphId, MarkerRef, ObjectId,
 };
+use std::collections::BTreeMap;
 
 /// Domain separator for the marker chain hash.
 pub const MARKER_CHAIN_DOMAIN: &[u8] = b"fgdb:commit-marker-chain:v2";
@@ -83,6 +84,19 @@ pub struct HeadUpdate {
 }
 
 impl HeadUpdate {
+    /// Check the same head comparison at caller admission and marker append.
+    pub fn check_previous(&self, actual: Option<MarkerRef>) -> Result<(), ChainError> {
+        if actual == self.expected_previous {
+            return Ok(());
+        }
+        Err(ChainError::HeadCasMismatch(Box::new(HeadCasMismatch {
+            graph: self.graph,
+            branch: self.branch,
+            expected: self.expected_previous,
+            actual,
+        })))
+    }
+
     fn write_into(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.graph.0.to_be_bytes());
         out.extend_from_slice(&self.branch.0.to_be_bytes());
@@ -457,6 +471,10 @@ pub struct ChainedMarker {
     pub chain_hash: Digest,
 }
 
+// Commit order need not resemble coordinate order. Index both first admissions
+// and later CAS lookups by the complete 128-bit graph and branch identities.
+type BranchHeads = BTreeMap<(GraphId, BranchId), MarkerRef>;
+
 /// The commit stream: an append-only chain of markers with branch heads.
 ///
 /// This is deliberately the whole of B1's version universe in one structure.
@@ -466,7 +484,7 @@ pub struct ChainedMarker {
 #[derive(Debug, Clone, Default)]
 pub struct MarkerChain {
     entries: Vec<ChainedMarker>,
-    heads: Vec<((GraphId, BranchId), MarkerRef)>,
+    heads: BranchHeads,
     /// Cumulative floors, including across later markers without counters.
     /// Keeping them at admission avoids a history scan on every append.
     identity_counters: IdentityCounters,
@@ -501,11 +519,48 @@ impl From<&ChainedMarker> for MarkerFrontier {
 #[derive(Debug, Default)]
 pub(crate) struct MarkerPrefix {
     frontier: Option<MarkerFrontier>,
-    heads: Vec<((GraphId, BranchId), MarkerRef)>,
+    heads: BranchHeads,
     identity_counters: IdentityCounters,
 }
 
 impl MarkerPrefix {
+    /// Verify borrowed entries without copying their bodies into a second
+    /// history. The retained-entry API reports structural refusals before
+    /// derived-value mismatches, even if both defects affect the same entry.
+    fn verified_entries(entries: &[ChainedMarker]) -> Result<Self, ChainVerifyFailure> {
+        let mut prefix = Self::default();
+        for entry in entries {
+            let commit_seq = entry.marker.commit_seq;
+            let structure = |cause| ChainVerifyFailure {
+                commit_seq,
+                cause: ChainVerifyCause::Structure(cause),
+            };
+            let hash = validate_marker(
+                &entry.marker,
+                prefix.frontier,
+                &prefix.heads,
+                prefix.identity_counters,
+            )
+            .map_err(structure)?;
+            if hash != entry.chain_hash || ObjectId(hash.0) != entry.marker_oid {
+                return Err(ChainVerifyFailure {
+                    commit_seq,
+                    cause: ChainVerifyCause::DerivedValueMismatch,
+                });
+            }
+            prefix.frontier = Some(
+                adopt_marker(
+                    entry,
+                    prefix.frontier,
+                    &mut prefix.heads,
+                    &mut prefix.identity_counters,
+                )
+                .map_err(structure)?,
+            );
+        }
+        Ok(prefix)
+    }
+
     pub(crate) fn frontier(&self) -> CommitSeq {
         self.frontier
             .map_or(CommitSeq::ORIGIN, |last| last.commit_seq)
@@ -561,23 +616,12 @@ fn next_commit_seq(frontier: Option<MarkerFrontier>) -> Result<CommitSeq, ChainE
     }
 }
 
-fn branch_head(
-    heads: &[((GraphId, BranchId), MarkerRef)],
-    graph: GraphId,
-    branch: BranchId,
-) -> Option<MarkerRef> {
-    heads
-        .iter()
-        .find(|((g, b), _)| *g == graph && *b == branch)
-        .map(|(_, marker)| *marker)
-}
-
 /// The single structural/hash admission law for retained and streaming scans.
 /// Refusal happens before either representation changes its frontier or heads.
 fn validate_marker(
     marker: &CommitMarker,
     frontier: Option<MarkerFrontier>,
-    heads: &[((GraphId, BranchId), MarkerRef)],
+    heads: &BranchHeads,
     identity_counters: IdentityCounters,
 ) -> Result<Digest, ChainError> {
     validate_marker_structure(marker, frontier, heads, identity_counters)?;
@@ -587,7 +631,7 @@ fn validate_marker(
 fn validate_marker_structure(
     marker: &CommitMarker,
     frontier: Option<MarkerFrontier>,
-    heads: &[((GraphId, BranchId), MarkerRef)],
+    heads: &BranchHeads,
     identity_counters: IdentityCounters,
 ) -> Result<(), ChainError> {
     let expected_seq = next_commit_seq(frontier)?;
@@ -643,15 +687,7 @@ fn validate_marker_structure(
     // All CASes are checked before any is applied: advancing several branches
     // must remain atomic even when an earlier update would have succeeded.
     for update in &marker.head_updates {
-        let actual = branch_head(heads, update.graph, update.branch);
-        if actual != update.expected_previous {
-            return Err(ChainError::HeadCasMismatch(Box::new(HeadCasMismatch {
-                graph: update.graph,
-                branch: update.branch,
-                expected: update.expected_previous,
-                actual,
-            })));
-        }
+        update.check_previous(heads.get(&(update.graph, update.branch)).copied())?;
     }
 
     Ok(())
@@ -664,7 +700,7 @@ fn recover_marker(
     marker: CommitMarker,
     stored_hash: Digest,
     frontier: Option<MarkerFrontier>,
-    heads: &mut Vec<((GraphId, BranchId), MarkerRef)>,
+    heads: &mut BranchHeads,
     identity_counters: &mut IdentityCounters,
 ) -> Result<ChainedMarker, ChainVerifyFailure> {
     let commit_seq = marker.commit_seq;
@@ -696,7 +732,7 @@ fn recover_marker(
 fn adopt_marker(
     chained: &ChainedMarker,
     frontier: Option<MarkerFrontier>,
-    heads: &mut Vec<((GraphId, BranchId), MarkerRef)>,
+    heads: &mut BranchHeads,
     identity_counters: &mut IdentityCounters,
 ) -> Result<MarkerFrontier, ChainError> {
     let expected_seq = next_commit_seq(frontier)?;
@@ -714,13 +750,7 @@ fn adopt_marker(
             marker_oid: chained.marker_oid,
             commit_seq: CommitSeq(chained.marker.commit_seq),
         };
-        match heads
-            .iter_mut()
-            .find(|((g, b), _)| *g == update.graph && *b == update.branch)
-        {
-            Some((_, head)) => *head = new_head,
-            None => heads.push(((update.graph, update.branch), new_head)),
-        }
+        heads.insert((update.graph, update.branch), new_head);
     }
     if let Some(next) = chained.marker.identity_counters {
         *identity_counters = next;
@@ -775,27 +805,12 @@ impl MarkerChain {
     /// head index advances only after that entry is accepted. An error returns no
     /// partially trusted `MarkerChain`.
     pub fn from_entries(entries: &[ChainedMarker]) -> Result<Self, ChainVerifyFailure> {
-        let mut rebuilt = Self::new();
-        for entry in entries {
-            let commit_seq = entry.marker.commit_seq;
-            let chained = rebuilt
-                .validate(&entry.marker)
-                .map_err(|cause| ChainVerifyFailure {
-                    commit_seq,
-                    cause: ChainVerifyCause::Structure(cause),
-                })?;
-            if chained.chain_hash != entry.chain_hash || chained.marker_oid != entry.marker_oid {
-                return Err(ChainVerifyFailure {
-                    commit_seq,
-                    cause: ChainVerifyCause::DerivedValueMismatch,
-                });
-            }
-            rebuilt.adopt(chained).map_err(|cause| ChainVerifyFailure {
-                commit_seq,
-                cause: ChainVerifyCause::Structure(cause),
-            })?;
-        }
-        Ok(rebuilt)
+        let prefix = MarkerPrefix::verified_entries(entries)?;
+        Ok(Self {
+            entries: entries.to_vec(),
+            heads: prefix.heads,
+            identity_counters: prefix.identity_counters,
+        })
     }
 
     /// Verify raw stored entries without constructing a usable chain.
@@ -804,7 +819,7 @@ impl MarkerChain {
     /// bytes may be represented as `ChainedMarker` values, but they never become
     /// authoritative heads or a chain value.
     pub fn verify_entries(entries: &[ChainedMarker]) -> Result<(), ChainVerifyFailure> {
-        Self::from_entries(entries).map(drop)
+        MarkerPrefix::verified_entries(entries).map(drop)
     }
 
     pub(crate) fn recover(
@@ -825,7 +840,41 @@ impl MarkerChain {
 
     /// A branch's current head, if it has one.
     pub fn head(&self, graph: GraphId, branch: BranchId) -> Option<MarkerRef> {
-        branch_head(&self.heads, graph, branch)
+        self.heads.get(&(graph, branch)).copied()
+    }
+
+    /// Walk the recorded ancestry of an exact branch head, newest first.
+    ///
+    /// `at` may be a prior head on this coordinate. Admission checks both
+    /// parts of its marker identity and the coordinate's head update. Every
+    /// such update in a verified chain passed its predecessor CAS, so a past
+    /// update is on that coordinate's single line of history. A marker shared
+    /// by several branches follows only the selected branch's predecessor.
+    /// Global-only markers and history before the first explicit update are
+    /// never attributed to a branch.
+    pub fn branch_history_from(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+        at: MarkerRef,
+    ) -> Option<impl Iterator<Item = &ChainedMarker>> {
+        let locate = move |reference: MarkerRef| {
+            let index = usize::try_from(reference.commit_seq.0.checked_sub(1)?).ok()?;
+            let entry = self.entries.get(index)?;
+            if entry.marker_oid != reference.marker_oid {
+                return None;
+            }
+            let updates = &entry.marker.head_updates;
+            let index = updates
+                .binary_search_by_key(&(graph, branch), |update| (update.graph, update.branch))
+                .ok()?;
+            Some((entry, updates[index].expected_previous))
+        };
+        let start = locate(at)?;
+        Some(
+            std::iter::successors(Some(start), move |(_, previous)| previous.and_then(locate))
+                .map(|(entry, _)| entry),
+        )
     }
 
     /// Append one marker, enforcing every structural law before anything is
@@ -893,13 +942,9 @@ impl MarkerChain {
     /// sequence, unsorted head updates, or a head CAS that never held would have
     /// verified — each of them a law `validate` enforces at append time.
     ///
-    /// Closed by REPLAY rather than by restating the predicates: this rebuilds the
-    /// chain from the origin through `validate`, which is the same code path an
-    /// append takes, and compares the derived values at every step. So `verify`
-    /// enforces every law `validate` does, by construction and forever — a law
-    /// added to `validate` tomorrow is enforced here the same day. Restating the
-    /// four checks would have been the obvious fix and would have created two
-    /// copies of one law, which is how they drift apart.
+    /// Replay verifies the borrowed entries from the origin using the same
+    /// admission laws as append. Only the frontier, counters, and latest head
+    /// per coordinate survive between markers.
     ///
     /// Still needs nothing beyond the entries themselves — no index, no future
     /// object — because markers carry no forward references, so a replica or a
@@ -1221,12 +1266,12 @@ mod commit_seq_exhaustion_tests {
                 marker_oid: ObjectId([0x88; 32]),
                 chain_hash: Digest([0x99; 32]),
             }],
-            heads: Vec::new(),
+            heads: BranchHeads::new(),
             identity_counters: IdentityCounters::default(),
         };
         let mut prefix = MarkerPrefix {
             frontier: chain.entries.last().map(MarkerFrontier::from),
-            heads: Vec::new(),
+            heads: BranchHeads::new(),
             identity_counters: IdentityCounters::default(),
         };
 
@@ -1262,7 +1307,6 @@ mod commit_seq_exhaustion_tests {
     fn streaming_prefix_matches_history_without_retaining_prior_marker_bodies() {
         let mut chain = MarkerChain::new();
         let mut prefix = MarkerPrefix::default();
-        let mut head_capacity = None;
         for seq in 1..=4096 {
             let mut next = marker(seq);
             if seq % 7 == 0 {
@@ -1309,15 +1353,125 @@ mod commit_seq_exhaustion_tests {
             assert_eq!(prefix.identity_counters, chain.identity_counters());
             if seq >= 3 {
                 assert_eq!(prefix.heads.len(), 3);
-                assert_eq!(
-                    *head_capacity.get_or_insert(prefix.heads.capacity()),
-                    prefix.heads.capacity(),
-                    "streaming retention grows with distinct heads, not commits"
-                );
             }
         }
         assert_eq!(chain.entries.len(), 4096);
         assert_eq!(prefix.heads.len(), 3);
+    }
+
+    #[test]
+    fn historical_heads_walk_only_their_verified_coordinate_after_recovery() {
+        let graph = GraphId(1 << 110);
+        let left = BranchId(3);
+        let right = BranchId((1 << 100) + 3);
+        let mut chain = MarkerChain::new();
+        for (seq, branches) in [
+            (1, vec![]), // older global-only marker
+            (2, vec![left]),
+            (3, vec![right]),
+            (4, vec![left, right]), // same head, different predecessors
+            (5, vec![left]),
+            (6, vec![]),
+        ] {
+            let mut next = marker(seq);
+            next.head_updates = branches
+                .into_iter()
+                .map(|branch| HeadUpdate {
+                    graph,
+                    branch,
+                    expected_previous: chain.head(graph, branch),
+                })
+                .collect();
+            chain.append(next).unwrap();
+        }
+        let recovered = MarkerChain::from_entries(chain.entries()).unwrap();
+        for chain in [&chain, &recovered] {
+            let identity = |seq: usize| MarkerRef {
+                marker_oid: chain.entries()[seq - 1].marker_oid,
+                commit_seq: CommitSeq(seq as u64),
+            };
+            let history = |branch, at| {
+                chain.branch_history_from(graph, branch, at).map(|entries| {
+                    entries
+                        .map(|entry| entry.marker.commit_seq)
+                        .collect::<Vec<_>>()
+                })
+            };
+            assert_eq!(history(left, identity(5)), Some(vec![5, 4, 2]));
+            assert_eq!(history(left, identity(4)), Some(vec![4, 2]));
+            assert_eq!(history(right, identity(4)), Some(vec![4, 3]));
+            assert_eq!(history(left, identity(3)), None);
+            assert_eq!(history(left, identity(1)), None);
+            assert_eq!(history(left, identity(6)), None);
+            for seq in [0, 4, 7, u64::MAX] {
+                assert_eq!(
+                    history(
+                        left,
+                        MarkerRef {
+                            commit_seq: CommitSeq(seq),
+                            ..identity(2)
+                        }
+                    ),
+                    None
+                );
+            }
+            assert!(
+                chain
+                    .branch_history_from(GraphId(0), left, identity(4))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn many_branch_heads_survive_interleaved_recovery_and_a_stale_tail() {
+        let mut chain = MarkerChain::new();
+        let mut prefix = MarkerPrefix::default();
+        let coordinates = |n: u64| {
+            // Permute insertion order and reuse branch IDs across graphs.
+            let key = u128::from((n * 499) % 10_000);
+            (GraphId((key % 4) << 96), BranchId((key / 4) << 64))
+        };
+        for seq in 1..=20_000 {
+            let (graph, branch) = coordinates(seq % 10_000);
+            let mut next = marker(seq);
+            next.head_updates.push(HeadUpdate {
+                graph,
+                branch,
+                expected_previous: chain.head(graph, branch),
+            });
+            let admitted = chain.append(next).unwrap();
+            prefix
+                .recover(admitted.marker.clone(), admitted.chain_hash)
+                .unwrap();
+        }
+        assert_eq!(prefix.heads.len(), 10_000);
+        let rebuilt = MarkerChain::from_entries(chain.entries()).unwrap();
+        chain.verify().unwrap();
+        for seq in 10_001..=20_000 {
+            let (graph, branch) = coordinates(seq % 10_000);
+            let expected = MarkerRef {
+                commit_seq: CommitSeq(seq),
+                marker_oid: chain.entries()[seq as usize - 1].marker_oid,
+            };
+            assert_eq!(rebuilt.head(graph, branch), Some(expected));
+            assert_eq!(prefix.heads.get(&(graph, branch)), Some(&expected));
+        }
+
+        // Even when derived bytes are also stale, the public retained-entry
+        // verifier reports the structural refusal at the first bad sequence.
+        let tail = chain.entries.last_mut().unwrap();
+        tail.marker.head_updates[0].expected_previous = None;
+        let error = chain.verify().unwrap_err();
+        assert_eq!(error.commit_seq, 20_000);
+        assert!(matches!(
+            error.cause,
+            ChainVerifyCause::Structure(ChainError::HeadCasMismatch(_))
+        ));
+        assert_eq!(
+            MarkerChain::from_entries(chain.entries()).unwrap_err(),
+            error
+        );
     }
 
     #[test]

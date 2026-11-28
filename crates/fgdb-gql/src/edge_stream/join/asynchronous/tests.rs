@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 mod optional;
+mod projection;
 
 const R: RelationId = RelationId(7);
 const S: RelationId = RelationId(8);

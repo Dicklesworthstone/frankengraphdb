@@ -645,6 +645,11 @@ fgdb verify-history --db mydb.fgdbdir --key-file fgdb.keys --through 42
 fgdb verify-history --db backup.fgdbdir --key-file fgdb.keys --through 42 \
   --expect-chain "$SAVED_CHAIN_HASH"
 
+# Publish only if commit 42 is still the recorded head of the embedded branch.
+fgdb write --db mydb.fgdbdir --key-file fgdb.keys --if-head "42@$SAVED_CHAIN_HASH" \
+  "CREATE (:Person {name: 'Ada'})"
+# --if-head empty admits the first write to a database with no commits.
+
 # Verify every capsule and block; repair damaged redundancy in place
 fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys
 
@@ -790,6 +795,10 @@ fgdb schema --db mydb.fgdbdir --key-file fgdb.keys
 # Name-only declarations and explicit IDs can share one registration.
 fgdb schema --db mydb.fgdbdir --key-file fgdb.keys --if-current 2 \
   --property score --label Team=100
+
+# Fence registration against the exact branch marker obtained from verify-history.
+fgdb schema --db mydb.fgdbdir --key-file fgdb.keys --if-head "3@$SAVED_CHAIN_HASH" \
+  --property rank
 
 # Inspect exactly the names visible at an earlier committed revision.
 fgdb schema --db mydb.fgdbdir --key-file fgdb.keys --as-of 1
@@ -984,6 +993,27 @@ Historical native reads can continue directly from `FOR SYSTEM_TIME AS OF SEQ` i
 
 `query --buffered` streams vertex and edge scans, fixed-hop joins and correlated `EXISTS`/`NOT EXISTS` directly from the authenticated checkpoint. For example, `MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:KNOWS]->(b) } RETURN a` streams vertices with no outgoing `KNOWS` edge. Direct streams require a supported identity-leading projection and canonical order. They support local predicates, `SKIP`/`LIMIT`, parameters and historical cuts. The CLI checks the physical plan before streaming and retains each row’s graph-memory reservation through its output flush. Only the terminal result confirms complete delivery. Use `--spill-dir` for supported aggregation and alternate ordering.
 
+Local buffered reads also stream computed vertex, single-edge and fixed-hop
+join projections when the native input and final output have proved ascending identity order.
+For example, `MATCH (n) RETURN n AS id,n.age+1 AS next_age ORDER BY id` and
+`MATCH (n) RETURN {node:n,next_age:n.age+1} AS doc ORDER BY n` need no spill
+directory. A directed edge can use
+`MATCH (a)-[r:KNOWS]->(b) RETURN r AS id,a.age+1 AS start_age,r.age+1 AS weight ORDER BY id`;
+an undirected edge also needs its source vertex in the identity prefix.
+Fixed-hop joins require every traversed edge identity in order, for example
+`MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) RETURN r AS first,s AS second,r.age+s.age AS cost ORDER BY first,second`.
+Every property read must target the current vertex, a bound edge or its
+endpoints. The complete property demand is checked before graph open, and the VM's memory reservation
+stays with each row through output flush. Historical selectors, parameters and
+final pages retain their ordinary meanings; every matching expression is
+evaluated before successful completion, including the suffix after `LIMIT`
+and a `LIMIT 0` query. Embedded callers use
+`BufferedReadView::stream_graph_projection_governed[_at]`. Both undirected
+orientations share the admitted record and retain their computed payload
+charges through delivery. Joined outputs retain independent reservations
+after the cursor backtracks or closes. Other computed
+source shapes and unproved ordering retain their existing refusals.
+
 With implicit ordering, put the traversed edge identities first for a directed fixed-hop join, in traversal order. For example, `MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) RETURN r,s,a.team,b.team,c.team` streams each two-hop occurrence. For an undirected root, put its source vertex immediately after the first edge identity and before the remaining edge identities.
 
 **`query --buffered --spill-dir <existing-directory>` connects the bounded graph reader to external query execution.** It accepts direct local field, identity and path projections without a leading identity, property and hidden-key ordering, output `DISTINCT`, and pagination. Native computed `RETURN` and `WITH` projections also support arithmetic, scalar functions, lists, maps, comprehensions and reductions, with computed filters between stages. `UNWIND` expands graph-backed or supplied lists one row at a time into the same external stages, preserving the child sequence and each list's element order; null and empty lists produce no rows. Literal-only and parameter-only queries begin with the native singleton input and open no graph cursor. They report `Values` source metadata and zero snapshot records, while retaining the selected checkpoint's sequence. Each stage preserves its own canonical ordering, `DISTINCT`, `ORDER BY`, and `SKIP`/`LIMIT`: selecting an inner page precedes the next projection, and a later `LIMIT 0` cannot hide an earlier expression failure.
@@ -1031,11 +1061,69 @@ Grouping and sorting finish before delivery begins. Rows are decoded and flushed
 
 Native `CREATE`/`INSERT`, matched mutations and vertex `MERGE` also support aggregate `RETURN`: for example, `UNWIND [1,1,2] AS x CREATE (n:Person {p:x}) RETURN n.p AS p,count(*) AS created ORDER BY p`. Grouping uses the exact statement occurrences and their frozen post-effect values, including duplicates; it does not rescan the graph. `COUNT`, `SUM`, `MIN`, `MAX` and `COLLECT` use the existing native aggregate engine, including supported `DISTINCT` arguments. Work and scratch quotas remain cumulative, final rows share the normal transaction output allowance, and `LIMIT 0` cannot skip effects or conceal an aggregate error. Counts and integer sums must fit the ordinary Int64 row domain; nonnull exact integer-domain averages still refuse rather than silently round.
 
-`fgdbd` (`crates/fgdb-server`) serves the FGP handshake, `AUTH_REFRESH`, one autocommit GQL read or write per `EXECUTE`, atomic parameterized `EXECUTE_BATCH` writes, explicit connection-scoped read/write transactions, reusable prepared read templates, ephemeral flow-controlled result streams, and live `SUBSCRIBE TO` changefeeds (a baseline, then one exact delta per commit), plus the HTTP/1.1 JSON adapter (`/v1/health`, `/v1/databases/<name>/schema`, `/query`, `/query-batch`, `/write`, `/write-batch`, `/transaction`, `/read-transaction`). `CREATE`/`INSERT`, matched `SET`/`REMOVE`/deletion, and vertex `MERGE` can return rows with their native transaction outcome over FGP and HTTP. Their `RETURN` expressions run against the authorized statement result before commit, so expression or result-quota failures discard the writes; `LIMIT 0` still applies effects. The Bolt-compat subset (`BoltCompatProfileV1`, `--bolt-listen`) accepts official Neo4j drivers: autocommit and explicit read transactions each use one pinned generation, bounded autocommit writes execute as one atomic authorized program on `PULL`/`DISCARD`, and write `RETURN` supports scalar values, lists, maps, nodes, relationships and paths. Write graph metadata is hydrated from the final unpublished overlay under the same capability and budgets before commit; a late conversion or output-limit failure rolls back all effects, even with `PULL 1` or `DISCARD`. Autocommit read graph values retain their statement's selected historical sequence. Explicit read transactions retain one native Read permit across RUN, metadata hydration and COMMIT, with cumulative signed limits and selectors constrained to the BEGIN basis. Explicit write transactions retain an authorized native workspace across `BEGIN`/`RUN`/`COMMIT`; later graph, aggregate, catalog, analytics and hybrid reads observe prior staged effects. Results remain provisional until the sole native commit, and rollback discards the workspace. Graph-valued write output was runtime-qualified on 2026-11-11 via [bolt_autocommit.rs](crates/fgdb-server/tests/bolt_autocommit.rs); it is not a full `BoltCompatProfileV2` conformance claim. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion (including native GQL `SUBSCRIBE TO` changefeeds via a pre-expansion Z-set capability homomorphism; analytic `CALL fnx.*` subscriptions still require unrestricted graph scope). It does not yet serve durable result retention (ACK/release/resume), durable transaction reattachment, durable subscriptions, or the HTTP/2, gRPC and WebSocket adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
+`fgdbd` (`crates/fgdb-server`) serves the FGP handshake, `AUTH_REFRESH`, one autocommit GQL read or write per `EXECUTE`, atomic parameterized `EXECUTE_BATCH` writes, explicit connection-scoped read/write transactions, reusable prepared read templates, ephemeral flow-controlled result streams, and live `SUBSCRIBE TO` changefeeds (a baseline, then one exact delta per commit), plus the HTTP/1.1 JSON adapter (`/v1/health`, `/v1/databases/<name>/schema`, `/query`, `/query-batch`, `/write`, `/write-batch`, `/transaction`, `/read-transaction`). `CREATE`/`INSERT`, matched `SET`/`REMOVE`/deletion, and vertex `MERGE` can return rows with their native transaction outcome over FGP and HTTP. Their `RETURN` expressions run against the authorized statement result before commit, so expression or result-quota failures discard the writes; `LIMIT 0` still applies effects. The Bolt-compat subset (`BoltCompatProfileV1`, `--bolt-listen`) accepts official Neo4j drivers: autocommit and explicit read transactions each use one pinned generation, bounded autocommit writes execute as one atomic authorized program on `PULL`/`DISCARD`, and write `RETURN` supports scalar values, lists, maps, nodes, relationships and paths. Write graph metadata is hydrated from the final unpublished overlay under the same capability and budgets before commit; a late conversion or output-limit failure rolls back all effects, even with `PULL 1` or `DISCARD`. Autocommit read graph values retain their statement's selected historical sequence. Explicit read transactions retain one native Read permit across RUN, metadata hydration and COMMIT, with cumulative signed limits and selectors constrained to the BEGIN basis. Explicit write transactions retain an authorized native workspace across `BEGIN`/`RUN`/`COMMIT`; later graph, aggregate, catalog, analytics and hybrid reads observe prior staged effects. Results remain provisional until the sole native commit, and rollback discards the workspace. Graph-valued write output was runtime-qualified on 2026-11-11 via [bolt_autocommit.rs](crates/fgdb-server/tests/bolt_autocommit.rs); it is not a full `BoltCompatProfileV2` conformance claim. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion (including native GQL `SUBSCRIBE TO` changefeeds via a pre-expansion Z-set capability homomorphism; analytic `CALL fnx.*` subscriptions still require unrestricted graph scope). It does not yet serve durable result retention (ACK/release/resume), durable transaction reattachment, durable subscriptions, or the HTTP/2 and gRPC adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
+
+**WebSocket FGP.** Add `--websocket-listen 127.0.0.1:8789` and an explicit
+`--websocket-allow-origin http://localhost:3000` to serve native FGP at
+`ws://127.0.0.1:8789/v1/fgp` (or `wss://` when TLS is configured). The required
+WebSocket subprotocol is `fgp.v1`. Binary messages carry the existing FGP byte
+stream, so authentication, prepared statements, explicit transactions, native
+streams and subscriptions use the same server dispatcher. Browser callers
+still perform FGP HELLO/AUTH/SELECT_DATABASE after the upgrade; the URL contains
+no token. Explicit Host and Origin policies fence the upgrade, and one
+30-second deadline spans it through READY. See the
+[WebSocket transport contract](docs/FABRIC_PROTOCOL.md#websocket-fgp).
+This adapter has source review and regression sources. Native build and runtime
+qualification are recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
+The native CLI and Rust client also open this transport directly. For example:
+
+```bash
+fgdb remote --websocket --addr 127.0.0.1:8789 \
+  --token-file token.hex --database social query "MATCH (n) RETURN n LIMIT 10"
+```
+
+`--websocket` applies to every remote operation, including transactions,
+prepared batches and subscriptions. `--websocket-host host[:port]` selects an
+explicit virtual Host; otherwise the address is used. The existing paired TLS
+options enable WSS with certificate/name verification and HTTP/1.1 ALPN.
+The client validates the complete upgrade before sending an FGP credential,
+retains upgrade read-ahead, and bounds establishment through authentication
+with one context-clock deadline. Rust callers use `WebSocketTarget` and
+`Client::connect_websocket`, or `connect_websocket_stream` with an already
+verified TLS transport.
 
 FGP also supports reusable native read templates through `Client::prepare_read`, `execute_prepared`/`execute_prepared_streaming`, and `release_prepared`. Preparation binds syntax and operand types without executing or pinning a snapshot; each execution supplies its parameters again and opens a fresh authorized read. Handles belong to one connection, are invalidated by authority refresh or database recovery, and cannot be used to execute writes. Each connection retains at most 64 templates and 4 MiB of original query text. Both schema and row callbacks return `Result<(), ClientError>`; a callback error cancels and drains its result before the client can execute another request.
 
 Remote queries select their execution path with `--read-mode buffered|source|ordered`. The default `buffered` mode collects the ordinary eager answer. `source` uses the authorized native row or aggregate cursor with transport credit driving source demand. Its row profile is identity-leading: a vertex scan's rows begin with the scanned vertex and a fixed-edge scan's with the captured edge, so `MATCH (p:Person) RETURN p.name` refuses in `source` mode (re-measured 2026-11-24) while `buffered` answers it; [Native source streams](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) gives the exact profile. `ordered` uses the server's private external sorter for property-only vertex and fixed-edge/join projections, hidden sort keys, DISTINCT and SKIP/LIMIT. It also accepts terminal `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` and `COLLECT` over admitted graph and complete relational inputs, including prepared historical reads. Groups spill through the existing bounded reducer; exact counts, wide sums and rational averages retain their native wire types, and collections retain native occurrence order. Both native modes flush the schema and each row without collecting the complete result in the CLI. Unsupported source profiles and terminal aggregate expressions that require an additional graph-element lookup refuse before execution. New external aggregate regressions have source and formatting review; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
+
+Source streams additionally admit computed projections when the native input
+and final output both have proved identity order, for example
+`MATCH (n) RETURN n AS id, n.age + 1 AS next_age ORDER BY id`. The identity may
+be a private ranking key, as in
+`MATCH (n) RETURN {node:n, next_age:n.age+1} AS doc ORDER BY n SKIP 1 LIMIT 10`.
+Directed edges use the edge identity; undirected roots also require
+the source vertex, and fixed joins retain every traversal identity. Expressions use the
+same scoped readers and cumulative allowance as the source. Every reached
+expression, including the unselected suffix, is checked before successful
+exhaustion. Bare property-only queries still require canonical value ordering,
+and configured cold/buffered source streams admit vertex, single-edge and
+fixed-hop join forms when property reads target the current vertex, a captured
+edge or its endpoints.
+For example, `MATCH (a)-[r:KNOWS]->(b) RETURN r AS id,a.age+1 AS from_age,r.age+1 AS weight ORDER BY id`
+computes endpoint and edge fields without opening another graph read. The cold
+source admits the complete predicate and projection field demand before
+capability masking and source construction. A non-self undirected edge retains
+one admitted record for both orientations; their computed values and output
+guards share that record's growing memory reservation. Fixed-hop joins keep
+their full active binding frame until the projection finishes, then retain
+computed payloads in an independent output guard while traversal continues.
+For example, `MATCH (a)-[r:KNOWS]->(b)-[s:KNOWS]->(c) RETURN r AS first,s AS second,r.age+s.age AS cost ORDER BY first,second`
+streams computed two-hop occurrences. Undirected roots also require the root
+source vertex immediately after the first edge identity. Indirect element
+lookups, terminal optional expansions and other unsupported source shapes
+still refuse.
+These new source projections have qualification pending.
 
 Enable external ordered reads by adding `--query-scratch-dir /existing/private/scratch` to the database's `fgdbd serve` options, after its `--database` argument. This is an operator path; clients cannot choose files or physical limits. Defaults bound the database's shared tracked spill buffers to 64 MiB and concurrent ordered sessions to four, with three private files of at most 512 MiB each per session and at most 100,000 input rows. The complete sort-work ceiling is reserved from the same signed allowance that pays for source work and final delivery. The server announces the stream before sorting, handles controls while setup or sort I/O is pending, and streams only the completed final rows under credit. Aggregate inputs and completed-group expressions finish even when `LIMIT 0` suppresses output; only delivered groups spend the signed result-row allowance. Each collection must fit the per-value memory and encoded-row limits. On Unix, scratch files are exclusive and unlinked before query data is written. The source graph remains resident. [Ordered stream details and limits](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) describe the supported profile and ownership boundaries.
 
@@ -1059,7 +1147,7 @@ Served subscriptions now reserve the capability's signed work and graph-node all
 
 Each served database has a supervised authoritative recovery worker. A write that leaves the engine requiring recovery fences new requests, invalidates old sessions and queued results, and triggers a reopen through Chronicle after active source operations drain. Recovery never replays the write: uncertain completion remains `outcome_unknown`. Successful recovery admits a new generation; a failed reopen keeps the database unavailable for operator intervention. A subscription invalidated by recovery receives a terminal reset with its last fully delivered sequence when the connection can safely deliver one, and must subscribe again for a replacement baseline. That sequence is a delivery checkpoint, not a durable resume token.
 
-To encrypt all configured listeners, add `--tls-cert-file server-chain.pem --tls-key-file server.key` to `fgdbd serve`. The PEM private key must be owner-only. FGP, HTTPS and Bolt then require TLS 1.3 through the pinned foundation; a refused handshake never falls back to plaintext. FGP requires ALPN `fgp/1`, HTTPS requires `http/1.1`, and Bolt retains its encrypted version negotiation without requiring ALPN. Capability authentication and fresh checks before physical output still apply. Clients connect with an explicit trusted CA and the name on the server certificate:
+To encrypt all configured listeners, add `--tls-cert-file server-chain.pem --tls-key-file server.key` to `fgdbd serve`. The PEM private key must be owner-only. FGP, HTTPS, WebSocket and Bolt then require TLS 1.3 through the pinned foundation; a refused handshake never falls back to plaintext. FGP requires ALPN `fgp/1`, HTTPS and WSS require `http/1.1`, and Bolt retains its encrypted version negotiation without requiring ALPN. Capability authentication and fresh checks before physical output still apply. Clients connect with an explicit trusted CA and the name on the server certificate:
 
 ```bash
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \

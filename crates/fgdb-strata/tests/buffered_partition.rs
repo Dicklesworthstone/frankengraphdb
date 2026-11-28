@@ -98,7 +98,7 @@ fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> 
 }
 
 #[test]
-fn cold_admission_refunds_repeated_edge_statements_without_hiding_retirement() {
+fn cold_admission_compacts_distinct_edges_and_preserves_retirement() {
     run(|contexts, dir| async move {
         let commit = contexts.commit();
         let query = contexts.query();
@@ -176,13 +176,47 @@ fn cold_admission_refunds_repeated_edge_statements_without_hiding_retirement() {
                     .unwrap()
                     .unwrap();
                 assert_eq!(live.entry, edge(128, 7, 11, 1, None));
+                drop(live);
+                drop(view);
+                // Replacing one family's predecessor across 48 blocks
+                // retains just one head alongside the 128 distinct rows.
+                let tight = MemoryPool::new(1_282_000, 0).unwrap();
+                let view = store
+                    .open_buffered_root(&query, root, tight.clone(), limits)
+                    .await
+                    .expect("repeated publications share their family-head slot");
+                drop(view);
+                assert_eq!(tight.used(), 0);
             } else {
+                let mut view = opened.expect("6,144 distinct edge identities fit a 3 MiB pool");
+                for eid in [1, 128, 129, 6144] {
+                    let found = view
+                        .edge_at(&query, EId(eid), CommitSeq(2))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(found.entry, edge(eid, 7, 11, 1, None));
+                }
+                drop(view);
+                let tight = MemoryPool::new(1_282_000, 0).unwrap();
+                // The 48 nonoverlapping EId ranges retain no cross-block
+                // singleton map, while their one family still checks every link.
+                let view = store
+                    .open_buffered_root(&query, root, tight.clone(), limits)
+                    .await
+                    .expect("disjoint EIds fit the same pool as repeated publications");
+                drop(view);
+                let below_workspace = MemoryPool::new(1_100_000, 0).unwrap();
                 assert!(matches!(
-                    opened,
+                    store
+                        .open_buffered_root(&query, root, below_workspace.clone(), limits)
+                        .await,
                     Err(BufferedReadError::Memory(
                         MemoryError::ResourceExhausted { .. }
                     ))
                 ));
+                assert_eq!(below_workspace.used(), 0);
+                assert_eq!(tight.used(), 0);
             }
             assert_eq!(pool.used(), 0);
         }
@@ -206,6 +240,92 @@ fn scan_vertex(vid: u128, created: u64, retired: Option<u64>, value: i64) -> Ver
         birth_ordinal: vid as u64,
         ..vertex(created, retired, value)
     }
+}
+
+#[test]
+fn disjoint_vertex_patches_open_below_the_global_history_allowance() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let mut patches = Vec::new();
+        let mut source_bytes = 0;
+        // Reverse publication order exercises interval sorting. Each patch
+        // contains a two-version VID alongside independent singletons.
+        for group in (0..48u128).rev() {
+            let first = group * 256 + 1;
+            let mut rows = vec![
+                scan_vertex(first, 1, Some(2), 10),
+                scan_vertex(first, 2, None, 20),
+            ];
+            rows.extend((1..192).map(|offset| scan_vertex(first + offset, 1, None, 30)));
+            let bytes = encode_patch(&rows).unwrap();
+            source_bytes += bytes.len();
+            let version = store.put_patch(&commit, &bytes).await.unwrap();
+            patches.push(PatchRef {
+                patch_id: version.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(2),
+            });
+        }
+        let version = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(2),
+                    blocks: Vec::new(),
+                    vertex_patches: patches,
+                },
+            )
+            .await
+            .unwrap();
+        // The decoder needs 1,114,112 bytes. The 9,264 former map entries
+        // alone needed another 2,371,584, above this complete pool.
+        let pool = MemoryPool::new(3 * 1024 * 1024, 0).unwrap();
+        let limits = BufferedReadLimits {
+            max_vertex_patches: 48,
+            max_source_bytes: source_bytes,
+            max_work: 20_000,
+            ..limits()
+        };
+        let mut view = store
+            .open_buffered_root(&query, version, pool.clone(), limits)
+            .await
+            .unwrap();
+        for group in [0, 23, 47] {
+            let vid = group * 256 + 1;
+            for (cut, expected) in [
+                (1, scan_vertex(vid, 1, Some(2), 10)),
+                (2, scan_vertex(vid, 2, None, 20)),
+            ] {
+                let row = view
+                    .vertex_at(&query, VId(vid), CommitSeq(cut))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(row.as_ref(), &expected);
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        let short = BufferedReadLimits {
+            max_source_bytes: source_bytes - 1,
+            ..limits
+        };
+        assert!(matches!(
+            store
+                .open_buffered_root(&query, version, pool.clone(), short)
+                .await,
+            Err(BufferedReadError::Limit {
+                resource: "buffered source bytes",
+                ..
+            })
+        ));
+        assert_eq!(pool.used(), 0);
+    });
 }
 
 async fn vertex_scan_fixture(
@@ -2479,67 +2599,114 @@ fn cold_edge_and_vertex_history_reuse_the_same_admission_budget() {
         let query = contexts.query();
         let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
         let at = CommitSeq(1);
-        let mut root = PartitionRoot {
-            graph: GraphId(1),
-            branch: BranchId(2),
-            partition: 0,
-            published_at: at,
-            blocks: Vec::new(),
-            vertex_patches: Vec::new(),
-        };
-        for source in 0..4 {
-            let ids = source * 96..(source + 1) * 96;
-            let edges: Vec<_> = ids
-                .clone()
-                .map(|id| edge(id, source, id, 1, None))
-                .collect();
-            let vertices: Vec<_> = ids.map(|id| scan_vertex(id, 1, None, 7)).collect();
-            let block = store
-                .put(&commit, &encode_block(0, None, &edges).unwrap())
+        for interleaved in [false, true] {
+            let mut root = PartitionRoot {
+                graph: GraphId(1),
+                branch: BranchId(2),
+                partition: 0,
+                published_at: at,
+                blocks: Vec::new(),
+                vertex_patches: Vec::new(),
+            };
+            for source in 0..4 {
+                // Preserve the original contiguous populations, and interleave
+                // the same number of distinct IDs to make every range overlap.
+                let ids = (0..96).map(|offset| {
+                    if interleaved {
+                        4 * offset + source
+                    } else {
+                        96 * source + offset
+                    }
+                });
+                let edges: Vec<_> = ids
+                    .clone()
+                    .map(|id| edge(id, source, id, 1, None))
+                    .collect();
+                let vertices: Vec<_> = ids.map(|id| scan_vertex(id, 1, None, 7)).collect();
+                let block = store
+                    .put(&commit, &encode_block(0, None, &edges).unwrap())
+                    .await
+                    .unwrap();
+                let patch = store
+                    .put_patch(&commit, &encode_patch(&vertices).unwrap())
+                    .await
+                    .unwrap();
+                root.blocks.push(BlockRef {
+                    block_id: block.0,
+                    first_seq: at,
+                    last_seq: at,
+                });
+                root.vertex_patches.push(PatchRef {
+                    patch_id: patch.0,
+                    first_seq: at,
+                    last_seq: at,
+                });
+            }
+            let id = store.put_root(&commit, &root).await.unwrap();
+            let read = BufferedReadLimits {
+                max_source_bytes: 256 * 1024,
+                max_work: 16_384,
+                ..limits()
+            };
+            // One object workspace and either 384-entry validation history fit.
+            // Keeping the completed edge history throughout the vertex walk does
+            // not. Only the overlapping populations need that global history.
+            let pool = MemoryPool::new(1_400_000, 0).unwrap();
+            let view = store
+                .open_buffered_root(&query, id, pool.clone(), read)
                 .await
                 .unwrap();
-            let patch = store
-                .put_patch(&commit, &encode_patch(&vertices).unwrap())
-                .await
-                .unwrap();
-            root.blocks.push(BlockRef {
-                block_id: block.0,
-                first_seq: at,
-                last_seq: at,
-            });
-            root.vertex_patches.push(PatchRef {
-                patch_id: patch.0,
-                first_seq: at,
-                last_seq: at,
-            });
-        }
-        let id = store.put_root(&commit, &root).await.unwrap();
-        let read = BufferedReadLimits {
-            max_source_bytes: 256 * 1024,
-            max_work: 16_384,
-            ..limits()
-        };
-        // One object workspace and either 384-entry validation history fit.
-        // Keeping the completed edge history throughout the vertex walk does
-        // not. A smaller pool still refuses before successful admission.
-        let pool = MemoryPool::new(1_400_000, 0).unwrap();
-        let view = store
-            .open_buffered_root(&query, id, pool.clone(), read)
-            .await
-            .unwrap();
-        assert_eq!(view.root(), &root);
-        drop(view);
-        assert_eq!(pool.used(), 0);
-        let small = MemoryPool::new(1_200_000, 0).unwrap();
-        assert!(matches!(
-            store
+            assert_eq!(view.root(), &root);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+            let small = MemoryPool::new(1_200_000, 0).unwrap();
+            let opened = store
                 .open_buffered_root(&query, id, small.clone(), read)
-                .await,
-            Err(BufferedReadError::Memory(
-                MemoryError::ResourceExhausted { .. }
-            ))
-        ));
-        assert_eq!(small.used(), 0);
+                .await;
+            if interleaved {
+                assert!(matches!(
+                    opened,
+                    Err(BufferedReadError::Memory(
+                        MemoryError::ResourceExhausted { .. }
+                    ))
+                ));
+            } else {
+                let view = opened.expect("disjoint histories fit within the tighter pool");
+                assert_eq!(view.root(), &root);
+                drop(view);
+            }
+            assert_eq!(small.used(), 0);
+
+            // With only vertex patches, a single locator/lifecycle entry per
+            // version fits between the old two-map bound and the object workspace.
+            root.blocks.clear();
+            let vertices = store.put_root(&commit, &root).await.unwrap();
+            let pool = MemoryPool::new(1_270_000, 0).unwrap();
+            let view = store
+                .open_buffered_root(&query, vertices, pool.clone(), read)
+                .await
+                .unwrap();
+            assert_eq!(view.root(), &root);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+            let small = MemoryPool::new(1_190_000, 0).unwrap();
+            let opened = store
+                .open_buffered_root(&query, vertices, small.clone(), read)
+                .await;
+            if interleaved {
+                assert!(matches!(
+                    opened,
+                    Err(BufferedReadError::Memory(
+                        MemoryError::ResourceExhausted { .. }
+                    ))
+                ));
+            } else {
+                let view = opened.expect("disjoint histories fit within the tighter pool");
+                assert_eq!(view.root(), &root);
+                drop(view);
+            }
+            assert_eq!(small.used(), 0);
+        }
     });
 }
 
@@ -3524,6 +3691,164 @@ fn vertex_topology_refusal_at_each_work_boundary_fuses_and_refunds() {
         drop(scan);
         assert_eq!(pool.used(), baseline);
         drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn counted_cold_open_admits_overlapping_ranges_and_rechecks_repeated_edge_history() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let mut blocks = Vec::new();
+        let mut bytes_read_once = 0;
+        let mut previous = None;
+        // Every EId interval intersects another, yet only edge 1 is repeated.
+        // Its retirement still has to match the original content statement.
+        for group in 0..=96 {
+            let entries = if group == 96 {
+                vec![edge(1, 3, 1, 1, Some(2))]
+            } else {
+                (0..128)
+                    .map(|row| {
+                        let eid = 1 + row * 96 + group;
+                        edge(eid, 3, eid, 1, None)
+                    })
+                    .collect()
+            };
+            let bytes = encode_block(0, previous, &entries).unwrap();
+            bytes_read_once += bytes.len();
+            let block = store.put(&commit, &bytes).await.unwrap();
+            blocks.push(BlockRef {
+                block_id: block.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(if group == 96 { 2 } else { 1 }),
+            });
+            previous = Some(block);
+        }
+        let first = blocks[0].block_id;
+        let replacement = blocks[1].block_id;
+        let root = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(2),
+                    blocks,
+                    vertex_patches: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let pool = MemoryPool::new(3 * 1024 * 1024, 0).unwrap();
+        let limits = BufferedReadLimits {
+            max_blocks: 97,
+            max_root_bytes: 48 * 1024,
+            max_source_bytes: 2 * bytes_read_once,
+            max_work: 1_000_000,
+            ..limits()
+        };
+        assert!(matches!(
+            store
+                .open_buffered_root(&cx, root, pool.clone(), limits)
+                .await,
+            Err(BufferedReadError::Memory(
+                MemoryError::ResourceExhausted { .. }
+            ))
+        ));
+        assert_eq!(pool.used(), 0);
+        for bytes in [32 * 1024, 48 * 1024] {
+            let mut view = store
+                .open_buffered_root_with_history_counts(&cx, root, pool.clone(), limits, bytes)
+                .await
+                .unwrap();
+            assert_eq!(
+                view.edge_at(&cx, EId(1), CommitSeq(1))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .entry,
+                edge(1, 3, 1, 1, Some(2))
+            );
+            assert!(
+                view.edge_at(&cx, EId(1), CommitSeq(2))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                view.edge_at(&cx, EId(12_288), CommitSeq(2))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .entry,
+                edge(12_288, 3, 12_288, 1, None)
+            );
+            drop(view);
+            assert_eq!(pool.used(), 0);
+        }
+        // A saturated table cannot exempt repeated or colliding IDs. The
+        // original memory refusal survives until the exact validator fits.
+        assert!(matches!(
+            store
+                .open_buffered_root_with_history_counts(&cx, root, pool.clone(), limits, 32)
+                .await,
+            Err(BufferedReadError::Memory(
+                MemoryError::ResourceExhausted { .. }
+            ))
+        ));
+        let roomy = MemoryPool::new(5 * 1024 * 1024, 0).unwrap();
+        let mut saturated = store
+            .open_buffered_root_with_history_counts(&cx, root, roomy.clone(), limits, 32)
+            .await
+            .unwrap();
+        assert_eq!(
+            saturated
+                .edge_at(&cx, EId(1), CommitSeq(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .entry,
+            edge(1, 3, 1, 1, Some(2))
+        );
+        drop(saturated);
+        assert_eq!(roomy.used(), 0);
+        let short = BufferedReadLimits {
+            max_source_bytes: limits.max_source_bytes - 1,
+            ..limits
+        };
+        assert!(matches!(
+            store
+                .open_buffered_root_with_history_counts(&cx, root, pool.clone(), short, 32768)
+                .await,
+            Err(BufferedReadError::Limit {
+                resource: "buffered source bytes",
+                ..
+            })
+        ));
+        let tiny = store
+            .open_buffered_root_with_history_counts(&cx, root, pool.clone(), limits, 31)
+            .await;
+        assert!(matches!(
+            tiny,
+            Err(BufferedReadError::Limit {
+                requested: 32,
+                limit: 31,
+                ..
+            })
+        ));
+        // Replace a counted file by another well-formed block: the prepass
+        // must authenticate the expected ObjectId before trusting its IDs.
+        std::fs::copy(store.path(replacement), store.path(first)).unwrap();
+        assert!(matches!(
+            store
+                .open_buffered_root_with_history_counts(&cx, root, pool.clone(), limits, 32768)
+                .await,
+            Err(BufferedReadError::Store(_))
+        ));
         assert_eq!(pool.used(), 0);
     });
 }

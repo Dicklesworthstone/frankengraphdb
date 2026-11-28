@@ -4708,6 +4708,7 @@ impl<'a> Parser<'a> {
             && deferred.is_none()
             && (((aggregate || body_aggregate) && self.is_word("RETURN"))
                 || self.is_word("UNWIND")
+                || self.is_word("FILTER")
                 || before_call
                 || before_existence);
         if aggregate
@@ -4717,7 +4718,7 @@ impl<'a> Parser<'a> {
             && !before_call
             && !before_existence
             && !before_write
-            && !(kind.is_none() && self.is_word("UNWIND"))
+            && !(kind.is_none() && (self.is_word("UNWIND") || self.is_word("FILTER")))
             && !self.implicit_withs.contains(&self.current.at)
         {
             return Err(expected(

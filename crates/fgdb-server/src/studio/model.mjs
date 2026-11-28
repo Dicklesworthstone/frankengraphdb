@@ -58,9 +58,24 @@ export function validateResult(result) {
   if (result.columns.length > 256 || !result.columns.every(x => typeof x === 'string')) throw new Error('Invalid result columns.');
   if (result.rows.length > LIMITS.rows) throw new Error('Result exceeds 10,000 rows. Add a LIMIT before sending it to Studio.');
   let cells = 0;
+  const compact = ids => {
+    if (!Array.isArray(ids)) throw new Error('Invalid graph identity list.');
+    cells += ids.length;
+    if (cells > LIMITS.cells) throw new Error('Result exceeds the browser value bounds.');
+    for (const id of ids) if (!identity(id)) throw new Error('Invalid graph identity in result.');
+  };
   const visit = (cell, depth) => {
     if (++cells > LIMITS.cells || depth > 32 || !cell || typeof cell.type !== 'string') throw new Error('Result exceeds the browser value bounds or contains an invalid cell.');
-    if (cell.type === 'list') {
+    if (cell.type === 'vertex' || cell.type === 'edge') {
+      if (!identity(cell.value)) throw new Error('Invalid graph identity in result.');
+    } else if (cell.type === 'vertices' || cell.type === 'edges') {
+      compact(cell.value);
+    } else if (cell.type === 'path') {
+      const path = cell.value;
+      if (!Array.isArray(path?.nodes) || !Array.isArray(path?.edges) || path.nodes.length !== path.edges.length + 1) throw new Error('Invalid path cell.');
+      compact(path.nodes);
+      compact(path.edges);
+    } else if (cell.type === 'list') {
       if (!Array.isArray(cell.value)) throw new Error('Invalid list cell.');
       for (const item of cell.value) visit(item, depth + 1);
     } else if (cell.type === 'map') {
@@ -101,13 +116,53 @@ export function csv(result) {
   return [result.columns.map(field).join(','), ...result.rows.map(row => row.map(cellText).map(field).join(','))].join('\r\n');
 }
 function identity(value) { return typeof value === 'string' && /^(0|[1-9]\d{0,38})$/.test(value) && BigInt(value) <= (1n << 128n) - 1n; }
+// Each map is a separate projection scope. A relationship can only take its
+// endpoints from named siblings in that same map (or the same top-level row).
+export function* projectionRecords(result, visitValue) {
+  const columns = new Map(result.columns.map((name, i) => [name, i]));
+  function* nested(cell) {
+    if (cell.type === 'list') {
+      for (const item of cell.value) yield* nested(item);
+    } else if (cell.type === 'map') {
+      const fields = cell.value;
+      for (const item of Object.values(fields)) yield* nested(item);
+      if (fields.node?.type === 'vertex' || fields.source?.type === 'vertex' ||
+          fields.target?.type === 'vertex' || fields.relationship?.type === 'edge') {
+        yield name => Object.hasOwn(fields, name) ? fields[name] : undefined;
+      }
+    } else {
+      visitValue?.(cell);
+    }
+  }
+  for (const row of result.rows) {
+    for (const cell of row) yield* nested(cell);
+    yield name => row[columns.get(name)];
+  }
+}
+
+export function typedProperties(result, id, kind) {
+  if (!result) return {};
+  const aliases = kind === 'node' ? ['node', 'source', 'target'] : ['relationship'];
+  for (const get of projectionRecords(result)) {
+    for (const alias of aliases) {
+      const entity = get(alias), properties = get(alias + '_properties');
+      if (entity?.type === (kind === 'node' ? 'vertex' : 'edge') && entity.value === id && properties?.type === 'map') {
+        return properties.value;
+      }
+    }
+  }
+  return {};
+}
+
 export function extractGraph(result, comparisonIndex) {
   validateResult(result);
   const nodes = new Map(), edges = new Map(), unresolved = new Set();
+  // Endpoint evidence must survive canvas clipping. The comparison index
+  // uses this same evidence to count and check all returned relationships.
+  const endpoints = comparisonIndex?.edges ?? new Map();
+  const observeEdgeId = id => { if (!endpoints.has(id)) unresolved.add(id); };
   let omittedNodes = 0, omittedEdges = 0;
-  const index = new Map(result.columns.map((name, i) => [name, i]));
   const addNode = (id, labels, properties) => {
-    if (!identity(id)) throw new Error('Invalid vertex identity in result.');
     comparisonIndex?.nodes.add(id);
     let node = nodes.get(id);
     if (!node) {
@@ -126,10 +181,9 @@ export function extractGraph(result, comparisonIndex) {
     return node;
   };
   const addEdge = (id, source, target, directed, label = '', properties = null) => {
-    if (!identity(id) || !identity(source) || !identity(target)) throw new Error('Invalid relationship identity in result.');
     addNode(source); addNode(target);
     const old = edges.get(id);
-    const previous = comparisonIndex?.edges.get(id) ?? old;
+    const previous = endpoints.get(id);
     if (previous) {
       const same = previous.source === source && previous.target === target;
       const reversed = previous.source === target && previous.target === source;
@@ -137,40 +191,35 @@ export function extractGraph(result, comparisonIndex) {
         throw new Error('A relationship has inconsistent endpoints in this result.');
       }
     }
-    // Keep only endpoint evidence for comparison edges outside the draw limit.
-    if (comparisonIndex && (!previous || (directed && !previous.directed))) {
-      comparisonIndex.edges.set(id, { source, target, directed });
-    }
+    if (!previous || (directed && !previous.directed)) endpoints.set(id, { source, target, directed });
+    unresolved.delete(id);
     if (old) {
-      if (directed && !old.directed) Object.assign(old, { source, target, directed, label, properties: properties || Object.create(null) });
-      unresolved.delete(id);
+      if (directed) {
+        Object.assign(old, { source, target, directed });
+        if (label) old.label = label;
+        if (properties) old.properties = properties;
+      }
       return;
     }
     if (!nodes.has(source) || !nodes.has(target) || edges.size >= LIMITS.edges) { omittedEdges++; return; }
     edges.set(id, { id, source, target, directed, label, properties: properties || Object.create(null) });
-    unresolved.delete(id);
   };
   const visit = cell => {
     switch (cell.type) {
       case 'vertex': addNode(cell.value); break;
-      case 'edge': if (identity(cell.value)) unresolved.add(cell.value); else throw new Error('Invalid edge identity.'); break;
+      case 'edge': observeEdgeId(cell.value); break;
       case 'vertices': for (const id of cell.value) addNode(id); break;
-      case 'edges': for (const id of cell.value) { if (!identity(id)) throw new Error('Invalid edge identity.'); unresolved.add(id); } break;
+      case 'edges': for (const id of cell.value) observeEdgeId(id); break;
       case 'path': {
         const path = cell.value;
-        if (!Array.isArray(path?.nodes) || !Array.isArray(path?.edges) || path.nodes.length !== path.edges.length + 1) throw new Error('Invalid path cell.');
         for (const id of path.nodes) addNode(id);
         // The path protocol records traversal order, NOT stored edge orientation.
         for (let i = 0; i < path.edges.length; i++) addEdge(path.edges[i], path.nodes[i], path.nodes[i + 1], false);
         break;
       }
-      case 'list': for (const child of cell.value) visit(child); break;
-      case 'map': for (const child of Object.values(cell.value)) visit(child); break;
     }
   };
-  for (const row of result.rows) {
-    for (const cell of row) visit(cell);
-    const get = name => row[index.get(name)];
+  for (const get of projectionRecords(result, visit)) {
     for (const prefix of ['source', 'target', 'node']) {
       const cell = get(prefix);
       if (cell?.type === 'vertex') addNode(cell.value, plain(get(prefix + '_labels')), plain(get(prefix + '_properties')));
@@ -179,17 +228,17 @@ export function extractGraph(result, comparisonIndex) {
     // co-occurring vertex/edge cells are not evidence of an adjacency.
     if (get('source')?.type === 'vertex' && get('target')?.type === 'vertex' && get('relationship')?.type === 'edge') {
       addEdge(get('relationship').value, get('source').value, get('target').value, true,
-        cellText(get('relationship_type')), plain(get('relationship_properties')));
+        get('relationship_type')?.type === 'text' ? get('relationship_type').value : '',
+        get('relationship_properties')?.type === 'map' ? plain(get('relationship_properties')) : null);
     }
   }
   for (const edge of edges.values()) {
     nodes.get(edge.source).degree++;
     if (edge.source !== edge.target) nodes.get(edge.target).degree++;
-    unresolved.delete(edge.id);
   }
   const warnings = [];
   if (omittedNodes || omittedEdges) warnings.push(`Canvas capped at ${LIMITS.nodes} nodes / ${LIMITS.edges} relationships. The table and JSON retain the complete received result.`);
-  if (unresolved.size) warnings.push(`${unresolved.size} relationship IDs have no endpoints. Return source, relationship, target to draw directed connections.`);
+  if (unresolved.size) warnings.push(`${unresolved.size} relationship ${unresolved.size === 1 ? 'ID has' : 'IDs have'} no endpoints. Return source, relationship, target to draw directed connections.`);
   if ([...edges.values()].some(edge => !edge.directed)) warnings.push('Path connections show traversal adjacency; stored direction is not supplied.');
   return { nodes: [...nodes.values()], edges: [...edges.values()], warnings };
 }
