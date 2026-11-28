@@ -189,6 +189,9 @@ fn requested_cuts(
     resolver: Option<&PinnedTzdb>,
     cx: &QueryCx,
 ) -> Result<Vec<Option<CommitSeq>>, Failure> {
+    if let Some(marker) = options.at_revision {
+        return Ok(vec![Some(marker.commit_seq)]);
+    }
     match command {
         "query" if options.weighted_path.enabled() => Ok(vec![options.weighted_path.as_of()]),
         "query" if options.fnx_call => Ok(vec![options.fnx.as_of()]),
@@ -257,21 +260,24 @@ pub(super) async fn discover(
     let opened = if options.buffered.enabled() {
         async {
             let (pool, limits) = options.buffered.admission(options.budget.policy())?;
-            let publication = Database::open_buffered_publication_with_vfs(
-                open_cx,
-                asupersync::fs::UnixVfs::new(),
-                &options.db,
-                keys,
-                pool,
-                limits,
-            )
-            .await
-            .map_err(|error| {
+            let vfs = asupersync::fs::UnixVfs::new();
+            let selected = match options.at_revision {
+                Some(at) => Database::open_buffered_publication_containing_revision(
+                    open_cx, vfs, &options.db, keys, pool, limits, at,
+                ).await,
+                None => Database::open_buffered_publication_with_vfs(
+                    open_cx, vfs, &options.db, keys, pool, limits,
+                ).await.map(Some),
+            };
+            let publication = selected.map_err(|error| {
                 catalog_unreadable = matches!(
                     error,
                     fgdb::BufferedOpenError::Memory(_) | fgdb::BufferedOpenError::Read(_)
                 );
                 super::buffered::open_failure(error)
+            })?.ok_or_else(|| {
+                catalog_unreadable = true;
+                Failure::coded(refusal::Code::NotFound, "unknown recorded branch revision")
             })?;
             let view = publication.symbol_catalog(open_cx).await.map_err(|error| {
                 catalog_unreadable = true;

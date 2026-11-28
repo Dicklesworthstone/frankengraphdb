@@ -200,12 +200,17 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         |(lowered, derived)| (lowered.text(), derived),
     );
     let native = PreparedNativeRead::prepare(text, params, options).map_err(execution_failure)?;
+    if options.at_revision.is_some() {
+        native
+            .check_branch_revision_read()
+            .map_err(execution_failure)?;
+    }
     let (pattern, as_of) = match native {
         PreparedNativeRead::Pattern(template) => (
             template
                 .bind_parameters(params)
                 .map_err(execution_failure)?,
-            None,
+            options.at_revision.map(|marker| marker.commit_seq),
         ),
         PreparedNativeRead::TemporalPattern(template) => {
             let bound = template

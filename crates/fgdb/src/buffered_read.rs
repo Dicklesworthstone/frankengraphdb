@@ -622,7 +622,47 @@ impl<V: Vfs + Clone> Database<V> {
         pool: MemoryPool,
         limits: BufferedReadLimits,
     ) -> Result<BufferedReadPublication<V>, BufferedOpenError> {
-        let path = path.as_ref();
+        Self::select_buffered_publication(cx, vfs, path.as_ref(), keys, pool, limits, None)
+            .await
+            .map(|(publication, _)| publication)
+    }
+
+    /// Select one bounded current publication and prove it contains a specific
+    /// historical branch marker. Returns `None` if the complete verified chain
+    /// has no such coordinate update. The returned publication has its own
+    /// current frontier; use `marker.commit_seq` for both catalog and reads.
+    /// A lagging checkpoint or a damaged captured suffix still refuses.
+    pub async fn open_buffered_publication_containing_revision(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+        marker: fgdb_types::MarkerRef,
+    ) -> Result<Option<BufferedReadPublication<V>>, BufferedOpenError> {
+        let (publication, matched) = Self::select_buffered_publication(
+            cx,
+            vfs,
+            path.as_ref(),
+            keys,
+            pool,
+            limits,
+            Some(marker),
+        )
+        .await?;
+        Ok(matched.then_some(publication))
+    }
+
+    async fn select_buffered_publication(
+        cx: &CommitCx,
+        vfs: V,
+        path: &Path,
+        keys: DatabaseKeys,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+        marker: Option<fgdb_types::MarkerRef>,
+    ) -> Result<(BufferedReadPublication<V>, bool), BufferedOpenError> {
         require_database_dir(cx, &vfs, path).await?;
         // Like the resident read view's fast path, this takes no writer lease
         // and writes nothing (fgdb-xxxnb): the committed chain is scanned
@@ -657,9 +697,24 @@ impl<V: Vfs + Clone> Database<V> {
             .map_or(CommitSeq::ORIGIN, |(_, selection)| {
                 selection.root().published_at
             });
-        let scan = CommitCoordinator::scan_committed_prefix(cx, &vfs, path, requested)
-            .await
-            .map_err(OpenError::Commit)?;
+        let (scan, matched) = match marker {
+            Some(at) => {
+                CommitCoordinator::scan_committed_branch_prefix(
+                    cx,
+                    &vfs,
+                    path,
+                    requested,
+                    crate::GRAPH,
+                    crate::BRANCH,
+                    at,
+                )
+                .await
+            }
+            None => CommitCoordinator::scan_committed_prefix(cx, &vfs, path, requested)
+                .await
+                .map(|scan| (scan, false)),
+        }
+        .map_err(OpenError::Commit)?;
         let (record, selection) = resolved.ok_or_else(|| OpenError::SlotDisagreesWithStream {
             path: path.to_path_buf(),
             slot_manifest: manifest.0,
@@ -682,7 +737,7 @@ impl<V: Vfs + Clone> Database<V> {
         } else {
             BufferedReadSource::Selected(Box::new(selection))
         };
-        Ok(BufferedReadPublication {
+        Ok((BufferedReadPublication {
             namespace: keys.namespace,
             published: PublishedRead {
                 store,
@@ -692,6 +747,6 @@ impl<V: Vfs + Clone> Database<V> {
                 schema: checkpoint.schema,
             },
             source,
-        })
+        }, matched))
     }
 }

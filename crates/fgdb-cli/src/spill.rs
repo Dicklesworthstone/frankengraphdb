@@ -449,6 +449,11 @@ pub(super) fn prepare_buffered(options: &Options) -> Result<PreparedBuffered, Fa
         |(lowered, derived)| (lowered.text(), derived),
     );
     let prepared = PreparedNativeRead::prepare(text, params, options).map_err(execution_failure)?;
+    if options.at_revision.is_some() {
+        prepared
+            .check_branch_revision_read()
+            .map_err(execution_failure)?;
+    }
     if options.fnx.is_sealed() {
         if is_aggregate(&prepared) {
             return super::fnx::prepare_buffered_sealed_aggregate(options, &prepared, params)
@@ -460,11 +465,19 @@ pub(super) fn prepare_buffered(options: &Options) -> Result<PreparedBuffered, Fa
     if is_aggregate(&prepared) {
         prepared
             .prepare_buffered_aggregate(params)
+            .and_then(|plan| match options.at_revision {
+                Some(at) => plan.at_snapshot(at.commit_seq),
+                None => Ok(plan),
+            })
             .map(|aggregate| PreparedBuffered::Aggregate(Box::new(aggregate)))
             .map_err(execution_failure)
     } else {
         prepared
             .prepare_buffered_order(params)
+            .and_then(|plan| match options.at_revision {
+                Some(at) => plan.at_snapshot(at.commit_seq),
+                None => Ok(plan),
+            })
             .map(|order| PreparedBuffered::Ordered(Box::new(order)))
             .map_err(execution_failure)
     }

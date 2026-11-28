@@ -604,6 +604,21 @@ impl PreparedNativeRead {
 }
 
 impl PreparedBufferedAggregate {
+    /// Pin a physical definition with no temporal selector to a host-selected
+    /// revision. Every child stage shares this cut; a statement that already
+    /// specifies a temporal cut cannot be rebound by the host.
+    pub fn at_snapshot(mut self, at: CommitSeq) -> Result<Self> {
+        if self.as_of.is_some() {
+            return Err(NativeAggregateSpoolError::Prepare(Box::new(
+                QueryError::Unsupported {
+                    diagnostics: vec!["the physical plan already selects an exact snapshot".into()],
+                },
+            )));
+        }
+        self.as_of = Some(at);
+        Ok(self)
+    }
+
     /// Number of external relational barriers before aggregate reduction.
     /// Hosts include these append-only passes in scratch metadata admission.
     pub fn stage_count(&self) -> usize {

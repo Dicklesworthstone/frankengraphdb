@@ -289,23 +289,32 @@ impl crate::BranchRevision {
             .map_or((text, params), |(text, params)| (text.text(), params));
         let prepared = PreparedNativeRead::prepare(text, params, resolver)
             .map_err(|error| error.original_text(0, lowered.as_ref().map(|(text, _)| text)))?;
-        if prepared.has_procedure_call() {
+        prepared.check_branch_revision_read()?;
+        prepared.execute_in_view_at_seq(&self.view, cx, params, policy, self.marker.commit_seq)
+    }
+}
+
+impl crate::PreparedNativeRead {
+    /// Admit a statement for execution at one externally authenticated branch
+    /// revision. Temporal selectors or procedures could select a different or
+    /// unproved source. The caller still binds every physical source to the
+    /// marker's sequence before reading.
+    pub fn check_branch_revision_read(&self) -> Result<(), QueryError> {
+        if self.has_procedure_call() {
             return Err(QueryError::Unsupported {
                 diagnostics: vec!["procedure sources are unavailable on recorded branch revisions".into()],
             });
         }
-        match prepared {
-            PreparedNativeRead::TemporalPattern(_)
-            | PreparedNativeRead::TemporalSet(_)
-            | PreparedNativeRead::TemporalAggregate(_) => Err(QueryError::Unsupported {
+        match self {
+            Self::TemporalPattern(_)
+            | Self::TemporalSet(_)
+            | Self::TemporalAggregate(_) => Err(QueryError::Unsupported {
                 diagnostics: vec!["the recorded branch revision already selects an exact snapshot".into()],
             }),
-            PreparedNativeRead::Pattern(_)
-            | PreparedNativeRead::Aggregate(_)
-            | PreparedNativeRead::PipelineAggregate(_)
-            | PreparedNativeRead::Set(_) => {
-                prepared.execute_in_view_at_seq(&self.view, cx, params, policy, self.marker.commit_seq)
-            }
+            Self::Pattern(_)
+            | Self::Aggregate(_)
+            | Self::PipelineAggregate(_)
+            | Self::Set(_) => Ok(()),
         }
     }
 }

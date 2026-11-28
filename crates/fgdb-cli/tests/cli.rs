@@ -2446,6 +2446,92 @@ fn revision_read_opens_beside_writer_and_reuses_the_historical_catalog() {
 }
 
 #[test]
+fn buffered_revision_keeps_one_cut_for_stream_sort_set_and_aggregate() {
+    let fixture = Fixture::new("buffered-branch-read");
+    assert_eq!(
+        succeeded(&fixture.robot("create", &["--persist-bindings"]), "created"),
+        1
+    );
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &["CREATE (:Person {id:10})"]),
+            "written"
+        ),
+        2
+    );
+    let revision = verified_head(&fixture, 2);
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &["CREATE (:Person {id:20})"]),
+            "written"
+        ),
+        3
+    );
+    assert_eq!(
+        succeeded(&fixture.discovered("schema", &["--label", "Later"]), "rows"),
+        4
+    );
+    let current = verified_head(&fixture, 4);
+    let scratch = fixture.dir.join("spill");
+    std::fs::create_dir(&scratch).unwrap();
+    let before = directory_bytes(&fixture.db());
+    for (text, spill) in [
+        ("MATCH (v:Person) RETURN v, v.id", false),
+        ("MATCH (v:Person) RETURN v.id AS x ORDER BY x DESC", true),
+        (
+            "MATCH (v:Person) RETURN v.id AS x UNION ALL MATCH (w:Person) RETURN w.id AS x",
+            true,
+        ),
+        ("MATCH (v:Person) RETURN count(v) AS total", true),
+    ] {
+        for (marker, seq) in [(&revision, 2), (&current, 4)] {
+            let resident = fixture.discovered("query", &["--at-revision", marker, text]);
+            assert_eq!(succeeded(&resident, "rows"), seq);
+            let mut args = vec!["--buffered", "--at-revision", marker.as_str()];
+            if spill {
+                args.extend(["--spill-dir", scratch.to_str().unwrap()]);
+            }
+            args.push(text);
+            let cold = fixture.discovered("query", &args);
+            assert_eq!(succeeded(&cold, "rows"), seq);
+            assert_eq!(rows(&cold), rows(&resident));
+            assert!(std::fs::read_dir(&scratch).unwrap().next().is_none());
+        }
+    }
+    for text in [
+        "MATCH (v:Later) RETURN v",
+        "MATCH (v) FOR SYSTEM_TIME AS OF SEQ 4 RETURN v",
+    ] {
+        refused(
+            &fixture.discovered("query", &["--at-revision", &revision, "--buffered", text]),
+            3,
+            "query",
+        );
+    }
+    let forged = format!("2@{}", current.split_once('@').unwrap().1);
+    let miss = fixture.discovered(
+        "query",
+        &["--buffered", "--at-revision", &forged, "MATCH (n) RETURN n"],
+    );
+    refused(&miss, 3, "query");
+    assert!(terminal(&miss).contains(r#""code":"not_found""#));
+    let capped = fixture.discovered(
+        "query",
+        &[
+            "--buffered",
+            "--buffer-memory-bytes",
+            "1",
+            "--at-revision",
+            &revision,
+            "MATCH (n) RETURN n",
+        ],
+    );
+    assert!(!capped.status.success());
+    assert!(rows(&capped).is_empty());
+    assert_eq!(directory_bytes(&fixture.db()), before);
+}
+
+#[test]
 fn local_writes_and_transactions_check_the_exact_verified_marker() {
     let fixture = Fixture::new("branch-head");
     assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
