@@ -41,6 +41,7 @@ USAGE:
                   [--max-snapshot-records <n>] [--max-result-rows <n>]
                   [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
                   [--compact-interval-seconds <n>] [--scrub-interval-seconds <n>]
+                  [--capsule-donor <native-database-directory>]
                   [--beacon-checkpoint-interval-seconds <n>]
                   [--subscription-coalesce-ticks <n>]
                   [--label <name>=<u64>]... [--relation <name>=<u64>]... [--property <name>=<u64>]...
@@ -141,6 +142,13 @@ latency pacing. Existing read snapshots and the committed frontier survive
 healthy maintenance. Outcomes, including lost-object counts, go to stderr;
 lost data or ambiguous maintenance publication uses supervised recovery.
 Drain stops new maintenance and waits for an admitted operation to finish.
+
+--capsule-donor opts one database into a full local capsule scrub and history
+replay at startup and whenever its writer needs authoritative recovery. It
+reads a mounted native donor only for lost objects named in the local history.
+The donor must retain those objects with compatible keys. A missing or invalid
+required donor capsule keeps the database unavailable. Verified repairs made
+before a failure remain on disk and are reused on restart.
 
 --tls-cert-file and --tls-key-file must be supplied together. They enable
 TLS 1.3 on EVERY configured listener, with no plaintext fallback. Supply a
@@ -295,6 +303,7 @@ struct DatabaseOptions {
     strata_ecs: bool,
     issuer_key_file: Option<PathBuf>,
     query_scratch_dir: Option<PathBuf>,
+    capsule_donor: Option<PathBuf>,
     buffered_reads_memory_bytes: Option<NonZeroUsize>,
     policy_epoch: u64,
     write_relation: u64,
@@ -601,6 +610,7 @@ impl ServeOptions {
                         strata_ecs: false,
                         issuer_key_file: None,
                         query_scratch_dir: None,
+                        capsule_donor: None,
                         buffered_reads_memory_bytes: None,
                         policy_epoch: 1,
                         write_relation: 1,
@@ -634,6 +644,9 @@ impl ServeOptions {
                         }
                         "--query-scratch-dir" if db.query_scratch_dir.is_none() => {
                             db.query_scratch_dir = Some(PathBuf::from(value(args, &mut at, flag)?));
+                        }
+                        "--capsule-donor" if db.capsule_donor.is_none() => {
+                            db.capsule_donor = Some(PathBuf::from(value(args, &mut at, flag)?));
                         }
                         "--buffered-reads-memory-bytes"
                             if db.buffered_reads_memory_bytes.is_none() =>
@@ -901,6 +914,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         config.write_relation = RelationId(db.write_relation);
         config.symbols = db.symbols;
         config.ordered_reads = db.query_scratch_dir.map(OrderedReadConfig::new);
+        config.capsule_donor = db.capsule_donor;
         config.buffered_reads = db
             .buffered_reads_memory_bytes
             .map(|bytes| BufferedReadConfig::new(bytes.get()));
@@ -2318,7 +2332,10 @@ mod tests {
         };
         let defaults = parse(&[]).unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(defaults.databases[0].maintenance_intervals, [None; 3]);
+        assert!(defaults.databases[0].capsule_donor.is_none());
         let configured = parse(&[
+            "--capsule-donor",
+            "replica-backup",
             "--compact-interval-seconds",
             "300",
             "--scrub-interval-seconds",
@@ -2335,6 +2352,13 @@ mod tests {
             "90",
         ])
         .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            configured.databases[0].capsule_donor.as_deref(),
+            Some(std::path::Path::new("replica-backup"))
+        );
+        assert!(configured.databases[1].capsule_donor.is_none());
+        assert!(parse(&["--capsule-donor"]).is_err());
+        assert!(parse(&["--capsule-donor", "a", "--capsule-donor", "b"]).is_err());
         assert_eq!(
             configured.databases[0].maintenance_intervals,
             [

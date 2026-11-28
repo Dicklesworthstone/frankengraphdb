@@ -1237,6 +1237,61 @@ fn host_maintenance_admission_tracks_waiters_cancellation_and_drain() {
 }
 
 #[test]
+fn mounted_donor_reopens_the_served_generation_after_scrub_finds_a_lost_capsule() {
+    let ((), report) = run_async_under_lab(0x79a0_0143, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let donor = std::env::temp_dir().join(format!("fgdb-server-donor-{}", std::process::id()));
+        let (server, _, path) = served_with_config(&root, "mounted-donor", |config| {
+            config.capsule_donor = Some(donor.clone());
+        })
+        .await;
+        let db = &server.databases["test"];
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(9))
+            .await
+            .unwrap();
+        let (_, old_generation) = db.db.read_view(&root).await.unwrap();
+        let prefix = std::fs::read(path.join("commits.log")).unwrap();
+        let capsule = std::fs::read_dir(path.join("capsules"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::create_dir_all(donor.join("capsules")).unwrap();
+        let copy = donor.join("capsules").join(capsule.file_name().unwrap());
+        std::fs::rename(&capsule, &copy).unwrap();
+        let summary = server.scrub_database(&root, "test").await.unwrap();
+        assert_eq!(summary.lost.len(), 1);
+        assert_eq!(settled(db).await, DatabaseStatus::Ready { generation: 2 });
+        assert!(old_generation.check().is_err());
+        let (view, _) = db.db.read_view(&root).await.unwrap();
+        assert_eq!(view.frontier(), CommitSeq(1));
+        assert!(view.vertex(VId(9)).unwrap().is_some());
+        assert_eq!(
+            std::fs::read(&capsule).unwrap(),
+            std::fs::read(copy).unwrap()
+        );
+        assert_eq!(std::fs::read(path.join("commits.log")).unwrap(), prefix);
+        assert_eq!(
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), vertex(10))
+                .await
+                .unwrap(),
+            CommitSeq(2)
+        );
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn host_scrub_loss_fences_pinned_readers_and_uses_authoritative_recovery() {
     let ((), report) = run_async_under_lab(0x79a0_0012, |root| async move {
         let (server, token, path) = served(&root, "host-scrub-loss").await;

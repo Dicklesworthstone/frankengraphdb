@@ -251,6 +251,10 @@ pub struct DatabaseConfig {
     /// Retained read-acceleration budgets for this served database. Other
     /// databases have independent owners; recovery preserves this policy.
     pub read_cache_limits: fgdb::ReadCacheLimits,
+    /// Optional mounted Chronicle database whose native capsules can repair
+    /// lost objects during startup and supervised recovery. Only the local
+    /// verified marker history selects objects. Request bodies cannot set it.
+    pub capsule_donor: Option<std::path::PathBuf>,
     /// Operator-declared, commit-maintained text/vector indexes. Definitions
     /// are restored from authenticated checkpoints with bounded delta catch-up,
     /// or rebuilt before startup and authoritative recovery admit readers.
@@ -308,6 +312,7 @@ impl DatabaseConfig {
             subscription_max_coalesced_ticks: NonZeroUsize::MIN,
             ordered_reads: None,
             buffered_reads: None,
+            capsule_donor: None,
         }
     }
 
@@ -364,6 +369,7 @@ pub enum ServerError {
     DuplicateDatabase(String),
     InvalidDatabaseName,
     Open(fgdb::OpenError),
+    CapsuleRecovery(fgdb::CapsuleRecoveryError),
     Catalog(fgdb::ReadError),
     Symbols(SymbolConflict),
     BufferedSymbols,
@@ -394,6 +400,7 @@ impl core::fmt::Display for ServerError {
                 f.write_str("a database name must be 1..=128 bytes of [A-Za-z0-9_.-]")
             }
             Self::Open(error) => write!(f, "cannot open database: {error}"),
+            Self::CapsuleRecovery(error) => write!(f, "cannot recover served database: {error}"),
             Self::Catalog(error) => write!(f, "cannot read database symbol catalog: {error}"),
             Self::Symbols(error) => write!(f, "cannot configure database symbols: {error}"),
             Self::BufferedSymbols => f.write_str(
@@ -603,9 +610,20 @@ impl Server {
             .transpose()?;
         let namespace = config.keys.namespace.0;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let mut db = Database::open(&contexts.commit(), path, config.keys)
+        let mut db = match config.capsule_donor.as_deref() {
+            Some(donor) => Database::open_with_capsule_donor(
+                &contexts.commit(),
+                &contexts.repl(),
+                path,
+                config.keys,
+                donor,
+            )
             .await
-            .map_err(ServerError::Open)?;
+            .map_err(ServerError::CapsuleRecovery)?,
+            None => Database::open(&contexts.commit(), path, config.keys)
+                .await
+                .map_err(ServerError::Open)?,
+        };
         if let Some(expected) = config.catalog_frontier {
             let actual = db.frontier().map_err(ServerError::Catalog)?;
             if expected != actual {
@@ -656,6 +674,7 @@ impl Server {
             Arc::clone(&commits),
             Arc::clone(&subscriptions),
             beacon,
+            config.capsule_donor,
         )?;
         self.databases.insert(
             config.name,
