@@ -226,6 +226,10 @@ impl Database<asupersync::fs::UnixVfs> {
         donor: &std::path::Path,
     ) -> Result<Self, CapsuleRecoveryError> {
         let vfs = asupersync::fs::UnixVfs::new();
+        let ceiling =
+            std::num::NonZeroUsize::new(fgdb_chronicle::capsule::MAX_CAPSULE_CONTAINER_BYTES_V1)
+                .expect("native capsule framing has a nonempty header");
+        let mut verification = Vec::new();
         match crate::require_database_dir(cx, &vfs, path).await {
             Ok(()) => {}
             Err(
@@ -255,11 +259,48 @@ impl Database<asupersync::fs::UnixVfs> {
                 if !journal.file_type().is_file() {
                     return Err(error.into());
                 }
-                let slot = fgdb_chronicle::RootStore::with_vfs(vfs.clone(), path)
-                    .current(cx)
-                    .await
-                    .map_err(crate::OpenError::Slot)?;
+                let root = fgdb_chronicle::RootStore::with_vfs(vfs.clone(), path);
+                let slot = root.current(cx).await.map_err(crate::OpenError::Slot)?;
                 crate::validate_plain_slot(&slot, &keys, path)?;
+                let chain = fgdb_chronicle::CommitCoordinator::scan_committed_chain(cx, &vfs, path)
+                    .await
+                    .map_err(crate::OpenError::from)?;
+                let Some(store) = crate::open_block_store_for_read(cx, &vfs, path, &keys).await?
+                else {
+                    return Err(error.into());
+                };
+                if crate::select_checkpoint(cx, &chain, &store, &root, &keys, path)
+                    .await?
+                    .is_none()
+                {
+                    return Err(error.into());
+                }
+                if slot.format_minor == 0 {
+                    // This older opener has no DEK commitment. Authenticate
+                    // a locally named donor capsule before creating even the
+                    // replacement directory. An empty legacy root has no such
+                    // evidence and must remain untouched.
+                    let Some(first) = chain.entries().first() else {
+                        return Err(error.into());
+                    };
+                    let fgdb_chronicle::marker::EffectSource::Local {
+                        capsule_ref: object_id,
+                        ..
+                    } = first.marker.effect_source;
+                    fgdb_chronicle::commit::donor::read_capsule(
+                        repl,
+                        donor,
+                        &keys.capsule_keys(),
+                        object_id,
+                        ceiling,
+                        &mut verification,
+                    )
+                    .await
+                    .map_err(|source| CapsuleRecoveryError::Capsule {
+                        object_id,
+                        source: source.into(),
+                    })?;
+                }
             }
             Err(error) => return Err(error.into()),
         }
@@ -279,10 +320,6 @@ impl Database<asupersync::fs::UnixVfs> {
                 path: path.to_path_buf(),
                 missing: "an authenticated published checkpoint for donor recovery",
             })?;
-        let mut verification = Vec::new();
-        let ceiling =
-            std::num::NonZeroUsize::new(fgdb_chronicle::capsule::MAX_CAPSULE_CONTAINER_BYTES_V1)
-                .expect("native capsule framing has a nonempty header");
         use fgdb_chronicle::commit::donor::DonorRepairError;
         coordinator
             .restore_lost_from_donor(cx, repl, donor, ceiling, &mut verification)

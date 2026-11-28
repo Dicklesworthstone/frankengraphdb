@@ -116,6 +116,33 @@ fn mounted_capsule_donor_recovers_only_lost_local_history_across_reopens() {
                 .is_err()
         );
         assert!(!path.join(CAPSULE_DIR).exists());
+        let wrong_identity = DatabaseKeys::new([0xdc; 32], NAMESPACE, [0xd3; 32]);
+        assert!(
+            Database::open_with_capsule_donor(&cx, &repl, &path, wrong_identity, &full_backup)
+                .await
+                .is_err()
+        );
+        assert!(!path.join(CAPSULE_DIR).exists());
+        // A legacy opener carries no DEK commitment. Authenticating an exact
+        // donor object supplies that evidence before recreating the directory.
+        let slot_file = path.join("manifest.root");
+        let mut slots = fs::read(&slot_file).unwrap();
+        for frame in slots.chunks_exact_mut(fgdb_chronicle::root::SLOT_LEN) {
+            if let Ok(mut slot) = fgdb_chronicle::RootSlot::parse(frame) {
+                slot.format_minor = 0;
+                slot.bootstrap.opener_payload_len = 2;
+                slot.bootstrap.opener_payload[2..36].fill(0);
+                frame.copy_from_slice(&slot.serialize());
+            }
+        }
+        fs::write(slot_file, slots).unwrap();
+        let wrong_legacy = DatabaseKeys::new(K_OID, NAMESPACE, [0xdd; 32]);
+        assert!(
+            Database::open_with_capsule_donor(&cx, &repl, &path, wrong_legacy, &full_backup)
+                .await
+                .is_err()
+        );
+        assert!(!path.join(CAPSULE_DIR).exists());
         let whole = Database::open_with_capsule_donor(&cx, &repl, &path, keys(), &full_backup)
             .await
             .unwrap();
