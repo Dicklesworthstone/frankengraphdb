@@ -1228,6 +1228,66 @@ body!(
     }
 );
 
+/// An observed head on the selected database's current branch. A nonempty
+/// head binds both the commit sequence and the verified Chronicle chain hash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchHead {
+    Empty,
+    Recorded {
+        seq: core::num::NonZeroU64,
+        chain_hash: [u8; 32],
+    },
+}
+
+impl BranchHead {
+    fn put(self, out: &mut Out) {
+        match self {
+            Self::Empty => out.u8(0),
+            Self::Recorded { seq, chain_hash } => {
+                out.u8(1);
+                out.u64(seq.get());
+                out.array(&chain_hash);
+            }
+        }
+    }
+
+    fn get(input: &mut In<'_>) -> Result<Self, BodyError> {
+        match input.u8()? {
+            0 => Ok(Self::Empty),
+            1 => Ok(Self::Recorded {
+                seq: core::num::NonZeroU64::new(input.u64()?).ok_or(BodyError::Noncanonical)?,
+                chain_hash: input.array()?,
+            }),
+            _ => Err(BodyError::UnknownTag),
+        }
+    }
+}
+
+/// Execute one native text write under a marker-bound branch-head precondition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecuteHeadWrite {
+    pub expected: BranchHead,
+    pub statement: String,
+    pub parameters: Vec<(String, WireValue)>,
+}
+
+body!(
+    ExecuteHeadWrite,
+    |s, out| {
+        s.expected.put(&mut out);
+        check_len(s.statement.len(), MAX_STATEMENT_BYTES)?;
+        out.text(&s.statement);
+        put_parameters(&mut out, &s.parameters)?;
+    },
+    |input| {
+        ExecuteHeadWrite {
+            expected: BranchHead::get(&mut input)?,
+            statement: input.text(MAX_STATEMENT_BYTES)?,
+            parameters: get_parameters(&mut input)?,
+        }
+    }
+);
+
 /// Select the execution contract of one finite historical result comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffMode {
@@ -2819,6 +2879,47 @@ mod tests {
         body.parameters = vec![("p".into(), deep)];
         assert_eq!(body.encode(), Err(BodyError::TooDeep));
         assert_eq!(crate::FrameKind::ExecuteConditionalWrite as u16, 0x0028);
+    }
+
+    #[test]
+    fn branch_guard_encodes_the_whole_marker_and_refuses_ambiguous_prefixes() {
+        let seq = core::num::NonZeroU64::MAX;
+        for head in [
+            BranchHead::Empty,
+            BranchHead::Recorded {
+                seq,
+                chain_hash: [0xab; 32],
+            },
+        ] {
+            let request = ExecuteHeadWrite {
+                expected: head,
+                statement: "x".into(),
+                parameters: vec![],
+            };
+            let mut bytes = match head {
+                BranchHead::Empty => vec![0],
+                BranchHead::Recorded { .. } => {
+                    let mut bytes = vec![1];
+                    bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+                    bytes.extend_from_slice(&[0xab; 32]);
+                    bytes
+                }
+            };
+            bytes.extend_from_slice(&[0, 0, 0, 1, b'x', 0, 0, 0, 0]);
+            assert_eq!(request.encode().unwrap(), bytes);
+            assert_eq!(ExecuteHeadWrite::decode(&bytes), Ok(request));
+            every_prefix_refuses::<ExecuteHeadWrite>(&bytes);
+            bytes.push(0);
+            assert_eq!(
+                ExecuteHeadWrite::decode(&bytes),
+                Err(BodyError::TrailingBytes)
+            );
+        }
+        assert_eq!(
+            ExecuteHeadWrite::decode(&[1, 0, 0, 0, 0, 0, 0, 0, 0]),
+            Err(BodyError::Noncanonical)
+        );
+        assert_eq!(ExecuteHeadWrite::decode(&[2]), Err(BodyError::UnknownTag));
     }
 
     #[test]

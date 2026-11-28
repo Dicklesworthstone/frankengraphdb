@@ -72,6 +72,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | ROLLBACK_TRANSACTION / TRANSACTION_ROLLED_BACK | 0x0033 / 0x0034 | client / server |
 | TRANSACTION_RESULT_CHUNK / TRANSACTION_RESULT_END | 0x0035 / 0x0036 | server |
 | BEGIN_READ_TRANSACTION | 0x0037 | client |
+| EXECUTE_HEAD_WRITE | 0x0038 | client |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -937,6 +938,16 @@ options. Argument-file batches and prepared JSONL input cannot use this flag.
 Output remains the ordinary versioned write contract; a conflict is a query
 refusal with robot code `conflict` and exit status 3. The caller can read the new
 state and decide whether to issue a new conditional request.
+
+For a marker-bound precondition, the Rust client accepts
+`execute_write_if_head(cx, expected, text, parameters)`. The
+`EXECUTE_HEAD_WRITE` body starts with an empty tag (0) or a recorded tag
+(1, followed by a positive big-endian u64 sequence and the 32 Chronicle
+chain-hash bytes). The ordinary statement text and parameter map follow.
+The server compares both fields while holding the same exclusive writer
+through completion. A nonempty legacy frontier without a recorded head
+refuses even the empty guard. A conflict reveals neither the actual marker
+nor the statement result. The client never downgrades to a sequence check.
 
 For both conditional and unconditional text writes, the remote CLI reports
 `kind: "written"` and the terminal's `outcome`. A published write reports

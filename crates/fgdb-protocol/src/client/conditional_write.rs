@@ -1,7 +1,7 @@
 //! Exact-frontier conditional text writes use the ordinary result protocol.
 
 use super::*;
-use crate::body::ExecuteConditionalWrite;
+use crate::body::{BranchHead, ExecuteConditionalWrite, ExecuteHeadWrite};
 
 impl Client {
     /// Execute one native text write only if the selected database still has
@@ -29,6 +29,55 @@ impl Client {
                 expected_seq,
                 statement,
                 parameters,
+                |names| {
+                    columns = names.to_vec();
+                    Ok(())
+                },
+                |row| {
+                    rows.push(row);
+                    Ok(())
+                },
+            )
+            .await?;
+        Ok(Answer {
+            columns,
+            rows,
+            outcome,
+        })
+    }
+
+    /// Commit a text write only if the selected branch is empty or still
+    /// identifies the exact recorded marker. A stale or legacy unrecorded
+    /// head fails with Conflict before statement execution.
+    pub async fn execute_write_if_head(
+        &mut self,
+        cx: &Cx,
+        expected: BranchHead,
+        statement: &str,
+        mut parameters: Vec<(String, WireValue)>,
+    ) -> Result<Answer, ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let request = self
+            .send(
+                cx,
+                FrameKind::ExecuteHeadWrite,
+                StreamId::CONTROL,
+                &ExecuteHeadWrite {
+                    expected,
+                    statement: statement.to_owned(),
+                    parameters,
+                },
+            )
+            .await?;
+        let mut columns = Vec::new();
+        let mut rows = Vec::new();
+        let outcome = self
+            .finish_conditional_write(
+                cx,
+                request,
                 |names| {
                     columns = names.to_vec();
                     Ok(())
@@ -76,6 +125,17 @@ impl Client {
                 },
             )
             .await?;
+        self.finish_conditional_write(cx, request, on_columns, on_row)
+            .await
+    }
+
+    async fn finish_conditional_write(
+        &mut self,
+        cx: &Cx,
+        request: u64,
+        on_columns: impl FnMut(&[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
+    ) -> Result<Outcome, ClientError> {
         let outcome = self.receive_result(cx, request, on_columns, on_row).await?;
         if matches!(outcome, Outcome::Rows { .. }) {
             return Err(ClientError::Protocol(

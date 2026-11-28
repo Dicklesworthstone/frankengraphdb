@@ -146,6 +146,7 @@ impl Connection {
             | FrameKind::ExecutePreparedBatch
             | FrameKind::ExecuteDiff
             | FrameKind::ExecutePreparedDiff
+            | FrameKind::ExecuteHeadWrite
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::ReleasePrepared => self.phase == Phase::Ready,
             FrameKind::QueryCancel

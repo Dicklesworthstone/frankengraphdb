@@ -252,3 +252,57 @@ fn conditional_write_waiter_cannot_cross_a_recovery_generation() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn head_write_compares_marker_and_sequence_under_the_same_authorized_writer() {
+    let ((), report) = run_async_under_lab(0x1480_00c1, |root| async move {
+        let (server, token, _) = served(&root, "conditional-marker-writes").await;
+        let db = &server.databases["test"];
+        let request = |expected, text: &str| ExecuteHeadWrite {
+            expected,
+            statement: text.into(),
+            parameters: Vec::new(),
+        };
+        let create = request(BranchHead::Empty, "CREATE ()");
+        accepted(write_if_head_framed(&root, db, &token, &create, 4096).await);
+        let marker = db
+            .db
+            .read(&root)
+            .await
+            .unwrap()
+            .branch_head()
+            .unwrap()
+            .unwrap();
+        let seq = core::num::NonZeroU64::new(marker.commit_seq.0).unwrap();
+        let mut other = marker.marker_oid.0;
+        other[31] ^= 1;
+        let wrong = BranchHead::Recorded {
+            seq,
+            chain_hash: other,
+        };
+        for expected in [wrong, BranchHead::Empty] {
+            let mismatch = request(expected, "invalid syntax");
+            let refusal = write_if_head_framed(&root, db, &token, &mismatch, 4096)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(refusal.code, ErrorCode::Conflict);
+            assert_eq!(state(&root, db).await, (CommitSeq(1), 1));
+        }
+        let correct = BranchHead::Recorded {
+            seq,
+            chain_hash: marker.marker_oid.0,
+        };
+        let next = request(correct, "CREATE (n) RETURN 7 AS value");
+        let answer = accepted(write_if_head_framed(&root, db, &token, &next, 4096).await);
+        assert_eq!(answer.rows, [vec![WireValue::Int(7)]]);
+        assert_eq!(state(&root, db).await, (CommitSeq(2), 2));
+        let stale = write_if_head_framed(&root, db, &token, &next, 4096)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(stale.code, ErrorCode::Conflict);
+        assert_eq!(state(&root, db).await, (CommitSeq(2), 2));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
