@@ -3852,3 +3852,193 @@ fn counted_cold_open_admits_overlapping_ranges_and_rechecks_repeated_edge_histor
         assert_eq!(pool.used(), 0);
     });
 }
+
+#[test]
+fn three_level_root_admits_in_a_small_pool_without_weakening_source_or_reference_limits() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        // One complete index, its sixteen leaves, then a tail restating the
+        // very first edge. All three levels must agree with their keyed IDs.
+        let count = fgdb_strata::root_segment::INDEX_REFS * fgdb_strata::root_segment::SEGMENT_REFS;
+        let mut receipts = fgdb_strata::store::PublishReceipts::new();
+        let mut batch = store
+            .publication_batch(&commit, &mut receipts, None)
+            .unwrap();
+        let mut blocks = Vec::new();
+        let mut source = 0;
+        let mut first = None;
+        for at in 0..=count {
+            let retirement = at == count;
+            let id = if retirement { 1 } else { at as u128 + 1 };
+            let bytes = encode_block(
+                0,
+                if retirement { first } else { None },
+                &[edge(id, id, id + 1, 1, retirement.then_some(2))],
+            )
+            .unwrap();
+            source += bytes.len();
+            let block = batch.put_verified(&commit, &bytes, None).await.unwrap();
+            first.get_or_insert(block);
+            blocks.push(BlockRef {
+                block_id: block.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(if retirement { 2 } else { 1 }),
+            });
+        }
+        batch.finish(&commit).await.unwrap();
+        let root = store
+            .put_root_verified(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(2),
+                    blocks,
+                    vertex_patches: Vec::new(),
+                },
+                &mut receipts,
+            )
+            .await
+            .unwrap();
+        drop(receipts);
+        drop(store);
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let bounds = BufferedReadLimits {
+            max_root_bytes: 2 * 1024 * 1024,
+            max_blocks: count + 1,
+            max_source_bytes: source,
+            max_work: 2_000_000,
+            ..limits()
+        };
+        let mut view = store
+            .open_buffered_root(&query, root, pool.clone(), bounds)
+            .await
+            .unwrap();
+        assert_eq!(view.root().blocks.len(), count + 1);
+        let legacy = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(2),
+            partition: 0,
+            published_at: CommitSeq(2),
+            blocks: vec![view.root().blocks[0], view.root().blocks[count]],
+            vertex_patches: Vec::new(),
+        };
+        assert_eq!(
+            view.edge_at(&query, EId(1), CommitSeq(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .entry
+                .retired_at,
+            Some(CommitSeq(2))
+        );
+        assert!(
+            view.edge_at(&query, EId(1), CommitSeq(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        for (case, refused) in [
+            BufferedReadLimits {
+                max_blocks: count,
+                ..bounds
+            },
+            BufferedReadLimits {
+                max_root_bytes: 512 * 1024,
+                ..bounds
+            },
+            BufferedReadLimits {
+                max_source_bytes: source - 1,
+                ..bounds
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let err = store
+                .open_buffered_root(&query, root, pool.clone(), refused)
+                .await
+                .err()
+                .unwrap();
+            match (case, err) {
+                (0, BufferedReadError::Store(error)) => assert!(matches!(*error,
+                    StoreError::RootReferenceLimit { resource: "root blocks", requested, limit }
+                    if requested == count + 1 && limit == count)),
+                (1, BufferedReadError::Store(error)) => assert!(matches!(*error,
+                    StoreError::ObjectTooLarge { limit, observed } if observed > limit)),
+                (
+                    2,
+                    BufferedReadError::Limit {
+                        resource: "buffered source bytes",
+                        requested,
+                        limit,
+                    },
+                ) => assert_eq!((requested, limit), (source, source - 1)),
+                (_, other) => panic!("unexpected admission failure for case {case}: {other:?}"),
+            }
+            assert_eq!(pool.used(), 0);
+        }
+        // An old flat root has no stored descriptors. Selection releases
+        // decode scratch before graph admission synthesizes its descriptors.
+        let bytes = fgdb_strata::root::encode_root(&legacy).unwrap();
+        let legacy_id = PartitionRootVersion(fgdb_strata::root::root_id(&KEY, NS, &bytes));
+        std::fs::write(store.path(legacy_id.0), bytes).unwrap();
+        let manifest = store
+            .put_manifest(
+                &commit,
+                &[fgdb_strata::manifest::ManifestRecord {
+                    graph: legacy.graph,
+                    branch: legacy.branch,
+                    partition: legacy.partition,
+                    root: legacy_id,
+                    published_chain_hash: fgdb_crypto::Digest([1; 32]),
+                    schema: None,
+                }],
+            )
+            .await
+            .unwrap();
+        let initial = pool
+            .reserve(&query, bounds.metadata_bytes().unwrap())
+            .unwrap();
+        let (_, selected) = store
+            .resolve_manifest_bounded(&query, manifest, bounds, initial)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut old = selected.into_partition(&query).await.unwrap();
+        assert_eq!(
+            old.edge_at(&query, EId(1), CommitSeq(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .entry
+                .retired_at,
+            Some(CommitSeq(2))
+        );
+        assert!(
+            old.edge_at(&query, EId(1), CommitSeq(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        drop(old);
+        assert_eq!(pool.used(), 0);
+        // The bootstrap window alone cannot hold the decoded columns.
+        let tight = MemoryPool::new(bounds.metadata_bytes().unwrap() + 64 * 1024, 0).unwrap();
+        assert!(matches!(
+            store
+                .open_buffered_root(&query, root, tight.clone(), bounds)
+                .await,
+            Err(BufferedReadError::Memory(
+                MemoryError::ResourceExhausted { .. }
+            ))
+        ));
+        assert_eq!(tight.used(), 0);
+    });
+}

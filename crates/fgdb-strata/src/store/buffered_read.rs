@@ -89,7 +89,39 @@ pub struct BufferedReadLimits {
 }
 
 impl BufferedReadLimits {
-    const ROOT_DECODE_MULTIPLIER: usize = 16;
+    pub(super) const ROOT_DECODE_MULTIPLIER: usize = 16;
+
+    // A single window covers either an index or a leaf and its temporary
+    // decoding vectors. Larger traversals charge the actual top frame and
+    // its authenticated list sizes separately, before following children.
+    const ROOT_WINDOW: usize = super::READ_OP_BYTES;
+
+    fn use_sized_root(
+        self,
+        cx: &impl StorageReadCx,
+        metadata: &mut MemoryCharge,
+    ) -> Result<bool, BufferedReadError> {
+        if self.max_root_bytes <= Self::ROOT_WINDOW {
+            return Ok(false);
+        }
+        // Keep the original conservative decoder whenever it fits. This
+        // matters for large flat legacy frames: their full encoded image,
+        // membership and synthesized descriptors can all overlap. A refusal
+        // to reserve that worst case leaves the existing charge untouched.
+        let policy = self.metadata_policy_bytes()?;
+        let worst = self
+            .max_root_bytes
+            .checked_mul(Self::ROOT_DECODE_MULTIPLIER)
+            .and_then(|bytes| bytes.checked_add(policy));
+        if let Some(additional) = worst.map(|bytes| bytes.saturating_sub(metadata.bytes())) {
+            match metadata.grow(cx, additional) {
+                Ok(()) => return Ok(false),
+                Err(MemoryError::ResourceExhausted { .. }) => {}
+                Err(other) => return Err(other.into()),
+            }
+        }
+        Ok(true)
+    }
 
     /// Encoded root budget for a host that gives root decoding one quarter
     /// of its read pool. Cache-policy bookkeeping is charged separately.
@@ -108,15 +140,15 @@ impl BufferedReadLimits {
         scan_access::native_runs::decode_capacity(limits).map(|_| ())
     }
 
-    /// Reserve before decoding a manifest/root. This opening allowance covers
-    /// simultaneous encoded frames, V4 segment vectors, flattened references,
-    /// descriptors, and bounded cache-policy bookkeeping. Payload and history
-    /// use separate reservations. After root decoding, unused decode slack is
-    /// refunded. The same descriptor vectors are verified during admission
-    /// and kept by the view together with the cache-policy allowance.
+    /// Initial charge for the manifest/root decoder and cache bookkeeping.
+    /// If the full allowance would exceed the pool, traversals larger than
+    /// one read window charge their actual top frame and declared membership
+    /// before constructing the flattened lists.
+    /// Unused opening charges are refunded after decoding.
     pub fn metadata_bytes(self) -> Result<usize, BufferedReadError> {
         let policy = self.metadata_policy_bytes()?;
         self.max_root_bytes
+            .min(Self::ROOT_WINDOW)
             .checked_mul(Self::ROOT_DECODE_MULTIPLIER)
             .and_then(|bytes| bytes.checked_add(policy))
             .ok_or(BufferedReadError::SizeOverflow)
@@ -663,6 +695,56 @@ fn descriptor(id: fgdb_types::ids::ObjectId, bytes: &[u8]) -> Result<ExtentKey, 
     Ok(ExtentKey::new(id, 0, bytes.len(), extent_checksum(bytes))?)
 }
 
+/// The encoded owner belongs to the physical read. This additional charge
+/// travels with the decoded top-level frame until its vectors drop.
+pub(super) fn reserve_frame_decode(
+    cx: &impl StorageReadCx,
+    pool: Option<&MemoryPool>,
+    length: usize,
+) -> Result<Option<MemoryCharge>, StoreError> {
+    pool.map(|pool| {
+        let bytes = length
+            .checked_mul(BufferedReadLimits::ROOT_DECODE_MULTIPLIER)
+            .ok_or(MemoryError::SizeOverflow)?;
+        pool.reserve(cx, bytes)
+    })
+    .transpose()
+    .map_err(|error| StoreError::Extent(ExtentError::Memory(error)))
+}
+
+/// Charge both generations of each geometrically growing output column.
+/// Flattening one index also holds its decoded children, a flat list, and
+/// the segment cache. Eight slots per leaf cover those three lists, their
+/// geometric capacities, and the much smaller index lists and Vec headers
+/// (each full index owns sixteen leaves). The top frame and one current
+/// index/leaf decoder have independent reservations.
+pub(super) fn reserve_root_columns(
+    cx: &impl StorageReadCx,
+    metadata: &mut MemoryCharge,
+    blocks: usize,
+    patches: usize,
+) -> Result<(), StoreError> {
+    let column = |count: usize, width: usize| count.checked_mul(width)?.checked_mul(2);
+    let leaves =
+        blocks / crate::root_segment::SEGMENT_REFS + patches / crate::root_segment::SEGMENT_REFS;
+    let result = column(
+        blocks,
+        size_of::<crate::root::BlockRef>() + size_of::<BlockDescriptor>(),
+    )
+    .and_then(|blocks| {
+        blocks.checked_add(column(
+            patches,
+            size_of::<crate::root::PatchRef>() + size_of::<PatchDescriptor>(),
+        )?)
+    })
+    .and_then(|columns| {
+        columns.checked_add(leaves.checked_mul(8 * size_of::<crate::root_segment::SegmentRef>())?)
+    })
+    .ok_or(MemoryError::SizeOverflow)
+    .and_then(|bytes| metadata.grow(cx, bytes));
+    result.map_err(|error| StoreError::Extent(ExtentError::Memory(error)))
+}
+
 struct DecodedBufferedRoot {
     root: PartitionRoot,
     published: Option<RootDescriptors>,
@@ -731,7 +813,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
         cx: &impl StorageReadCx,
         id: crate::manifest::ManifestVersion,
         limits: BufferedReadLimits,
-        metadata: MemoryCharge,
+        mut metadata: MemoryCharge,
     ) -> Result<
         Option<(crate::manifest::ManifestRecord, BufferedRootSelection<V>)>,
         BufferedReadError,
@@ -746,24 +828,38 @@ impl<V: Vfs + Clone> BlockStore<V> {
             .into());
         }
         let store = self.clone().with_buffered_reads(metadata.pool().clone());
-        let records = store
-            .read_object_proven(
+        let sized = limits.use_sized_root(cx, &mut metadata)?;
+        let frame_pool = sized.then_some(metadata.pool());
+        let (records, manifest_charge) = store
+            .read_object_selected_owned(
                 cx,
                 super::StoredObjectKind::Manifest,
                 id.0,
                 (limits.max_root_bytes as u64).min(super::MANIFEST_HEADER_AND_RECORDS_CEILING),
                 |bytes| async move {
-                    crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
-                        .map_err(StoreError::MalformedManifest)
+                    let charge = reserve_frame_decode(cx, frame_pool, bytes.len())?;
+                    let records = crate::manifest::read_manifest(
+                        self.k_oid.expose(),
+                        self.namespace,
+                        &bytes,
+                        id,
+                    )
+                    .map_err(StoreError::MalformedManifest)?;
+                    Ok((records, charge))
                 },
+                |_| true,
+                frame_pool,
             )
             .await?;
         limit("native manifest roots", records.len(), 1)?;
         let Some(record) = records.into_iter().next() else {
             return Ok(None);
         };
+        drop(manifest_charge);
         let id = record.root;
-        let mut decoded = store.decode_buffered_root(cx, id, limits, metadata).await?;
+        let mut decoded = store
+            .decode_buffered_root(cx, id, limits, metadata, sized)
+            .await?;
         let (block_capacity, patch_capacity) =
             decoded.published.as_ref().map_or((0, 0), |published| {
                 (published.blocks.capacity(), published.patches.capacity())
@@ -868,7 +964,8 @@ impl<V: Vfs + Clone> BlockStore<V> {
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
         limits: BufferedReadLimits,
-        metadata: MemoryCharge,
+        mut metadata: MemoryCharge,
+        sized: bool,
     ) -> Result<DecodedBufferedRoot, BufferedReadError> {
         let (root, mut segments) = self
             .get_root_and_segments_limited(
@@ -877,6 +974,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 limits.max_root_bytes,
                 limits.max_blocks,
                 limits.max_vertex_patches,
+                sized.then_some(&mut metadata),
             )
             .await?;
         Ok(DecodedBufferedRoot {
@@ -963,20 +1061,21 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 // the opening allowance before allocating those vectors.
                 if decoded.published.is_none() {
                     let additional = limits
-                        .metadata_bytes()?
+                        .retained_metadata_bytes(
+                            &decoded.root,
+                            decoded.root.blocks.len(),
+                            decoded.root.vertex_patches.len(),
+                        )?
                         .saturating_sub(decoded.metadata.bytes());
                     decoded.metadata.grow(cx, additional)?;
                 }
                 decoded
             }
             None => {
-                self.decode_buffered_root(
-                    cx,
-                    id,
-                    limits,
-                    pool.reserve(cx, limits.metadata_bytes()?)?,
-                )
-                .await?
+                let mut metadata = pool.reserve(cx, limits.metadata_bytes()?)?;
+                let sized = limits.use_sized_root(cx, &mut metadata)?;
+                self.decode_buffered_root(cx, id, limits, metadata, sized)
+                    .await?
             }
         };
         let identity = self.root_identity_domain();
@@ -2621,6 +2720,16 @@ mod tests {
         assert_eq!(
             larger_ceiling.metadata_bytes().unwrap(),
             16 * 128 * 1024 + policy
+        );
+        assert_eq!(
+            BufferedReadLimits {
+                max_root_bytes: usize::MAX,
+                ..limits
+            }
+            .metadata_bytes()
+            .unwrap(),
+            larger_ceiling.metadata_bytes().unwrap(),
+            "large source ceilings share a single decoder window before the frame is authenticated"
         );
         assert_eq!(
             larger_ceiling
