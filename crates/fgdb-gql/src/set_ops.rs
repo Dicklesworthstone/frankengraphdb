@@ -2185,10 +2185,48 @@ impl GraphSetRowPull {
     pub(crate) fn vertex_projection_properties(
         &self,
     ) -> Option<fgdb_delta_types::PropertySelection> {
+        let mut keys = fgdb_delta_types::PropertySelection::EMPTY;
+        self.projection_properties(|column, key| {
+            if !matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() == 0) {
+                return None;
+            }
+            keys.insert(key).ok()
+        })?;
+        Some(keys)
+    }
+
+    /// Edge and endpoint fields of direct bound element columns. The complete
+    /// edge compiler still proves that those bindings belong to its source;
+    /// lists, map lookups and other indirect receivers cannot request fields.
+    pub(crate) fn edge_projection_properties(
+        &self,
+    ) -> Option<crate::edge_stream::EdgeScanPropertySelection> {
+        let mut selected = crate::edge_stream::EdgeScanPropertySelection {
+            edge: fgdb_delta_types::PropertySelection::EMPTY,
+            endpoints: fgdb_delta_types::PropertySelection::EMPTY,
+        };
+        self.projection_properties(|column, key| match column {
+            ValueProjection::Vertex { .. } => selected.endpoints.insert(key).ok(),
+            ValueProjection::Path {
+                function: crate::algebra::GraphPathFunction::Edge,
+                ..
+            } => selected.edge.insert(key).ok(),
+            _ => None,
+        })?;
+        Some(selected)
+    }
+
+    // One exhaustive effect walk for both source profiles, including every
+    // lazy operand and compiler-private cell. Each profile owns its receiver
+    // and bounded-key admission; this walk never evaluates an expression.
+    fn projection_properties(
+        &self,
+        mut keys: impl FnMut(&ValueProjection, fgdb_delta_types::PropertyKeyId) -> Option<()>,
+    ) -> Option<()> {
         fn include(
             value: &GraphSetValue,
             columns: &[ValueProjection],
-            keys: &mut fgdb_delta_types::PropertySelection,
+            keys: &mut impl FnMut(&ValueProjection, fgdb_delta_types::PropertyKeyId) -> Option<()>,
         ) -> Option<()> {
             use GraphSetValue as V;
             match value {
@@ -2204,12 +2242,7 @@ impl GraphSetRowPull {
                         let V::Column(column) = map.as_ref() else {
                             return None;
                         };
-                        if !matches!(columns.get(*column),
-                            Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
-                        {
-                            return None;
-                        }
-                        keys.insert(*key).ok()?;
+                        keys(columns.get(*column)?, *key)?;
                     }
                     include(map, columns, keys)?;
                 }
@@ -2294,14 +2327,13 @@ impl GraphSetRowPull {
             }
             Some(())
         }
-        let mut keys = fgdb_delta_types::PropertySelection::EMPTY;
         for cell in &self.projection {
             if !cell.value().is_element_scan_local() {
                 return None;
             }
             include(cell.value(), self.pattern.value_columns(), &mut keys)?;
         }
-        Some(keys)
+        Some(())
     }
 
     /// The source pattern whose native cursor supplies the input rows.

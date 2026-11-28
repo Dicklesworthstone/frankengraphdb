@@ -10,9 +10,9 @@
 pub mod aggregate;
 mod asynchronous;
 pub use asynchronous::{
-    AsyncEdgeCandidate, AsyncEdgeScanCursor, AsyncEdgeScanEvent, AsyncEdgeScanOutput,
-    AsyncEdgeScanPlan, AsyncEdgeScanRecord, AsyncEdgeScanSource, AsyncEdgeSpillAggregateCursor,
-    AsyncEdgeSpillAggregatePlan,
+    AsyncEdgeCandidate, AsyncEdgeProjectionCursor, AsyncEdgeProjectionPlan, AsyncEdgeScanCursor,
+    AsyncEdgeScanEvent, AsyncEdgeScanOutput, AsyncEdgeScanPlan, AsyncEdgeScanRecord,
+    AsyncEdgeScanSource, AsyncEdgeSpillAggregateCursor, AsyncEdgeSpillAggregatePlan,
 };
 mod join;
 pub use join::{

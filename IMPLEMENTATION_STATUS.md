@@ -69,8 +69,9 @@ allocations use the original meter and retained memory reservation; delivered
 rows keep their guards after cursor destruction. Only final selected rows
 spend result-row allowance. Skipped and suffix rows still evaluate before
 successful EOF, including LIMIT 0. Cancellation and projection failures fuse
-the source and release the existing session/source owner. Computed cold edges,
-joins, indirect element lookups and unsupported physical sources still refuse.
+the source and release the existing session/source owner. Computed cold
+single-edge support is described below; joins, indirect element lookups and
+unsupported physical sources still refuse.
 
 Regression sources cover public direct/prepared FGP, duplicate occurrences,
 private map projections, masked properties, temporal rebinding, full suffix
@@ -82,6 +83,35 @@ Independent source/API review, scoped pinned formatting and whitespace checks
 completed. Native build/runtime and exact-tree qualification remain pending;
 no passing runtime result is claimed. Keep `fgdb-w5-executor-olp` and
 `fgdb-qualify-integrated-nov22-maz0p` open.
+
+### Computed cold edge source projections — qualification pending
+
+Authorized buffered Set/TemporalSet reads now dispatch proved single-edge
+projections through `AsyncEdgeProjectionPlan` and `AsyncEdgeProjectionCursor`.
+The complete native edge compiler establishes directed or undirected identity
+order. One exhaustive expression-effect walk combines bounded captured-edge
+and endpoint field demand with native predicate/projection demand before scope
+masking and source admission. Computations use the existing row VM and only
+the admitted current edge or its endpoints; no additional graph lookup or
+candidate charge is introduced.
+
+The source keeps the current record through projection and parks it for the
+second undirected orientation when needed. Both returned guards retain its
+growing VM reservation. Original work/scratch meters cover the full source;
+only final selected rows consume result-row allowance. Skipped/suffix
+expressions still execute, including LIMIT 0, and failure or cancellation
+fuses and releases the source owner. Directed, incoming and undirected roots,
+any-relation authority filtering, private ranking keys and prepared historical
+pages use this route. Fixed joins and indirect element property reads remain
+outside the computed cold profile.
+
+Eight new regression sources cover native demand/ordering/ownership, retained
+host payload charges and memory refusal, direct/prepared FGP, orientation,
+scope masking, exact history, flow credit, cumulative budgets, cancellation
+and suffix errors. Independent production/test source review and scoped pinned
+formatting completed. Rust compilation and runtime remain unqualified: the
+fresh metadata build was SIGKILLed in exact pinned `asupersync` before any
+first-party diagnostic. No passing runtime result is claimed.
 
 ### Native FGP over WebSocket — qualification pending
 

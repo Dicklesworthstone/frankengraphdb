@@ -7,6 +7,8 @@ use crate::algebra::EdgeRelation;
 
 mod aggregate;
 pub use aggregate::{AsyncEdgeSpillAggregateCursor, AsyncEdgeSpillAggregatePlan};
+mod projection;
+pub use projection::{AsyncEdgeProjectionCursor, AsyncEdgeProjectionPlan};
 
 /// An owned, source-admitted edge and its endpoint images at one immutable cut.
 /// The source must mask relation, endpoint and field visibility BEFORE exposing
@@ -57,6 +59,8 @@ pub enum AsyncEdgeScanEvent {
 /// selected payload plus row/path framing, retaining the guard with the result.
 /// evaluation_event admits each row-local allocation before the shared kernel
 /// performs it; a byte-accounted host retains this temporary charge in record.
+/// Its output guard must retain that growing reservation after record drop,
+/// including allocations from an admitted outer computed projection.
 /// Hosts may explicitly use () guards, but then this API establishes no byte
 /// bound. Source buffers, caller collection and durable retention remain separate.
 pub trait AsyncEdgeScanSource: Send {
@@ -329,6 +333,29 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
     {
+        let Some((output, record, eid, reverse)) =
+            self.advance_record::<EMIT, C>(source, pending).await?
+        else {
+            return Ok(None);
+        };
+        if reverse {
+            *pending = Some((eid, record));
+        }
+        Ok(Some(output))
+    }
+
+    // A computed row borrows the same admitted record before it is either
+    // dropped or parked for the second undirected orientation. Ordinary rows
+    // keep their previous ownership through the thin advance adapter above.
+    async fn advance_record<const EMIT: bool, C>(
+        &mut self,
+        source: &mut S,
+        pending: &mut Option<(EId, S::Record)>,
+    ) -> ScanResult<Option<(AsyncEdgeScanOutput<S::OutputGuard>, S::Record, EId, bool)>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
         self.meter.event(GlaExecutionEvent::Work)?;
         if self.plan.inner.count == Some(0) {
             return Ok(None);
@@ -405,13 +432,13 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
                 }
             };
             let output = self.project_record::<EMIT, C>(source, eid, &record, from, to)?;
+            if let Some(output) = output {
+                return Ok(Some((output, record, eid, reverse)));
+            }
             // Even a rejected or skipped first orientation leaves the second
             // eligible. Moving the record preserves its reservation, no clone.
             if reverse {
                 *pending = Some((eid, record));
-            }
-            if let Some(output) = output {
-                return Ok(Some(output));
             }
         }
     }

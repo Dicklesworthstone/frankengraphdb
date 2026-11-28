@@ -124,7 +124,7 @@ fn buffered_computed_projections_keep_private_keys_scope_and_duplicate_occurrenc
         }
 
         // Native source order is a physical contract, including an empty page.
-        // The new cold profile remains vertex-local and cannot silently sort,
+        // Cold projections retain their proved source order and cannot sort,
         // collect a graph, or retry an unsupported projection through resident
         // evaluation. Eager reads still accept these ordinary queries.
         for statement in [

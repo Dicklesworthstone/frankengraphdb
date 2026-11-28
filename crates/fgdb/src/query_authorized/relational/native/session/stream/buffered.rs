@@ -11,8 +11,9 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::PropertySelection;
 use fgdb_delta_types::catalog::SymbolCatalog;
 use fgdb_gql::edge_stream::{
-    AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeScanCursor, AsyncEdgeScanPlan,
-    AsyncGraphWalkCursor, AsyncGraphWalkPlan, EdgeScanPropertySelection, EdgeScanState,
+    AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeProjectionCursor, AsyncEdgeProjectionPlan,
+    AsyncEdgeScanCursor, AsyncEdgeScanPlan, AsyncGraphWalkCursor, AsyncGraphWalkPlan,
+    EdgeScanPropertySelection, EdgeScanState,
 };
 use fgdb_gql::stream::{
     AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexProjectionCursor,
@@ -363,6 +364,8 @@ type ProjectedVertexCursor<'q, V, C> =
     AsyncVertexProjectionCursor<Source<'q, V, C, BufferedVertexScanState>, Checkpoint<'q>>;
 type EdgeCursor<'q, V, C> =
     AsyncEdgeScanCursor<Source<'q, V, C, BufferedEdgeScanState>, Checkpoint<'q>>;
+type ProjectedEdgeCursor<'q, V, C> =
+    AsyncEdgeProjectionCursor<Source<'q, V, C, BufferedEdgeScanState>, Checkpoint<'q>>;
 type JoinCursor<'q, V, C> =
     AsyncEdgeJoinCursor<Source<'q, V, C, BufferedEdgeJoinScanState>, Checkpoint<'q>>;
 type VertexProbeCursor<'q, V, C> = AsyncVertexProbeCursor<
@@ -377,6 +380,7 @@ enum Native<'q, V: Vfs + Clone, C: FnMut() -> u64 + Send> {
     Vertex(Box<VertexCursor<'q, V, C>>),
     ProjectedVertex(Box<ProjectedVertexCursor<'q, V, C>>),
     Edge(Box<EdgeCursor<'q, V, C>>),
+    ProjectedEdge(Box<ProjectedEdgeCursor<'q, V, C>>),
     Join(Box<JoinCursor<'q, V, C>>),
     VertexProbe(Box<VertexProbeCursor<'q, V, C>>),
     // Walks are private input for the external ordering owner. Their DFS/BFS
@@ -397,6 +401,12 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
                 EdgeScanState::Failed => VertexScanState::Failed,
             },
             Self::Edge(cursor) => match cursor.state() {
+                EdgeScanState::Open => VertexScanState::Open,
+                EdgeScanState::Exhausted => VertexScanState::Exhausted,
+                EdgeScanState::Closed => VertexScanState::Closed,
+                EdgeScanState::Failed => VertexScanState::Failed,
+            },
+            Self::ProjectedEdge(cursor) => match cursor.state() {
                 EdgeScanState::Open => VertexScanState::Open,
                 EdgeScanState::Exhausted => VertexScanState::Exhausted,
                 EdgeScanState::Closed => VertexScanState::Closed,
@@ -439,6 +449,11 @@ impl<V: Vfs + Clone, C: FnMut() -> u64 + Send> Native<'_, V, C> {
                 result
                     .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
                     .map_err(source::edge_error)
+            }),
+            Self::ProjectedEdge(cursor) => cursor.next().await.map(|result| {
+                result
+                    .map(|output| BufferedQueryRow::from_parts(output.into_parts()))
+                    .map_err(source::projection_error)
             }),
             Self::Join(cursor) => cursor.next().await.map(|result| {
                 result
@@ -557,6 +572,7 @@ enum Scan {
     Vertex(AsyncVertexScanPlan<GraphValueRow>),
     ProjectedVertex(AsyncVertexProjectionPlan),
     Edge(AsyncEdgeScanPlan),
+    ProjectedEdge(AsyncEdgeProjectionPlan),
     Join(AsyncEdgeJoinPlan),
     VertexProbe(AsyncVertexProbePlan<GraphValueRow>),
     Walk(AsyncGraphWalkPlan),
@@ -588,6 +604,14 @@ impl Plan {
     fn edge(plan: AsyncEdgeScanPlan, selection: EdgeScanPropertySelection) -> Self {
         Self {
             scan: Scan::Edge(plan),
+            keys: selection.edge,
+            endpoint_keys: selection.endpoints,
+        }
+    }
+
+    fn projected_edge(plan: AsyncEdgeProjectionPlan, selection: EdgeScanPropertySelection) -> Self {
+        Self {
+            scan: Scan::ProjectedEdge(plan),
             keys: selection.edge,
             endpoint_keys: selection.endpoints,
         }
@@ -636,6 +660,7 @@ impl Plan {
             Scan::Vertex(_) => size_of::<VertexCursor<'q, V, C>>(),
             Scan::ProjectedVertex(_) => size_of::<ProjectedVertexCursor<'q, V, C>>(),
             Scan::Edge(_) => size_of::<EdgeCursor<'q, V, C>>(),
+            Scan::ProjectedEdge(_) => size_of::<ProjectedEdgeCursor<'q, V, C>>(),
             Scan::Join(_) => size_of::<JoinCursor<'q, V, C>>(),
             Scan::VertexProbe(_) => size_of::<VertexProbeCursor<'q, V, C>>(),
             Scan::Walk(_) => size_of::<WalkCursor<'q, V, C>>(),
@@ -710,6 +735,32 @@ impl Plan {
                     execution.clone(),
                 );
                 Native::Edge(Box::new(AsyncEdgeScanCursor::new(
+                    source, plan, policy, checkpoint,
+                )))
+            }
+            Scan::ProjectedEdge(plan) => {
+                let relation = plan.root_relation();
+                let position =
+                    if excludes_all_relations(relation, execution.borrow().permit.predicates()) {
+                        None
+                    } else {
+                        let partition = backend.view.partition_mut();
+                        let scan = match relation.one() {
+                            Some(relation) => partition.edge_scan_relation(cx, at, relation),
+                            None => partition.edge_scan(cx, at),
+                        }?;
+                        Some(scan.into_state())
+                    };
+                let source = Source::new(
+                    slot.take().expect("admitted backend"),
+                    returned.clone(),
+                    position,
+                    self.keys,
+                    self.endpoint_keys,
+                    cx,
+                    execution.clone(),
+                );
+                Native::ProjectedEdge(Box::new(AsyncEdgeProjectionCursor::new(
                     source, plan, policy, checkpoint,
                 )))
             }
@@ -867,18 +918,24 @@ fn compile_projection(
     scope: &PlannerPredicates,
     facade: crate::NativeReadClass,
 ) -> Result<(Plan, Vec<String>), AuthorizedBufferedError> {
-    let plan = AsyncVertexProjectionPlan::compile(query)
-        .map_err(|_| QueryError::StreamingUnsupported { facade })?;
     // Complete compiler demand is bounded BEFORE authorization masks it.
     // Denied keys never reach cold decoding or the retained row reader.
-    let keys = match plan.property_demand() {
-        VertexScanPropertyDemand::Topology => PropertySelection::EMPTY,
-        VertexScanPropertyDemand::Properties(keys) => select_properties(keys, scope),
-        VertexScanPropertyDemand::Complete => {
-            return Err(QueryError::StreamingUnsupported { facade }.into());
-        }
-    };
-    Ok((Plan::projected_vertex(plan, keys), query.columns().to_vec()))
+    if let Ok(plan) = AsyncVertexProjectionPlan::compile(query) {
+        let keys = match plan.property_demand() {
+            VertexScanPropertyDemand::Topology => PropertySelection::EMPTY,
+            VertexScanPropertyDemand::Properties(keys) => select_properties(keys, scope),
+            VertexScanPropertyDemand::Complete => {
+                return Err(QueryError::StreamingUnsupported { facade }.into());
+            }
+        };
+        return Ok((Plan::projected_vertex(plan, keys), query.columns().to_vec()));
+    }
+    let plan = AsyncEdgeProjectionPlan::compile(query)
+        .map_err(|_| QueryError::StreamingUnsupported { facade })?;
+    let mut keys = plan.selected_property_demand();
+    keys.edge = select_properties(keys.edge, scope);
+    keys.endpoints = select_properties(keys.endpoints, scope);
+    Ok((Plan::projected_edge(plan, keys), query.columns().to_vec()))
 }
 
 fn bind(

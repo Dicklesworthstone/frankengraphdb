@@ -710,7 +710,7 @@ fn native_source_stream_cancellation_and_late_budget_keep_the_connection_usable(
     });
 }
 
-async fn prepared_source(
+pub(super) async fn prepared_source(
     cx: &Cx,
     client: &mut Client,
     handle: fgdb_protocol::body::PreparedHandle,

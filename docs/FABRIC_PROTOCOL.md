@@ -1274,18 +1274,22 @@ application output is admitted.
   incomplete identity orders, DISTINCT for this computed profile, arbitrary
   relational barriers, metadata reads and random draws still refuse.
 
-  Configured cold/buffered sources also admit the computed vertex profile,
-  including prepared historical reads and private identity keys. Every element
-  property read must target a direct column for the current root vertex. The
+  Configured cold/buffered sources also admit computed vertex and single-edge
+  profiles, including prepared historical reads and private identity keys.
+  Every element property read must target a direct column for the current root
+  vertex, captured edge or one of that edge's endpoints. The
   complete bounded field demand includes native predicates, the source
   projection and every outer expression, before capability masking and source
-  construction. The existing asynchronous vertex compiler still admits the
-  entire physical source. Evaluation borrows the admitted record, charges
+  construction. The existing asynchronous vertex or edge compiler still admits
+  the entire physical source. Evaluation borrows the admitted record, charges
   copied payloads before allocation, and retains the output's memory guard
   independently of the cursor. One cumulative native/signed allowance covers
   source and VM work; only selected delivered rows spend result-row credit.
   SKIP/LIMIT does not hide projection failures in the skipped or suffix rows.
-  Computed cold edges/joins, indirect element reads, probes and collections
+  Both undirected orientations share one admitted edge record and its growing
+  VM charge; neither projection performs another history lookup or endpoint
+  admission. The complete edge/source identity prefix remains required for
+  undirected output. Computed cold joins, indirect element reads, probes and collections
   outside that asynchronous source profile refuse before source construction.
 
   Vertex and fixed-edge aggregates also use the native cursor:
